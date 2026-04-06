@@ -302,3 +302,71 @@ async def get_executions(
         "total_cached": exec_store.count,
         "orders": groups,
     }
+
+
+# ── Profit Targets ────────────────────────────────────────────────────────────
+
+
+@router.get("/profit-targets")
+async def get_profit_targets(
+    _user: Annotated[TokenData, Security(require_auth, scopes=["account:read"])],
+) -> dict:
+    """List all active profit targets."""
+    from app.services.profit_target_service import get_profit_target_service
+    svc = get_profit_target_service()
+    if not svc:
+        return {"positions": {}}
+    return {"positions": svc.get_targets()}
+
+
+@router.post("/profit-targets")
+async def set_profit_target(
+    _user: Annotated[TokenData, Security(require_auth, scopes=["trades:write"])],
+    position_id: str = "",
+    entry_credit: float = 0,
+    profit_target_pct: float = 50,
+    symbol: str = "",
+    short_strike: float = 0,
+    long_strike: float = 0,
+    quantity: int = 1,
+) -> dict:
+    """Set a profit target for a position."""
+    from app.services.profit_target_service import get_profit_target_service
+    svc = get_profit_target_service()
+    if not svc:
+        raise HTTPException(status_code=503, detail="Profit target service not initialized")
+    if not position_id:
+        raise HTTPException(status_code=400, detail="position_id required")
+    svc.set_target(position_id, entry_credit, profit_target_pct, symbol, short_strike, long_strike, quantity)
+    return {"status": "ok", "position_id": position_id, "profit_target_pct": profit_target_pct}
+
+
+@router.put("/profit-targets/{position_id}")
+async def update_profit_target(
+    position_id: str,
+    _user: Annotated[TokenData, Security(require_auth, scopes=["trades:write"])],
+    profit_target_pct: float = 50,
+) -> dict:
+    """Update a position's profit target percentage. Set to 0 to remove."""
+    from app.services.profit_target_service import get_profit_target_service
+    svc = get_profit_target_service()
+    if not svc:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+    if not svc.update_target(position_id, profit_target_pct):
+        raise HTTPException(status_code=404, detail="Position not found in profit targets")
+    return {"status": "ok", "position_id": position_id, "profit_target_pct": profit_target_pct}
+
+
+@router.delete("/profit-targets/{position_id}")
+async def delete_profit_target(
+    position_id: str,
+    _user: Annotated[TokenData, Security(require_auth, scopes=["trades:write"])],
+) -> dict:
+    """Remove a profit target."""
+    from app.services.profit_target_service import get_profit_target_service
+    svc = get_profit_target_service()
+    if not svc:
+        raise HTTPException(status_code=503, detail="Service not initialized")
+    if not svc.remove_target(position_id):
+        raise HTTPException(status_code=404, detail="Position not found")
+    return {"status": "removed", "position_id": position_id}

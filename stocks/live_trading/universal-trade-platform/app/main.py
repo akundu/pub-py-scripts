@@ -86,7 +86,17 @@ async def _position_sync_loop(interval: int) -> None:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Register and connect broker providers on startup; disconnect on shutdown."""
     if _daemon_mode:
-        # Daemon already initialized providers, ledger, position store, and background tasks
+        # Daemon already initialized providers, ledger, position store, and background tasks.
+        # If this is a forked worker (not the main daemon process), the IBKR connection
+        # doesn't survive the fork. Register a proxy provider that routes IBKR calls
+        # back to the main daemon process via HTTP.
+        if os.environ.get("_UTP_DAEMON_WORKER") == "1":
+            daemon_port = int(os.environ.get("_UTP_DAEMON_PORT", "8000"))
+            logger.info("Worker process: registering DaemonProxyProvider (port=%d)", daemon_port)
+            from app.core.providers.daemon_proxy import DaemonProxyProvider
+            proxy = DaemonProxyProvider(f"http://127.0.0.1:{daemon_port}")
+            ProviderRegistry.register(proxy)
+            await proxy.connect()
         yield
         return
 

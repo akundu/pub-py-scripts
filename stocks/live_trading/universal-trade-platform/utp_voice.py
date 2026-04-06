@@ -919,11 +919,11 @@ async def execute_write_tool(tool_name: str, tool_input: dict) -> dict:
             )
             if is_real:
                 log_trade_to_csv(tool_input, result, source="manual")
-                # Register profit target if specified
+                # Register profit target via daemon if specified
                 pt_pct = tool_input.get("profit_target_pct")
                 if pt_pct and pt_pct > 0 and result.get("order_id"):
                     credit = tool_input.get("net_price") or tool_input.get("credit") or 0
-                    add_profit_target(
+                    asyncio.create_task(_set_profit_target_on_daemon(
                         position_id=str(result["order_id"]),
                         entry_credit=credit,
                         profit_target_pct=pt_pct,
@@ -931,7 +931,7 @@ async def execute_write_tool(tool_name: str, tool_input: dict) -> dict:
                         short_strike=tool_input.get("short_strike", 0),
                         long_strike=tool_input.get("long_strike", 0),
                         quantity=tool_input.get("quantity", 1),
-                    )
+                    ))
             return result
         elif tool_name == "close_position":
             return await client.close_position(
@@ -1082,8 +1082,8 @@ app = FastAPI(title="UTP Voice", docs_url=None, redoc_url=None)
 
 @app.on_event("startup")
 async def _resume_background_tasks_on_startup():
-    """Resume auto-trade and start profit monitor on startup."""
-    global _auto_trade_task, _profit_monitor_task
+    """Resume auto-trade on startup. Profit monitoring is handled by the daemon."""
+    global _auto_trade_task
 
     # Resume auto-trade if active
     try:
@@ -1093,15 +1093,6 @@ async def _resume_background_tasks_on_startup():
             _auto_trade_task = asyncio.create_task(_auto_trade_loop(state))
     except Exception as e:
         logger.warning("Failed to resume auto-trade: %s", e)
-
-    # Start profit monitor if there are active targets
-    try:
-        targets = _load_profit_targets()
-        if targets.get("positions"):
-            logger.info("Starting profit monitor (%d active targets)", len(targets["positions"]))
-        _profit_monitor_task = asyncio.create_task(_profit_monitor_loop())
-    except Exception as e:
-        logger.warning("Failed to start profit monitor: %s", e)
 
 
 @app.exception_handler(Exception)
@@ -2019,144 +2010,35 @@ async def _auto_trade_loop(state: dict) -> None:
         await asyncio.sleep(interval)
 
 
-# ── Profit Target Monitor ─────────────────────────────────────────────────────
-
-PROFIT_TARGETS_PATH = Path("data/utp_voice/profit_targets.json")
-_profit_monitor_task: asyncio.Task | None = None
-_profit_close_locks: dict[str, bool] = {}  # Per-position lock to prevent concurrent closes
+# ── Profit Targets (proxied to daemon) ────────────────────────────────────────
+# Profit target monitoring runs in the UTP daemon, not here.
+# Voice app just proxies CRUD operations to the daemon's endpoints.
 
 MAX_OPEN_POSITIONS = int(os.environ.get("MAX_OPEN_POSITIONS", "10"))
 MAX_DAILY_TRADES = int(os.environ.get("MAX_DAILY_TRADES", "20"))
 
 
-def _load_profit_targets() -> dict:
-    if PROFIT_TARGETS_PATH.exists():
-        with open(PROFIT_TARGETS_PATH) as f:
-            return json.load(f)
-    return {"positions": {}}
-
-
-def _save_profit_targets(data: dict) -> None:
-    PROFIT_TARGETS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(PROFIT_TARGETS_PATH, "w") as f:
-        json.dump(data, f, indent=2, default=str)
-
-
-def add_profit_target(
+async def _set_profit_target_on_daemon(
     position_id: str, entry_credit: float, profit_target_pct: float,
     symbol: str = "", short_strike: float = 0, long_strike: float = 0,
     quantity: int = 1,
 ) -> None:
-    """Register a profit target for a position."""
-    data = _load_profit_targets()
-    data["positions"][position_id] = {
-        "entry_credit": entry_credit,
-        "profit_target_pct": profit_target_pct,
-        "symbol": symbol,
-        "short_strike": short_strike,
-        "long_strike": long_strike,
-        "quantity": quantity,
-        "created_at": _now_iso(),
-    }
-    _save_profit_targets(data)
-    logger.info("Profit target set: %s %s %.0f%% (credit=%.2f)", position_id[:8], symbol, profit_target_pct, entry_credit)
-
-
-def remove_profit_target(position_id: str) -> None:
-    """Remove a profit target (position closed)."""
-    data = _load_profit_targets()
-    if position_id in data["positions"]:
-        del data["positions"][position_id]
-        _save_profit_targets(data)
-
-
-async def _profit_monitor_loop() -> None:
-    """Background loop: check open positions against profit targets every 30s."""
+    """Register a profit target via the daemon's endpoint."""
+    if profit_target_pct <= 0:
+        return
     client = get_daemon_client()
-
-    while True:
-        try:
-            if not _is_market_hours():
-                await asyncio.sleep(30)
-                continue
-
-            targets = _load_profit_targets()
-            if not targets.get("positions"):
-                await asyncio.sleep(30)
-                continue
-
-            # Get current portfolio from daemon (without quotes — fast)
-            try:
-                portfolio = await client.get_portfolio(include_quotes=False)
-            except Exception:
-                await asyncio.sleep(30)
-                continue
-
-            positions = portfolio.get("positions", [])
-            pos_by_id: dict[str, dict] = {}
-            for p in positions:
-                pid = p.get("position_id", "")
-                if pid:
-                    pos_by_id[pid] = p
-
-            # Check each target
-            for pid, target in list(targets["positions"].items()):
-                # Skip if already being closed
-                if _profit_close_locks.get(pid):
-                    continue
-
-                pos = pos_by_id.get(pid)
-                if not pos or pos.get("status") != "open":
-                    # Position no longer open — remove target
-                    remove_profit_target(pid)
-                    continue
-
-                entry_credit = target.get("entry_credit", 0)
-                target_pct = target.get("profit_target_pct", 50)
-                if not entry_credit or entry_credit <= 0:
-                    continue
-
-                # Current mark (what it would cost to buy back)
-                # For credit spreads: market_price is the current spread value
-                # Profit = entry_credit - current_btc_cost
-                mark = pos.get("market_price")
-                if mark is None:
-                    continue
-
-                btc_cost = abs(mark)  # Cost to buy back
-                profit_pct = ((entry_credit - btc_cost) / entry_credit) * 100
-
-                if profit_pct >= target_pct:
-                    # Hit profit target — close at MARKET
-                    _profit_close_locks[pid] = True
-                    try:
-                        logger.info(
-                            "Profit target hit: %s %s profit=%.1f%% (target=%.0f%%), closing",
-                            pid[:8], target.get("symbol"), profit_pct, target_pct,
-                        )
-                        result = await client.close_position(pid)
-                        status = result.get("status", "")
-                        if status in ("ok", "FILLED", "SUBMITTED"):
-                            remove_profit_target(pid)
-                            # Log to CSV
-                            log_trade_to_csv(
-                                {"trade_type": "close", "symbol": target.get("symbol"),
-                                 "short_strike": target.get("short_strike"),
-                                 "long_strike": target.get("long_strike"),
-                                 "quantity": target.get("quantity")},
-                                result, source="profit_target",
-                            )
-                    except Exception as e:
-                        logger.warning("Profit target close failed %s: %s", pid[:8], e)
-                    finally:
-                        _profit_close_locks.pop(pid, None)
-
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.error("Profit monitor error: %s", e)
-
-        await asyncio.sleep(30)
+    try:
+        await client._post("/account/profit-targets", json_data={
+            "position_id": position_id,
+            "entry_credit": entry_credit,
+            "profit_target_pct": profit_target_pct,
+            "symbol": symbol,
+            "short_strike": short_strike,
+            "long_strike": long_strike,
+            "quantity": quantity,
+        })
+    except Exception as e:
+        logger.warning("Failed to set profit target on daemon: %s", e)
 
 
 async def _check_position_limits() -> dict:
@@ -2806,8 +2688,12 @@ async def api_trades_export(username: str = Depends(require_session)):
 
 @app.get("/api/profit-targets")
 async def api_profit_targets(username: str = Depends(require_session)):
-    """List active profit targets."""
-    return _load_profit_targets()
+    """List active profit targets — proxied to daemon."""
+    client = get_daemon_client()
+    try:
+        return await client._get("/account/profit-targets")
+    except Exception as e:
+        return {"positions": {}, "error": str(e)}
 
 
 @app.put("/api/profit-targets/{position_id}")
@@ -2816,28 +2702,16 @@ async def api_update_profit_target(
     request: Request,
     username: str = Depends(require_session),
 ):
-    """Update a position's profit target percentage."""
+    """Update a position's profit target — proxied to daemon."""
     body = await request.json()
-    new_pct = body.get("profit_target_pct")
-    if new_pct is None or new_pct < 0:
-        raise HTTPException(status_code=400, detail="profit_target_pct required (>= 0)")
-
-    data = _load_profit_targets()
-    # Find by prefix match
-    matched = None
-    for pid in data["positions"]:
-        if pid.startswith(position_id):
-            matched = pid
-            break
-    if not matched:
-        raise HTTPException(status_code=404, detail="Position not found in profit targets")
-
-    if new_pct == 0:
-        del data["positions"][matched]
-    else:
-        data["positions"][matched]["profit_target_pct"] = new_pct
-    _save_profit_targets(data)
-    return {"status": "updated", "position_id": matched, "profit_target_pct": new_pct}
+    client = get_daemon_client()
+    try:
+        return await client._get(
+            f"/account/profit-targets/{position_id}",
+            params={"profit_target_pct": body.get("profit_target_pct", 50)},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
 
 @app.get("/api/position-limits")

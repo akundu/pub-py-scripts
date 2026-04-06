@@ -1258,25 +1258,34 @@ class TestTradeCSVLogger:
 
 
 class TestProfitTargets:
+    """Test ProfitTargetService in the daemon."""
+
     def test_save_and_load(self, tmp_path):
-        utp_voice.PROFIT_TARGETS_PATH = tmp_path / "targets.json"
-        utp_voice.add_profit_target("pos123", 1.50, 50, "SPX", 6400, 6380, 25)
-        data = utp_voice._load_profit_targets()
-        assert "pos123" in data["positions"]
-        assert data["positions"]["pos123"]["profit_target_pct"] == 50
-        assert data["positions"]["pos123"]["entry_credit"] == 1.50
+        from app.services.profit_target_service import ProfitTargetService
+        store = MagicMock()
+        ledger = MagicMock()
+        svc = ProfitTargetService(tmp_path, store, ledger)
+        svc.set_target("pos123", 1.50, 50, "SPX", 6400, 6380, 25)
+        targets = svc.get_targets()
+        assert "pos123" in targets
+        assert targets["pos123"]["profit_target_pct"] == 50
+        assert targets["pos123"]["entry_credit"] == 1.50
 
     def test_remove_target(self, tmp_path):
-        utp_voice.PROFIT_TARGETS_PATH = tmp_path / "targets.json"
-        utp_voice.add_profit_target("pos123", 1.50, 50, "SPX")
-        utp_voice.remove_profit_target("pos123")
-        data = utp_voice._load_profit_targets()
-        assert "pos123" not in data["positions"]
+        from app.services.profit_target_service import ProfitTargetService
+        store = MagicMock()
+        ledger = MagicMock()
+        svc = ProfitTargetService(tmp_path, store, ledger)
+        svc.set_target("pos123", 1.50, 50, "SPX")
+        assert svc.remove_target("pos123")
+        assert "pos123" not in svc.get_targets()
 
     def test_load_empty(self, tmp_path):
-        utp_voice.PROFIT_TARGETS_PATH = tmp_path / "nonexistent.json"
-        data = utp_voice._load_profit_targets()
-        assert data == {"positions": {}}
+        from app.services.profit_target_service import ProfitTargetService
+        store = MagicMock()
+        ledger = MagicMock()
+        svc = ProfitTargetService(tmp_path, store, ledger)
+        assert svc.get_targets() == {}
 
 
 class TestPositionLimits:

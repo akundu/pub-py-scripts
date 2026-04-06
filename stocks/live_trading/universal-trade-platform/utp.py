@@ -4967,6 +4967,8 @@ async def _cmd_daemon(args) -> int:
     init_position_store(data_dir)
     from app.services.execution_store import init_execution_store
     init_execution_store(data_dir)
+    from app.services.profit_target_service import init_profit_target_service
+    init_profit_target_service(data_dir, get_position_store(), get_ledger())
 
     # Initialize IBKR provider
     live_provider = None
@@ -5089,6 +5091,26 @@ async def _cmd_daemon(args) -> int:
                         logging.getLogger(__name__).error("Sync loop: %s", e)
 
     bg_tasks.append(asyncio.create_task(_sync_bg()))
+
+    # Profit target monitor loop
+    async def _profit_monitor_bg():
+        from app.services.profit_target_service import get_profit_target_service
+        _log = logging.getLogger("utp.profit_monitor")
+        check_interval = int(os.environ.get("PROFIT_TARGET_CHECK_INTERVAL", "30"))
+        while not shutdown_event.is_set():
+            await asyncio.sleep(check_interval)
+            if shutdown_event.is_set():
+                break
+            svc = get_profit_target_service()
+            if svc:
+                try:
+                    closed = await svc.check_targets()
+                    if closed:
+                        _log.info("Profit monitor: closed %d positions", len(closed))
+                except Exception as e:
+                    _log.error("Profit monitor error: %s", e)
+
+    bg_tasks.append(asyncio.create_task(_profit_monitor_bg()))
 
     # Market data streaming loop (if --streaming-config provided)
     streaming_config_path = getattr(args, "streaming_config", None)
@@ -5309,6 +5331,10 @@ async def _cmd_daemon(args) -> int:
     # Each worker gets its own copy of the app via app.main lifespan, but the
     # IBKR connection + background loops are already running in the main process.
     num_workers = getattr(args, "workers", 1)
+    if num_workers > 1:
+        # Workers will detect this and register a proxy provider instead of IBKR
+        os.environ["_UTP_DAEMON_WORKER"] = "1"
+        os.environ["_UTP_DAEMON_PORT"] = str(server_port)
     config = uvicorn.Config(
         "app.main:app",
         host=server_host,
