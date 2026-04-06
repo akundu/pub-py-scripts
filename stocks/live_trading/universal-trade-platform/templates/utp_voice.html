@@ -449,6 +449,9 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
               <label style="color:var(--muted);font-size:11px">Until</label>
               <input type="time" id="at-end-time" class="select-styled" style="width:90px" value="12:00">
               <span style="color:var(--muted);font-size:11px">ET</span>
+              <label style="color:var(--muted);font-size:11px">Profit Target</label>
+              <input type="number" id="at-profit-target" class="select-styled" style="width:50px" value="50" min="0" max="100" step="5">
+              <span style="color:var(--muted);font-size:11px">%</span>
             </div>
             <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:10px;padding:8px;background:var(--bg);border-radius:6px">
               <div style="flex:1;min-width:140px" title="After buying a specific spread, wait this many minutes before buying the exact same spread again. Prevents stacking.">
@@ -1840,6 +1843,11 @@ function renderOrderTicket() {
       <input type="number" id="ot-limit-price" class="ot-price-input" value="${Math.abs(m.credit).toFixed(2)}"
              step="0.05" style="display:${orderType==='LIMIT'?'block':'none'}" placeholder="Price">
     </div>
+    <div class="ot-row">
+      <span style="color:var(--muted);font-size:12px;min-width:40px" title="Auto-close when profit reaches this % of credit received. 0 = no auto-close.">Profit Target</span>
+      <input type="number" id="ot-profit-target" class="ot-qty-input" value="50" min="0" max="100" step="5" style="width:55px">
+      <span style="color:var(--muted);font-size:11px">% of credit</span>
+    </div>
     <div class="ot-actions">
       <button class="btn btn-muted" onclick="closeOrderTicket()">Cancel</button>
       <button class="btn btn-green" onclick="submitOrder()">Review Order</button>
@@ -1896,6 +1904,7 @@ async function submitOrder() {
   if (!orderLegs.length) return;
   const qty = parseInt(document.getElementById('ot-qty')?.value) || 1;
   const limitPrice = orderType === 'LIMIT' ? parseFloat(document.getElementById('ot-limit-price')?.value) : undefined;
+  const profitTarget = parseInt(document.getElementById('ot-profit-target')?.value) || 0;
   const sym = orderLegs[0].sym;
   const exp = orderLegs[0].exp;
 
@@ -1943,6 +1952,7 @@ async function submitOrder() {
   }
 
   if (limitPrice !== undefined) payload.net_price = limitPrice;
+  if (profitTarget > 0) payload.profit_target_pct = profitTarget;
 
   try {
     const r = await fetch('/api/quick-trade', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload)});
@@ -2491,6 +2501,7 @@ async function startAutoTrade() {
     top_n: parseInt(document.getElementById('at-top-n')?.value) || 3,
     interval_minutes: parseInt(document.getElementById('at-interval')?.value) || 3,
     end_time_utc: document.getElementById('at-end-time')?.value || '16:00',
+    profit_target_pct: parseInt(document.getElementById('at-profit-target')?.value) || 50,
     dedup_minutes: parseInt(document.getElementById('at-dedup')?.value) || 10,
     dedup_fallback_minutes: parseInt(document.getElementById('at-dedup-fallback')?.value) || 15,
     mode: 'live',

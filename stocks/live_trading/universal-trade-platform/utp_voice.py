@@ -899,6 +899,11 @@ async def execute_write_tool(tool_name: str, tool_input: dict) -> dict:
     client = get_daemon_client()
     try:
         if tool_name == "execute_trade":
+            # Check position limits before execution
+            limits = await _check_position_limits()
+            if not limits["allowed"]:
+                return {"error": limits["reason"], "limits": limits}
+
             payload = build_trade_payload(tool_input)
             result = await client.execute_trade(payload)
             # Log trade with all metadata to CSV — only real fills
@@ -914,6 +919,19 @@ async def execute_write_tool(tool_name: str, tool_input: dict) -> dict:
             )
             if is_real:
                 log_trade_to_csv(tool_input, result, source="manual")
+                # Register profit target if specified
+                pt_pct = tool_input.get("profit_target_pct")
+                if pt_pct and pt_pct > 0 and result.get("order_id"):
+                    credit = tool_input.get("net_price") or tool_input.get("credit") or 0
+                    add_profit_target(
+                        position_id=str(result["order_id"]),
+                        entry_credit=credit,
+                        profit_target_pct=pt_pct,
+                        symbol=tool_input.get("symbol", ""),
+                        short_strike=tool_input.get("short_strike", 0),
+                        long_strike=tool_input.get("long_strike", 0),
+                        quantity=tool_input.get("quantity", 1),
+                    )
             return result
         elif tool_name == "close_position":
             return await client.close_position(
@@ -1063,9 +1081,11 @@ app = FastAPI(title="UTP Voice", docs_url=None, redoc_url=None)
 
 
 @app.on_event("startup")
-async def _resume_auto_trade_on_startup():
-    """Resume auto-trade if state file says active and it's the same trading day."""
-    global _auto_trade_task
+async def _resume_background_tasks_on_startup():
+    """Resume auto-trade and start profit monitor on startup."""
+    global _auto_trade_task, _profit_monitor_task
+
+    # Resume auto-trade if active
     try:
         state = _load_auto_trade_state()
         if state.get("active") and state.get("trading_day") == datetime.now().strftime("%Y-%m-%d"):
@@ -1073,6 +1093,15 @@ async def _resume_auto_trade_on_startup():
             _auto_trade_task = asyncio.create_task(_auto_trade_loop(state))
     except Exception as e:
         logger.warning("Failed to resume auto-trade: %s", e)
+
+    # Start profit monitor if there are active targets
+    try:
+        targets = _load_profit_targets()
+        if targets.get("positions"):
+            logger.info("Starting profit monitor (%d active targets)", len(targets["positions"]))
+        _profit_monitor_task = asyncio.create_task(_profit_monitor_loop())
+    except Exception as e:
+        logger.warning("Failed to start profit monitor: %s", e)
 
 
 @app.exception_handler(Exception)
@@ -1911,6 +1940,7 @@ async def _auto_trade_loop(state: dict) -> None:
 
         # Execute selected trades
         for s in selected:
+            profit_target_pct = config.get("profit_target_pct", 50)
             trade_input = {
                 "trade_type": "credit-spread",
                 "symbol": s["symbol"],
@@ -1919,6 +1949,7 @@ async def _auto_trade_loop(state: dict) -> None:
                 "long_strike": s["long_strike"],
                 "quantity": qty,
                 "expiration": s["expiration"],
+                "profit_target_pct": profit_target_pct,
                 "otm_pct": s["otm_pct"],
                 "current_price": s["current_price"],
                 "short_delta": s.get("short_delta"),
@@ -1927,6 +1958,13 @@ async def _auto_trade_loop(state: dict) -> None:
             }
 
             try:
+                # Check position limits
+                limits = await _check_position_limits()
+                if not limits["allowed"]:
+                    log.append({"time": _now_iso(), "action": "skip", "sym": s["symbol"],
+                                "short": s["short_strike"], "reason": limits["reason"]})
+                    break  # Stop executing more trades this cycle
+
                 payload = build_trade_payload(trade_input)
                 result = await client.execute_trade(payload)
                 status = result.get("status", "UNKNOWN")
@@ -1979,6 +2017,194 @@ async def _auto_trade_loop(state: dict) -> None:
 
         # Wait for next interval
         await asyncio.sleep(interval)
+
+
+# ── Profit Target Monitor ─────────────────────────────────────────────────────
+
+PROFIT_TARGETS_PATH = Path("data/utp_voice/profit_targets.json")
+_profit_monitor_task: asyncio.Task | None = None
+_profit_close_locks: dict[str, bool] = {}  # Per-position lock to prevent concurrent closes
+
+MAX_OPEN_POSITIONS = int(os.environ.get("MAX_OPEN_POSITIONS", "10"))
+MAX_DAILY_TRADES = int(os.environ.get("MAX_DAILY_TRADES", "20"))
+
+
+def _load_profit_targets() -> dict:
+    if PROFIT_TARGETS_PATH.exists():
+        with open(PROFIT_TARGETS_PATH) as f:
+            return json.load(f)
+    return {"positions": {}}
+
+
+def _save_profit_targets(data: dict) -> None:
+    PROFIT_TARGETS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(PROFIT_TARGETS_PATH, "w") as f:
+        json.dump(data, f, indent=2, default=str)
+
+
+def add_profit_target(
+    position_id: str, entry_credit: float, profit_target_pct: float,
+    symbol: str = "", short_strike: float = 0, long_strike: float = 0,
+    quantity: int = 1,
+) -> None:
+    """Register a profit target for a position."""
+    data = _load_profit_targets()
+    data["positions"][position_id] = {
+        "entry_credit": entry_credit,
+        "profit_target_pct": profit_target_pct,
+        "symbol": symbol,
+        "short_strike": short_strike,
+        "long_strike": long_strike,
+        "quantity": quantity,
+        "created_at": _now_iso(),
+    }
+    _save_profit_targets(data)
+    logger.info("Profit target set: %s %s %.0f%% (credit=%.2f)", position_id[:8], symbol, profit_target_pct, entry_credit)
+
+
+def remove_profit_target(position_id: str) -> None:
+    """Remove a profit target (position closed)."""
+    data = _load_profit_targets()
+    if position_id in data["positions"]:
+        del data["positions"][position_id]
+        _save_profit_targets(data)
+
+
+async def _profit_monitor_loop() -> None:
+    """Background loop: check open positions against profit targets every 30s."""
+    client = get_daemon_client()
+
+    while True:
+        try:
+            if not _is_market_hours():
+                await asyncio.sleep(30)
+                continue
+
+            targets = _load_profit_targets()
+            if not targets.get("positions"):
+                await asyncio.sleep(30)
+                continue
+
+            # Get current portfolio from daemon (without quotes — fast)
+            try:
+                portfolio = await client.get_portfolio(include_quotes=False)
+            except Exception:
+                await asyncio.sleep(30)
+                continue
+
+            positions = portfolio.get("positions", [])
+            pos_by_id: dict[str, dict] = {}
+            for p in positions:
+                pid = p.get("position_id", "")
+                if pid:
+                    pos_by_id[pid] = p
+
+            # Check each target
+            for pid, target in list(targets["positions"].items()):
+                # Skip if already being closed
+                if _profit_close_locks.get(pid):
+                    continue
+
+                pos = pos_by_id.get(pid)
+                if not pos or pos.get("status") != "open":
+                    # Position no longer open — remove target
+                    remove_profit_target(pid)
+                    continue
+
+                entry_credit = target.get("entry_credit", 0)
+                target_pct = target.get("profit_target_pct", 50)
+                if not entry_credit or entry_credit <= 0:
+                    continue
+
+                # Current mark (what it would cost to buy back)
+                # For credit spreads: market_price is the current spread value
+                # Profit = entry_credit - current_btc_cost
+                mark = pos.get("market_price")
+                if mark is None:
+                    continue
+
+                btc_cost = abs(mark)  # Cost to buy back
+                profit_pct = ((entry_credit - btc_cost) / entry_credit) * 100
+
+                if profit_pct >= target_pct:
+                    # Hit profit target — close at MARKET
+                    _profit_close_locks[pid] = True
+                    try:
+                        logger.info(
+                            "Profit target hit: %s %s profit=%.1f%% (target=%.0f%%), closing",
+                            pid[:8], target.get("symbol"), profit_pct, target_pct,
+                        )
+                        result = await client.close_position(pid)
+                        status = result.get("status", "")
+                        if status in ("ok", "FILLED", "SUBMITTED"):
+                            remove_profit_target(pid)
+                            # Log to CSV
+                            log_trade_to_csv(
+                                {"trade_type": "close", "symbol": target.get("symbol"),
+                                 "short_strike": target.get("short_strike"),
+                                 "long_strike": target.get("long_strike"),
+                                 "quantity": target.get("quantity")},
+                                result, source="profit_target",
+                            )
+                    except Exception as e:
+                        logger.warning("Profit target close failed %s: %s", pid[:8], e)
+                    finally:
+                        _profit_close_locks.pop(pid, None)
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error("Profit monitor error: %s", e)
+
+        await asyncio.sleep(30)
+
+
+async def _check_position_limits() -> dict:
+    """Check if a new trade is allowed within position limits.
+    Returns {allowed: bool, reason: str, open_count: int, daily_count: int}.
+    """
+    import csv as csv_mod
+
+    # Count open positions from daemon
+    open_count = 0
+    try:
+        client = get_daemon_client()
+        portfolio = await client.get_portfolio(include_quotes=False)
+        positions = portfolio.get("positions", [])
+        open_count = sum(1 for p in positions if abs(p.get("quantity", 0)) > 0)
+    except Exception:
+        pass
+
+    # Count today's trades from CSV
+    daily_count = 0
+    today = datetime.now().strftime("%Y-%m-%d")
+    if TRADES_CSV_PATH.exists():
+        try:
+            with open(TRADES_CSV_PATH) as f:
+                reader = csv_mod.DictReader(f)
+                for row in reader:
+                    if (row.get("timestamp", "") or "")[:10] == today:
+                        daily_count += 1
+        except Exception:
+            pass
+
+    allowed = True
+    reasons = []
+    if MAX_OPEN_POSITIONS > 0 and open_count >= MAX_OPEN_POSITIONS:
+        allowed = False
+        reasons.append(f"Max open positions reached ({open_count}/{MAX_OPEN_POSITIONS})")
+    if MAX_DAILY_TRADES > 0 and daily_count >= MAX_DAILY_TRADES:
+        allowed = False
+        reasons.append(f"Max daily trades reached ({daily_count}/{MAX_DAILY_TRADES})")
+
+    return {
+        "allowed": allowed,
+        "reason": " | ".join(reasons) if reasons else "",
+        "open_count": open_count,
+        "max_open": MAX_OPEN_POSITIONS,
+        "daily_count": daily_count,
+        "max_daily": MAX_DAILY_TRADES,
+    }
 
 
 # ── Pre-Fetch Logic ──────────────────────────────────────────────────────────
@@ -2578,6 +2804,48 @@ async def api_trades_export(username: str = Depends(require_session)):
     )
 
 
+@app.get("/api/profit-targets")
+async def api_profit_targets(username: str = Depends(require_session)):
+    """List active profit targets."""
+    return _load_profit_targets()
+
+
+@app.put("/api/profit-targets/{position_id}")
+async def api_update_profit_target(
+    position_id: str,
+    request: Request,
+    username: str = Depends(require_session),
+):
+    """Update a position's profit target percentage."""
+    body = await request.json()
+    new_pct = body.get("profit_target_pct")
+    if new_pct is None or new_pct < 0:
+        raise HTTPException(status_code=400, detail="profit_target_pct required (>= 0)")
+
+    data = _load_profit_targets()
+    # Find by prefix match
+    matched = None
+    for pid in data["positions"]:
+        if pid.startswith(position_id):
+            matched = pid
+            break
+    if not matched:
+        raise HTTPException(status_code=404, detail="Position not found in profit targets")
+
+    if new_pct == 0:
+        del data["positions"][matched]
+    else:
+        data["positions"][matched]["profit_target_pct"] = new_pct
+    _save_profit_targets(data)
+    return {"status": "updated", "position_id": matched, "profit_target_pct": new_pct}
+
+
+@app.get("/api/position-limits")
+async def api_position_limits(username: str = Depends(require_session)):
+    """Get current position limit status."""
+    return await _check_position_limits()
+
+
 @app.get("/api/trades/list")
 async def api_trades_list(
     days: int = 0,
@@ -2808,6 +3076,10 @@ Examples:
                               help="Number of worker processes (default: 1). Use 2-4 for multi-core.")
     serve_parser.add_argument("--public", action="store_true", default=False,
                               help="Allow anonymous access to options/picks without login (default: require login for all)")
+    serve_parser.add_argument("--max-open-positions", type=int, default=10,
+                              help="Max open positions at any time (default: 10, 0=unlimited)")
+    serve_parser.add_argument("--max-daily-trades", type=int, default=20,
+                              help="Max new trades per day (default: 20, 0=unlimited)")
 
     # add-user
     add_user_parser = subparsers.add_parser("add-user", help="Add or update a user")
@@ -2851,6 +3123,10 @@ Examples:
         # Set public mode from --public flag
         global PUBLIC_MODE
         PUBLIC_MODE = getattr(args, "public", False)
+
+        global MAX_OPEN_POSITIONS, MAX_DAILY_TRADES
+        MAX_OPEN_POSITIONS = getattr(args, "max_open_positions", 10)
+        MAX_DAILY_TRADES = getattr(args, "max_daily_trades", 20)
 
         if not JWT_SECRET:
             print("ERROR: UTP_VOICE_JWT_SECRET environment variable is required.")

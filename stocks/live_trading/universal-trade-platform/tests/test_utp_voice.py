@@ -1154,20 +1154,21 @@ class TestSpreadMetrics:
 class TestCacheSourcePriority:
     def test_ibkr_not_overwritten_by_csv(self):
         """IBKR data should not be overwritten by CSV data."""
-        utp_voice._put_cached_options("SPX", "2026-04-06", "PUT", [{"strike": 6400}], source="ibkr")
-        # Try to overwrite with CSV
-        utp_voice._put_cached_options("SPX", "2026-04-06", "PUT", [{"strike": 6400, "old": True}], source="csv_exports")
-        entry = utp_voice._get_cached_options("SPX", "2026-04-06", "PUT")
-        assert entry is not None
-        assert entry.source == "ibkr"
+        with patch.object(utp_voice, "_is_market_hours", return_value=False):
+            utp_voice._put_cached_options("SPX", "2026-04-06", "PUT", [{"strike": 6400}], source="ibkr")
+            utp_voice._put_cached_options("SPX", "2026-04-06", "PUT", [{"strike": 6400, "old": True}], source="csv_exports")
+            entry = utp_voice._get_cached_options("SPX", "2026-04-06", "PUT")
+            assert entry is not None
+            assert entry.source == "ibkr"
 
     def test_csv_can_be_overwritten_by_ibkr(self):
         """CSV data should be overwritable by IBKR data."""
-        utp_voice._put_cached_options("SPX", "2026-04-06", "PUT", [{"old": True}], source="csv_exports")
-        utp_voice._put_cached_options("SPX", "2026-04-06", "PUT", [{"new": True}], source="ibkr")
-        entry = utp_voice._get_cached_options("SPX", "2026-04-06", "PUT")
-        assert entry.source == "ibkr"
-        assert entry.data == [{"new": True}]
+        with patch.object(utp_voice, "_is_market_hours", return_value=False):
+            utp_voice._put_cached_options("SPX", "2026-04-06", "PUT", [{"old": True}], source="csv_exports")
+            utp_voice._put_cached_options("SPX", "2026-04-06", "PUT", [{"new": True}], source="ibkr")
+            entry = utp_voice._get_cached_options("SPX", "2026-04-06", "PUT")
+            assert entry.source == "ibkr"
+            assert entry.data == [{"new": True}]
 
 
 # ── Server-Side Spread Computation Tests ──────────────────────────────────────
@@ -1254,3 +1255,48 @@ class TestTradeCSVLogger:
         assert rows[0]["symbol"] == "SPX"
         assert rows[0]["source"] == "manual"
         assert rows[0]["order_id"] == "123"
+
+
+class TestProfitTargets:
+    def test_save_and_load(self, tmp_path):
+        utp_voice.PROFIT_TARGETS_PATH = tmp_path / "targets.json"
+        utp_voice.add_profit_target("pos123", 1.50, 50, "SPX", 6400, 6380, 25)
+        data = utp_voice._load_profit_targets()
+        assert "pos123" in data["positions"]
+        assert data["positions"]["pos123"]["profit_target_pct"] == 50
+        assert data["positions"]["pos123"]["entry_credit"] == 1.50
+
+    def test_remove_target(self, tmp_path):
+        utp_voice.PROFIT_TARGETS_PATH = tmp_path / "targets.json"
+        utp_voice.add_profit_target("pos123", 1.50, 50, "SPX")
+        utp_voice.remove_profit_target("pos123")
+        data = utp_voice._load_profit_targets()
+        assert "pos123" not in data["positions"]
+
+    def test_load_empty(self, tmp_path):
+        utp_voice.PROFIT_TARGETS_PATH = tmp_path / "nonexistent.json"
+        data = utp_voice._load_profit_targets()
+        assert data == {"positions": {}}
+
+
+class TestPositionLimits:
+    @pytest.mark.asyncio
+    async def test_check_limits_allowed(self):
+        mock_client = AsyncMock()
+        mock_client.get_portfolio.return_value = {"positions": [{"quantity": 25}, {"quantity": 25}]}
+        utp_voice.MAX_OPEN_POSITIONS = 10
+        utp_voice.MAX_DAILY_TRADES = 20
+        with patch.object(utp_voice, "get_daemon_client", return_value=mock_client):
+            result = await utp_voice._check_position_limits()
+            assert result["allowed"] is True
+            assert result["open_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_check_limits_exceeded(self):
+        mock_client = AsyncMock()
+        mock_client.get_portfolio.return_value = {"positions": [{"quantity": 1}] * 10}
+        utp_voice.MAX_OPEN_POSITIONS = 10
+        with patch.object(utp_voice, "get_daemon_client", return_value=mock_client):
+            result = await utp_voice._check_position_limits()
+            assert result["allowed"] is False
+            assert "Max open positions" in result["reason"]
