@@ -4,10 +4,33 @@ ALL quote and option data requests go through this module.  It enforces
 a consistent cache → provider fallback pattern so no caller accidentally
 bypasses the cache and hits the slow TWS/CPG provider directly.
 
+This module also normalizes provider output to a consistent data contract
+regardless of whether the backend is TWS (ib_insync) or CPG (REST API).
+
+Data Contract — get_quote():
+    Returns Quote(symbol, bid, ask, last, volume, timestamp, source)
+    - Prices validated against per-index floor prices
+    - source: "streaming_cache" | "delayed" | "cpg" | "rejected"
+
+Data Contract — get_option_quotes():
+    Returns list of dicts, each with:
+    - strike: float (required)
+    - bid: float (required, 0 if unavailable)
+    - ask: float (required, 0 if unavailable)
+    - last: float
+    - volume: int
+    - open_interest: int (0 if unavailable)
+    - greeks: dict (optional) with:
+        - delta, gamma, theta, vega: float | None
+        - iv: float | None (as ratio, e.g., 0.25 = 25%)
+
+Data producers (streaming services) call providers directly to populate
+caches. All other code MUST use this module (Rule 4 in CLAUDE.md).
+
 Usage:
     from app.services.market_data import get_quote, get_option_quotes
 
-    quote = await get_quote("RUT")           # instant from streaming cache, slow fallback
+    quote = await get_quote("RUT")
     opts  = await get_option_quotes("RUT", "2026-04-01", "CALL",
                                      strike_min=2560, strike_max=2600)
 """
@@ -15,6 +38,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 
 from app.core.provider import ProviderRegistry
@@ -132,8 +156,104 @@ async def get_option_quotes(
     # 3. Provider (slow path)
     provider = ProviderRegistry.get(broker)
     if hasattr(provider, "get_option_quotes"):
-        return await provider.get_option_quotes(
+        quotes = await provider.get_option_quotes(
             symbol, expiration, option_type,
             strike_min=strike_min, strike_max=strike_max,
         )
+        return _normalize_option_quotes(quotes)
     return []
+
+
+def _normalize_option_quotes(quotes: list[dict]) -> list[dict]:
+    """Normalize option quotes to a consistent data contract.
+
+    Ensures every quote has: strike, bid, ask, last, volume, open_interest.
+    Greeks (if present) are normalized to ratio format (iv as 0.25 not 25%).
+    """
+    normalized = []
+    for q in quotes:
+        entry = {
+            "strike": float(q.get("strike", 0)),
+            "bid": float(q.get("bid", 0) or 0),
+            "ask": float(q.get("ask", 0) or 0),
+            "last": float(q.get("last", 0) or 0),
+            "volume": int(q.get("volume", 0) or 0),
+            "open_interest": int(q.get("open_interest", 0) or 0),
+        }
+        # Preserve OCC symbol if present
+        if q.get("symbol"):
+            entry["symbol"] = q["symbol"]
+        # Normalize greeks
+        g = q.get("greeks")
+        if g and isinstance(g, dict):
+            greeks = {}
+            for k in ("delta", "gamma", "theta", "vega"):
+                v = g.get(k)
+                if v is not None:
+                    greeks[k] = round(float(v), 6)
+            iv = g.get("iv")
+            if iv is not None:
+                iv_f = float(iv)
+                # If IV looks like a percentage (> 5), convert to ratio
+                if iv_f > 5:
+                    iv_f = iv_f / 100.0
+                greeks["iv"] = round(iv_f, 6)
+            if greeks:
+                entry["greeks"] = greeks
+        normalized.append(entry)
+    return normalized
+
+
+# ── Data Freshness Monitor ──────────────────────────────────────────────────
+
+_last_freshness_check: float = 0
+_FRESHNESS_CHECK_INTERVAL = 120.0  # Check every 2 minutes
+
+
+async def check_data_freshness() -> dict:
+    """Check that all data sources are fresh. Returns status dict.
+
+    Called periodically by the streaming loop or on-demand via status endpoint.
+    Logs warnings for stale data.
+    """
+    global _last_freshness_check
+    now = time.time()
+    if now - _last_freshness_check < _FRESHNESS_CHECK_INTERVAL:
+        return {}
+    _last_freshness_check = now
+
+    status = {"checked_at": datetime.now(timezone.utc).isoformat(), "issues": []}
+
+    # Check streaming tick freshness
+    from app.services.market_data_streaming import get_streaming_service
+    svc = get_streaming_service()
+    if svc and svc.is_running:
+        for sym_cfg in getattr(svc, "_config", None) and svc._config.symbols or []:
+            sym = sym_cfg.symbol
+            tick = svc.get_last_tick(sym, max_age_seconds=120.0)
+            if not tick:
+                issue = f"No streaming tick for {sym} in last 2 min"
+                status["issues"].append(issue)
+                logger.warning("Data freshness: %s", issue)
+
+    # Check option quote freshness
+    from app.services.option_quote_streaming import get_option_quote_streaming
+    oq_svc = get_option_quote_streaming()
+    if oq_svc:
+        cache_stats = oq_svc._cache.stats()
+        if cache_stats["entries"] == 0:
+            issue = "Option quote cache is empty"
+            status["issues"].append(issue)
+            logger.warning("Data freshness: %s", issue)
+        elif cache_stats["oldest_age_seconds"] > 600:
+            issue = f"Option quotes stale: oldest entry {cache_stats['oldest_age_seconds']:.0f}s old"
+            status["issues"].append(issue)
+            logger.warning("Data freshness: %s", issue)
+
+    if not status["issues"]:
+        status["healthy"] = True
+    else:
+        status["healthy"] = False
+        logger.warning("Data freshness check: %d issues found", len(status["issues"]))
+
+    return status

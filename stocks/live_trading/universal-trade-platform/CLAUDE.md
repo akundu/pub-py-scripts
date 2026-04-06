@@ -21,6 +21,47 @@ There are no standalone scripts. Do not create new top-level scripts unless expl
 2. **All tests must pass.** Never leave broken tests. If a change breaks existing tests, fix them as part of the same change.
 3. **Do not create new files** for scripts or tests. Add to `utp.py` and `tests/test_utp.py` respectively.
 4. **All market data access MUST go through `app/services/market_data.py`.** Never call `provider.get_quote()` or `provider.get_option_quotes()` directly from routes, CLI, or any other code. Always use `from app.services.market_data import get_quote, get_option_quotes`. This module enforces a consistent cache → stale → provider fallback pattern that prevents slow 10-18s IBKR round-trips. Direct provider calls bypass the streaming cache and cause severe performance regressions.
+5. **Provider data output must follow the normalized contract.** All providers (TWS, CPG, future) must return the same data shape. The centralized layer normalizes output via `_normalize_option_quotes()`. If adding a new provider, ensure it returns: `strike, bid, ask, last, volume, open_interest` for option quotes, and `greeks: {delta, gamma, theta, vega, iv}` (iv as ratio, e.g., 0.25 = 25%). The freshness monitor (`check_data_freshness()`) runs every 2 min and logs warnings for stale data.
+
+## Market Data Architecture
+
+```
+Provider (TWS / CPG / future)
+    │ get_quote(), get_option_quotes()
+    │ (called ONLY by data producers below)
+    ▼
+┌─────────────────────────────────────┐
+│ Data Producers (populate caches)    │
+│  - MarketDataStreamingService       │
+│    (ticks → streaming cache)        │
+│  - OptionQuoteStreamingService      │
+│    (option quotes → quote cache)    │
+│  Both run as background tasks,      │
+│  both write to in-memory + Redis    │
+└──────────────┬──────────────────────┘
+               │
+               ▼
+┌─────────────────────────────────────┐
+│ app/services/market_data.py         │
+│ (SINGLE entry point for all reads)  │
+│                                     │
+│ get_quote():                        │
+│   streaming cache → provider cache  │
+│   → provider fetch                  │
+│                                     │
+│ get_option_quotes():                │
+│   option cache → stale cache        │
+│   → provider fetch → normalize      │
+│                                     │
+│ check_data_freshness():             │
+│   monitors all caches, logs stale   │
+└──────────────┬──────────────────────┘
+               │
+               ▼
+         All consumers
+    (routes, CLI, trade estimate,
+     close, portfolio, utp_voice)
+```
 
 ## Server-First Architecture (v4.0)
 

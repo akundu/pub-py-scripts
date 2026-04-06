@@ -508,6 +508,13 @@ class OptionQuoteStreamingService:
                 break
             except Exception as e:
                 logger.error("Option quote streaming cycle error: %s", e)
+
+            # Periodic data freshness check (every ~2 min)
+            try:
+                from app.services.market_data import check_data_freshness
+                await check_data_freshness()
+            except Exception:
+                pass
                 self._errors += 1
             self._last_cycle_duration = time.monotonic() - cycle_start
             self._cycles += 1
