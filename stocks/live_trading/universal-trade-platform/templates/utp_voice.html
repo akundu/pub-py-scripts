@@ -450,8 +450,14 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
               <input type="time" id="at-end-time" class="select-styled" style="width:90px" value="12:00">
               <span style="color:var(--muted);font-size:11px">ET</span>
               <label style="color:var(--muted);font-size:11px">Profit Target</label>
-              <input type="number" id="at-profit-target" class="select-styled" style="width:50px" value="50" min="0" max="100" step="5">
-              <span style="color:var(--muted);font-size:11px">%</span>
+              <select id="at-profit-target" class="select-styled" style="width:70px">
+                <option value="0">None</option>
+                <option value="30">30%</option>
+                <option value="50" selected>50%</option>
+                <option value="70">70%</option>
+                <option value="80">80%</option>
+                <option value="90">90%</option>
+              </select>
             </div>
             <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:10px;padding:8px;background:var(--bg);border-radius:6px">
               <div style="flex:1;min-width:140px" title="After buying a specific spread, wait this many minutes before buying the exact same spread again. Prevents stacking.">
@@ -896,6 +902,12 @@ function onLoginSuccess() {
   _isLoggedIn = true;
   hideLoginModal();
   document.getElementById('login-btn-area').innerHTML = '<button class="hbtn" onclick="handleLogout()">Out</button>';
+  // Reload all data now that we're authenticated
+  loadPortfolio();
+  loadTickers();
+  // Restart chain refresh to pick up authenticated requests
+  stopChainRefresh();
+  startChainRefresh();
   if (_loginCallback) { const cb = _loginCallback; _loginCallback = null; cb(); }
 }
 
@@ -935,8 +947,18 @@ async function loadTickers() {
       const el = document.getElementById('tk-'+sym);
       if (!el) continue;
       const p = q.last || q.bid || 0;
-      el.querySelector('.price').textContent = p ? p.toLocaleString(undefined,{minimumFractionDigits:1,maximumFractionDigits:1}) : '--';
-      el.querySelector('.price').className = 'price flat'; // Could add up/down based on previous close
+      // Get previous close from predictions data (or percentile data)
+      const prevClose = predictionsData?.[sym]?.today?.prev_close || _pctlByTicker[sym]?.close || 0;
+      const change = prevClose ? p - prevClose : 0;
+      const changePct = prevClose ? ((change / prevClose) * 100) : 0;
+      const dir = change > 0 ? 'up' : change < 0 ? 'down' : 'flat';
+
+      let priceHtml = p ? p.toLocaleString(undefined,{minimumFractionDigits:1,maximumFractionDigits:1}) : '--';
+      if (prevClose && p) {
+        priceHtml += `<div style="font-size:9px">${change>=0?'+':''}${change.toFixed(1)} (${changePct>=0?'+':''}${changePct.toFixed(1)}%)</div>`;
+      }
+      el.querySelector('.price').innerHTML = priceHtml;
+      el.querySelector('.price').className = `price ${dir}`;
     }
   } catch(e) { console.log('Ticker error:', e); }
 }
@@ -1845,8 +1867,15 @@ function renderOrderTicket() {
     </div>
     <div class="ot-row">
       <span style="color:var(--muted);font-size:12px;min-width:40px" title="Auto-close when profit reaches this % of credit received. 0 = no auto-close.">Profit Target</span>
-      <input type="number" id="ot-profit-target" class="ot-qty-input" value="50" min="0" max="100" step="5" style="width:55px">
-      <span style="color:var(--muted);font-size:11px">% of credit</span>
+      <select id="ot-profit-target" class="select-styled" style="width:80px">
+        <option value="0" selected>None</option>
+        <option value="30">30%</option>
+        <option value="50">50%</option>
+        <option value="70">70%</option>
+        <option value="80">80%</option>
+        <option value="90">90%</option>
+      </select>
+      <span style="color:var(--muted);font-size:11px">auto-close at % of credit</span>
     </div>
     <div class="ot-actions">
       <button class="btn btn-muted" onclick="closeOrderTicket()">Cancel</button>
@@ -2804,7 +2833,7 @@ function loadAll() {
 }
 
 // Auto-refresh tickers every 15s, portfolio every 30s
-setInterval(() => { if (document.getElementById('app').style.display==='flex') loadTickers(); }, 15000);
+setInterval(() => { if (document.getElementById('app').style.display==='flex') loadTickers(); }, 5000);
 setInterval(() => { if (document.getElementById('app').style.display==='flex' && document.getElementById('pane-portfolio').classList.contains('active')) loadPortfolio(); }, 30000);
 setInterval(checkHealth, 30000);
 

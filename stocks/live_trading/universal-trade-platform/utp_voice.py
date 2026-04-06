@@ -3161,6 +3161,12 @@ Examples:
 def _run_server_with_restart(host: str, port: int, log_level: str, workers: int) -> None:
     """Run uvicorn with auto-restart on crash. Ctrl-C/SIGTERM exits cleanly."""
     import signal
+    import threading
+
+    def _force_exit():
+        """Force kill after 5 seconds if graceful shutdown hangs."""
+        print("\n  Force killing (shutdown took too long)...")
+        os._exit(1)
 
     max_restarts = 50
     restart_count = 0
@@ -3182,7 +3188,11 @@ def _run_server_with_restart(host: str, port: int, log_level: str, workers: int)
             break
 
         except KeyboardInterrupt:
-            print("\n  Shutting down (Ctrl-C)...")
+            print("\n  Shutting down (Ctrl-C)... force kill in 5s if stuck")
+            # Start a daemon thread that force-kills after 5 seconds
+            t = threading.Timer(5.0, _force_exit)
+            t.daemon = True
+            t.start()
             break
         except SystemExit as e:
             if e.code == 0:
