@@ -601,7 +601,9 @@ class OptionQuoteStreamingService:
                 self._symbol_errors[symbol] = self._symbol_errors.get(symbol, 0) + 1
                 logger.warning("Option quote fetch failed: %s %s %s: %s", symbol, exp, opt_type, err)
             else:
-                self._cache.put(symbol, exp, opt_type, quotes)
+                # Only cache non-empty results — empty results should trigger re-fetch
+                if quotes:
+                    self._cache.put(symbol, exp, opt_type, quotes)
                 self._fetches_ok += 1
                 self._symbol_last_fetch_utc[symbol] = fetch_ts
                 price = self._symbol_last_price.get(symbol, 0)
