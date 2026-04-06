@@ -87,11 +87,11 @@ class OptionChainCache:
         today = date.today()
 
         def _is_valid(data: dict) -> bool:
-            """Reject cache entries with too few strikes or only past expirations."""
+            """Reject cache entries with too few strikes, past expirations, or missing today."""
             strikes = data.get("strikes", [])
             expirations = data.get("expirations", [])
-            if len(strikes) < 10:
-                logger.info("Option chain cache rejected for %s: only %d strikes", symbol, len(strikes))
+            if len(strikes) < 50:
+                logger.info("Option chain cache rejected for %s: only %d strikes (need 50+)", symbol, len(strikes))
                 return False
             # Check if all expirations are in the past
             today_str = today.isoformat().replace("-", "")
@@ -99,6 +99,12 @@ class OptionChainCache:
             if expirations and not future_exps:
                 logger.info("Option chain cache rejected for %s: all expirations in the past", symbol)
                 return False
+            # For daily-expiring indices, require today's expiration
+            _DAILY_INDICES = {"SPX", "NDX", "RUT"}
+            if symbol.upper() in _DAILY_INDICES and today.weekday() < 5:
+                if today_str not in [e.replace("-", "") for e in expirations]:
+                    logger.info("Option chain cache rejected for %s: missing today's expiration %s", symbol, today_str)
+                    return False
             return True
 
         # Check in-memory first

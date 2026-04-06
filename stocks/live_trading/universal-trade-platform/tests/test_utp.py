@@ -2445,10 +2445,11 @@ class TestIBKRProvider:
         from app.core.providers.ibkr_cache import OptionChainCache
         from datetime import date, timedelta
         cache = OptionChainCache(cache_dir=str(tmp_path))
-        # Use a future expiration and enough strikes to pass validation
+        # Use today + future expiration and 50+ strikes to pass validation
+        today_exp = date.today().strftime("%Y%m%d")
         future_exp = (date.today() + timedelta(days=7)).strftime("%Y%m%d")
-        strikes = [float(5000 + i * 10) for i in range(20)]
-        cache.put("SPX", [future_exp], strikes)
+        strikes = [float(5000 + i * 10) for i in range(60)]
+        cache.put("SPX", [today_exp, future_exp], strikes)
         result = cache.get("SPX")
         assert result is not None
         assert result["strikes"] == strikes
@@ -2457,9 +2458,10 @@ class TestIBKRProvider:
         from app.core.providers.ibkr_cache import OptionChainCache
         from datetime import date, timedelta
         c1 = OptionChainCache(cache_dir=str(tmp_path))
+        today_exp = date.today().strftime("%Y%m%d")
         future_exp = (date.today() + timedelta(days=7)).strftime("%Y%m%d")
-        strikes = [float(20000 + i * 50) for i in range(20)]
-        c1.put("NDX", [future_exp], strikes)
+        strikes = [float(20000 + i * 50) for i in range(60)]
+        c1.put("NDX", [today_exp, future_exp], strikes)
         c2 = OptionChainCache(cache_dir=str(tmp_path))
         assert c2.get("NDX") is not None
 
@@ -2950,18 +2952,19 @@ class TestIBKRRestProvider:
 
         # Seed the daily cache directly (avoids mocking the multi-step CPG flow)
         from datetime import date, timedelta
+        today_exp = date.today().strftime("%Y%m%d")
         future_exp = (date.today() + timedelta(days=7)).strftime("%Y%m%d")
-        strikes = [float(5000 + i * 10) for i in range(20)]
+        strikes = [float(5000 + i * 10) for i in range(60)]
         provider._cache.option_chains.put(
             "SPX",
-            expirations=[future_exp],
+            expirations=[today_exp, future_exp],
             strikes=strikes,
         )
 
         chain = await provider.get_option_chain("SPX")
         assert 5100.0 in chain["strikes"]
-        assert len(chain["strikes"]) == 20
-        assert future_exp in chain["expirations"]
+        assert len(chain["strikes"]) == 60
+        assert today_exp in chain["expirations"]
 
     @pytest.mark.asyncio
     async def test_check_margin_whatif(self):
