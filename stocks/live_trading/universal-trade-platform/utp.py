@@ -4968,6 +4968,8 @@ async def _cmd_daemon(args) -> int:
     from app.services.execution_store import init_execution_store
     init_execution_store(data_dir)
     from app.services.profit_target_service import init_profit_target_service
+    from app.services.position_store import get_position_store
+    from app.services.ledger import get_ledger
     init_profit_target_service(data_dir, get_position_store(), get_ledger())
 
     # Initialize IBKR provider
