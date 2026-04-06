@@ -1220,8 +1220,9 @@ async function executeClose(pid) {
     const ok = d.status === 'ok' && !d.result?.error;
     const msg = d.result?.message || d.result?.status || JSON.stringify(d.result || d.error || d);
     resEl.innerHTML = `<div class="confirm-result ${ok?'success':'failure'}" style="margin-top:8px">${ok?'SUBMITTED':'FAILED'}: ${msg}</div>`;
-    if (ok) setTimeout(() => { closeTrade(); loadPortfolio(); }, 2000);
-  } catch(e) { resEl.innerHTML = `<div class="confirm-result failure" style="margin-top:8px">${e.message}</div>`; }
+    // Keep modal open — user must tap OK to dismiss
+    if (ok) res.innerHTML += `<button class="btn btn-muted btn-sm" style="margin-top:8px" onclick="closeTrade();loadPortfolio()">OK</button>`;
+  } catch(e) { resEl.innerHTML = `<div class="confirm-result failure" style="margin-top:8px">${e.message}</div><button class="btn btn-muted btn-sm" style="margin-top:8px" onclick="closeTrade()">OK</button>`; }
 }
 
 async function flushPortfolio() {
@@ -1289,8 +1290,9 @@ async function executeHardReset() {
     const d = await r.json();
     const ok = d.status === 'ok';
     resEl.innerHTML = `<div class="confirm-result ${ok?'success':'failure'}" style="margin-top:8px">${ok?'Reset complete. Re-syncing from broker...':'Failed: '+JSON.stringify(d.error||d)}</div>`;
-    if (ok) setTimeout(() => { closeTrade(); loadPortfolio(); }, 2000);
-  } catch(e) { resEl.innerHTML = `<div class="confirm-result failure" style="margin-top:8px">${e.message}</div>`; }
+    // Keep modal open — user must tap OK to dismiss
+    if (ok) res.innerHTML += `<button class="btn btn-muted btn-sm" style="margin-top:8px" onclick="closeTrade();loadPortfolio()">OK</button>`;
+  } catch(e) { resEl.innerHTML = `<div class="confirm-result failure" style="margin-top:8px">${e.message}</div><button class="btn btn-muted btn-sm" style="margin-top:8px" onclick="closeTrade()">OK</button>`; }
 }
 
 function buyMore(posJsonStr) {
@@ -2099,8 +2101,8 @@ async function executeConfirm(cid) {
     const result = d.result||{};
     const ok = !result.error && result.status!=='FAILED';
     res.innerHTML = `<div class="confirm-result ${ok?'success':'failure'}" style="margin-top:8px">${ok?'EXECUTED':'FAILED'}: ${result.message||result.status||JSON.stringify(d)}</div>`;
-    if (ok) { setTimeout(() => { closeTrade(); loadPortfolio(); }, 2000); }
-  } catch(e) { res.innerHTML = `<div class="confirm-result failure" style="margin-top:8px">${e.message}</div>`; }
+    if (ok) { res.innerHTML += `<button class="btn btn-muted btn-sm" style="margin-top:8px" onclick="closeTrade();loadPortfolio()">OK</button>`; }
+  } catch(e) { res.innerHTML = `<div class="confirm-result failure" style="margin-top:8px">${e.message}</div><button class="btn btn-muted btn-sm" style="margin-top:8px" onclick="closeTrade()">OK</button>`; }
 }
 
 function closeTrade() {
