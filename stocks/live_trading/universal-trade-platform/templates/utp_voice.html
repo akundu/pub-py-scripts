@@ -1290,8 +1290,7 @@ async function executeHardReset() {
     const d = await r.json();
     const ok = d.status === 'ok';
     resEl.innerHTML = `<div class="confirm-result ${ok?'success':'failure'}" style="margin-top:8px">${ok?'Reset complete. Re-syncing from broker...':'Failed: '+JSON.stringify(d.error||d)}</div>`;
-    // Keep modal open — user must tap OK to dismiss
-    if (ok) res.innerHTML += `<button class="btn btn-muted btn-sm" style="margin-top:8px" onclick="closeTrade();loadPortfolio()">OK</button>`;
+    resEl.innerHTML += `<button class="btn btn-muted btn-sm" style="margin-top:8px" onclick="closeTrade();loadPortfolio()">OK</button>`;
   } catch(e) { resEl.innerHTML = `<div class="confirm-result failure" style="margin-top:8px">${e.message}</div><button class="btn btn-muted btn-sm" style="margin-top:8px" onclick="closeTrade()">OK</button>`; }
 }
 
