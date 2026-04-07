@@ -79,6 +79,11 @@ class StreamingConfig:
     option_quotes_strike_range_pct: float = 3.0
     option_quotes_num_expirations: int = 3
 
+    # CSV exports as primary fast source for option quotes
+    option_quotes_csv_primary: bool = True         # Use CSV exports as primary (instant bid/ask)
+    option_quotes_csv_dir: str = ""                # Empty = auto-resolve ../../csv_exports/options
+    option_quotes_greeks_interval: float = 30.0    # Seconds between IBKR fetches (prices + greeks)
+
     def validate(self) -> list[str]:
         """Validate config. Returns list of errors (empty = valid)."""
         errors = []
@@ -169,6 +174,9 @@ def load_streaming_config(path: str | Path) -> StreamingConfig:
         option_quotes_poll_interval=float(raw.get("option_quotes_poll_interval", 2.0)),
         option_quotes_strike_range_pct=float(raw.get("option_quotes_strike_range_pct", 3.0)),
         option_quotes_num_expirations=int(raw.get("option_quotes_num_expirations", 3)),
+        option_quotes_csv_primary=raw.get("option_quotes_csv_primary", True),
+        option_quotes_csv_dir=raw.get("option_quotes_csv_dir", ""),
+        option_quotes_greeks_interval=float(raw.get("option_quotes_greeks_interval", 60.0)),
     )
 
     errors = config.validate()

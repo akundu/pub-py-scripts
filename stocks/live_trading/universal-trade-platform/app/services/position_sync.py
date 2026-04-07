@@ -95,12 +95,28 @@ class PositionSyncService:
         return result
 
     def _update_existing(self, existing, bp, con_id):
-        """Update mark and con_id on an existing position."""
+        """Update mark, con_id, and backfill option fields on an existing position."""
         pos_id = existing.get("position_id", "")
         current_mark = bp.market_value / bp.quantity if bp.quantity else 0
         self._store.update_mark(pos_id, current_mark, datetime.now(UTC))
         if con_id and not existing.get("con_id"):
             self._store.update_field(pos_id, "con_id", con_id)
+        # Backfill option fields that may be missing from trade execution path
+        sec_type = getattr(bp, "sec_type", None)
+        if sec_type and not existing.get("sec_type"):
+            self._store.update_field(pos_id, "sec_type", sec_type)
+        exp = getattr(bp, "expiration", None)
+        if exp and not existing.get("expiration"):
+            # Normalize YYYYMMDD → YYYY-MM-DD
+            if len(exp) == 8 and "-" not in exp:
+                exp = f"{exp[:4]}-{exp[4:6]}-{exp[6:8]}"
+            self._store.update_field(pos_id, "expiration", exp)
+        strike = getattr(bp, "strike", None)
+        if strike and not existing.get("strike"):
+            self._store.update_field(pos_id, "strike", strike)
+        right = getattr(bp, "right", None)
+        if right and not existing.get("right"):
+            self._store.update_field(pos_id, "right", right)
 
     async def _log_sync(self, broker, pos_id, symbol, quantity, avg_cost, con_id):
         """Log a position sync event to the ledger."""

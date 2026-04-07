@@ -98,3 +98,9 @@ option_quotes_strike_range_pct: 3.5
 
 # Number of upcoming expirations to fetch per symbol
 option_quotes_num_expirations: 5
+
+# CSV exports as primary fast source for option bid/ask/volume (~10ms per read)
+# IBKR greeks overlaid every greeks_interval seconds
+option_quotes_csv_primary: true
+option_quotes_csv_dir: ""          # Empty = auto-resolve ../../csv_exports/options
+option_quotes_greeks_interval: 30  # Seconds between IBKR fetches (prices + greeks)

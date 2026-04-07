@@ -1583,6 +1583,52 @@ class TestPositionSync:
         for pos in _store.get_open_positions():
             assert pos.get("source") == PositionSource.EXTERNAL_SYNC.value
 
+    @pytest.mark.asyncio
+    async def test_sync_backfills_option_fields(self, _store, _ledger):
+        """Sync backfills sec_type, expiration, strike, right on existing positions."""
+        from app.services.position_sync import PositionSyncService
+        from app.models import Position, Broker
+
+        # Create a position missing option fields (simulates trade execution path)
+        pos_id = _store.add_position_from_sync(
+            broker=Broker.IBKR, symbol="SPX", quantity=-25,
+            avg_cost=1.50, market_value=-375.0, unrealized_pnl=0,
+            con_id=12345,
+            # Note: sec_type, expiration, strike, right are NOT set
+        )
+        pos = _store._positions[pos_id]
+        assert pos.get("sec_type") is None
+        assert pos.get("strike") is None
+        assert pos.get("right") is None
+
+        # Now mock a sync that returns the same position with full option fields
+        mock_provider = AsyncMock()
+        mock_provider.broker = Broker.IBKR
+        mock_provider.get_positions.return_value = [
+            Position(
+                broker=Broker.IBKR, symbol="SPX", quantity=-25,
+                avg_cost=1.50, market_value=-375.0, unrealized_pnl=0,
+                con_id=12345,
+                sec_type="OPT", expiration="20260407", strike=6460.0, right="P",
+            ),
+        ]
+        from app.core.provider import ProviderRegistry
+        original_all = ProviderRegistry.all
+        ProviderRegistry.all = lambda: [mock_provider]
+        try:
+            sync_svc = PositionSyncService(_store, _ledger)
+            result = await sync_svc.sync_all_brokers()
+            assert result.updated_positions >= 1
+        finally:
+            ProviderRegistry.all = original_all
+
+        # Verify fields were backfilled
+        updated = _store._positions[pos_id]
+        assert updated["sec_type"] == "OPT"
+        assert updated["expiration"] == "2026-04-07"
+        assert updated["strike"] == 6460.0
+        assert updated["right"] == "P"
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Reconciliation
@@ -6461,3 +6507,320 @@ option_quotes_num_expirations: 2
             result = svc.get_cached_quotes("SPX", "2026-03-25", "CALL")
             assert result is not None
             assert result[0]["strike"] == 5500
+
+    # ── CSV primary mode tests ────────────────────────────────────────────
+
+    def test_streaming_config_csv_primary_defaults(self):
+        """StreamingConfig has CSV primary fields with correct defaults."""
+        from app.services.streaming_config import StreamingConfig
+        cfg = StreamingConfig()
+        assert cfg.option_quotes_csv_primary is True
+        assert cfg.option_quotes_csv_dir == ""
+        assert cfg.option_quotes_greeks_interval == 30.0
+
+    def test_streaming_config_csv_primary_yaml(self, tmp_path):
+        """load_streaming_config parses CSV primary fields from YAML."""
+        from app.services.streaming_config import load_streaming_config
+        yaml_content = """\
+symbols:
+  - SPX
+option_quotes_csv_primary: false
+option_quotes_csv_dir: /tmp/test_csv
+option_quotes_greeks_interval: 30.0
+"""
+        cfg_file = tmp_path / "streaming.yaml"
+        cfg_file.write_text(yaml_content)
+        cfg = load_streaming_config(cfg_file)
+        assert cfg.option_quotes_csv_primary is False
+        assert cfg.option_quotes_csv_dir == "/tmp/test_csv"
+        assert cfg.option_quotes_greeks_interval == 30.0
+
+    def test_load_csv_latest_snapshot_basic(self, tmp_path):
+        """_load_csv_latest_snapshot reads latest timestamp from a CSV file."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        # Create a test CSV
+        csv_dir = tmp_path / "options"
+        sym_dir = csv_dir / "SPX"
+        sym_dir.mkdir(parents=True)
+        csv_file = sym_dir / "2026-04-06.csv"
+        csv_file.write_text(
+            "timestamp,ticker,type,strike,expiration,bid,ask,day_close,fmv,"
+            "delta,gamma,theta,vega,implied_volatility,volume\n"
+            "2026-04-06T14:00:00.000000,O:SPX,call,5500,2026-04-06,2.0,2.5,2.2,,,,,,,"
+            "100\n"
+            "2026-04-06T14:00:00.000000,O:SPX,put,5500,2026-04-06,1.0,1.5,1.2,,,,,,,"
+            "50\n"
+            "2026-04-06T14:00:01.000000,O:SPX,call,5500,2026-04-06,2.1,2.6,2.3,,,,,,,"
+            "110\n"
+            "2026-04-06T14:00:01.000000,O:SPX,put,5500,2026-04-06,1.1,1.6,1.3,,,,,,,"
+            "60\n"
+        )
+
+        cfg = StreamingConfig(option_quotes_csv_dir=str(csv_dir))
+        svc = OptionQuoteStreamingService(cfg, provider=MagicMock())
+
+        quotes, snap_ts = svc._load_csv_latest_snapshot("SPX", "2026-04-06", "CALL")
+        assert len(quotes) == 1
+        assert quotes[0]["strike"] == 5500
+        assert quotes[0]["bid"] == 2.1
+        assert quotes[0]["ask"] == 2.6
+        assert quotes[0]["volume"] == 110
+        assert snap_ts == "2026-04-06T14:00:01.000000"
+
+    def test_load_csv_latest_snapshot_strike_filtering(self, tmp_path):
+        """_load_csv_latest_snapshot filters by strike range."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        csv_dir = tmp_path / "options"
+        sym_dir = csv_dir / "NDX"
+        sym_dir.mkdir(parents=True)
+        csv_file = sym_dir / "2026-04-06.csv"
+        ts = "2026-04-06T15:00:00.000000"
+        csv_file.write_text(
+            "timestamp,ticker,type,strike,expiration,bid,ask,day_close,fmv,"
+            "delta,gamma,theta,vega,implied_volatility,volume\n"
+            f"{ts},O:NDX,call,19000,2026-04-06,10,15,12,,,,,,,50\n"
+            f"{ts},O:NDX,call,20000,2026-04-06,5,8,6,,,,,,,80\n"
+            f"{ts},O:NDX,call,21000,2026-04-06,1,2,1.5,,,,,,,30\n"
+        )
+
+        cfg = StreamingConfig(option_quotes_csv_dir=str(csv_dir))
+        svc = OptionQuoteStreamingService(cfg, provider=MagicMock())
+
+        quotes, _ = svc._load_csv_latest_snapshot(
+            "NDX", "2026-04-06", "CALL", strike_min=19500, strike_max=20500,
+        )
+        assert len(quotes) == 1
+        assert quotes[0]["strike"] == 20000
+
+    def test_load_csv_latest_snapshot_missing_file(self, tmp_path):
+        """_load_csv_latest_snapshot returns empty for missing file."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        csv_dir = tmp_path / "options"
+        csv_dir.mkdir(parents=True)
+
+        cfg = StreamingConfig(option_quotes_csv_dir=str(csv_dir))
+        svc = OptionQuoteStreamingService(cfg, provider=MagicMock())
+
+        quotes, snap_ts = svc._load_csv_latest_snapshot("SPX", "2026-04-06", "CALL")
+        assert quotes == []
+        assert snap_ts == ""
+
+    def test_greeks_cache_merge(self):
+        """_merge_greeks attaches cached greeks to CSV quotes."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        cfg = StreamingConfig()
+        svc = OptionQuoteStreamingService(cfg, provider=MagicMock())
+
+        # Pre-populate greeks cache
+        svc._greeks_cache[("SPX", "2026-04-06", "CALL")] = {
+            5500: {"delta": 0.45, "gamma": 0.02, "theta": -0.5, "vega": 1.2, "iv": 0.20},
+            5600: {"delta": 0.30, "gamma": 0.01, "theta": -0.3, "vega": 0.8, "iv": 0.18},
+        }
+
+        quotes = [
+            {"strike": 5500, "bid": 2.0, "ask": 2.5},
+            {"strike": 5600, "bid": 1.0, "ask": 1.5},
+            {"strike": 5700, "bid": 0.5, "ask": 0.8},  # No greeks for this strike
+        ]
+
+        merged = svc._merge_greeks(quotes, "SPX", "2026-04-06", "CALL")
+        assert merged[0]["greeks"]["delta"] == 0.45
+        assert merged[1]["greeks"]["iv"] == 0.18
+        assert "greeks" not in merged[2]  # No greeks for 5700
+
+    def test_greeks_persist_across_csv_refreshes(self, tmp_path):
+        """Greeks survive across CSV refresh cycles."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        csv_dir = tmp_path / "options"
+        sym_dir = csv_dir / "SPX"
+        sym_dir.mkdir(parents=True)
+
+        cfg = StreamingConfig(option_quotes_csv_dir=str(csv_dir))
+        svc = OptionQuoteStreamingService(cfg, provider=MagicMock())
+
+        # Store greeks
+        svc._greeks_cache[("SPX", "2026-04-06", "CALL")] = {
+            5500: {"delta": 0.45, "gamma": 0.02, "theta": -0.5, "vega": 1.2, "iv": 0.20},
+        }
+
+        # First CSV read
+        ts1 = "2026-04-06T14:00:00.000000"
+        csv_file = sym_dir / "2026-04-06.csv"
+        csv_file.write_text(
+            "timestamp,ticker,type,strike,expiration,bid,ask,day_close,fmv,"
+            "delta,gamma,theta,vega,implied_volatility,volume\n"
+            f"{ts1},O:SPX,call,5500,2026-04-06,2.0,2.5,2.2,,,,,,,100\n"
+        )
+        quotes1, _ = svc._load_csv_latest_snapshot("SPX", "2026-04-06", "CALL")
+        merged1 = svc._merge_greeks(quotes1, "SPX", "2026-04-06", "CALL")
+        assert merged1[0]["greeks"]["delta"] == 0.45
+
+        # Second CSV read (new snapshot, same greeks)
+        ts2 = "2026-04-06T14:01:00.000000"
+        csv_file.write_text(
+            "timestamp,ticker,type,strike,expiration,bid,ask,day_close,fmv,"
+            "delta,gamma,theta,vega,implied_volatility,volume\n"
+            f"{ts2},O:SPX,call,5500,2026-04-06,2.2,2.7,2.4,,,,,,,120\n"
+        )
+        quotes2, _ = svc._load_csv_latest_snapshot("SPX", "2026-04-06", "CALL")
+        merged2 = svc._merge_greeks(quotes2, "SPX", "2026-04-06", "CALL")
+        assert merged2[0]["bid"] == 2.2  # New CSV data
+        assert merged2[0]["greeks"]["delta"] == 0.45  # Greeks persisted
+
+    async def test_csv_cycle_skips_ibkr_when_not_due(self, tmp_path):
+        """CSV primary cycle does NOT call IBKR when fetch interval hasn't elapsed."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig, StreamingSymbolConfig
+
+        csv_dir = tmp_path / "options"
+        sym_dir = csv_dir / "SPX"
+        sym_dir.mkdir(parents=True)
+        ts = "2026-04-06T15:00:00.000000"
+        (sym_dir / "2026-04-06.csv").write_text(
+            "timestamp,ticker,type,strike,expiration,bid,ask,day_close,fmv,"
+            "delta,gamma,theta,vega,implied_volatility,volume\n"
+            f"{ts},O:SPX,call,5500,2026-04-06,2.0,2.5,2.2,,,,,,,100\n"
+            f"{ts},O:SPX,put,5500,2026-04-06,1.0,1.5,1.2,,,,,,,50\n"
+        )
+
+        provider = AsyncMock()
+        cfg = StreamingConfig(
+            symbols=[StreamingSymbolConfig(symbol="SPX", sec_type="IND", exchange="CBOE")],
+            option_quotes_csv_primary=True,
+            option_quotes_csv_dir=str(csv_dir),
+            option_quotes_greeks_interval=60.0,
+            option_quotes_num_expirations=1,
+        )
+        svc = OptionQuoteStreamingService(cfg, provider=provider)
+        svc._last_greeks_fetch = time.monotonic()  # Just fetched
+
+        # Set up jobs manually (bypass price/expiration resolution)
+        jobs = [("SPX", "2026-04-06", "CALL", 5000, 6000, "test"),
+                ("SPX", "2026-04-06", "PUT", 5000, 6000, "test")]
+        await svc._run_csv_primary_cycle(jobs)
+
+        # IBKR should NOT have been called (greeks not due)
+        provider.get_option_quotes.assert_not_called()
+        # But CSV data should be cached
+        cached = svc._cache.get("SPX", "2026-04-06", "CALL", max_age_seconds=10)
+        assert cached is not None
+        assert len(cached) == 1
+
+    async def test_csv_cycle_fetches_ibkr_when_due(self, tmp_path):
+        """CSV primary cycle calls IBKR for prices+greeks when interval has elapsed."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig, StreamingSymbolConfig
+
+        csv_dir = tmp_path / "options"
+        sym_dir = csv_dir / "SPX"
+        sym_dir.mkdir(parents=True)
+        ts = "2026-04-06T15:00:00.000000"
+        (sym_dir / "2026-04-06.csv").write_text(
+            "timestamp,ticker,type,strike,expiration,bid,ask,day_close,fmv,"
+            "delta,gamma,theta,vega,implied_volatility,volume\n"
+            f"{ts},O:SPX,call,5500,2026-04-06,2.0,2.5,2.2,,,,,,,100\n"
+            f"{ts},O:SPX,put,5500,2026-04-06,1.0,1.5,1.2,,,,,,,50\n"
+        )
+
+        provider = AsyncMock()
+        provider.get_option_quotes.return_value = [
+            {"strike": 5500, "bid": 2.0, "ask": 2.5,
+             "greeks": {"delta": 0.45, "gamma": 0.02, "theta": -0.5, "vega": 1.2, "iv": 0.20}},
+        ]
+        cfg = StreamingConfig(
+            symbols=[StreamingSymbolConfig(symbol="SPX", sec_type="IND", exchange="CBOE")],
+            option_quotes_csv_primary=True,
+            option_quotes_csv_dir=str(csv_dir),
+            option_quotes_greeks_interval=60.0,
+            option_quotes_num_expirations=1,
+        )
+        svc = OptionQuoteStreamingService(cfg, provider=provider)
+        svc._last_greeks_fetch = 0  # Never fetched — greeks are due
+
+        jobs = [("SPX", "2026-04-06", "CALL", 5000, 6000, "test"),
+                ("SPX", "2026-04-06", "PUT", 5000, 6000, "test")]
+        await svc._run_csv_primary_cycle(jobs)
+
+        # IBKR SHOULD have been called for greeks
+        assert provider.get_option_quotes.call_count >= 1
+
+    async def test_csv_primary_disabled_uses_original(self):
+        """When csv_primary is disabled, original IBKR-only path is used."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig, StreamingSymbolConfig
+        import app.services.option_quote_streaming as oqs_mod
+
+        provider = AsyncMock()
+        provider.get_option_quotes.return_value = [{"strike": 5500, "bid": 1.0}]
+
+        cfg = StreamingConfig(
+            symbols=[StreamingSymbolConfig(symbol="SPX", sec_type="IND", exchange="CBOE")],
+            option_quotes_csv_primary=False,
+            option_quotes_num_expirations=1,
+        )
+        svc = OptionQuoteStreamingService(cfg, provider=provider)
+
+        mock_quote = MagicMock(last=5500.0, bid=5499.0, ask=5501.0, source="test")
+        mock_dt = MagicMock(wraps=datetime)
+        mock_dt.now.return_value = datetime(2026, 4, 6, 15, 0, 0, tzinfo=timezone.utc)
+        with patch.object(oqs_mod, "datetime", mock_dt):
+            with patch.object(oqs_mod, "date") as mock_date:
+                mock_date.today.return_value = date(2026, 4, 6)
+                mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+                with patch("app.services.market_data.get_quote", new_callable=AsyncMock, return_value=mock_quote):
+                    provider.get_option_chain.return_value = {
+                        "expirations": ["2026-04-06"], "strikes": [5500],
+                    }
+                    await svc._run_one_cycle()
+
+        # Should have used IBKR directly (not CSV)
+        assert provider.get_option_quotes.call_count >= 1
+
+    def test_get_expirations_from_csv(self, tmp_path):
+        """_get_expirations_from_csv lists future expirations from directory."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        csv_dir = tmp_path / "options"
+        sym_dir = csv_dir / "SPX"
+        sym_dir.mkdir(parents=True)
+        # Create some CSV files — use dates well in the future to avoid date-sensitivity
+        (sym_dir / "2027-06-15.csv").write_text("header\n")
+        (sym_dir / "2027-06-16.csv").write_text("header\n")
+        (sym_dir / "2027-06-18.csv").write_text("header\n")
+        (sym_dir / "2020-01-01.csv").write_text("header\n")  # Past date
+        (sym_dir / "not-a-date.csv").write_text("header\n")  # Invalid
+
+        cfg = StreamingConfig(option_quotes_csv_dir=str(csv_dir))
+        svc = OptionQuoteStreamingService(cfg, provider=MagicMock())
+
+        exps = svc._get_expirations_from_csv("SPX")
+        assert "2027-06-15" in exps
+        assert "2027-06-16" in exps
+        assert "2027-06-18" in exps
+        assert "2020-01-01" not in exps  # Past
+        assert "not-a-date" not in exps  # Invalid
+
+    def test_csv_primary_stats_in_service_stats(self):
+        """Service stats include csv_primary section."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        cfg = StreamingConfig(option_quotes_csv_primary=True, option_quotes_greeks_interval=45.0)
+        svc = OptionQuoteStreamingService(cfg, provider=MagicMock())
+        stats = svc.stats
+        assert "csv_primary" in stats
+        assert stats["csv_primary"]["enabled"] is True
+        assert stats["csv_primary"]["greeks_interval"] == 45.0
+        assert stats["csv_primary"]["csv_reads_ok"] == 0
+        assert stats["csv_primary"]["csv_reads_failed"] == 0

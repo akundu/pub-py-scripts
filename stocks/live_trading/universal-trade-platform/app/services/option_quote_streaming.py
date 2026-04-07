@@ -16,11 +16,15 @@ vice-versa.
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 from app.services.streaming_config import StreamingConfig
@@ -283,11 +287,41 @@ class OptionQuoteStreamingService:
         self._cycle_jobs_total: int = 0
         self._cycle_started_utc: str | None = None
 
+        # CSV primary mode
+        self._csv_primary = config.option_quotes_csv_primary
+        self._csv_dir = self._resolve_csv_dir(config.option_quotes_csv_dir)
+        self._greeks_interval = config.option_quotes_greeks_interval
+        # greeks cache: (symbol, exp, opt_type) → {strike: {delta, gamma, theta, vega, iv}}
+        self._greeks_cache: dict[tuple[str, str, str], dict[float, dict]] = {}
+        self._last_greeks_fetch: float = 0
+        # CSV stats
+        self._csv_reads_ok = 0
+        self._csv_reads_failed = 0
+        self._csv_latest_snapshot_age: float = 0
+        self._greeks_cache_entries = 0
+
         # Redis for conID cache persistence across restarts
         self._redis = None
         self._redis_url: str = config.redis_url if config.redis_enabled else ""
         self._conid_cache_loaded = False
         self._conid_cache_snapshot: int = 0  # size at last save
+
+    @staticmethod
+    def _resolve_csv_dir(configured: str) -> str:
+        """Resolve CSV exports directory. Empty = auto-resolve relative to this file."""
+        if configured:
+            return configured
+        # Auto-resolve: this file is at app/services/option_quote_streaming.py
+        # CSV exports are at ../../csv_exports/options relative to the UTP root
+        utp_root = Path(__file__).resolve().parent.parent.parent
+        candidate = utp_root.parent.parent / "csv_exports" / "options"
+        if candidate.is_dir():
+            return str(candidate)
+        # Fallback: try from cwd
+        cwd_candidate = Path.cwd().parent.parent / "csv_exports" / "options"
+        if cwd_candidate.is_dir():
+            return str(cwd_candidate)
+        return ""
 
     @property
     def stats(self) -> dict:
@@ -339,6 +373,16 @@ class OptionQuoteStreamingService:
                 "poll_interval": self._config.option_quotes_poll_interval,
                 "strike_range_pct": self._config.option_quotes_strike_range_pct,
                 "num_expirations": self._config.option_quotes_num_expirations,
+            },
+            "csv_primary": {
+                "enabled": self._csv_primary,
+                "csv_dir": self._csv_dir,
+                "csv_reads_ok": self._csv_reads_ok,
+                "csv_reads_failed": self._csv_reads_failed,
+                "csv_latest_snapshot_age": round(self._csv_latest_snapshot_age, 1),
+                "greeks_interval": self._greeks_interval,
+                "greeks_last_fetch_age": round(time.monotonic() - self._last_greeks_fetch, 1) if self._last_greeks_fetch else None,
+                "greeks_cache_entries": sum(len(v) for v in self._greeks_cache.values()),
             },
         }
 
@@ -498,6 +542,244 @@ class OptionQuoteStreamingService:
         except Exception as e:
             logger.debug("Failed to save conID cache to Redis: %s", e)
 
+    # ── CSV primary mode helpers ────────────────────────────────────────────
+
+    def _load_csv_latest_snapshot(
+        self,
+        symbol: str,
+        expiration: str,
+        option_type: str,
+        strike_min: float = 0,
+        strike_max: float = float("inf"),
+    ) -> tuple[list[dict], str]:
+        """Load the latest snapshot from CSV exports.
+
+        Tail-reads ~200KB from the file, finds the max timestamp,
+        filters to that timestamp + strike range + option type.
+
+        Returns (quotes, snapshot_timestamp) or ([], "") if unavailable.
+        """
+        if not self._csv_dir:
+            return [], ""
+
+        csv_path = os.path.join(self._csv_dir, symbol, f"{expiration}.csv")
+        if not os.path.exists(csv_path):
+            return [], ""
+
+        try:
+            file_size = os.path.getsize(csv_path)
+            tail_bytes = 200_000  # ~200KB covers 2-3 snapshots
+
+            with open(csv_path, "r") as f:
+                # Read header
+                header_line = f.readline().strip()
+                if not header_line:
+                    return [], ""
+                headers = header_line.split(",")
+
+                # Seek to tail
+                if file_size > tail_bytes:
+                    f.seek(max(0, file_size - tail_bytes))
+                    f.readline()  # Skip partial first line after seek
+                else:
+                    pass  # Already at line 2 (after header)
+
+                tail_text = f.read()
+
+            if not tail_text.strip():
+                return [], ""
+
+            # Parse tail lines into dicts, find max timestamp
+            opt_type_lower = option_type.lower()  # "call" or "put"
+            rows = []
+            max_ts = ""
+
+            for line in tail_text.strip().split("\n"):
+                parts = line.split(",")
+                if len(parts) < len(headers):
+                    continue
+                row = dict(zip(headers, parts))
+                ts = row.get("timestamp", "")
+                if ts > max_ts:
+                    max_ts = ts
+
+                # Filter by option type
+                row_type = row.get("type", "").lower()
+                if row_type != opt_type_lower:
+                    continue
+
+                # Parse strike
+                try:
+                    strike = float(row.get("strike", 0))
+                except (ValueError, TypeError):
+                    continue
+
+                if strike < strike_min or strike > strike_max:
+                    continue
+
+                rows.append((ts, strike, row))
+
+            if not max_ts or not rows:
+                return [], ""
+
+            # Filter to max timestamp only
+            quotes = []
+            for ts, strike, row in rows:
+                if ts != max_ts:
+                    continue
+                try:
+                    bid = float(row.get("bid", 0) or 0)
+                    ask = float(row.get("ask", 0) or 0)
+                    last = float(row.get("day_close", 0) or 0)
+                    volume = int(float(row.get("volume", 0) or 0))
+                    oi = int(float(row.get("open_interest", 0) or 0))
+                except (ValueError, TypeError):
+                    continue
+
+                quotes.append({
+                    "strike": strike,
+                    "bid": bid,
+                    "ask": ask,
+                    "last": last,
+                    "volume": volume,
+                    "open_interest": oi,
+                })
+
+            # Compute snapshot age
+            try:
+                snap_dt = datetime.fromisoformat(max_ts)
+                age = (datetime.now(timezone.utc) - snap_dt.replace(tzinfo=timezone.utc)).total_seconds()
+                self._csv_latest_snapshot_age = max(0, age)
+            except (ValueError, TypeError):
+                pass
+
+            self._csv_reads_ok += 1
+            return quotes, max_ts
+
+        except Exception as e:
+            self._csv_reads_failed += 1
+            logger.debug("CSV read failed for %s %s %s: %s", symbol, expiration, option_type, e)
+            return [], ""
+
+    def _merge_greeks(
+        self,
+        quotes: list[dict],
+        symbol: str,
+        expiration: str,
+        option_type: str,
+    ) -> list[dict]:
+        """Merge cached greeks onto CSV quotes."""
+        key = (symbol.upper(), _normalize_exp(expiration), option_type.upper())
+        greeks_map = self._greeks_cache.get(key)
+        if not greeks_map:
+            return quotes
+
+        for q in quotes:
+            strike = q.get("strike", 0)
+            greeks = greeks_map.get(strike)
+            if greeks:
+                q["greeks"] = greeks
+
+        return quotes
+
+    async def _fetch_from_ibkr(self, fetch_jobs: list[tuple]) -> None:
+        """Fetch full option quotes (prices + greeks) from IBKR.
+
+        Caches the full quotes AND updates the greeks cache so CSV primary
+        mode can overlay greeks onto faster CSV price data.
+
+        fetch_jobs: list of (symbol, exp, opt_type, strike_min, strike_max, price_source)
+        """
+        self._cycle_phase = "fetching_ibkr"
+
+        async def _do_fetch(symbol, exp, opt_type, smin, smax, _psrc):
+            try:
+                quotes = await self._provider.get_option_quotes(
+                    symbol, exp, opt_type,
+                    strike_min=smin, strike_max=smax,
+                )
+                return (symbol, exp, opt_type, quotes, smin, smax, _psrc, None)
+            except Exception as e:
+                return (symbol, exp, opt_type, [], smin, smax, _psrc, e)
+
+        results = await asyncio.gather(
+            *[_do_fetch(*job) for job in fetch_jobs],
+            return_exceptions=False,
+        )
+
+        self._cycle_phase = "storing"
+        fetch_ts = datetime.now(timezone.utc).isoformat()
+        for symbol, exp, opt_type, quotes, smin, smax, psrc, err in results:
+            if err is not None:
+                self._fetches_failed += 1
+                self._errors += 1
+                self._symbol_errors[symbol] = self._symbol_errors.get(symbol, 0) + 1
+                logger.warning("IBKR option quote fetch failed: %s %s %s: %s", symbol, exp, opt_type, err)
+                continue
+
+            # Cache full quotes (prices + greeks)
+            if quotes:
+                self._cache.put(symbol, exp, opt_type, quotes)
+            self._fetches_ok += 1
+            self._symbol_last_fetch_utc[symbol] = fetch_ts
+            price = self._symbol_last_price.get(symbol, 0)
+            level = logging.INFO if self._cycles < 3 else logging.DEBUG
+            logger.log(
+                level,
+                "IBKR cached %d %s %s quotes for %s (strikes %.0f-%.0f, price=%.2f via %s)",
+                len(quotes), exp, opt_type, symbol, smin, smax, price, psrc,
+            )
+            if len(quotes) == 0:
+                logger.warning(
+                    "Provider returned 0 quotes for %s %s %s (strikes %.0f-%.0f) "
+                    "— conID resolution may be failing silently in the REST provider",
+                    symbol, exp, opt_type, smin, smax,
+                )
+
+            # Update greeks cache for CSV primary mode overlay
+            key = (symbol.upper(), _normalize_exp(exp), opt_type.upper())
+            greeks_for_key: dict[float, dict] = {}
+            for q in quotes:
+                strike = q.get("strike", 0)
+                g = q.get("greeks")
+                if g and any(v is not None and v != 0 for v in g.values()):
+                    greeks_for_key[strike] = g
+            if greeks_for_key:
+                self._greeks_cache[key] = greeks_for_key
+
+        self._greeks_cache_entries = sum(len(v) for v in self._greeks_cache.values())
+        logger.info(
+            "IBKR fetch complete: %d jobs, %d greeks cache entries",
+            len(fetch_jobs), self._greeks_cache_entries,
+        )
+
+    def _get_expirations_from_csv(self, symbol: str) -> list[str]:
+        """Get expirations from CSV directory listing (filenames are dates)."""
+        if not self._csv_dir:
+            return []
+        sym_dir = os.path.join(self._csv_dir, symbol)
+        if not os.path.isdir(sym_dir):
+            return []
+
+        today_str = date.today().isoformat()
+        exps = []
+        try:
+            for fname in os.listdir(sym_dir):
+                if not fname.endswith(".csv"):
+                    continue
+                exp_str = fname[:-4]  # Remove .csv
+                # Validate date format
+                try:
+                    datetime.strptime(exp_str, "%Y-%m-%d")
+                except ValueError:
+                    continue
+                if exp_str >= today_str:
+                    exps.append(exp_str)
+        except OSError:
+            return []
+
+        return sorted(exps)
+
     async def run_loop(self, shutdown_event: asyncio.Event) -> None:
         """Main loop — call after start(). Runs until shutdown_event is set."""
         while not shutdown_event.is_set() and self._running:
@@ -531,23 +813,24 @@ class OptionQuoteStreamingService:
                 remaining -= 0.5
 
     async def _run_one_cycle(self) -> None:
-        """Fetch option quotes for all configured symbols concurrently."""
+        """Fetch option quotes for all configured symbols.
+
+        When csv_primary is enabled, reads bid/ask/volume from CSV exports (~10ms)
+        and overlays IBKR greeks every greeks_interval seconds.
+        Otherwise, uses the original IBKR-only fetch path.
+        """
         if not _is_market_hours():
             self._cycles_skipped_market_closed += 1
-            # Outside market hours: only fetch once to warm the cache,
-            # then stop (data won't change).  Re-fetch if cache is empty.
             if self._cache.stats()["entries"] > 0:
                 return
-            # Cache empty — do one fetch to populate it
 
         pct = self._config.option_quotes_strike_range_pct / 100.0
         num_exp = self._config.option_quotes_num_expirations
 
-        # Phase 1: resolve prices and expirations for all symbols (sequential —
-        # these are cheap cached lookups after the first call)
+        # Phase 1: resolve prices and expirations
         self._cycle_phase = "resolving"
         self._cycle_started_utc = datetime.now(timezone.utc).isoformat()
-        fetch_jobs: list[tuple[str, str, str, float, float, str]] = []  # (symbol, exp, opt_type, smin, smax, price_src)
+        fetch_jobs: list[tuple[str, str, str, float, float, str]] = []
         for sym_cfg in self._config.symbols:
             if sym_cfg.sec_type not in ("IND", "STK"):
                 continue
@@ -580,52 +863,42 @@ class OptionQuoteStreamingService:
             self._cycle_phase = "idle"
             return
 
-        # Phase 2: fetch all (symbol × expiration × type) concurrently
-        self._cycle_phase = "fetching"
         self._cycle_jobs_total = len(fetch_jobs)
-        async def _do_fetch(symbol, exp, opt_type, smin, smax, psrc):
-            try:
-                quotes = await self._provider.get_option_quotes(
-                    symbol, exp, opt_type,
-                    strike_min=smin, strike_max=smax,
-                )
-                return (symbol, exp, opt_type, quotes, smin, smax, psrc, None)
-            except Exception as e:
-                return (symbol, exp, opt_type, [], smin, smax, psrc, e)
 
-        results = await asyncio.gather(
-            *[_do_fetch(*job) for job in fetch_jobs],
-            return_exceptions=False,
-        )
+        if self._csv_primary and self._csv_dir:
+            await self._run_csv_primary_cycle(fetch_jobs)
+        else:
+            await self._fetch_from_ibkr(fetch_jobs)
 
-        # Phase 3: store results
-        self._cycle_phase = "storing"
+    async def _run_csv_primary_cycle(self, fetch_jobs: list[tuple]) -> None:
+        """CSV primary path: instant bid/ask from CSV, IBKR prices+greeks every greeks_interval."""
+        self._cycle_phase = "csv_reading"
         fetch_ts = datetime.now(timezone.utc).isoformat()
-        for symbol, exp, opt_type, quotes, smin, smax, psrc, err in results:
-            if err is not None:
-                self._fetches_failed += 1
-                self._errors += 1
-                self._symbol_errors[symbol] = self._symbol_errors.get(symbol, 0) + 1
-                logger.warning("Option quote fetch failed: %s %s %s: %s", symbol, exp, opt_type, err)
-            else:
-                # Only cache non-empty results — empty results should trigger re-fetch
-                if quotes:
-                    self._cache.put(symbol, exp, opt_type, quotes)
+
+        for symbol, exp, opt_type, smin, smax, psrc in fetch_jobs:
+            csv_quotes, snap_ts = self._load_csv_latest_snapshot(
+                symbol, exp, opt_type, strike_min=smin, strike_max=smax,
+            )
+            if csv_quotes:
+                merged = self._merge_greeks(csv_quotes, symbol, exp, opt_type)
+                self._cache.put(symbol, exp, opt_type, merged)
                 self._fetches_ok += 1
                 self._symbol_last_fetch_utc[symbol] = fetch_ts
-                price = self._symbol_last_price.get(symbol, 0)
                 level = logging.INFO if self._cycles < 3 else logging.DEBUG
                 logger.log(
                     level,
-                    "Cached %d %s %s quotes for %s (strikes %.0f-%.0f, price=%.2f via %s)",
-                    len(quotes), exp, opt_type, symbol, smin, smax, price, psrc,
+                    "CSV cached %d %s %s quotes for %s (strikes %.0f-%.0f, snap=%s)",
+                    len(merged), exp, opt_type, symbol, smin, smax,
+                    snap_ts[:19] if snap_ts else "?",
                 )
-                if len(quotes) == 0:
-                    logger.warning(
-                        "Provider returned 0 quotes for %s %s %s (strikes %.0f-%.0f) "
-                        "— conID resolution may be failing silently in the REST provider",
-                        symbol, exp, opt_type, smin, smax,
-                    )
+            else:
+                self._fetches_failed += 1
+
+        # Periodically fetch full quotes (prices + greeks) from IBKR
+        now = time.monotonic()
+        if now - self._last_greeks_fetch >= self._greeks_interval:
+            await self._fetch_from_ibkr(fetch_jobs)
+            self._last_greeks_fetch = now
 
     # Absolute floor prices per index — reject garbage from TWS delayed data
     _INDEX_MIN_PRICES = {"SPX": 3000, "NDX": 10000, "RUT": 1000, "DJX": 200, "VIX": 5}
@@ -649,20 +922,33 @@ class OptionQuoteStreamingService:
         return None, ""
 
     async def _get_expirations(self, symbol: str, n: int) -> list[str]:
-        """Get next N expirations for symbol (daily cached)."""
+        """Get next N expirations for symbol (daily cached).
+
+        When csv_primary is enabled, tries CSV directory listing first
+        (instant, no IBKR call needed), falling back to IBKR chain.
+        """
         today_str = date.today().isoformat()
         cached = self._expiration_cache.get(symbol)
         if cached and cached[0] == today_str:
             return cached[1]
 
-        try:
-            chain = await self._provider.get_option_chain(symbol)
-            # Normalize all expirations to YYYY-MM-DD
-            all_exps = sorted(_normalize_exp(e) for e in chain.get("expirations", []))
-        except Exception as e:
-            logger.debug("Option chain fetch failed for %s: %s", symbol, e)
-            self._errors += 1
-            return []
+        all_exps = []
+
+        # CSV primary: try directory listing first
+        if self._csv_primary and self._csv_dir:
+            csv_exps = self._get_expirations_from_csv(symbol)
+            if csv_exps:
+                all_exps = csv_exps
+
+        # Fallback to IBKR chain if CSV didn't work
+        if not all_exps:
+            try:
+                chain = await self._provider.get_option_chain(symbol)
+                all_exps = sorted(_normalize_exp(e) for e in chain.get("expirations", []))
+            except Exception as e:
+                logger.debug("Option chain fetch failed for %s: %s", symbol, e)
+                self._errors += 1
+                return []
 
         # Filter to upcoming trading days (both are now YYYY-MM-DD)
         upcoming = _next_n_trading_days(n)

@@ -2955,53 +2955,9 @@ async def _cmd_trade_http(args, server: str) -> int:
         payload["multi_leg_order"] = trade_request.multi_leg_order.model_dump()
 
     mode = _get_mode(args)
-    simulate = getattr(args, "simulate", False)
+    nocheck = getattr(args, "nocheck", False)
 
     async with httpx.AsyncClient(base_url=server, timeout=90.0) as client:
-        if simulate:
-            # --simulate: use margin check (whatIfOrder) — qualifies contracts,
-            # checks margin, shows costs, but does NOT place the order.
-            if trade_request.multi_leg_order:
-                margin_payload = {"order": trade_request.multi_leg_order.model_dump(), "timeout": 15.0}
-            else:
-                print(f"  {_color('--simulate only supported for multi-leg trades (spreads, condors)', '93')}")
-                print(f"  For equity, use: python utp.py margin single-option ...")
-                return 1
-
-            _print_header("Simulated Trade (margin check only — NOT executed)")
-            # Show what would be traded
-            order = trade_request.multi_leg_order
-            print(f"  Symbol:     {order.legs[0].symbol if order.legs else '?'}")
-            print(f"  Type:       {subcommand}")
-            print(f"  Quantity:   {order.quantity}")
-            if order.net_price:
-                print(f"  Net price:  ${order.net_price:.2f} (LIMIT)")
-            else:
-                print(f"  Price:      MARKET")
-            print(f"  Legs:")
-            for leg in (order.legs or []):
-                leg_qty = leg.quantity * order.quantity
-                print(f"    {leg.action.value:>15} {leg.option_type.value:>4} "
-                      f"strike={leg.strike} exp={leg.expiration} qty={leg_qty}")
-
-            resp = await client.post("/market/margin", json=margin_payload)
-            if resp.status_code != 200:
-                print(f"\n  {_color(f'Margin check failed: {resp.status_code} {resp.text}', '91')}")
-                return 1
-            data = resp.json()
-            if data.get("error"):
-                err_detail = data.get("error", "unknown")
-                print(f"\n  {_color(f'Margin error: {err_detail}', '91')}")
-                return 1
-            print(f"\n  Margin Requirements:")
-            print(f"    Initial margin:     ${data.get('init_margin', 0):>12,.2f}")
-            print(f"    Maintenance margin: ${data.get('maint_margin', 0):>12,.2f}")
-            print(f"    Commission:         ${data.get('commission', 0):>12,.2f}")
-            if data.get("equity_with_loan"):
-                print(f"    Equity w/ loan:     ${data['equity_with_loan']:>12,.2f}")
-            print(f"\n  {_color('NOT EXECUTED', '93')} — remove --simulate to place the order")
-            return 0
-
         # Show order summary before executing
         confirm = getattr(args, "confirm", False)
 
@@ -3142,6 +3098,31 @@ async def _cmd_trade_http(args, server: str) -> int:
                           f"strike={leg.strike} exp={leg.expiration} qty={leg_qty}")
 
         if not confirm and mode != "dry-run":
+            # Auto-validate with IBKR margin check when --live (catches rejections early)
+            if mode in ("live", "paper") and trade_request.multi_leg_order and not nocheck:
+                order = trade_request.multi_leg_order
+                margin_payload = {"order": order.model_dump(), "timeout": 15.0}
+                try:
+                    mr = await client.post("/market/margin", json=margin_payload)
+                    if mr.status_code == 200:
+                        md = mr.json()
+                        if md.get("error"):
+                            err_msg = md["error"]
+                            print(f"\n  {_color(f'IBKR rejects: {err_msg}', '91')}")
+                        else:
+                            im = md.get("init_margin", 0)
+                            mm = md.get("maint_margin", 0)
+                            comm = md.get("commission", 0)
+                            print(f"\n  IBKR margin check:")
+                            print(f"    Initial:    ${im:>10,.2f}")
+                            print(f"    Maint:      ${mm:>10,.2f}")
+                            print(f"    Commission: ${comm:>10,.2f}")
+                    elif mr.status_code >= 400:
+                        detail = mr.json().get("detail", mr.text) if mr.headers.get("content-type", "").startswith("application/json") else mr.text
+                        print(f"\n  {_color(f'IBKR margin check failed: {detail}', '91')}")
+                except Exception as e:
+                    logger.debug("Auto margin check failed: %s", e)
+
             print(f"\n  {_color('NOT EXECUTED', '93')} — add --confirm to place the order")
             return 0
 
@@ -6222,7 +6203,7 @@ Examples:
   %(prog)s trade credit-spread --symbol SPX --short-strike 5500 \\
     --long-strike 5475 --option-type PUT --expiration 2026-03-20 \\
     --quantity 1 --net-price 0.05 --close --live      # Close a credit spread
-  %(prog)s trade --simulate --symbol RUT --live       # Margin check, no execution
+  %(prog)s trade credit-spread ... --live --nocheck    # Quick preview, skip IBKR check
   %(prog)s trade --validate-all --paper               # Test all 5 trade types
   %(prog)s orders --live                              # Show open/working orders
   %(prog)s cancel --order-id 123 --live               # Cancel order by ID
@@ -6417,8 +6398,7 @@ subcommand (equity, option, credit-spread, debit-spread, iron-condor).
 Default mode is dry-run (no broker). Use --paper or --live for real execution.
 
 Special flags:
-  --simulate      Use live IBKR to qualify contracts and check margin, but do
-                  NOT submit the order. Works with any trade type.
+  --nocheck       Skip IBKR margin validation — show cached prices only (fast).
   --close         Reverse a spread position (BUY_TO_CLOSE / SELL_TO_CLOSE).
                   Available on credit-spread, debit-spread, and iron-condor.
   --validate-all  Run all 5 trade types as a validation suite (no real trades).
@@ -6452,9 +6432,9 @@ Examples:
   %(prog)s iron-condor --symbol SPX --put-short 5500 --put-long 5475 \\
     --call-short 5700 --call-long 5725 --expiration 2026-03-20 --quantity 1 --paper
 
-  # Simulate (margin check only, no execution)
+  # Quick preview without IBKR margin check (cached prices only)
   %(prog)s credit-spread --symbol RUT --short-strike 2460 --long-strike 2440 \\
-    --option-type PUT --expiration 2026-03-18 --quantity 1 --live --simulate
+    --option-type PUT --expiration 2026-03-18 --quantity 1 --live --nocheck
 
   # Validate all 5 trade types (safe, no real execution)
   %(prog)s --validate-all --paper
@@ -6476,9 +6456,8 @@ Aliases: t
                          help="Run all 5 trade types as validation")
     p_trade.add_argument("--cleanup", action="store_true",
                          help="Close positions after --validate-all")
-    p_trade.add_argument("--simulate", action="store_true",
-                         help="Use live IBKR connection but do NOT execute — "
-                              "qualifies contracts, checks margin, shows what would happen")
+    p_trade.add_argument("--nocheck", action="store_true",
+                         help="Skip IBKR margin validation — show cached prices only (fast)")
     p_trade.add_argument("--confirm", action="store_true",
                          help="Confirm and execute the trade (without this, shows order summary only)")
     p_trade.add_argument("--symbol", default="SPY",
@@ -6513,8 +6492,8 @@ Required flags:
                       help="Order type (default: MARKET)")
     t_eq.add_argument("--limit-price", type=float, default=None,
                       help="Limit price (required for LIMIT orders)")
-    t_eq.add_argument("--simulate", action="store_true",
-                      help="Check margin only — do NOT execute")
+    t_eq.add_argument("--nocheck", action="store_true",
+                      help="Skip IBKR margin validation — show cached prices only")
     t_eq.add_argument("--confirm", action="store_true",
                       help="Confirm and execute (without this, shows order summary only)")
     _add_connection_args(t_eq)
@@ -6549,8 +6528,8 @@ Actions:
                        help="Order type (default: LIMIT)")
     t_opt.add_argument("--limit-price", type=float, default=None,
                        help="Limit price per contract (required for LIMIT orders)")
-    t_opt.add_argument("--simulate", action="store_true",
-                       help="Check margin only — do NOT execute")
+    t_opt.add_argument("--nocheck", action="store_true",
+                       help="Skip IBKR margin validation — show cached prices only")
     _add_connection_args(t_opt)
 
     # trade credit-spread
@@ -6582,8 +6561,8 @@ P&L: credit_received - cost_to_close (max profit = full credit, max loss = width
                       help="Use mid-point between market and best-case (default: market price)")
     t_cs.add_argument("--close", action="store_true",
                       help="Close an existing position (BUY_TO_CLOSE / SELL_TO_CLOSE)")
-    t_cs.add_argument("--simulate", action="store_true",
-                      help="Check margin only — do NOT execute")
+    t_cs.add_argument("--nocheck", action="store_true",
+                      help="Skip IBKR margin validation — show cached prices only")
     t_cs.add_argument("--confirm", action="store_true",
                       help="Confirm and execute (without this, shows order summary only)")
     _add_connection_args(t_cs)
@@ -6613,8 +6592,8 @@ P&L: value_on_close - debit_paid (max profit = width - debit, max loss = debit p
                       help="Use mid-point between market and best-case (default: market price)")
     t_ds.add_argument("--close", action="store_true",
                       help="Close an existing position (SELL_TO_CLOSE / BUY_TO_CLOSE)")
-    t_ds.add_argument("--simulate", action="store_true",
-                      help="Check margin only — do NOT execute")
+    t_ds.add_argument("--nocheck", action="store_true",
+                      help="Skip IBKR margin validation — show cached prices only")
     t_ds.add_argument("--confirm", action="store_true",
                       help="Confirm and execute (without this, shows order summary only)")
     _add_connection_args(t_ds)
@@ -6646,8 +6625,8 @@ P&L: combined credit - cost_to_close (max profit = total credit, max loss = wide
                       help="Use mid-point between market and best-case (default: market price)")
     t_ic.add_argument("--close", action="store_true",
                       help="Close an existing position (reverses all legs)")
-    t_ic.add_argument("--simulate", action="store_true",
-                      help="Check margin only — do NOT execute")
+    t_ic.add_argument("--nocheck", action="store_true",
+                      help="Skip IBKR margin validation — show cached prices only")
     t_ic.add_argument("--confirm", action="store_true",
                       help="Confirm and execute (without this, shows order summary only)")
     _add_connection_args(t_ic)
