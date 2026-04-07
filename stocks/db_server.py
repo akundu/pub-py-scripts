@@ -14928,8 +14928,8 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
             )
 
             # Intraday hourly computation scans many 5-min CSV files and can be expensive.
-            # Keep this opt-in so default multi-window requests stay responsive.
-            include_hourly = request.query.get('include_hourly', '').strip().lower() in {"1", "true", "yes", "on"}
+            # Enabled by default; pass ?hourly=0 or ?hourly=false to disable.
+            include_hourly = request.query.get('hourly', '1').strip().lower() not in {"0", "false", "no", "off"}
             hourly = {}
             if include_hourly and 0 in windows:
                 for ticker_name, _ in ticker_specs:
