@@ -896,7 +896,7 @@ class TestOptionsGridAPI:
         mock_client = AsyncMock()
         mock_client.get_quote.return_value = {"last": 2500.0}
         mock_client.get_options.side_effect = [
-            {"expirations": ["2026-04-06"]},  # list_expirations call (IBKR)
+            {"expirations": ["2099-04-06"]},  # list_expirations call (IBKR)
             {"quotes": {"put": [{"strike": 2490, "bid": 3.0, "ask": 3.5}]}},  # PUT chain
             {"quotes": {"call": [{"strike": 2510, "bid": 2.5, "ask": 3.0}]}},  # CALL chain
         ]
@@ -983,19 +983,19 @@ class TestCSVExpirations:
         csv_dir = tmp_path / "SPX"
         csv_dir.mkdir()
         # Create some CSV files
-        (csv_dir / "2026-04-06.csv").write_text("header\n")
-        (csv_dir / "2026-04-07.csv").write_text("header\n")
-        (csv_dir / "2026-04-08.csv").write_text("header\n")
-        (csv_dir / "2026-03-01.csv").write_text("header\n")  # Past date
+        (csv_dir / "2099-04-06.csv").write_text("header\n")
+        (csv_dir / "2099-04-07.csv").write_text("header\n")
+        (csv_dir / "2099-04-08.csv").write_text("header\n")
+        (csv_dir / "2020-03-01.csv").write_text("header\n")  # Past date
         (csv_dir / "not-a-date.csv").write_text("header\n")  # Invalid
 
         original = utp_voice.CSV_EXPORTS_DIR
         utp_voice.CSV_EXPORTS_DIR = str(tmp_path)
         try:
             exps = utp_voice._get_csv_expirations("SPX")
-            assert "2026-04-06" in exps
-            assert "2026-04-07" in exps
-            assert "2026-04-08" in exps
+            assert "2099-04-06" in exps
+            assert "2099-04-07" in exps
+            assert "2099-04-08" in exps
             assert "not-a-date" not in exps
             assert exps == sorted(exps)
         finally:
@@ -1085,10 +1085,10 @@ class TestSplitCSVQuotes:
 
 class TestMergeExpirations:
     def test_merge_dedup_sort(self):
-        csv = ["2026-04-06", "2026-04-07", "2026-04-08"]
-        ibkr = ["2026-04-10", "2026-04-07", "2026-04-17"]
+        csv = ["2099-04-06", "2099-04-07", "2099-04-08"]
+        ibkr = ["2099-04-10", "2099-04-07", "2099-04-17"]
         result = utp_voice._merge_expirations(csv, ibkr)
-        assert result == ["2026-04-06", "2026-04-07", "2026-04-08", "2026-04-10", "2026-04-17"]
+        assert result == ["2099-04-06", "2099-04-07", "2099-04-08", "2099-04-10", "2099-04-17"]
 
     def test_merge_normalizes_yyyymmdd(self):
         csv = ["2099-04-06"]

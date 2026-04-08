@@ -1358,10 +1358,13 @@ function buyMore(posJsonStr) {
 // ── Options Grid Tab ─────────────────────────────────────────────────────────
 let _optRetryTimer = null;
 
+let _optGridLoading = false;
+
 async function loadOptionsGrid() {
+  if (_optGridLoading) return;  // Prevent concurrent loads
+  _optGridLoading = true;
   const grid = document.getElementById('options-grid');
   delete grid.dataset.loaded;  // Reset so ATM scroll fires on symbol/exp change
-  stopOptAutoRefresh();
   const sym = document.getElementById('opt-symbol').value;
   const exp = document.getElementById('opt-exp').value;
   const otype = document.getElementById('opt-type').value;
@@ -1433,6 +1436,8 @@ async function loadOptionsGrid() {
     if (!grid.innerHTML.includes('tbl')) {
       grid.innerHTML = `<div class="msg-error">${e.message}</div>`;
     }
+  } finally {
+    _optGridLoading = false;
   }
 }
 
@@ -1661,8 +1666,15 @@ function stopOptAutoRefresh() {
   if (_optRefreshTimer) { clearInterval(_optRefreshTimer); _optRefreshTimer = null; }
 }
 
+let _optRefreshing = false;
+
 async function refreshOptionPrices() {
+  if (_optRefreshing) return;  // Prevent overlapping refreshes
   if (!optGridData?.symbol || !optGridData?.expiration) return;
+  // Don't refresh if the options grid isn't rendered yet
+  if (!document.querySelector('[data-field="c-bid"]')) return;
+
+  _optRefreshing = true;
   const sym = optGridData.symbol;
   const exp = optGridData.expiration;
   const otype = document.getElementById('opt-type').value;
@@ -1671,9 +1683,9 @@ async function refreshOptionPrices() {
   try {
     const params = new URLSearchParams({symbol:sym, option_type:otype, strike_range_pct:range, expiration:exp});
     const r = await fetch('/api/options-grid?'+params);
-    if (!r.ok) return;
+    if (!r.ok) { _optRefreshing = false; return; }
     const d = await r.json();
-    if (!d.chain) return;
+    if (!d.chain) { _optRefreshing = false; return; }
 
     // Update optGridData with fresh prices
     optGridData = d;
@@ -1734,6 +1746,7 @@ async function refreshOptionPrices() {
     updateDataSourceBar([{sym:d.symbol, source:d.source, time:d.fetched_at}, {label:'Mkt', source: d.market_open?'open':'closed'}]);
 
   } catch(e) { /* silent — don't disrupt UI on refresh failure */ }
+  finally { _optRefreshing = false; }
 }
 
 // ── Multi-Leg Order Builder ──────────────────────────────────────────────────
