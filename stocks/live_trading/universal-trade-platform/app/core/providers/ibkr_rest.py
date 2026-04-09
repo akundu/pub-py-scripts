@@ -184,15 +184,16 @@ class IBKRRestProvider(BrokerProvider):
     async def _resolve_option_conid(
         self, symbol: str, expiration: str, strike: float, right: str
     ) -> int:
-        """Resolve option contract → conId via CPG secdef/info. Cached."""
+        """Resolve option contract → conId via CPG secdef/info. Cached.
+
+        Positive results are cached permanently (conIDs don't change within a day).
+        Failed resolutions are NOT cached — transient CPG issues (session expiry,
+        rate limits) should not poison the cache and block subsequent attempts.
+        """
         key = f"{symbol}_{expiration}_{strike}_{right}"
         cached = self._option_conid_cache.get(key)
         if cached is not None and cached > 0:
             return cached
-        # If cached == 0 (negative) for an index, don't trust it — may have been
-        # cached from the wrong exchange (SMART instead of CBOE).  Re-resolve.
-        if cached == 0 and symbol.upper() not in self._INDEX_SYMBOLS:
-            raise RuntimeError(f"No contract (cached): {symbol} {expiration} {strike}{right}")
 
         underlying_conid = await self._resolve_conid(symbol)
         exp_clean = expiration.replace("-", "")
@@ -202,13 +203,15 @@ class IBKRRestProvider(BrokerProvider):
         # Try exchanges in order: SMART works for RUT/NDX, CBOE needed for SPX.
         # For non-index symbols, only try SMART.
         exchanges = ["SMART", "CBOE"] if symbol.upper() in self._INDEX_SYMBOLS else ["SMART"]
+        last_error = None
         for exch in exchanges:
             try:
                 data = await self._get("/iserver/secdef/info", params={
                     "conid": underlying_conid, "sectype": "OPT", "month": month_mmmyy,
                     "strike": str(strike), "right": right, "exchange": exch,
                 })
-            except Exception:
+            except Exception as e:
+                last_error = e
                 data = None
                 continue
 
@@ -221,10 +224,11 @@ class IBKRRestProvider(BrokerProvider):
                         return con_id
                 # Do NOT fall back to first result — wrong expiration = wrong conID
 
-        # Cache negative result to avoid re-hitting CPG for the same strike
-        self._option_conid_cache[key] = 0
+        # Do NOT cache negative results — transient CPG failures should not
+        # block future resolution attempts
+        detail = f" (last error: {last_error})" if last_error else ""
         raise RuntimeError(
-            f"Failed to resolve option conId: {symbol} {expiration} {strike}{right}"
+            f"Failed to resolve option conId: {symbol} {expiration} {strike}{right}{detail}"
         )
 
     # ── Order Confirmation Flow ───────────────────────────────────────────────
