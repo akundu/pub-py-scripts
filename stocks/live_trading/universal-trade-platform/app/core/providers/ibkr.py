@@ -756,6 +756,7 @@ class IBKRLiveProvider(BrokerProvider):
             "Submitted": OrderStatus.SUBMITTED,
             "Filled": OrderStatus.FILLED,
             "Cancelled": OrderStatus.CANCELLED,
+            "Rejected": OrderStatus.REJECTED,
             "PreSubmitted": OrderStatus.PENDING,
             "Inactive": OrderStatus.FAILED,
         }
@@ -769,11 +770,30 @@ class IBKRLiveProvider(BrokerProvider):
                         filled_qty = int(trade.orderStatus.filled)
                 except (TypeError, ValueError):
                     pass
+
+                # Build descriptive message with rejection reason if available
+                msg_parts = [ibkr_status]
+                # ib_insync Trade.log has CommissionReport and status events;
+                # Trade.orderStatus.whyHeld has reason for held orders
+                why_held = getattr(trade.orderStatus, "whyHeld", "") or ""
+                if why_held:
+                    msg_parts.append(why_held)
+                # Check trade.log for error/warning messages
+                for entry in getattr(trade, "log", []):
+                    entry_msg = getattr(entry, "message", "") or ""
+                    if entry_msg and entry_msg not in str(msg_parts):
+                        msg_parts.append(entry_msg)
+                    entry_err = getattr(entry, "errorCode", None)
+                    if entry_err:
+                        err_msg = getattr(entry, "errorMsg", "") or ""
+                        if err_msg and err_msg not in str(msg_parts):
+                            msg_parts.append(f"[{entry_err}] {err_msg}")
+
                 return OrderResult(
                     order_id=order_id,
                     broker=Broker.IBKR,
                     status=status_map.get(ibkr_status, OrderStatus.PENDING),
-                    message=f"IBKR status: {ibkr_status}",
+                    message="; ".join(msg_parts),
                     filled_price=trade.orderStatus.avgFillPrice or None,
                     filled_quantity=filled_qty,
                 )
