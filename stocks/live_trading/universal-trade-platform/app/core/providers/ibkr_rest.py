@@ -128,12 +128,19 @@ class IBKRRestProvider(BrokerProvider):
             return await resp.json()
 
     async def _post(self, path: str, **kwargs: Any) -> dict | list:
-        """POST with rate limiting. Returns parsed JSON."""
+        """POST with rate limiting. Returns parsed JSON.
+
+        On HTTP errors, reads the response body and includes it in the exception
+        for better diagnostics (CPG often returns error details in the body).
+        """
         await self._cache.rate_limiter.acquire()
         assert self._session is not None
         async with self._session.post(self._url(path), **kwargs) as resp:
-            resp.raise_for_status()
             text = await resp.text()
+            try:
+                resp.raise_for_status()
+            except Exception:
+                raise RuntimeError(f"HTTP {resp.status} from {path}: {text[:500]}")
             if not text:
                 return {}
             return await resp.json(content_type=None)
@@ -1030,10 +1037,16 @@ class IBKRRestProvider(BrokerProvider):
             "tif": "DAY",
         }
 
-        data = await self._post(
-            f"/iserver/account/{self._account_id}/orders/whatif",
-            json={"orders": [order_body]},
-        )
+        try:
+            data = await self._post(
+                f"/iserver/account/{self._account_id}/orders/whatif",
+                json={"orders": [order_body]},
+            )
+        except Exception as e:
+            # Try to extract response body for better error messages
+            error_detail = str(e)
+            logger.warning("whatif margin check failed: %s", error_detail)
+            return {"error": f"IBKR whatif failed: {error_detail}"}
 
         if not isinstance(data, dict):
             data = data[0] if isinstance(data, list) and data else {}
