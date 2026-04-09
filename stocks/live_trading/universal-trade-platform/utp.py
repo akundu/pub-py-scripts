@@ -2997,14 +2997,31 @@ async def _cmd_trade_http(args, server: str) -> int:
             print(f"  Quantity:   {order.quantity}")
             print(f"  Exchange:   SMART (best execution)")
 
-            # Fetch and show current underlying price
+            # Fetch and show current underlying price with change from prev close
             try:
                 qr = await client.get(f"/market/quote/{sym}")
                 if qr.status_code == 200:
                     qd = qr.json()
                     ul_price = qd.get("last") or qd.get("bid") or qd.get("ask")
                     if ul_price and ul_price > 0:
-                        print(f"  Underlying: ${ul_price:,.2f}")
+                        # Try to get prev close from streaming status
+                        prev_close = None
+                        try:
+                            sr = await client.get("/market/streaming/status")
+                            if sr.status_code == 200:
+                                sd = sr.json()
+                                ps = sd.get("per_symbol", {}).get(sym, {})
+                                prev_close = ps.get("prev_close")
+                        except Exception:
+                            pass
+                        if prev_close and prev_close > 0:
+                            chg = ul_price - prev_close
+                            chg_pct = (chg / prev_close) * 100
+                            chg_color = "92" if chg >= 0 else "91"
+                            print(f"  Underlying: ${ul_price:,.2f} "
+                                  f"({_color(f'{chg:+,.2f} / {chg_pct:+.2f}%', chg_color)} from prev close ${prev_close:,.2f})")
+                        else:
+                            print(f"  Underlying: ${ul_price:,.2f}")
             except Exception:
                 pass
             is_credit = order.legs[0].action.value in ("SELL_TO_OPEN", "SELL_TO_CLOSE") if order.legs else False

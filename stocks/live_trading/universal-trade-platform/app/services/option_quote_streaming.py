@@ -694,71 +694,67 @@ class OptionQuoteStreamingService:
         Caches the full quotes AND updates the greeks cache so CSV primary
         mode can overlay greeks onto faster CSV price data.
 
+        Each job stores its results immediately on completion (not batched),
+        so partial results survive if the overall fetch times out.
+
         fetch_jobs: list of (symbol, exp, opt_type, strike_min, strike_max, price_source)
         """
         self._cycle_phase = "fetching_ibkr"
         sem = asyncio.Semaphore(self._IBKR_FETCH_CONCURRENCY)
+        completed = 0
 
-        async def _do_fetch(symbol, exp, opt_type, smin, smax, _psrc):
+        async def _do_fetch_and_store(symbol, exp, opt_type, smin, smax, psrc):
+            nonlocal completed
             async with sem:
                 try:
                     quotes = await self._provider.get_option_quotes(
                         symbol, exp, opt_type,
                         strike_min=smin, strike_max=smax,
                     )
-                    return (symbol, exp, opt_type, quotes, smin, smax, _psrc, None)
                 except Exception as e:
-                    return (symbol, exp, opt_type, [], smin, smax, _psrc, e)
+                    self._fetches_failed += 1
+                    self._errors += 1
+                    self._symbol_errors[symbol] = self._symbol_errors.get(symbol, 0) + 1
+                    logger.warning("IBKR option quote fetch failed: %s %s %s: %s",
+                                   symbol, exp, opt_type, e)
+                    return
 
-        results = await asyncio.gather(
-            *[_do_fetch(*job) for job in fetch_jobs],
-            return_exceptions=False,
-        )
-
-        self._cycle_phase = "storing"
-        fetch_ts = datetime.now(timezone.utc).isoformat()
-        for symbol, exp, opt_type, quotes, smin, smax, psrc, err in results:
-            if err is not None:
-                self._fetches_failed += 1
-                self._errors += 1
-                self._symbol_errors[symbol] = self._symbol_errors.get(symbol, 0) + 1
-                logger.warning("IBKR option quote fetch failed: %s %s %s: %s", symbol, exp, opt_type, err)
-                continue
-
-            # Cache full quotes (prices + greeks)
-            if quotes:
-                self._cache.put(symbol, exp, opt_type, quotes)
-            self._fetches_ok += 1
-            self._symbol_last_fetch_utc[symbol] = fetch_ts
-            price = self._symbol_last_price.get(symbol, 0)
-            level = logging.INFO if self._cycles < 3 else logging.DEBUG
-            logger.log(
-                level,
-                "IBKR cached %d %s %s quotes for %s (strikes %.0f-%.0f, price=%.2f via %s)",
-                len(quotes), exp, opt_type, symbol, smin, smax, price, psrc,
-            )
-            if len(quotes) == 0:
-                logger.warning(
-                    "Provider returned 0 quotes for %s %s %s (strikes %.0f-%.0f) "
-                    "— conID resolution may be failing silently in the REST provider",
-                    symbol, exp, opt_type, smin, smax,
+                # Store results immediately — survives timeout cancellation
+                fetch_ts = datetime.now(timezone.utc).isoformat()
+                if quotes:
+                    self._cache.put(symbol, exp, opt_type, quotes)
+                self._fetches_ok += 1
+                self._symbol_last_fetch_utc[symbol] = fetch_ts
+                price = self._symbol_last_price.get(symbol, 0)
+                level = logging.INFO if self._cycles < 3 else logging.DEBUG
+                logger.log(
+                    level,
+                    "IBKR cached %d %s %s quotes for %s (strikes %.0f-%.0f, price=%.2f via %s)",
+                    len(quotes), exp, opt_type, symbol, smin, smax, price, psrc,
                 )
 
-            # Update greeks cache for CSV primary mode overlay
-            key = (symbol.upper(), _normalize_exp(exp), opt_type.upper())
-            greeks_for_key: dict[float, dict] = {}
-            for q in quotes:
-                strike = q.get("strike", 0)
-                g = q.get("greeks")
-                if g and any(v is not None and v != 0 for v in g.values()):
-                    greeks_for_key[strike] = g
-            if greeks_for_key:
-                self._greeks_cache[key] = greeks_for_key
+                # Update greeks cache for CSV primary mode overlay
+                key = (symbol.upper(), _normalize_exp(exp), opt_type.upper())
+                greeks_for_key: dict[float, dict] = {}
+                for q in quotes:
+                    strike = q.get("strike", 0)
+                    g = q.get("greeks")
+                    if g and any(v is not None and v != 0 for v in g.values()):
+                        greeks_for_key[strike] = g
+                if greeks_for_key:
+                    self._greeks_cache[key] = greeks_for_key
+
+                completed += 1
+
+        await asyncio.gather(
+            *[_do_fetch_and_store(*job) for job in fetch_jobs],
+            return_exceptions=True,
+        )
 
         self._greeks_cache_entries = sum(len(v) for v in self._greeks_cache.values())
         logger.info(
-            "IBKR fetch complete: %d jobs, %d greeks cache entries",
-            len(fetch_jobs), self._greeks_cache_entries,
+            "IBKR fetch: %d/%d jobs completed, %d greeks cache entries",
+            completed, len(fetch_jobs), self._greeks_cache_entries,
         )
 
     def _get_expirations_from_csv(self, symbol: str) -> list[str]:
