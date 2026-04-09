@@ -685,6 +685,9 @@ class OptionQuoteStreamingService:
 
         return quotes
 
+    # Max concurrent IBKR option quote fetches (CPG chokes on >5 parallel requests)
+    _IBKR_FETCH_CONCURRENCY = 3
+
     async def _fetch_from_ibkr(self, fetch_jobs: list[tuple]) -> None:
         """Fetch full option quotes (prices + greeks) from IBKR.
 
@@ -694,16 +697,18 @@ class OptionQuoteStreamingService:
         fetch_jobs: list of (symbol, exp, opt_type, strike_min, strike_max, price_source)
         """
         self._cycle_phase = "fetching_ibkr"
+        sem = asyncio.Semaphore(self._IBKR_FETCH_CONCURRENCY)
 
         async def _do_fetch(symbol, exp, opt_type, smin, smax, _psrc):
-            try:
-                quotes = await self._provider.get_option_quotes(
-                    symbol, exp, opt_type,
-                    strike_min=smin, strike_max=smax,
-                )
-                return (symbol, exp, opt_type, quotes, smin, smax, _psrc, None)
-            except Exception as e:
-                return (symbol, exp, opt_type, [], smin, smax, _psrc, e)
+            async with sem:
+                try:
+                    quotes = await self._provider.get_option_quotes(
+                        symbol, exp, opt_type,
+                        strike_min=smin, strike_max=smax,
+                    )
+                    return (symbol, exp, opt_type, quotes, smin, smax, _psrc, None)
+                except Exception as e:
+                    return (symbol, exp, opt_type, [], smin, smax, _psrc, e)
 
         results = await asyncio.gather(
             *[_do_fetch(*job) for job in fetch_jobs],
@@ -897,11 +902,21 @@ class OptionQuoteStreamingService:
             else:
                 self._fetches_failed += 1
 
-        # Periodically fetch full quotes (prices + greeks) from IBKR
+        # Periodically fetch full quotes (prices + greeks) from IBKR.
+        # Run with a timeout so a slow IBKR fetch doesn't block CSV cycles.
         now = time.monotonic()
         if now - self._last_greeks_fetch >= self._greeks_interval:
-            await self._fetch_from_ibkr(fetch_jobs)
-            self._last_greeks_fetch = now
+            self._last_greeks_fetch = now  # Set before fetch to prevent re-trigger
+            try:
+                await asyncio.wait_for(
+                    self._fetch_from_ibkr(fetch_jobs),
+                    timeout=self._greeks_interval * 0.9,  # 90% of interval
+                )
+            except asyncio.TimeoutError:
+                logger.warning("IBKR fetch timed out after %.0fs — will retry next interval",
+                               self._greeks_interval * 0.9)
+            except Exception as e:
+                logger.warning("IBKR fetch failed: %s", e)
 
     # Absolute floor prices per index — reject garbage from TWS delayed data
     _INDEX_MIN_PRICES = {"SPX": 3000, "NDX": 10000, "RUT": 1000, "DJX": 200, "VIX": 5}
