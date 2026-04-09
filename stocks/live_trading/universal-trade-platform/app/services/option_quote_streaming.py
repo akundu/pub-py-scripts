@@ -383,6 +383,9 @@ class OptionQuoteStreamingService:
                 "greeks_interval": self._greeks_interval,
                 "greeks_last_fetch_age": round(time.monotonic() - self._last_greeks_fetch, 1) if self._last_greeks_fetch else None,
                 "greeks_cache_entries": sum(len(v) for v in self._greeks_cache.values()),
+                "greeks_cache_keys": [
+                    f"{k[0]}:{k[1]}:{k[2]}={len(v)}" for k, v in sorted(self._greeks_cache.items())
+                ][:20],
             },
         }
 
