@@ -74,7 +74,45 @@ _STATUS_MAP = {
     "PendingSubmit": OrderStatus.PENDING,
     "PendingCancel": OrderStatus.PENDING,
     "Inactive": OrderStatus.FAILED,
+    "Rejected": OrderStatus.REJECTED,
 }
+
+
+def _build_order_message(data: dict) -> str:
+    """Build a descriptive message from CPG order data.
+
+    Extracts the most useful information: status, rejection reason,
+    warnings, and description.
+    """
+    parts = []
+
+    # Primary status
+    cpg_status = data.get("order_ccp_status") or data.get("status") or data.get("order_status", "")
+    if cpg_status:
+        parts.append(cpg_status)
+
+    # Rejection/cancellation reason (the most important field for debugging)
+    reason = data.get("order_cancellation_by_system_reason", "")
+    if reason:
+        # Clean up the multiline reason — take the actionable part
+        lines = [l.strip() for l in reason.split("\n") if l.strip()]
+        # Skip "Rejected by System:" prefix, keep the actual reason
+        for line in lines:
+            if line.startswith("Rejected by System:"):
+                continue
+            parts.append(line)
+
+    # Warning messages from order placement
+    warn = data.get("warn", "") or data.get("warning", "")
+    if warn and warn not in str(parts):
+        parts.append(warn)
+
+    # Order description for context
+    desc = data.get("orderDesc", "") or data.get("description1", "")
+    if desc and len(parts) < 2:
+        parts.append(desc)
+
+    return "; ".join(parts) if parts else "No details"
 
 
 class IBKRRestProvider(BrokerProvider):
@@ -690,7 +728,7 @@ class IBKRRestProvider(BrokerProvider):
                             order_id=oid,
                             broker=Broker.IBKR,
                             status=_STATUS_MAP.get(cpg_status, OrderStatus.PENDING),
-                            message=f"CPG status: {cpg_status}",
+                            message=_build_order_message(o),
                             filled_price=float(o.get("avgPrice", 0) or 0) or None,
                         )
             except Exception:
@@ -720,7 +758,7 @@ class IBKRRestProvider(BrokerProvider):
             order_id=order_id,
             broker=Broker.IBKR,
             status=_STATUS_MAP.get(cpg_status, OrderStatus.PENDING),
-            message=f"CPG status: {cpg_status}",
+            message=_build_order_message(data),
             filled_price=float(data.get("avg_price", 0) or 0) or None,
             filled_quantity=filled_qty,
         )
