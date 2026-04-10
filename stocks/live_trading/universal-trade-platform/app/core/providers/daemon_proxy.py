@@ -121,14 +121,14 @@ class DaemonProxyProvider(BrokerProvider):
     async def get_positions(self) -> list:
         from app.models import Position, PositionSource
         data = await self._get("/account/positions")
-        # /account/positions returns AggregatedPositions with broker-keyed positions
-        raw_positions = []
-        for broker_key, pos_list in data.get("positions", {}).items():
-            if isinstance(pos_list, list):
-                raw_positions.extend(pos_list)
-        # Also handle flat list format
-        if not raw_positions and isinstance(data.get("positions"), list):
-            raw_positions = data["positions"]
+        raw_positions = data.get("positions", [])
+        if isinstance(raw_positions, dict):
+            # Broker-keyed format: {ibkr: [...], robinhood: [...]}
+            flat = []
+            for pos_list in raw_positions.values():
+                if isinstance(pos_list, list):
+                    flat.extend(pos_list)
+            raw_positions = flat
         result = []
         for p in raw_positions:
             if isinstance(p, dict):
