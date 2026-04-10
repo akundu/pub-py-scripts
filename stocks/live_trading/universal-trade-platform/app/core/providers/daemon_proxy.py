@@ -118,6 +118,11 @@ class DaemonProxyProvider(BrokerProvider):
         data = await self._get("/dashboard/portfolio")
         return data.get("positions", [])
 
+    async def get_positions(self) -> list:
+        data = await self._get("/account/positions")
+        positions = data.get("positions", data if isinstance(data, list) else [])
+        return positions
+
     async def get_order_status(self, order_id: str) -> OrderResult:
         # Not directly available via HTTP — return unknown
         return OrderResult(
