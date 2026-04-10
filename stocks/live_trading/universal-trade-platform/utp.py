@@ -474,7 +474,7 @@ def _detect_server(args) -> str | None:
         port = getattr(args, "server_port", 8000)
         url = f"http://localhost:{port}/health"
         req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=1) as resp:
+        with urllib.request.urlopen(req, timeout=3) as resp:
             if resp.status == 200:
                 return f"http://localhost:{port}"
     except Exception:
