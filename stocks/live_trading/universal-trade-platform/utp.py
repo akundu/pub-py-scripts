@@ -468,17 +468,20 @@ def _detect_server(args) -> str | None:
     server = getattr(args, "server", None)
     if server:
         return server
-    # Auto-detect: try default daemon URL
+    # Auto-detect: try default daemon URL (with retry for slow startup)
     import urllib.request
-    try:
-        port = getattr(args, "server_port", 8000)
-        url = f"http://localhost:{port}/health"
-        req = urllib.request.Request(url, method="GET")
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            if resp.status == 200:
-                return f"http://localhost:{port}"
-    except Exception:
-        pass
+    port = getattr(args, "server_port", 8000)
+    url = f"http://localhost:{port}/health"
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                if resp.status == 200:
+                    return f"http://localhost:{port}"
+        except Exception:
+            if attempt < 2:
+                import time as _t
+                _t.sleep(1)  # Brief retry for slow-starting workers
     return None
 
 
