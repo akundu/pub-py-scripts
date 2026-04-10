@@ -50,7 +50,7 @@ UTP_DAEMON_URL = os.environ.get("UTP_DAEMON_URL", "http://localhost:8000")
 UTP_VOICE_PORT = int(os.environ.get("UTP_VOICE_PORT", "8800"))
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 JWT_SECRET = os.environ.get("UTP_VOICE_JWT_SECRET", "")
-JWT_EXPIRE_MINUTES = int(os.environ.get("UTP_VOICE_JWT_EXPIRE_MINUTES", "480"))
+JWT_EXPIRE_MINUTES = int(os.environ.get("UTP_VOICE_JWT_EXPIRE_MINUTES", "10080"))  # 7 days
 CREDENTIALS_FILE = os.environ.get(
     "UTP_VOICE_CREDENTIALS_FILE", "data/utp_voice/credentials.json"
 )
