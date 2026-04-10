@@ -119,9 +119,38 @@ class DaemonProxyProvider(BrokerProvider):
         return data.get("positions", [])
 
     async def get_positions(self) -> list:
+        from app.models import Position, PositionSource
         data = await self._get("/account/positions")
-        positions = data.get("positions", data if isinstance(data, list) else [])
-        return positions
+        # /account/positions returns AggregatedPositions with broker-keyed positions
+        raw_positions = []
+        for broker_key, pos_list in data.get("positions", {}).items():
+            if isinstance(pos_list, list):
+                raw_positions.extend(pos_list)
+        # Also handle flat list format
+        if not raw_positions and isinstance(data.get("positions"), list):
+            raw_positions = data["positions"]
+        result = []
+        for p in raw_positions:
+            if isinstance(p, dict):
+                try:
+                    result.append(Position(
+                        broker=Broker(p.get("broker", "ibkr")),
+                        symbol=p.get("symbol", ""),
+                        quantity=float(p.get("quantity", 0)),
+                        avg_cost=float(p.get("avg_cost", 0)),
+                        market_value=float(p.get("market_value", 0)),
+                        unrealized_pnl=float(p.get("unrealized_pnl", 0)),
+                        source=PositionSource(p.get("source", "live_api")),
+                        con_id=p.get("con_id"),
+                        sec_type=p.get("sec_type", ""),
+                        expiration=p.get("expiration", ""),
+                        strike=float(p.get("strike", 0)),
+                        right=p.get("right", ""),
+                        account_id=p.get("account_id", ""),
+                    ))
+                except Exception:
+                    pass
+        return result
 
     async def get_order_status(self, order_id: str) -> OrderResult:
         # Not directly available via HTTP — return unknown
