@@ -321,6 +321,7 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
             <option value="8">&#xb1;8%</option>
           </select>
           <span class="refresh-btn" onclick="loadOptionsGrid()">&#x21bb;</span>
+          <span id="opt-activity" style="font-size:10px;color:var(--blue);display:none"><span class="spinner" style="width:9px;height:9px;border-width:1px;vertical-align:middle;margin-right:3px"></span>Updating</span>
         </div>
         <div class="grid-controls" style="margin-bottom:8px;font-size:11px">
           <label style="color:var(--muted)">Min OTM%</label>
@@ -354,6 +355,7 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
       <div class="panel">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
           <span class="card-title" style="margin:0">Best Credit Spreads</span>
+          <span id="recs-activity" style="font-size:10px;color:var(--blue);display:none"><span class="spinner" style="width:9px;height:9px;border-width:1px;vertical-align:middle;margin-right:3px"></span>Updating</span>
           <span class="refresh-btn" onclick="loadRecommendations()">&#x21bb;</span>
         </div>
         <div class="grid-controls" style="margin-bottom:10px">
@@ -364,11 +366,13 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
             <option value="2">2DTE</option>
             <option value="5">5DTE</option>
           </select>
-          <label style="color:var(--muted);font-size:11px">Min ROI%</label>
-          <input type="number" id="rec-min-roi" class="select-styled" style="width:65px" value="5" min="0" step="5" onchange="filterRecs()">
+          <label style="color:var(--muted);font-size:11px">Min D/ROI%</label>
+          <input type="number" id="rec-min-roi" class="select-styled" style="width:65px" value="1.5" min="0" step="0.5" onchange="filterRecs()">
           <input type="hidden" id="rec-min-credit" value="0">
-          <label style="color:var(--muted);font-size:11px">Min OTM%</label>
-          <input type="number" id="rec-min-otm" class="select-styled" style="width:65px" value="2" min="0" step="0.5" onchange="filterRecs()">
+          <label style="color:var(--muted);font-size:11px" title="OTM% from current price">OTM% cur</label>
+          <input type="number" id="rec-min-otm" class="select-styled" style="width:55px" value="0" min="0" step="0.5" placeholder="0" onchange="filterRecs()">
+          <label style="color:var(--muted);font-size:11px" title="OTM% from previous close">OTM% pc</label>
+          <input type="number" id="rec-min-otm-pc" class="select-styled" style="width:55px" value="1.5" min="0" step="0.5" onchange="filterRecs()">
           <label style="color:var(--muted);font-size:11px">Width</label>
           <input type="number" id="rec-width" class="select-styled" style="width:65px" value="0" min="0" step="5" placeholder="Auto" onchange="filterRecs()">
           <select id="rec-type-filter" class="select-styled" onchange="filterRecs()">
@@ -399,9 +403,23 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
           <label style="color:var(--muted);font-size:11px">Qty</label>
           <input type="number" id="rec-qty" class="select-styled" style="width:60px" value="25" min="1" step="5" onchange="filterRecs()">
           <label style="color:var(--muted);font-size:11px">Min Tot Cr</label>
-          <input type="number" id="rec-min-total-credit" class="select-styled" style="width:75px" value="1000" min="0" step="500" onchange="filterRecs()">
+          <input type="number" id="rec-min-total-credit" class="select-styled" style="width:75px" value="500" min="0" step="500" onchange="filterRecs()">
           <label style="color:var(--muted);font-size:11px">Max Loss</label>
           <input type="number" id="rec-max-total-loss" class="select-styled" style="width:100px" value="100000" min="0" step="5000" onchange="filterRecs()">
+          <label style="color:var(--muted);font-size:11px">Ticker</label>
+          <select id="rec-ticker-filter" class="select-styled" onchange="filterRecs()">
+            <option value="ALL">All</option>
+            <option value="SPX">SPX</option>
+            <option value="NDX">NDX</option>
+            <option value="RUT">RUT</option>
+          </select>
+          <label style="color:var(--muted);font-size:11px">Show</label>
+          <select id="rec-top-n" class="select-styled" onchange="filterRecs()">
+            <option value="10">10</option>
+            <option value="20" selected>20</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+          </select>
         </div>
         <div id="recs-content"></div>
       </div>
@@ -552,6 +570,7 @@ Examples:
 let rawMode = false, isProcessing = false, recognition = null, isRecording = false;
 let conversationHistory = [];
 let optSelectedShort = null, optSelectedLong = null, optGridData = null;
+let _prevCloses = {};  // {SPX: 6616.85, NDX: 24202.37, RUT: 2544.95}
 
 // Global chain cache — keeps option data for ALL default tickers fresh
 // chainCache[sym][expiration] = {chain, current_price, source, fetched_at, ts}
@@ -564,44 +583,32 @@ let _chainRefreshTimer = null;
 let _chainJobQueue = [];  // [{sym, exp, dte, priority}] — round-robin job queue
 let _chainJobIdx = 0;
 
-// Build the job queue: DTE 0 for all tickers first (highest priority),
-// then DTE 1, 2, 5 added after DTE 0 is done for each ticker.
-function _buildChainJobs() {
-  const jobs = [];
-  // Phase 1: DTE 0 for all tickers (highest priority)
-  for (const sym of CHAIN_TICKERS) {
-    const exps = chainCache[sym]?._expirations || [];
-    if (!exps.length) {
-      jobs.push({sym, exp: '', dte: 0, priority: 0});
-      continue;
-    }
-    const exp0 = exps[0];
-    if (exp0) jobs.push({sym, exp: exp0, dte: 0, priority: 0});
-  }
-  // Phase 2: DTE 1, 2, 5 — only add if DTE 0 has data for that ticker
-  for (const dte of [1, 2, 5]) {
-    for (const sym of CHAIN_TICKERS) {
-      const exps = chainCache[sym]?._expirations || [];
-      if (!exps.length) continue;
-      // Only queue higher DTEs after DTE 0 has been fetched
-      const exp0 = exps[0];
-      if (!exp0 || !chainCache[sym]?.[exp0]?.chain) continue;  // DTE 0 not ready yet
-      const target = exps[Math.min(dte, exps.length - 1)];
-      if (target && target !== exp0) {
-        // Avoid duplicates
-        if (!jobs.find(j => j.sym === sym && j.exp === target)) {
-          jobs.push({sym, exp: target, dte, priority: dte});
-        }
-      }
-    }
-  }
-  return jobs;
-}
-
 let _chainRunning = false;
 let _chainStopped = false;
+let _chainActiveFetches = 0;  // count of in-flight chain fetches
+let _chainCycleCount = 0;     // increments each cycle for probabilistic DTE scheduling
+
+// Debounce renderRecs during concurrent fetches — batches rapid completions
+let _recsRenderTimer = null;
+function scheduleRenderRecs() {
+  if (_recsRenderTimer) return;
+  _recsRenderTimer = setTimeout(() => { _recsRenderTimer = null; renderRecs(); }, 200);
+}
+
+// Activity indicators — show/hide based on fetch state
+function _updateActivityIndicators() {
+  const optEl = document.getElementById('opt-activity');
+  const recsEl = document.getElementById('recs-activity');
+  if (optEl) optEl.style.display = (_optGridLoading || _optRefreshing) ? '' : 'none';
+  if (recsEl) recsEl.style.display = (_chainActiveFetches > 0 || _recsRenderTimer) ? '' : 'none';
+}
 
 async function _fetchChainJob(job) {
+  // Skip if the options grid is already showing & refreshing this exact symbol+exp
+  if (optGridData?.symbol === job.sym && optGridData?.expiration === job.exp && _optRefreshing) return;
+
+  _chainActiveFetches++;
+  _updateActivityIndicators();
   try {
     const params = new URLSearchParams({symbol: job.sym, option_type: 'BOTH', strike_range_pct: '5'});
     if (job.exp) params.set('expiration', job.exp);
@@ -620,34 +627,52 @@ async function _fetchChainJob(job) {
     if (optGridData?.symbol === job.sym && optGridData?.expiration === exp) {
       optGridData = d;
     }
-    renderRecs();
+    scheduleRenderRecs();
   } catch(e) { /* silent */ }
+  finally { _chainActiveFetches--; _updateActivityIndicators(); }
 }
 
-// Sequential loop: runs DTE0 for all tickers first, then DTE1, DTE2, DTE5.
-// Each cycle takes ~30s. If a fetch is slow, lower DTEs still get priority next cycle.
+// Chain refresh loop — all tickers in parallel per DTE, one DTE at a time.
+// Each cycle: DTE0 (always), DTE1 (50%), DTE2 (25%), DTE5 (12.5%).
 async function _chainRefreshLoop() {
   _chainRunning = true;
   while (!_chainStopped) {
     const cycleStart = Date.now();
-    const jobs = _buildChainJobs();
+    _chainCycleCount++;
 
-    for (const job of jobs) {
+    // DTE targets with halving probability
+    const dtes = [0];
+    if (_chainCycleCount % 2 === 0) dtes.push(1);
+    if (_chainCycleCount % 4 === 0) dtes.push(2);
+    if (_chainCycleCount % 8 === 0) dtes.push(5);
+
+    for (const dte of dtes) {
       if (_chainStopped) break;
-      await _fetchChainJob(job);
-      // Pace: wait so the full cycle takes ~30s
-      // But minimum 1s between fetches to avoid hammering
-      if (_chainStopped) break;
-      const elapsed = Date.now() - cycleStart;
-      const remaining = 30000 - elapsed;
-      const jobsLeft = jobs.length - jobs.indexOf(job) - 1;
-      const paceMs = jobsLeft > 0 ? Math.max(1000, Math.floor(remaining / jobsLeft)) : 0;
-      if (paceMs > 0 && jobsLeft > 0) {
-        await new Promise(r => setTimeout(r, paceMs));
+
+      // Build jobs for ALL tickers at this DTE
+      const batch = [];
+      for (const sym of CHAIN_TICKERS) {
+        const exps = chainCache[sym]?._expirations || [];
+        let exp;
+        if (dte === 0) {
+          exp = exps[0] || '';
+        } else {
+          if (!exps.length) continue;
+          const exp0 = exps[0];
+          if (!exp0 || !chainCache[sym]?.[exp0]?.chain) continue;
+          exp = exps[Math.min(dte, exps.length - 1)];
+          if (!exp || exp === exp0) continue;
+        }
+        batch.push({sym, exp, dte});
+      }
+
+      // Fetch all tickers for this DTE in parallel, then move to next DTE
+      if (batch.length) {
+        await Promise.allSettled(batch.map(j => _fetchChainJob(j)));
       }
     }
 
-    // If cycle finished early, wait for the remainder of 30s
+    // Wait for remainder of 30s cycle
     const cycleTime = Date.now() - cycleStart;
     if (cycleTime < 30000 && !_chainStopped) {
       await new Promise(r => setTimeout(r, 30000 - cycleTime));
@@ -694,6 +719,7 @@ async function fetchPercentiles() {
         };
       }
     }
+    scheduleRenderRecs();
   } catch(e) { /* silent */ }
 }
 
@@ -774,6 +800,16 @@ function pctlBadge(bracket) {
   return `<span class="badge ${cls}">${bracket.label}</span>`;
 }
 
+// ── Previous Close Prices (from QuestDB daily_prices) ────────────────────────
+async function fetchPrevCloses() {
+  try {
+    const r = await fetch('/api/prev-closes?symbols=SPX,NDX,RUT');
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d && !d.error) _prevCloses = d;
+  } catch(e) { /* silent */ }
+}
+
 // ── Predictions Data (model-based bands) ─────────────────────────────────────
 let predictionsData = null;  // {SPX: {today:{...}, future:{0:{...}, 1:{...}, ...}}, ...}
 
@@ -782,7 +818,7 @@ async function fetchPredictions() {
     const r = await fetch('/api/predictions');
     if (!r.ok) return;
     const d = await r.json();
-    if (!d.error) predictionsData = d;
+    if (!d.error) { predictionsData = d; scheduleRenderRecs(); }
   } catch(e) { /* silent */ }
 }
 
@@ -885,12 +921,17 @@ function showLogin() {
 
 function showLoginModal(callback) {
   _loginCallback = callback || null;
-  document.getElementById('login-screen').style.display='flex';
-  document.getElementById('login-screen').style.position='fixed';
-  document.getElementById('login-screen').style.inset='0';
-  document.getElementById('login-screen').style.zIndex='200';
-  document.getElementById('login-screen').style.background='rgba(0,0,0,0.8)';
-  document.getElementById('login-user')?.focus();
+  const screen = document.getElementById('login-screen');
+  const alreadyVisible = screen.style.display === 'flex';
+  screen.style.display='flex';
+  screen.style.position='fixed';
+  screen.style.inset='0';
+  screen.style.zIndex='200';
+  screen.style.background='rgba(0,0,0,0.8)';
+  // Only auto-focus username on first show — never steal focus from password
+  if (!alreadyVisible) {
+    document.getElementById('login-user')?.focus();
+  }
 }
 
 function hideLoginModal() {
@@ -933,32 +974,66 @@ function switchTab(name, btn) {
 }
 
 // ── Ticker Bar ───────────────────────────────────────────────────────────────
+let _realtimePrices = {};  // {SPX: {price, bid, ask, timestamp}}
+let _priceWs = null;
+
+function _updateTickerItem(sym, p) {
+  const el = document.getElementById('tk-'+sym);
+  if (!el || !p) return;
+  const prevClose = _prevCloses[sym] || predictionsData?.[sym]?.today?.prev_close || _pctlByTicker[sym]?.close || 0;
+  const change = prevClose ? p - prevClose : 0;
+  const changePct = prevClose ? ((change / prevClose) * 100) : 0;
+  const dir = change > 0 ? 'up' : change < 0 ? 'down' : 'flat';
+
+  let priceHtml = p ? p.toLocaleString(undefined,{minimumFractionDigits:1,maximumFractionDigits:1}) : '--';
+  if (prevClose && p) {
+    priceHtml += `<div style="font-size:9px">${change>=0?'+':''}${change.toFixed(1)} (${changePct>=0?'+':''}${changePct.toFixed(1)}%)</div>`;
+  }
+  el.querySelector('.price').innerHTML = priceHtml;
+  el.querySelector('.price').className = `price ${dir}`;
+}
+
+function connectPriceWebSocket() {
+  if (_priceWs && _priceWs.readyState <= 1) return;  // already open/connecting
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const url = `${proto}//${location.host}/ws/prices`;
+  _priceWs = new WebSocket(url);
+  _priceWs.onmessage = (ev) => {
+    try {
+      const d = JSON.parse(ev.data);
+      if (d.symbol && d.price) {
+        _realtimePrices[d.symbol] = d;
+        _updateTickerItem(d.symbol, d.price);
+        // Also update options price bar if viewing this symbol
+        if (optGridData?.symbol === d.symbol) _updateOptPriceBar(d.symbol, d.price);
+      }
+    } catch(e) {}
+  };
+  _priceWs.onclose = () => { setTimeout(connectPriceWebSocket, 3000); };
+  _priceWs.onerror = () => { _priceWs.close(); };
+}
+
 async function loadTickers() {
   const bar = document.getElementById('ticker-bar');
-  // Only create skeleton on first load; subsequent refreshes update in-place
   if (!bar.innerHTML.includes('ticker-item')) {
     bar.innerHTML = ['SPX','NDX','RUT'].map(s => `<div class="ticker-item" id="tk-${s}"><div class="sym">${s}</div><div class="price flat">--</div></div>`).join('');
   }
+  // If we have realtime WS prices, use those — no HTTP needed
+  let hasWsData = false;
+  for (const sym of ['SPX','NDX','RUT']) {
+    const rt = _realtimePrices[sym];
+    if (rt?.price) { _updateTickerItem(sym, rt.price); hasWsData = true; }
+  }
+  if (hasWsData) return;
+
+  // Fallback: HTTP poll (used on initial load before WS connects, or if WS is down)
   try {
     const r = await fetch('/api/quotes?symbols=SPX,NDX,RUT');
     if (r.status===401) { showLogin(); return; }
     const d = await r.json();
     for (const [sym, q] of Object.entries(d)) {
-      const el = document.getElementById('tk-'+sym);
-      if (!el) continue;
       const p = q.last || q.bid || 0;
-      // Get previous close from predictions data (or percentile data)
-      const prevClose = predictionsData?.[sym]?.today?.prev_close || _pctlByTicker[sym]?.close || 0;
-      const change = prevClose ? p - prevClose : 0;
-      const changePct = prevClose ? ((change / prevClose) * 100) : 0;
-      const dir = change > 0 ? 'up' : change < 0 ? 'down' : 'flat';
-
-      let priceHtml = p ? p.toLocaleString(undefined,{minimumFractionDigits:1,maximumFractionDigits:1}) : '--';
-      if (prevClose && p) {
-        priceHtml += `<div style="font-size:9px">${change>=0?'+':''}${change.toFixed(1)} (${changePct>=0?'+':''}${changePct.toFixed(1)}%)</div>`;
-      }
-      el.querySelector('.price').innerHTML = priceHtml;
-      el.querySelector('.price').className = `price ${dir}`;
+      if (p) { _realtimePrices[sym] = {price: p}; _updateTickerItem(sym, p); }
     }
   } catch(e) { console.log('Ticker error:', e); }
 }
@@ -1361,21 +1436,42 @@ let _optRetryTimer = null;
 let _optGridLoading = false;
 
 async function loadOptionsGrid() {
-  if (_optGridLoading) return;  // Prevent concurrent loads
-  _optGridLoading = true;
+  if (_optGridLoading) return;
   const grid = document.getElementById('options-grid');
-  delete grid.dataset.loaded;  // Reset so ATM scroll fires on symbol/exp change
   const sym = document.getElementById('opt-symbol').value;
   const exp = document.getElementById('opt-exp').value;
   const otype = document.getElementById('opt-type').value;
   const range = document.getElementById('opt-range').value;
-  optSelectedShort = null; optSelectedLong = null;
-  closeOrderTicket();
 
-  // Only show spinner if no existing data
-  if (!grid.innerHTML.includes('tbl') && !grid.innerHTML.includes('fetching')) {
-    grid.innerHTML = '<div class="loading">Loading options</div>';
+  // Same symbol/exp/type already rendered → in-place price update only (no flash)
+  const sameView = optGridData?.symbol === sym
+    && optGridData?.expiration === exp
+    && grid.dataset.otype === otype
+    && grid.innerHTML.includes('tbl');
+  if (sameView) {
+    await refreshOptionPrices();
+    return;
   }
+
+  // Different view — try to render instantly from chainCache, fetch in background
+  const cached = getCachedChain(sym, exp);
+  const cachedExps = chainCache[sym]?._expirations || [];
+  const cachedPrice = chainCache[sym]?._current_price || _realtimePrices[sym]?.price || 0;
+
+  if (cached?.chain) {
+    // Render from cache immediately (no network wait)
+    const useExp = exp || cachedExps[0] || '';
+    _renderOptionsGridFromData({
+      symbol: sym, expiration: useExp, expirations: cachedExps,
+      current_price: cachedPrice, chain: cached.chain,
+      source: cached.source || 'cache', fetched_at: cached.fetched_at,
+      market_open: true,
+    }, otype, grid);
+  }
+
+  // Fetch fresh data in background — will update in-place when it arrives
+  _optGridLoading = true;
+  _updateActivityIndicators();
   if (_optRetryTimer) { clearTimeout(_optRetryTimer); _optRetryTimer = null; }
 
   try {
@@ -1384,53 +1480,61 @@ async function loadOptionsGrid() {
     const r = await fetch('/api/options-grid?'+params);
     if (r.status===401) { showLogin(); return; }
     const d = await r.json();
-    optGridData = d;
-
-    const expSel = document.getElementById('opt-exp');
-    if (d.expirations && d.expirations.length) {
-      expSel.innerHTML = d.expirations.map(e => `<option value="${e}" ${e===d.expiration?'selected':''}>${e}</option>`).join('');
-    }
-
-    if (d.error) { grid.innerHTML = `<div class="empty-msg">${d.error}</div>`; return; }
-
-    const cp = d.current_price || 0;
-    const puts = (d.chain?.put || []).sort((a,b) => a.strike - b.strike);
-    const calls = (d.chain?.call || []).sort((a,b) => a.strike - b.strike);
-    const tsInfo = formatTimestamp(d);
-
-    if (!puts.length && !calls.length) {
-      grid.innerHTML = `<div class="empty-msg" style="padding:20px">
-        <div style="font-size:14px;margin-bottom:8px">Loading ${sym} ${d.expiration||''} options...</div>
-        <div class="spinner" style="margin:12px auto"></div>
-        <div class="fetching" style="display:none"></div>
-      </div>`;
-      _optRetryTimer = setTimeout(() => loadOptionsGrid(), 5000);
+    if (d.error && !grid.innerHTML.includes('tbl')) {
+      grid.innerHTML = `<div class="empty-msg">${d.error}</div>`;
       return;
     }
 
-    let gridHtml;
-    if (otype === 'BOTH') {
-      gridHtml = renderChainGrid(puts, calls, cp, sym, d.expiration);
-    } else if (otype === 'PUT') {
-      gridHtml = renderSingleChain(puts, cp, 'PUT', sym, d.expiration);
+    // If the user switched away while we were fetching, don't overwrite
+    const curSym = document.getElementById('opt-symbol').value;
+    if (curSym !== sym) return;
+
+    optGridData = d;
+
+    const expSel = document.getElementById('opt-exp');
+    if (d.expirations?.length) {
+      expSel.innerHTML = d.expirations.map(e => `<option value="${e}" ${e===d.expiration?'selected':''}>${e}</option>`).join('');
+    }
+
+    // If grid is already rendered for this symbol (from cache above), update in-place
+    if (grid.innerHTML.includes('tbl') && grid.dataset.optSym === sym && grid.dataset.otype === otype) {
+      // In-place update
+      const putList = d.chain?.put || [];
+      const callList = d.chain?.call || [];
+      if (putList.length || callList.length) {
+        const putMap = Object.fromEntries(putList.map(q => [q.strike, q]));
+        const callMap = Object.fromEntries(callList.map(q => [q.strike, q]));
+        document.querySelectorAll('[data-field][data-strike]').forEach(cell => {
+          const strike = parseFloat(cell.dataset.strike);
+          const field = cell.dataset.field;
+          const cq = callMap[strike], pq = putMap[strike];
+          const cgg = cq?.greeks || {}, pgg = pq?.greeks || {};
+          let val = '--';
+          if (field === 'c-bid') val = cq?.bid?.toFixed(2) || '--';
+          else if (field === 'c-ask') val = cq?.ask?.toFixed(2) || '--';
+          else if (field === 'p-bid') val = pq?.bid?.toFixed(2) || '--';
+          else if (field === 'p-ask') val = pq?.ask?.toFixed(2) || '--';
+          else if (field === 'c-last') val = cq?.last?.toFixed(2) || '--';
+          else if (field === 'p-last') val = pq?.last?.toFixed(2) || '--';
+          else if (field === 'c-vol') val = cq?.volume || '';
+          else if (field === 'p-vol') val = pq?.volume || '';
+          else if (field === 'c-delta') val = fmtGreek(cgg.delta);
+          else if (field === 'c-theta') val = fmtGreek(cgg.theta);
+          else if (field === 'c-iv') val = cgg.iv != null ? (cgg.iv*100).toFixed(0)+'%' : '--';
+          else if (field === 'p-delta') val = fmtGreek(pgg.delta);
+          else if (field === 'p-theta') val = fmtGreek(pgg.theta);
+          else if (field === 'p-iv') val = pgg.iv != null ? (pgg.iv*100).toFixed(0)+'%' : '--';
+          cell.textContent = val;
+        });
+        _updateOptPriceBar(sym, d.current_price);
+        const tsDiv = document.querySelector('#options-grid div[style*="text-align:right"]');
+        if (tsDiv) tsDiv.innerHTML = formatTimestamp(d).replace(/<div[^>]*>|<\/div>/g, '');
+      }
     } else {
-      gridHtml = renderSingleChain(calls, cp, 'CALL', sym, d.expiration);
-    }
-    grid.innerHTML = gridHtml + tsInfo;
-
-    // Scroll to ATM row (only on first load, not on refresh)
-    if (!grid.dataset.loaded) {
-      grid.dataset.loaded = '1';
-      requestAnimationFrame(() => {
-        const atm = document.getElementById('atm-row');
-        if (atm) atm.scrollIntoView({block:'center', behavior:'auto'});
-      });
+      // No grid yet (cache was empty) — do full render
+      _renderOptionsGridFromData(d, otype, grid);
     }
 
-    // Ensure 5-second background refresh is running
-    startOptAutoRefresh();
-
-    // Update data source bar for options tab
     updateDataSourceBar([{sym:d.symbol, source:d.source, time:d.fetched_at}, {label:'Mkt', source: d.market_open?'open':'closed'}]);
   } catch(e) {
     if (!grid.innerHTML.includes('tbl')) {
@@ -1438,7 +1542,58 @@ async function loadOptionsGrid() {
     }
   } finally {
     _optGridLoading = false;
+    _updateActivityIndicators();
   }
+}
+
+// Render the full options grid from a data object (used for initial render + cache render)
+function _renderOptionsGridFromData(d, otype, grid) {
+  const cp = d.current_price || 0;
+  const puts = (d.chain?.put || []).sort((a,b) => a.strike - b.strike);
+  const calls = (d.chain?.call || []).sort((a,b) => a.strike - b.strike);
+  const sym = d.symbol;
+
+  if (!puts.length && !calls.length) {
+    if (!grid.innerHTML.includes('tbl')) {
+      grid.innerHTML = `<div class="empty-msg" style="padding:20px">
+        <div style="font-size:14px;margin-bottom:8px">Loading ${sym} ${d.expiration||''} options...</div>
+        <div class="spinner" style="margin:12px auto"></div>
+      </div>`;
+      _optRetryTimer = setTimeout(() => loadOptionsGrid(), 5000);
+    }
+    return;
+  }
+
+  optGridData = d;
+  optSelectedShort = null; optSelectedLong = null;
+  closeOrderTicket();
+
+  const expSel = document.getElementById('opt-exp');
+  if (d.expirations?.length) {
+    expSel.innerHTML = d.expirations.map(e => `<option value="${e}" ${e===d.expiration?'selected':''}>${e}</option>`).join('');
+  }
+
+  let gridHtml;
+  if (otype === 'BOTH') {
+    gridHtml = renderChainGrid(puts, calls, cp, sym, d.expiration);
+  } else if (otype === 'PUT') {
+    gridHtml = renderSingleChain(puts, cp, 'PUT', sym, d.expiration);
+  } else {
+    gridHtml = renderSingleChain(calls, cp, 'CALL', sym, d.expiration);
+  }
+  grid.innerHTML = gridHtml + formatTimestamp(d);
+  grid.dataset.otype = otype;
+  grid.dataset.optSym = sym;
+
+  // Scroll to ATM on first render for this symbol
+  delete grid.dataset.loaded;
+  grid.dataset.loaded = '1';
+  requestAnimationFrame(() => {
+    const atm = document.getElementById('atm-row');
+    if (atm) atm.scrollIntoView({block:'center', behavior:'auto'});
+  });
+
+  startOptAutoRefresh();
 }
 
 function formatTimestamp(d) {
@@ -1493,10 +1648,18 @@ function timeSince(isoStr) {
 // ── Chain Renderers ───────────────────────────────────────────────────────────
 // Tap bid = SELL that strike, tap ask = BUY that strike. Builds legs in order ticket.
 
-function distPct(strike, cp) {
-  if (!cp) return '';
-  const pct = ((strike - cp) / cp * 100).toFixed(1);
-  return `<div style="font-size:9px;color:var(--muted);font-weight:normal">${pct>0?'+':''}${pct}%</div>`;
+function distPct(strike, cp, sym) {
+  let html = '';
+  if (cp) {
+    const pct = ((strike - cp) / cp * 100).toFixed(1);
+    html += `<div style="font-size:9px;color:var(--muted);font-weight:normal" data-dist="cur">${pct>0?'+':''}${pct}%</div>`;
+  }
+  const pc = sym ? (_prevCloses[sym] || predictionsData?.[sym]?.today?.prev_close || _pctlByTicker[sym]?.close) : 0;
+  if (pc) {
+    const pct2 = ((strike - pc) / pc * 100).toFixed(1);
+    html += `<div style="font-size:8px;color:var(--yellow);font-weight:normal" data-dist="prev">${pct2>0?'+':''}${pct2}% pc</div>`;
+  }
+  return html;
 }
 
 // ── Data Source Banner ────────────────────────────────────────────────────────
@@ -1537,7 +1700,19 @@ function renderChainGrid(puts, calls, cp, sym, exp) {
 
   const width = DEFAULT_WIDTHS[sym] || 20;
 
-  let html = '<table class="tbl"><thead><tr>';
+  // Price summary bar: Prev Close | Current | Change
+  const prevClose = _prevCloses[sym] || predictionsData?.[sym]?.today?.prev_close || _pctlByTicker[sym]?.close || 0;
+  const rtPrice = _realtimePrices[sym]?.price || cp;
+  const chg = prevClose ? rtPrice - prevClose : 0;
+  const chgPct = prevClose ? (chg / prevClose * 100) : 0;
+  const chgDir = chg > 0 ? 'color:var(--green-b)' : chg < 0 ? 'color:var(--red-b)' : 'color:var(--muted)';
+  let html = `<div id="opt-price-bar" style="display:flex;gap:16px;align-items:center;padding:6px 8px;margin-bottom:4px;background:var(--bg2);border-radius:6px;font-size:12px">`;
+  html += `<span style="color:var(--muted)">Prev Close</span> <span id="opt-prev-close" style="font-weight:bold">${prevClose ? prevClose.toLocaleString(undefined,{minimumFractionDigits:1,maximumFractionDigits:1}) : '--'}</span>`;
+  html += `<span style="color:var(--muted)">Current</span> <span id="opt-current-price" style="font-weight:bold">${rtPrice ? rtPrice.toLocaleString(undefined,{minimumFractionDigits:1,maximumFractionDigits:1}) : '--'}</span>`;
+  html += `<span id="opt-price-change" style="font-weight:bold;${chgDir}">${chg>=0?'+':''}${chg.toFixed(1)} (${chgPct>=0?'+':''}${chgPct.toFixed(1)}%)</span>`;
+  html += `</div>`;
+
+  html += '<table class="tbl"><thead><tr>';
   html += '<th class="num greek-col">&delta;</th><th class="num greek-col">&theta;</th><th class="num greek-col">IV</th>';
   html += '<th class="num greek-col" title="Hist / Pred">H/P</th>';
   html += '<th class="num" style="color:var(--green-b)">C Bid</th><th class="num" style="color:var(--green-b)">C Ask</th>';
@@ -1581,7 +1756,7 @@ function renderChainGrid(puts, calls, cp, sym, exp) {
     html += `<td class="num cell-tap" data-field="c-bid" data-strike="${s}" style="${callBg}" onclick="addLeg(${s},'CALL','SELL','${sym}','${exp}')">${c?c.bid?.toFixed(2)||'--':'--'}</td>`;
     html += `<td class="num cell-tap" data-field="c-ask" data-strike="${s}" style="${callBg}" onclick="addLeg(${s},'CALL','BUY','${sym}','${exp}')">${c?c.ask?.toFixed(2)||'--':'--'}</td>`;
     // Strike + distance %
-    html += `<td class="num" style="text-align:center;font-weight:bold;font-size:13px;${isAtm?'color:var(--blue);background:rgba(88,166,255,0.1);':'color:var(--text);'}">${s}${distPct(s,cp)}</td>`;
+    html += `<td class="num" style="text-align:center;font-weight:bold;font-size:13px;${isAtm?'color:var(--blue);background:rgba(88,166,255,0.1);':'color:var(--text);'}">${s}${distPct(s,cp,sym)}</td>`;
     // Puts
     html += `<td class="num cell-tap" data-field="p-bid" data-strike="${s}" style="${putBg}" onclick="addLeg(${s},'PUT','SELL','${sym}','${exp}')">${p?p.bid?.toFixed(2)||'--':'--'}</td>`;
     html += `<td class="num cell-tap" data-field="p-ask" data-strike="${s}" style="${putBg}" onclick="addLeg(${s},'PUT','BUY','${sym}','${exp}')">${p?p.ask?.toFixed(2)||'--':'--'}</td>`;
@@ -1635,14 +1810,27 @@ function renderSingleChain(options, cp, type, sym, exp) {
   let atmStrike = options[0]?.strike, minDist = Infinity;
   for (const o of options) { const d = Math.abs(o.strike-cp); if (d < minDist) { minDist=d; atmStrike=o.strike; } }
   const prefix = type === 'CALL' ? 'c' : 'p';
-  let html = '<table class="tbl"><thead><tr>';
+
+  // Price summary bar (same as BOTH view)
+  const prevClose = _prevCloses[sym] || predictionsData?.[sym]?.today?.prev_close || _pctlByTicker[sym]?.close || 0;
+  const rtPrice = _realtimePrices[sym]?.price || cp;
+  const chg = prevClose ? rtPrice - prevClose : 0;
+  const chgPct = prevClose ? (chg / prevClose * 100) : 0;
+  const chgDir = chg > 0 ? 'color:var(--green-b)' : chg < 0 ? 'color:var(--red-b)' : 'color:var(--muted)';
+  let html = `<div id="opt-price-bar" style="display:flex;gap:16px;align-items:center;padding:6px 8px;margin-bottom:4px;background:var(--bg2);border-radius:6px;font-size:12px">`;
+  html += `<span style="color:var(--muted)">Prev Close</span> <span id="opt-prev-close" style="font-weight:bold">${prevClose ? prevClose.toLocaleString(undefined,{minimumFractionDigits:1,maximumFractionDigits:1}) : '--'}</span>`;
+  html += `<span style="color:var(--muted)">Current</span> <span id="opt-current-price" style="font-weight:bold">${rtPrice ? rtPrice.toLocaleString(undefined,{minimumFractionDigits:1,maximumFractionDigits:1}) : '--'}</span>`;
+  html += `<span id="opt-price-change" style="font-weight:bold;${chgDir}">${chg>=0?'+':''}${chg.toFixed(1)} (${chgPct>=0?'+':''}${chgPct.toFixed(1)}%)</span>`;
+  html += `</div>`;
+
+  html += '<table class="tbl"><thead><tr>';
   html += '<th class="num">Strike</th><th class="num">Bid</th><th class="num">Ask</th><th class="num">Last</th><th class="num">Vol</th>';
   html += '</tr></thead><tbody>';
   for (const o of options) {
     const isAtm = o.strike === atmStrike;
     const rowId = isAtm ? 'id="atm-row"' : '';
     html += `<tr class="strike-row" data-strike="${o.strike}" ${rowId} style="${isAtm?'border-top:2px solid var(--blue);border-bottom:2px solid var(--blue);':''}">`;
-    html += `<td class="num" style="font-weight:bold;${isAtm?'color:var(--blue)':''}">${o.strike}${distPct(o.strike,cp)}</td>`;
+    html += `<td class="num" style="font-weight:bold;${isAtm?'color:var(--blue)':''}">${o.strike}${distPct(o.strike,cp,sym)}</td>`;
     html += `<td class="num cell-tap" data-field="${prefix}-bid" data-strike="${o.strike}" onclick="addLeg(${o.strike},'${type}','SELL','${optGridData?.symbol||''}','${optGridData?.expiration||''}')">${o.bid?.toFixed(2)||'--'}</td>`;
     html += `<td class="num cell-tap" data-field="${prefix}-ask" data-strike="${o.strike}" onclick="addLeg(${o.strike},'${type}','BUY','${optGridData?.symbol||''}','${optGridData?.expiration||''}')">${o.ask?.toFixed(2)||'--'}</td>`;
     html += `<td class="num" data-field="${prefix}-last" data-strike="${o.strike}">${o.last?.toFixed(2)||'--'}</td>`;
@@ -1666,6 +1854,23 @@ function stopOptAutoRefresh() {
   if (_optRefreshTimer) { clearInterval(_optRefreshTimer); _optRefreshTimer = null; }
 }
 
+function _updateOptPriceBar(sym, cp) {
+  const prevClose = _prevCloses[sym] || predictionsData?.[sym]?.today?.prev_close || _pctlByTicker[sym]?.close || 0;
+  const rtPrice = _realtimePrices[sym]?.price || cp || 0;
+  const fmtP = (v) => v ? v.toLocaleString(undefined,{minimumFractionDigits:1,maximumFractionDigits:1}) : '--';
+  const elPrev = document.getElementById('opt-prev-close');
+  const elCur = document.getElementById('opt-current-price');
+  const elChg = document.getElementById('opt-price-change');
+  if (elPrev) elPrev.textContent = fmtP(prevClose);
+  if (elCur) elCur.textContent = fmtP(rtPrice);
+  if (elChg && prevClose && rtPrice) {
+    const chg = rtPrice - prevClose;
+    const pct = (chg / prevClose * 100);
+    elChg.textContent = `${chg>=0?'+':''}${chg.toFixed(1)} (${pct>=0?'+':''}${pct.toFixed(1)}%)`;
+    elChg.style.color = chg > 0 ? 'var(--green-b)' : chg < 0 ? 'var(--red-b)' : 'var(--muted)';
+  }
+}
+
 let _optRefreshing = false;
 
 async function refreshOptionPrices() {
@@ -1675,6 +1880,7 @@ async function refreshOptionPrices() {
   if (!document.querySelector('[data-field="c-bid"]')) return;
 
   _optRefreshing = true;
+  _updateActivityIndicators();
   const sym = optGridData.symbol;
   const exp = optGridData.expiration;
   const otype = document.getElementById('opt-type').value;
@@ -1742,11 +1948,14 @@ async function refreshOptionPrices() {
     const tsDiv = document.querySelector('#options-grid div[style*="text-align:right"]');
     if (tsDiv) tsDiv.innerHTML = formatTimestamp(d).replace(/<div[^>]*>|<\/div>/g, '');
 
+    // Update price bar in-place
+    _updateOptPriceBar(sym, d.current_price);
+
     // Update data source bar on refresh too
     updateDataSourceBar([{sym:d.symbol, source:d.source, time:d.fetched_at}, {label:'Mkt', source: d.market_open?'open':'closed'}]);
 
   } catch(e) { /* silent — don't disrupt UI on refresh failure */ }
-  finally { _optRefreshing = false; }
+  finally { _optRefreshing = false; _updateActivityIndicators(); }
 }
 
 // ── Multi-Leg Order Builder ──────────────────────────────────────────────────
@@ -2126,6 +2335,7 @@ function closeTrade() {
 // ── Client-Side Spread Scanner (Picks) ───────────────────────────────────────
 
 function computeSpreads(chain, sym, currentPrice, width) {
+  const prevClose = _prevCloses[sym] || predictionsData?.[sym]?.today?.prev_close || _pctlByTicker[sym]?.close || 0;
   const spreads = [];
   for (const optType of ['PUT', 'CALL']) {
     const quotes = chain[optType.toLowerCase()] || [];
@@ -2161,10 +2371,17 @@ function computeSpreads(chain, sym, currentPrice, width) {
         ? +((currentPrice - shortStrike) / currentPrice * 100).toFixed(2)
         : +((shortStrike - currentPrice) / currentPrice * 100).toFixed(2);
 
+      // Distance from previous close
+      const otmPc = prevClose > 0
+        ? (optType === 'PUT'
+          ? +((prevClose - shortStrike) / prevClose * 100).toFixed(2)
+          : +((shortStrike - prevClose) / prevClose * 100).toFixed(2))
+        : otm;
+
       const sg = sq.greeks || {};
       spreads.push({option_type:optType, short_strike:shortStrike, long_strike:longStrike,
         width, credit, credit_per_contract:creditPerContract,
-        max_loss:+(maxLossPerContract).toFixed(0), roi_pct:roi, otm_pct:otm,
+        max_loss:+(maxLossPerContract).toFixed(0), roi_pct:roi, otm_pct:otm, otm_pct_pc:otmPc,
         short_bid:shortBid, long_ask:longAsk,
         short_delta:sg.delta, short_theta:sg.theta, short_iv:sg.iv});
     }
@@ -2259,6 +2476,8 @@ async function _priorityFetchChain(sym, exp, dte) {
 
 function renderRecs() {
   const el = document.getElementById('recs-content');
+  const tickerFilter = document.getElementById('rec-ticker-filter')?.value || 'ALL';
+  const filteredTickers = tickerFilter === 'ALL' ? CHAIN_TICKERS : [tickerFilter];
   const minRoi = parseFloat(document.getElementById('rec-min-roi')?.value) || 0;
   const minCredit = parseFloat(document.getElementById('rec-min-credit')?.value) || 0;
   const minOtm = parseFloat(document.getElementById('rec-min-otm')?.value) || 0;
@@ -2271,13 +2490,33 @@ function renderRecs() {
   const maxTotalLoss = parseInt(document.getElementById('rec-max-total-loss')?.value) || Infinity;
   const maxDelta = parseFloat(document.getElementById('rec-max-delta')?.value) || Infinity;
   const selectedDte = parseInt(document.getElementById('rec-dte')?.value) || 0;
+  const topN = parseInt(document.getElementById('rec-top-n')?.value) || 10;
 
-  // Data status banner — show what's loaded and what's pending
+  const minOtmPc = parseFloat(document.getElementById('rec-min-otm-pc')?.value) || 0;
+
+  // Shared filter function. dteIdx = DTE index (0,1,2,5). D/ROI = ROI / (dteIdx+1).
+  function checkFilters(s, dteIdx) {
+    const fails = [];
+    const dte = dteIdx != null ? dteIdx : (s._dte != null ? s._dte : 0);
+    const dailyRoi = +(s.roi_pct / (dte + 1)).toFixed(2);
+    if (dailyRoi < minRoi) fails.push('D/ROI');
+    if (s.credit < minCredit) fails.push('Credit');
+    if (minOtm > 0 && Math.abs(s.otm_pct) < minOtm) fails.push('OTM');
+    if (minOtmPc > 0 && Math.abs(s.otm_pct_pc) < minOtmPc) fails.push('OTM-pc');
+    if (typeFilter !== 'ALL' && s.option_type !== typeFilter) fails.push('Type');
+    if (minPctl > 0 && (!s._pctl || s._pctl.pctl < minPctl)) fails.push('Hist');
+    if (minPred > 0 && (!s._pred || s._pred.pctl < minPred)) fails.push('Pred');
+    if (minTotalCredit > 0 && (s.credit_per_contract * recQty) < minTotalCredit) fails.push('TotCr');
+    if (maxTotalLoss < Infinity && (s.max_loss * recQty) > maxTotalLoss) fails.push('MaxL');
+    if (maxDelta < Infinity && s.short_delta != null && Math.abs(s.short_delta) > maxDelta) fails.push('Delta');
+    return fails;
+  }
+
+  // Data status banner
   const hasPctlData = Object.keys(_pctlByTicker).length > 0;
   const hasPredData = predictionsData && Object.keys(predictionsData).length > 0;
   const predTickers = predictionsData ? Object.keys(predictionsData).filter(k => !k.startsWith('error')) : [];
   const missingPred = CHAIN_TICKERS.filter(s => !predTickers.includes(s));
-  const chainReady = CHAIN_TICKERS.filter(s => getCachedChain(s));
   const chainMissing = CHAIN_TICKERS.filter(s => !getCachedChain(s));
 
   let statusHtml = '';
@@ -2296,55 +2535,106 @@ function renderRecs() {
   }
 
   let html = statusHtml;
-  for (const sym of CHAIN_TICKERS) {
+
+  // ═══ TOP PICKS — combined across all tickers × all DTEs ═══
+  const allTopSpreads = [];
+  const now = new Date();
+  for (const sym of filteredTickers) {
     const symCache = chainCache[sym];
     const exps = symCache?._expirations || [];
-    // Pick the expiration matching the selected DTE
+    if (!exps.length) continue;
+    const width = customWidth || DEFAULT_WIDTHS[sym] || 20;
+    // Scan expirations up to index 5 (covers DTE 0,1,2,5)
+    const maxExpIdx = Math.min(exps.length, 6);
+    for (let ei = 0; ei < maxExpIdx; ei++) {
+      const exp = exps[ei];
+      if (!exp) continue;
+      const cached = symCache?.[exp];
+      if (!cached?.chain) continue;
+      const cp = cached.current_price || symCache?._current_price || 0;
+      const spreads = computeSpreads(cached.chain, sym, cp, width);
+      // DTE number = expiration index (0, 1, 2, ...). D/ROI = ROI / (DTE + 1)
+      const dteNum = ei;
+      for (const s of spreads) {
+        const bracket = getPercentileBracket(sym, exp, s.option_type, s.otm_pct);
+        const predicted = getPredictedBracket(sym, exp, s.option_type, s.otm_pct);
+        const enriched = {...s, _pctl: bracket, _pred: predicted, _sym: sym, _exp: exp, _dte: dteNum};
+        const fails = checkFilters(enriched);
+        if (fails.length === 0) {
+          enriched._dailyRoi = +(s.roi_pct / (dteNum + 1)).toFixed(2);
+          allTopSpreads.push(enriched);
+        }
+      }
+    }
+  }
+  allTopSpreads.sort((a, b) => b._dailyRoi - a._dailyRoi);
+
+  if (allTopSpreads.length) {
+    const topCollapsed = document.getElementById('top-picks-body')?.style.display === 'none';
+    const caretChar = topCollapsed ? '&#9654;' : '&#9660;';
+    html += `<div class="card"><div class="card-title" style="cursor:pointer" onclick="const b=document.getElementById('top-picks-body');b.style.display=b.style.display==='none'?'':'none';this.querySelector('.caret').innerHTML=b.style.display==='none'?'&#9654;':'&#9660;'"><span class="caret">${caretChar}</span> Top Picks <span style="color:var(--muted);font-weight:normal;font-size:11px">across all tickers &amp; DTEs &middot; sorted by daily ROI</span></div>`;
+    html += `<div id="top-picks-body" style="max-height:400px;overflow-y:auto;${topCollapsed ? 'display:none' : ''}">`;
+    html += `<table class="tbl"><thead><tr><th>Tkr</th><th>Type</th><th>Short</th><th>Long</th><th>Exp</th><th class="num">DTE</th><th class="num">Credit</th><th class="num">MaxLoss</th><th class="num">ROI%</th><th class="num" style="color:var(--yellow)">D/ROI</th><th class="num">OTM%</th><th class="num" title="OTM% from prev close">pc%</th><th>H</th><th>P</th><th></th></tr></thead><tbody>`;
+    for (const s of allTopSpreads.slice(0, topN)) {
+      const totalCr = s.credit_per_contract * recQty;
+      const totalML = s.max_loss * recQty;
+      const expShort = s._exp.slice(5);  // "04-10" from "2026-04-10"
+      html += `<tr>`;
+      html += `<td style="font-weight:bold">${s._sym}</td>`;
+      html += `<td><span class="badge ${s.option_type==='PUT'?'badge-safe':'badge-watch'}">${s.option_type[0]}</span></td>`;
+      html += `<td>${s.short_strike}</td><td>${s.long_strike}</td>`;
+      html += `<td style="font-size:11px">${expShort}</td>`;
+      html += `<td class="num">${s._dte}</td>`;
+      html += `<td class="num pos">$${totalCr.toLocaleString()}<div style="font-size:8px;color:var(--muted)">$${s.credit_per_contract}/c</div></td>`;
+      html += `<td class="num" style="color:var(--red-b)">$${totalML.toLocaleString()}<div style="font-size:8px;color:var(--muted)">$${s.max_loss}/c</div></td>`;
+      html += `<td class="num">${s.roi_pct}%</td>`;
+      html += `<td class="num" style="color:var(--yellow);font-weight:bold">${s._dailyRoi}%</td>`;
+      html += `<td class="num">${s.otm_pct}%</td>`;
+      html += `<td class="num" style="color:var(--yellow)">${s.otm_pct_pc}%</td>`;
+      html += `<td>${pctlBadge(s._pctl)}</td>`;
+      html += `<td>${predBadge(s._pred)}</td>`;
+      html += `<td><button class="btn btn-green btn-sm" onclick="tradeRec('${s._sym}','${s.option_type}',${s.short_strike},${s.long_strike},'${s._exp}')">Trade</button></td>`;
+      html += '</tr>';
+    }
+    html += '</tbody></table></div>';
+    if (allTopSpreads.length > topN) {
+      html += `<div style="font-size:9px;color:var(--muted);text-align:right;padding:2px 4px">${allTopSpreads.length} total matches — showing top ${topN} (scroll or increase Top N)</div>`;
+    }
+    html += '</div>';
+  }
+
+  // ═══ PER-TICKER VIEW (selected DTE only) ═══
+  for (const sym of filteredTickers) {
+    const symCache = chainCache[sym];
+    const exps = symCache?._expirations || [];
     const dteIdx = Math.min(selectedDte, exps.length - 1);
     const exp = exps[Math.max(0, dteIdx)] || '';
     const cached = exp ? (symCache?.[exp] || getCachedChain(sym, exp)) : getCachedChain(sym);
     if (!cached?.chain) {
       const loading = exp ? `Loading ${sym} ${exp}...` : 'Waiting for option data...';
-      html += `<div class="rec-card"><div class="rec-header"><span class="rec-ticker">${sym}</span></div><div style="padding:12px;color:var(--muted);font-size:12px">${loading} <span class="spinner"></span><span class="fetching" style="display:none"></span></div></div>`;
+      html += `<div class="rec-card"><div class="rec-header"><span class="rec-ticker">${sym}</span></div><div style="padding:12px;color:var(--muted);font-size:12px">${loading} <span class="spinner"></span></div></div>`;
       continue;
     }
     const cp = cached.current_price || symCache?._current_price || 0;
     const width = customWidth || DEFAULT_WIDTHS[sym] || 20;
     const allSpreads = computeSpreads(cached.chain, sym, cp, width);
 
-    // Compute empirical + predicted percentile brackets
     const spreadsWithPctl = allSpreads.map(s => {
       const bracket = getPercentileBracket(sym, exp, s.option_type, s.otm_pct);
       const predicted = getPredictedBracket(sym, exp, s.option_type, s.otm_pct);
       return {...s, _pctl: bracket, _pred: predicted};
     });
 
-    // Tag each spread with which filters it fails
-    function checkFilters(s) {
-      const fails = [];
-      if (s.roi_pct < minRoi) fails.push('ROI');
-      if (s.credit < minCredit) fails.push('Credit');
-      if (Math.abs(s.otm_pct) < minOtm) fails.push('OTM');
-      if (typeFilter !== 'ALL' && s.option_type !== typeFilter) fails.push('Type');
-      if (minPctl > 0 && (!s._pctl || s._pctl.pctl < minPctl)) fails.push('Hist');
-      if (minPred > 0 && (!s._pred || s._pred.pctl < minPred)) fails.push('Pred');
-      if (minTotalCredit > 0 && (s.credit_per_contract * recQty) < minTotalCredit) fails.push('TotCr');
-      if (maxTotalLoss < Infinity && (s.max_loss * recQty) > maxTotalLoss) fails.push('MaxL');
-      if (maxDelta < Infinity && s.short_delta != null && Math.abs(s.short_delta) > maxDelta) fails.push('Delta');
-      return fails;
-    }
-
     const spreads = [];
     const nearMisses = [];
     for (const s of spreadsWithPctl) {
-      const fails = checkFilters(s);
+      const fails = checkFilters(s, selectedDte);
       if (fails.length === 0) {
         spreads.push(s);
       } else {
         nearMisses.push({...s, _fails: fails});
       }
     }
-    // Sort near-misses: fewest failures first, then by ROI
     nearMisses.sort((a, b) => a._fails.length - b._fails.length || b.roi_pct - a.roi_pct);
 
     const srcLabel = cached.source === 'csv_exports' ? 'CSV' : cached.source === 'ibkr' ? 'IBKR' : (cached.source||'cache');
@@ -2363,9 +2653,8 @@ function renderRecs() {
       continue;
     }
 
-    html += `<table class="tbl"><thead><tr><th>Type</th><th>Short</th><th>Long</th><th class="num">Credit</th><th class="num">MaxLoss</th><th class="num">ROI%</th><th class="num">OTM%</th><th>Hist</th><th>Pred</th><th></th></tr></thead><tbody>`;
+    html += `<table class="tbl"><thead><tr><th>Type</th><th>Short</th><th>Long</th><th class="num">Credit</th><th class="num">MaxLoss</th><th class="num">ROI%</th><th class="num">OTM%</th><th class="num" title="OTM% from prev close">pc%</th><th>Hist</th><th>Pred</th><th></th></tr></thead><tbody>`;
 
-    // Render matching spreads
     for (const s of showMatches) {
       const totalCr = s.credit_per_contract * recQty;
       const totalML = s.max_loss * recQty;
@@ -2376,15 +2665,15 @@ function renderRecs() {
       html += `<td class="num" style="color:var(--red-b)">$${totalML.toLocaleString()}<div style="font-size:9px;color:var(--muted)">$${s.max_loss.toLocaleString()}/c</div></td>`;
       html += `<td class="num rec-roi">${s.roi_pct}%</td>`;
       html += `<td class="num">${s.otm_pct}%</td>`;
+      html += `<td class="num" style="color:var(--yellow)">${s.otm_pct_pc}%</td>`;
       html += `<td>${pctlBadge(s._pctl)}</td>`;
       html += `<td>${predBadge(s._pred)}</td>`;
       html += `<td><button class="btn btn-green btn-sm" onclick="tradeRec('${sym}','${s.option_type}',${s.short_strike},${s.long_strike},'${exp}')">Trade</button></td>`;
       html += '</tr>';
     }
 
-    // Render near-miss spreads in grey
     if (nearMissCount > 0) {
-      html += `<tr><td colspan="10" style="padding:4px 8px;font-size:10px;color:var(--muted);background:var(--bg);border-top:2px dashed var(--border)">Filtered out — closest to matching (${nearMisses.length} total)</td></tr>`;
+      html += `<tr><td colspan="11" style="padding:4px 8px;font-size:10px;color:var(--muted);background:var(--bg);border-top:2px dashed var(--border)">Filtered out — closest to matching (${nearMisses.length} total)</td></tr>`;
       for (const s of nearMisses.slice(0, nearMissCount)) {
         const totalCr = s.credit_per_contract * recQty;
         const totalML = s.max_loss * recQty;
@@ -2396,6 +2685,7 @@ function renderRecs() {
         html += `<td class="num">$${totalML.toLocaleString()}<div style="font-size:9px">$${s.max_loss.toLocaleString()}/c</div></td>`;
         html += `<td class="num">${s.roi_pct}%</td>`;
         html += `<td class="num">${s.otm_pct}%</td>`;
+        html += `<td class="num" style="color:var(--yellow)">${s.otm_pct_pc}%</td>`;
         html += `<td>${pctlBadge(s._pctl)}</td>`;
         html += `<td>${predBadge(s._pred)}</td>`;
         html += `<td><button class="btn btn-muted btn-sm" style="opacity:0.7;font-size:10px" onclick="tradeRec('${sym}','${s.option_type}',${s.short_strike},${s.long_strike},'${exp}')">Trade</button> ${failTags}</td>`;
@@ -2410,9 +2700,8 @@ function renderRecs() {
 
   html += `<div style="margin-top:4px;font-size:10px;color:var(--muted);text-align:right">Computed ${new Date().toLocaleTimeString()} (client-side)</div>`;
 
-  // Update data source bar for picks tab
   const srcEntries = [];
-  for (const sym of CHAIN_TICKERS) {
+  for (const sym of filteredTickers) {
     const c = getCachedChain(sym);
     if (c) srcEntries.push({sym, source:c.source, time:c.fetched_at || c.ts?.toISOString()});
   }
@@ -2822,6 +3111,7 @@ function loadAll() {
   // Phase 1: Instant (no daemon dependency)
   checkHealth();
   loadTickers();
+  connectPriceWebSocket();  // Realtime prices via db_server WebSocket
 
   // Phase 2: Portfolio (fast — daemon caches warm quickly)
   loadPortfolio();
@@ -2830,24 +3120,24 @@ function loadAll() {
   // IBKR cache from CSV, so subsequent options-grid calls are instant.
   fetch('/api/prefetch').catch(() => {});
 
-  // Phase 4: Percentile + prediction data (separate servers, no IBKR contention)
+  // Phase 4: Percentile + prediction + previous close data (separate servers, no IBKR contention)
+  fetchPrevCloses();
   fetchPercentiles();
   fetchPredictions();
-  setInterval(fetchPercentiles, 120000);
-  setInterval(fetchPredictions, 120000);
+  setInterval(fetchPrevCloses, 3600000);  // 1 hour — closes only change after daily ingestion
+  setInterval(fetchPercentiles, 300000);  // 5 min
+  setInterval(fetchPredictions, 300000);  // 5 min
 
-  // Phase 5: Stagger chain refresh + options refresh to AFTER prefetch has time
-  // to warm the cache (3s delay). This prevents 8 concurrent IBKR calls on load.
-  setTimeout(() => {
-    startChainRefresh();
-    startOptAutoRefresh();
-    loadRecommendations();
-    refreshAutoTradeStatus();
-  }, 3000);
+  // Phase 5: Start chain refresh + options refresh immediately.
+  // Prefetch is fire-and-forget; chain refresh benefits from any cache it populates.
+  startChainRefresh();
+  startOptAutoRefresh();
+  loadRecommendations();
+  refreshAutoTradeStatus();
 }
 
-// Auto-refresh tickers every 15s, portfolio every 30s
-setInterval(() => { if (document.getElementById('app').style.display==='flex') loadTickers(); }, 5000);
+// Ticker fallback poll (30s) — only used when WebSocket is down; WS pushes are instant
+setInterval(() => { if (document.getElementById('app').style.display==='flex') loadTickers(); }, 30000);
 setInterval(() => { if (document.getElementById('app').style.display==='flex' && document.getElementById('pane-portfolio').classList.contains('active')) loadPortfolio(); }, 30000);
 setInterval(checkHealth, 30000);
 
@@ -2962,7 +3252,7 @@ async function init() {
 
   // Apply hash route — default depends on auth state
   if (!window.location.hash) {
-    const defaultTab = _isLoggedIn ? '#/portfolio' : '#/options';
+    const defaultTab = '#/portfolio';
     history.replaceState(null, '', defaultTab);
   }
   applyRoute();

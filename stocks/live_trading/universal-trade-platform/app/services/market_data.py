@@ -97,7 +97,23 @@ async def get_quote(symbol: str, broker: Broker = Broker.IBKR) -> Quote:
                 source="streaming_cache",
             )
 
-    # 2-3. Provider (has its own internal cache before hitting IBKR)
+    # 2. Stale streaming tick (any age — better than a slow provider round-trip)
+    if svc and svc.is_running:
+        stale_tick = svc.get_last_tick(symbol, max_age_seconds=86400)  # 24h
+        if stale_tick and stale_tick.get("price", 0) > 0 and _is_valid_price(symbol, stale_tick["price"]):
+            price = stale_tick["price"]
+            logger.debug("Serving stale streaming tick for %s (age > %ds)", symbol, _QUOTE_STREAMING_TTL)
+            return Quote(
+                symbol=symbol,
+                bid=stale_tick.get("bid") or price,
+                ask=stale_tick.get("ask") or price,
+                last=price,
+                volume=stale_tick.get("volume", 0),
+                timestamp=datetime.fromisoformat(stale_tick["timestamp"]),
+                source="streaming_cache",
+            )
+
+    # 3. Provider (has its own internal cache before hitting IBKR)
     provider = ProviderRegistry.get(broker)
     quote = await provider.get_quote(symbol)
 

@@ -39,7 +39,7 @@ from typing import Any
 
 import bcrypt as _bcrypt
 import httpx
-from fastapi import FastAPI, Request, Response, HTTPException, Depends, Cookie
+from fastapi import FastAPI, Request, Response, HTTPException, Depends, Cookie, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from jose import JWTError, jwt
 import uvicorn
@@ -1080,10 +1080,112 @@ async def run_agent(
 app = FastAPI(title="UTP Voice", docs_url=None, redoc_url=None)
 
 
+# ── Realtime Price WebSocket Relay ────────────────────────────────────────────
+# Connects to db_server's WebSocket (QuestDB realtime_data) and relays price
+# ticks to browser clients.  One upstream connection per symbol, many browser
+# clients share it.
+
+_ws_clients: set[WebSocket] = set()
+_realtime_prices: dict[str, dict] = {}  # {sym: {price, bid, ask, timestamp}}
+_ws_relay_task: asyncio.Task | None = None
+
+_db_http = os.environ.get("DB_SERVER_URL", "http://localhost:9102")
+DB_SERVER_WS_URL = os.environ.get(
+    "DB_SERVER_WS_URL",
+    _db_http.replace("http://", "ws://").replace("https://", "wss://") + "/ws",
+)
+
+
+async def _ws_relay_loop():
+    """Connect to db_server WebSocket for each ticker and relay ticks to browser clients."""
+    import websockets
+
+    symbols = DEFAULT_TICKERS  # SPX, NDX, RUT
+
+    async def _subscribe(sym: str):
+        while True:
+            try:
+                url = f"{DB_SERVER_WS_URL}?symbol={sym}"
+                async with websockets.connect(url, ping_interval=20) as ws:
+                    logger.info("WS relay connected to db_server for %s", sym)
+                    async for raw in ws:
+                        try:
+                            msg = json.loads(raw)
+                            # db_server sends: {symbol, data: {event_type, payload: [...]}}
+                            # or top-level {type, event_type, payload: [...]}
+                            data = msg.get("data", msg)
+                            payload = data.get("payload", [])
+                            if not payload:
+                                continue
+                            tick = payload[0] if isinstance(payload, list) else payload
+
+                            # trade_update has "price"; quote_update has "bid_price"
+                            # initial_price_update has "price"
+                            price = tick.get("price") or tick.get("bid_price") or 0
+                            if not price or float(price) <= 0:
+                                continue
+
+                            bid = float(tick.get("bid_price") or price)
+                            ask = float(tick.get("ask_price") or bid)
+                            _realtime_prices[sym] = {
+                                "price": float(price),
+                                "bid": bid,
+                                "ask": ask,
+                                "timestamp": tick.get("timestamp", datetime.now(UTC).isoformat()),
+                            }
+
+                            # Broadcast to all browser clients
+                            out = json.dumps({"symbol": sym, **_realtime_prices[sym]})
+                            dead: list[WebSocket] = []
+                            for client in list(_ws_clients):
+                                try:
+                                    await client.send_text(out)
+                                except Exception:
+                                    dead.append(client)
+                            for c in dead:
+                                _ws_clients.discard(c)
+
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.debug("WS relay %s disconnected: %s — reconnecting in 5s", sym, e)
+                await asyncio.sleep(5)
+
+    await asyncio.gather(*[_subscribe(s) for s in symbols])
+
+
+@app.websocket("/ws/prices")
+async def ws_prices(ws: WebSocket):
+    """Browser clients connect here to receive realtime price ticks."""
+    await ws.accept()
+    _ws_clients.add(ws)
+    # Send current snapshot immediately
+    for sym, data in _realtime_prices.items():
+        try:
+            await ws.send_text(json.dumps({"symbol": sym, **data}))
+        except Exception:
+            pass
+    try:
+        while True:
+            # Keep alive — client doesn't need to send anything
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        pass
+    finally:
+        _ws_clients.discard(ws)
+
+
 @app.on_event("startup")
 async def _resume_background_tasks_on_startup():
     """Resume auto-trade on startup. Profit monitoring is handled by the daemon."""
-    global _auto_trade_task
+    global _auto_trade_task, _ws_relay_task
+
+    # Start WebSocket relay to db_server for realtime prices
+    _ws_relay_task = asyncio.create_task(_ws_relay_loop())
+
+    # Pre-warm percentile + prediction caches so the first page load is instant.
+    # Fire-and-forget — don't block startup.
+    asyncio.create_task(_warm_percentile_caches())
 
     # Resume auto-trade if active
     try:
@@ -1093,6 +1195,20 @@ async def _resume_background_tasks_on_startup():
             _auto_trade_task = asyncio.create_task(_auto_trade_loop(state))
     except Exception as e:
         logger.warning("Failed to resume auto-trade: %s", e)
+
+
+async def _warm_percentile_caches():
+    """Pre-warm percentile, prediction, and previous-close caches at startup."""
+    try:
+        await asyncio.gather(
+            api_percentiles(),
+            api_predictions(),
+            api_prev_closes(),
+            return_exceptions=True,
+        )
+        logger.info("Pre-warmed percentile + prediction + prev-close caches")
+    except Exception as e:
+        logger.debug("Cache warm failed (non-critical): %s", e)
 
 
 @app.exception_handler(Exception)
@@ -1391,6 +1507,29 @@ _expirations_cache: dict[str, tuple[list[str], float, str]] = {}  # symbol -> (e
 _prefetch_in_progress: set[str] = set()
 
 OPTIONS_CACHE_TTL_MARKET = 120  # 2 minutes during market hours
+
+# ── Quote Cache ──────────────────────────────────────────────────────────────
+# Short-lived cache to deduplicate concurrent daemon requests.  The daemon's
+# streaming cache is the authoritative source — this just avoids redundant
+# HTTP round-trips (e.g. ticker bar + options-grid both needing SPX price).
+QUOTE_CACHE_TTL = 5  # seconds — uniform regardless of market hours
+_quote_cache: dict[str, tuple[dict, float]] = {}  # symbol -> (quote_data, monotonic_ts)
+
+
+def _get_cached_quote(symbol: str) -> dict | None:
+    """Return cached quote if still valid, else None."""
+    entry = _quote_cache.get(symbol)
+    if not entry:
+        return None
+    data, ts = entry
+    if (time.time() - ts) < QUOTE_CACHE_TTL:
+        return data
+    return None
+
+
+def _put_cached_quote(symbol: str, data: dict) -> None:
+    """Cache a quote result."""
+    _quote_cache[symbol] = (data, time.time())
 
 
 def _is_market_hours() -> bool:
@@ -2166,12 +2305,17 @@ async def _prefetch_options_for_symbol(symbol: str) -> None:
     """Two-phase prefetch: CSV instantly, IBKR in background."""
     client = get_daemon_client()
 
-    # Get price
-    try:
-        quote = await client.get_quote(symbol)
-        price = quote.get("last") or quote.get("bid") or 0
-    except Exception:
-        price = 0
+    # Get price — use cache when available
+    cached_q = _get_cached_quote(symbol)
+    if cached_q and not cached_q.get("error"):
+        price = cached_q.get("last") or cached_q.get("bid") or 0
+    else:
+        try:
+            quote = await client.get_quote(symbol)
+            _put_cached_quote(symbol, quote)
+            price = quote.get("last") or quote.get("bid") or 0
+        except Exception:
+            price = 0
 
     # Phase 1: CSV (instant, synchronous)
     csv_exps = _prefetch_csv_for_symbol(symbol, price)
@@ -2254,15 +2398,39 @@ async def api_quotes(
     symbols: str = "SPX,NDX,RUT",
     _u: str | None = Depends(optional_session),
 ):
-    """Get live quotes for multiple symbols."""
+    """Get live quotes for multiple symbols.
+
+    Uses a quote cache to avoid slow daemon round-trips:
+    - During market hours: 5s TTL, fetches from daemon concurrently
+    - Outside market hours: infinite TTL (prices don't change)
+    """
     client = get_daemon_client()
     tickers = [s.strip().upper() for s in symbols.split(",") if s.strip()]
     results = {}
+    to_fetch: list[str] = []
+
+    # Check cache first
     for sym in tickers:
-        try:
-            results[sym] = await client.get_quote(sym)
-        except Exception as e:
-            results[sym] = {"error": str(e)}
+        cached = _get_cached_quote(sym)
+        if cached:
+            results[sym] = cached
+        else:
+            to_fetch.append(sym)
+
+    # Fetch uncached quotes concurrently from daemon
+    if to_fetch:
+        async def _fetch_one(sym: str) -> tuple[str, dict]:
+            try:
+                data = await client.get_quote(sym)
+                _put_cached_quote(sym, data)
+                return (sym, data)
+            except Exception as e:
+                return (sym, {"error": str(e)})
+
+        fetched = await asyncio.gather(*[_fetch_one(s) for s in to_fetch])
+        for sym, data in fetched:
+            results[sym] = data
+
     return results
 
 
@@ -2279,8 +2447,18 @@ async def api_options_grid(
     symbol = symbol.upper()
 
     try:
-        # Get current price
-        quote = await client.get_quote(symbol)
+        market_open = _is_market_hours()
+
+        # Get current price — check local dedup cache first, then daemon
+        cached_q = _get_cached_quote(symbol)
+        if cached_q and not cached_q.get("error"):
+            quote = cached_q
+        else:
+            try:
+                quote = await client.get_quote(symbol)
+                _put_cached_quote(symbol, quote)
+            except Exception:
+                quote = cached_q or {}
         current_price = quote.get("last") or quote.get("bid") or 0
 
         # Get expirations: merge CSV (has daily 0DTE) + IBKR (has further-out)
@@ -2315,8 +2493,6 @@ async def api_options_grid(
         fetched_at = None
         cached_at = None
         any_empty = False
-
-        market_open = _is_market_hours()
 
         for ot in types:
             # 1. Check server-side cache (may have CSV or IBKR data)
@@ -2368,7 +2544,7 @@ async def api_options_grid(
                     cached_at = _now_iso()
                     continue
 
-            # 3. Try daemon/IBKR (slow)
+            # 4. Last resort: try daemon/IBKR
             try:
                 data = await client.get_options(
                     symbol, option_type=ot, expiration=expiration,
@@ -2454,8 +2630,17 @@ async def api_recommendations(
     results = {}
     for symbol in tickers:
         try:
-            quote = await client.get_quote(symbol)
-            current_price = quote.get("last") or quote.get("bid") or 0
+            # Use quote cache
+            cached_q = _get_cached_quote(symbol)
+            if cached_q and not cached_q.get("error"):
+                current_price = cached_q.get("last") or cached_q.get("bid") or 0
+            else:
+                try:
+                    quote = await client.get_quote(symbol)
+                    _put_cached_quote(symbol, quote)
+                    current_price = quote.get("last") or quote.get("bid") or 0
+                except Exception:
+                    current_price = 0
             if not current_price:
                 results[symbol] = {"error": "No price data"}
                 continue
@@ -2587,9 +2772,105 @@ async def api_performance_summary(
         raise HTTPException(status_code=502, detail=str(e))
 
 
+DB_SERVER_URL = os.environ.get("DB_SERVER_URL", "http://localhost:9102")
 PERCENTILE_SERVER_URL = os.environ.get("PERCENTILE_SERVER_URL", "http://localhost:9100")
 _percentile_cache: dict | None = None
 _percentile_cache_at: float = 0
+
+# ── Previous Close Prices ────────────────────────────────────────────────────
+# Queried from db_server (QuestDB daily_prices table) — the same source
+# stock_display_dashboard.py uses.  Cached with long TTL since closes only
+# change once a day (after daily ingestion, typically 3 AM).
+_prev_close_cache: dict[str, float] = {}  # {symbol: price}
+_prev_close_cache_at: float = 0
+PREV_CLOSE_CACHE_TTL = 3600  # 1 hour — closes don't change intraday
+
+
+@app.get("/api/prev-closes")
+async def api_prev_closes(
+    symbols: str = "SPX,NDX,RUT",
+    _u: str | None = Depends(optional_session),
+):
+    """Get previous close price from QuestDB daily_prices via db_server.
+
+    During market hours: the "previous close" is the most recent close BEFORE today
+    (yesterday's close).  This is the reference for intraday change calculations.
+
+    After market close: today's close may be ingested.  We still want yesterday's
+    close so the displayed change reflects "today vs yesterday" — same as Bloomberg/
+    Yahoo Finance.  Query: WHERE date < today ORDER BY date DESC LIMIT 1.
+    """
+    global _prev_close_cache, _prev_close_cache_at
+    tickers = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+
+    # Check cache — shorter TTL during market hours so it refreshes on date rollover
+    ttl = PREV_CLOSE_CACHE_TTL if not _is_market_hours() else 300  # 5 min during market
+    if _prev_close_cache and (time.time() - _prev_close_cache_at) < ttl:
+        if all(sym in _prev_close_cache for sym in tickers):
+            return _prev_close_cache
+
+    # Today's date in ET (market calendar uses ET)
+    try:
+        from zoneinfo import ZoneInfo
+        today_et = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
+    except Exception:
+        today_et = (datetime.now(UTC) - timedelta(hours=4)).strftime("%Y-%m-%d")
+
+    result: dict[str, float | None] = {}
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            for sym in tickers:
+                try:
+                    # Most recent close BEFORE today = previous trading day's close.
+                    # Works correctly regardless of whether today's close is ingested:
+                    # - Market open: today's close doesn't exist yet → returns yesterday's
+                    # - Market closed, pre-ingestion: same as above
+                    # - Market closed, post-ingestion: today's close exists but date < today
+                    #   filters it out → still returns yesterday's
+                    sql = (
+                        f"SELECT close FROM daily_prices "
+                        f"WHERE ticker = '{sym}' AND date < '{today_et}' "
+                        f"ORDER BY date DESC LIMIT 1"
+                    )
+                    resp = await client.get(
+                        f"{DB_SERVER_URL}/api/execute_sql",
+                        params={"sql": sql},
+                    )
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        rows = data.get("data", data.get("results", data.get("rows", [])))
+                        if rows:
+                            close_val = rows[0].get("close") or rows[0].get("Close")
+                            if close_val:
+                                result[sym] = float(close_val)
+                except Exception as e:
+                    logger.debug("prev-close fetch failed for %s: %s", sym, e)
+    except Exception as e:
+        logger.warning("db_server unavailable for prev-closes: %s", e)
+
+    # Fallback: use prediction/percentile data if db_server didn't work
+    if not result or len(result) < len(tickers):
+        for sym in tickers:
+            if sym not in result:
+                # Try predictions first, then percentiles
+                pred_close = None
+                if _predictions_cache and sym in _predictions_cache:
+                    pred_close = _predictions_cache[sym].get("today", {}).get("prev_close")
+                if pred_close:
+                    result[sym] = float(pred_close)
+                elif _percentile_cache:
+                    for t in _percentile_cache.get("tickers", []):
+                        if t.get("ticker") == sym:
+                            pc = t.get("metadata", {}).get("previous_close")
+                            if pc:
+                                result[sym] = float(pc)
+                            break
+
+    if result:
+        _prev_close_cache = result
+        _prev_close_cache_at = time.time()
+
+    return result
 
 
 @app.get("/api/percentiles")

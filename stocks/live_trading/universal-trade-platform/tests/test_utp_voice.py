@@ -34,6 +34,7 @@ def _reset_state(tmp_path):
     utp_voice._options_cache.clear()
     utp_voice._expirations_cache.clear()
     utp_voice._prefetch_in_progress.clear()
+    utp_voice._quote_cache.clear()
     utp_voice.PUBLIC_MODE = False  # Default: require auth
     # Override credentials file to tmp
     utp_voice.CREDENTIALS_FILE = str(tmp_path / "credentials.json")
@@ -43,6 +44,7 @@ def _reset_state(tmp_path):
     utp_voice._options_cache.clear()
     utp_voice._expirations_cache.clear()
     utp_voice._prefetch_in_progress.clear()
+    utp_voice._quote_cache.clear()
     utp_voice.PUBLIC_MODE = False
 
 
@@ -884,6 +886,39 @@ class TestQuotesAPI:
             data = resp.json()
             assert "SPX" in data
             assert "NDX" in data
+
+    def test_quotes_uses_cache(self, client, auth_cookie):
+        """Second call should serve from cache, not hit daemon again."""
+        mock_client = AsyncMock()
+        mock_client.get_quote.side_effect = [
+            {"symbol": "SPX", "last": 6500},
+        ]
+        # Populate cache
+        utp_voice._put_cached_quote("SPX", {"symbol": "SPX", "last": 6500})
+
+        with patch.object(utp_voice, "get_daemon_client", return_value=mock_client):
+            resp = client.get("/api/quotes?symbols=SPX", cookies=auth_cookie)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["SPX"]["last"] == 6500
+            # Daemon should NOT have been called since cache was populated
+            mock_client.get_quote.assert_not_called()
+
+    def test_quotes_concurrent_fetch(self, client, auth_cookie):
+        """Quotes for multiple symbols should be fetched concurrently."""
+        mock_client = AsyncMock()
+        mock_client.get_quote.side_effect = [
+            {"symbol": "SPX", "last": 6500},
+            {"symbol": "NDX", "last": 21000},
+            {"symbol": "RUT", "last": 2500},
+        ]
+        with patch.object(utp_voice, "get_daemon_client", return_value=mock_client):
+            resp = client.get("/api/quotes?symbols=SPX,NDX,RUT", cookies=auth_cookie)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert len(data) == 3
+            assert data["SPX"]["last"] == 6500
+            assert data["RUT"]["last"] == 2500
 
 
 class TestOptionsGridAPI:
