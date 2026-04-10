@@ -92,17 +92,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         # doesn't survive the fork. Register a proxy provider that routes IBKR calls
         # back to the main daemon process via HTTP.
         if os.environ.get("_UTP_DAEMON_WORKER") == "1":
-            daemon_port = int(os.environ.get("_UTP_DAEMON_PORT", "8000"))
-            logger.info("Worker process: registering DaemonProxyProvider (port=%d)", daemon_port)
-            from app.core.providers.daemon_proxy import DaemonProxyProvider
-            proxy = DaemonProxyProvider(f"http://127.0.0.1:{daemon_port}")
-            ProviderRegistry.register(proxy)
-            await proxy.connect()
-            # Workers also need persistence services for routes that access
-            # position store / ledger directly (flush, reconcile, trades, etc.)
-            data_dir = Path(settings.data_dir)
-            init_ledger(data_dir)
-            init_position_store(data_dir)
+            # Workers are pure reverse proxies — all requests forwarded to IBKR
+            # process by worker_proxy_middleware. No local services needed.
+            logger.info("Worker process: all requests proxy to IBKR process (port=%s)",
+                        os.environ.get("_UTP_DAEMON_PORT", "8001"))
         yield
         return
 
@@ -177,6 +170,85 @@ app = FastAPI(
                 "transaction ledger, dashboard, and paper trading.",
     lifespan=lifespan,
 )
+
+
+@app.middleware("http")
+async def worker_proxy_middleware(request: Request, call_next):
+    """In multi-worker mode, route requests through Redis cache or IBKR process.
+
+    Workers have no local state. For read (GET) requests:
+    1. Check Redis for a cached response → serve instantly if fresh
+    2. On miss → proxy to IBKR process → cache the response in Redis
+
+    For write (POST/PUT/DELETE) requests: always proxy to IBKR process.
+    /health is handled locally for uvicorn worker health checks.
+    """
+    if os.environ.get("_UTP_DAEMON_WORKER") != "1" or request.url.path == "/health":
+        return await call_next(request)
+
+    import httpx
+    import json as _json
+    from starlette.responses import Response
+    from fastapi.responses import JSONResponse
+
+    port = int(os.environ.get("_UTP_DAEMON_PORT", "8001"))
+    path = request.url.path
+    query = str(request.url.query) if request.url.query else ""
+    target = f"http://127.0.0.1:{port}{path}"
+    if query:
+        target += f"?{query}"
+
+    # GET requests: try Redis cache first
+    if request.method == "GET":
+        try:
+            from app.services.redis_cache import get_redis
+            r = await get_redis()
+            if r:
+                cache_key = f"utp:http_cache:{path}?{query}" if query else f"utp:http_cache:{path}"
+                cached = await r.get(cache_key)
+                if cached:
+                    return Response(
+                        content=cached.encode() if isinstance(cached, str) else cached,
+                        status_code=200,
+                        media_type="application/json",
+                    )
+        except Exception:
+            pass  # Redis down — fall through to proxy
+
+    # Proxy to IBKR process
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            body = await request.body()
+            resp = await client.request(
+                method=request.method,
+                url=target,
+                headers={k: v for k, v in request.headers.items()
+                         if k.lower() not in ("host", "content-length")},
+                content=body if body else None,
+            )
+
+            # Cache successful GET responses in Redis (short TTL for workers)
+            if request.method == "GET" and resp.status_code == 200:
+                try:
+                    from app.services.redis_cache import get_redis
+                    r = await get_redis()
+                    if r:
+                        cache_key = f"utp:http_cache:{path}?{query}" if query else f"utp:http_cache:{path}"
+                        # Short TTL: workers re-validate often; IBKR process is authoritative
+                        await r.setex(cache_key, 5, resp.content)
+                except Exception:
+                    pass
+
+            return Response(
+                content=resp.content,
+                status_code=resp.status_code,
+                headers=dict(resp.headers),
+            )
+    except Exception as e:
+        return JSONResponse(
+            status_code=502,
+            content={"detail": f"IBKR process proxy error: {e}"},
+        )
 
 
 @app.middleware("http")

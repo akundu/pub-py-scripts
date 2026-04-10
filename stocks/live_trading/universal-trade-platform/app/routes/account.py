@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from datetime import UTC, date, datetime, timedelta
 from typing import Annotated, Optional
 
@@ -13,25 +12,6 @@ from app.core.provider import ProviderRegistry
 from app.models import AggregatedPositions, Broker, ReconciliationReport, SyncResult
 
 router = APIRouter(prefix="/account", tags=["account"])
-
-
-def _is_worker() -> bool:
-    """True if running as a uvicorn worker (not the IBKR process)."""
-    return os.environ.get("_UTP_DAEMON_WORKER") == "1"
-
-
-async def _proxy_to_ibkr(method: str, path: str, json_data: dict | None = None) -> dict:
-    """Forward a request to the IBKR process (used by workers for state-mutating ops)."""
-    import httpx
-    port = int(os.environ.get("_UTP_DAEMON_PORT", "8001"))
-    url = f"http://127.0.0.1:{port}{path}"
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        if method == "POST":
-            resp = await client.post(url, json=json_data)
-        else:
-            resp = await client.get(url)
-        resp.raise_for_status()
-        return resp.json()
 
 
 @router.get("/positions", response_model=AggregatedPositions)
@@ -47,10 +27,6 @@ async def sync_positions(
     _user: Annotated[TokenData, Security(require_auth, scopes=["account:read"])],
 ) -> SyncResult:
     """Manually trigger a position sync across all brokers."""
-    if _is_worker():
-        data = await _proxy_to_ibkr("POST", "/account/sync")
-        return SyncResult(**data)
-
     from app.services.ledger import get_ledger
     from app.services.position_store import get_position_store
     from app.services.position_sync import PositionSyncService
@@ -69,9 +45,6 @@ async def check_expirations(
     _user: Annotated[TokenData, Security(require_auth, scopes=["trades:write"])],
 ) -> dict:
     """Manually trigger expiration check and auto-close."""
-    if _is_worker():
-        return await _proxy_to_ibkr("POST", "/account/check-expirations")
-
     from app.services.expiration_service import ExpirationService
     from app.services.ledger import get_ledger
     from app.services.position_store import get_position_store
@@ -140,10 +113,6 @@ async def flush_positions(
     Preserves closed positions (P&L history). Only clears open positions
     so they can be re-imported fresh from IBKR.
     """
-    # Workers proxy state-mutating ops to the IBKR process which owns the data
-    if _is_worker():
-        return await _proxy_to_ibkr("POST", "/account/flush")
-
     from app.services.ledger import get_ledger
     from app.services.position_store import get_position_store
     from app.services.position_sync import PositionSyncService
@@ -190,9 +159,6 @@ async def hard_reset(
     This is the only reliable way to reset when the daemon is running,
     since the daemon holds positions in memory.
     """
-    if _is_worker():
-        return await _proxy_to_ibkr("POST", "/account/hard-reset")
-
     from app.services.ledger import get_ledger
     from app.services.position_store import get_position_store
     from app.services.position_sync import PositionSyncService
