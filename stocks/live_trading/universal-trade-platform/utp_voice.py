@@ -3407,12 +3407,19 @@ Examples:
 
 
 def _run_server_with_restart(host: str, port: int, log_level: str, workers: int) -> None:
-    """Run uvicorn with auto-restart on crash. Ctrl-C/SIGTERM exits cleanly."""
+    """Run uvicorn with auto-restart on crash. Ctrl-C exits; second Ctrl-C force-kills."""
     import signal
     import threading
 
-    def _force_exit():
-        """Force kill after 5 seconds if graceful shutdown hangs."""
+    _shutting_down = False
+
+    def _force_exit_handler(signum, frame):
+        """Second Ctrl-C during shutdown → immediate kill."""
+        print("\n  Force exit (second Ctrl-C)")
+        os._exit(1)
+
+    def _force_exit_timer():
+        """Force kill after 3 seconds if graceful shutdown hangs."""
         print("\n  Force killing (shutdown took too long)...")
         os._exit(1)
 
@@ -3436,9 +3443,11 @@ def _run_server_with_restart(host: str, port: int, log_level: str, workers: int)
             break
 
         except KeyboardInterrupt:
-            print("\n  Shutting down (Ctrl-C)... force kill in 5s if stuck")
-            # Start a daemon thread that force-kills after 5 seconds
-            t = threading.Timer(5.0, _force_exit)
+            print("\n  Shutting down (Ctrl-C)... press again to force exit")
+            # Install handler so next Ctrl-C kills immediately
+            signal.signal(signal.SIGINT, _force_exit_handler)
+            # Also set a 3s safety timer
+            t = threading.Timer(3.0, _force_exit_timer)
             t.daemon = True
             t.start()
             break
