@@ -98,6 +98,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             proxy = DaemonProxyProvider(f"http://127.0.0.1:{daemon_port}")
             ProviderRegistry.register(proxy)
             await proxy.connect()
+            # Workers also need persistence services for routes that access
+            # position store / ledger directly (flush, reconcile, trades, etc.)
+            data_dir = Path(settings.data_dir)
+            init_ledger(data_dir)
+            init_position_store(data_dir)
         yield
         return
 
