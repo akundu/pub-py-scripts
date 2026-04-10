@@ -3125,7 +3125,15 @@ async def _cmd_trade_http(args, server: str) -> int:
                         md = mr.json()
                         if md.get("error"):
                             err_msg = md["error"]
-                            print(f"\n  {_color(f'IBKR rejects: {err_msg}', '91')}")
+                            # Distinguish real rejections from transient CPG issues
+                            is_margin_reject = any(kw in err_msg.upper() for kw in (
+                                "MARGIN", "EQUITY", "NOT ACCEPTED", "INSUFFICIENT",
+                                "BUYING POWER", "POSITION LIMIT",
+                            ))
+                            if is_margin_reject:
+                                print(f"\n  {_color(f'IBKR rejects: {err_msg}', '91')}")
+                            else:
+                                print(f"\n  {_color(f'Margin check unavailable: {err_msg}', '93')}")
                         else:
                             im = md.get("init_margin", 0)
                             mm = md.get("maint_margin", 0)
