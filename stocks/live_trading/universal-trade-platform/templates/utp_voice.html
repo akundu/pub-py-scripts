@@ -956,17 +956,26 @@ function getCachedChain(sym, exp) {
 }
 
 // ── Auth ─────────────────────────────────────────────────────────────────────
+let _loginInProgress = false;
 async function handleLogin(e) {
   e.preventDefault();
+  if (_loginInProgress) return false;
+  _loginInProgress = true;
   const u = document.getElementById('login-user').value;
   const p = document.getElementById('login-pass').value;
   const err = document.getElementById('login-error');
+  const btn = document.querySelector('#login-form button[type="submit"]');
   err.textContent = '';
+  if (btn) { btn.disabled = true; btn.textContent = 'Logging in...'; }
   try {
     const r = await fetch('/api/login', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({username:u,password:p})});
     if (!r.ok) { err.textContent = (await r.json()).detail||'Login failed'; return false; }
     onLoginSuccess();
   } catch(e) { err.textContent = 'Connection error'; }
+  finally {
+    _loginInProgress = false;
+    if (btn) { btn.disabled = false; btn.textContent = 'Login'; }
+  }
   return false;
 }
 let _isLoggedIn = false;
@@ -1110,7 +1119,10 @@ async function loadTickers() {
 }
 
 // ── Health ────────────────────────────────────────────────────────────────────
+let _healthLoading = false;
 async function checkHealth() {
+  if (_healthLoading) return;
+  _healthLoading = true;
   try {
     const r = await fetch('/api/health');
     const d = await r.json();
@@ -1118,12 +1130,16 @@ async function checkHealth() {
     dot.className = d.status==='ok' ? 'ok' : 'bad';
     dot.title = d.status==='ok' ? `IBKR: ${d.daemon?.ibkr_connected?'yes':'no'}` : 'Daemon offline';
   } catch { document.getElementById('status-dot').className = 'bad'; }
+  finally { _healthLoading = false; }
 }
 
 // ── Portfolio Tab ────────────────────────────────────────────────────────────
 let _portfolioData = null;  // last portfolio response for IDB caching
+let _portfolioLoading = false;
 
 async function loadPortfolio() {
+  if (_portfolioLoading) return;
+  _portfolioLoading = true;
   const tbl = document.getElementById('portfolio-table');
   const kpis = document.getElementById('portfolio-kpis');
 
@@ -1149,6 +1165,8 @@ async function loadPortfolio() {
     if (!tbl.innerHTML.includes('tbl')) {
       tbl.innerHTML = `<div class="msg-error">${e.message}</div>`;
     }
+  } finally {
+    _portfolioLoading = false;
   }
 }
 
