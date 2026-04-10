@@ -35,8 +35,9 @@ logging.basicConfig(level=getattr(logging, _log_level, logging.INFO),
 logger = logging.getLogger(__name__)
 
 # Module-level daemon mode flag. When True, lifespan() skips provider init
-# because the daemon process already did it.
-_daemon_mode = False
+# because the daemon process already did it.  Also check env var for
+# subprocess workers that can't inherit the Python module-level flag.
+_daemon_mode = os.environ.get("_UTP_DAEMON_MODE") == "1"
 
 
 async def _expiration_loop(interval: int) -> None:

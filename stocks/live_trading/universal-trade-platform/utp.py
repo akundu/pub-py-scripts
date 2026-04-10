@@ -5036,6 +5036,7 @@ async def _run_multiprocess_daemon(
     import subprocess
     env = os.environ.copy()
     env["_UTP_DAEMON_WORKER"] = "1"
+    env["_UTP_DAEMON_MODE"] = "1"
     env["_UTP_DAEMON_PORT"] = str(ibkr_port)
 
     worker_cmd = [
@@ -5170,6 +5171,7 @@ async def _cmd_daemon(args) -> int:
     # Set daemon mode flag to prevent lifespan from re-initializing
     import app.main
     app.main._daemon_mode = True
+    os.environ["_UTP_DAEMON_MODE"] = "1"
 
     server_host = getattr(args, "server_host", "0.0.0.0")
     server_port = getattr(args, "server_port", 8000)
@@ -6294,6 +6296,7 @@ def _run_daemon_with_restart(args) -> int:
             reset_option_quote_streaming()
             import app.main
             app.main._daemon_mode = False
+            os.environ.pop("_UTP_DAEMON_MODE", None)
 
 
 def main():
