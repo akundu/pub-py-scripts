@@ -3390,20 +3390,19 @@ async function init() {
     }
   } catch(e) { console.log('IDB hydration skipped:', e); }
 
-  // Quick auth check — lightweight, no daemon call
-  try {
-    const r = await fetch('/api/auth-check');
+  // Restore saved filter settings from localStorage
+  _restoreRecFilters();
+
+  // Start loading data immediately — don't wait for auth check
+  loadAll();
+
+  // Auth check in parallel (non-blocking)
+  fetch('/api/auth-check').then(r => {
     if (r.status !== 401) {
       _isLoggedIn = true;
       document.getElementById('login-btn-area').innerHTML = '<button class="hbtn" onclick="handleLogout()">Out</button>';
     }
-  } catch(e) {}
-
-  // Restore saved filter settings from localStorage
-  _restoreRecFilters();
-
-  // Load public data (network refresh — updates stale IDB data)
-  loadAll();
+  }).catch(() => {});
 
   // Apply hash route — default depends on auth state
   if (!window.location.hash) {
