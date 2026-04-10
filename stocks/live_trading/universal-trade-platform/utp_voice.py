@@ -1198,7 +1198,44 @@ async def _resume_background_tasks_on_startup():
 
 
 async def _warm_percentile_caches():
-    """Pre-warm percentile, prediction, and previous-close caches at startup."""
+    """Pre-warm caches at startup: Redis first (instant), then upstream servers."""
+    global _percentile_cache, _percentile_cache_at
+    global _predictions_cache, _predictions_cache_at
+    global _prev_close_cache, _prev_close_cache_at
+
+    # Phase 1: Hydrate L1 from Redis (instant — survives restarts)
+    try:
+        from app.services.redis_cache import cache_get
+        pctl = await cache_get("utp:voice:percentiles", ttl_market=300, ttl_closed=86400)
+        if pctl:
+            _percentile_cache = pctl
+            _percentile_cache_at = time.time()
+            logger.info("Hydrated percentiles from Redis")
+        pred = await cache_get("utp:voice:predictions", ttl_market=300, ttl_closed=86400)
+        if pred:
+            _predictions_cache = pred
+            _predictions_cache_at = time.time()
+            logger.info("Hydrated predictions from Redis")
+        pc = await cache_get("utp:voice:prev_closes", ttl_market=300, ttl_closed=3600)
+        if pc:
+            _prev_close_cache = pc
+            _prev_close_cache_at = time.time()
+            logger.info("Hydrated prev_closes from Redis")
+
+        # Hydrate options + expirations caches from Redis
+        from app.services.redis_cache import get_redis
+        r = await get_redis()
+        if r:
+            for sym in DEFAULT_TICKERS:
+                ekey = f"utp:voice:expirations:{sym}"
+                entry = await cache_get(ekey, ttl_market=3600, ttl_closed=86400)
+                if entry and isinstance(entry, list):
+                    _expirations_cache[sym] = (entry, time.time(), _now_iso())
+                    logger.info("Hydrated expirations for %s from Redis (%d)", sym, len(entry))
+    except Exception as e:
+        logger.debug("Redis hydration failed (non-critical): %s", e)
+
+    # Phase 2: Fetch fresh from upstream servers (fills gaps, refreshes stale data)
     try:
         await asyncio.gather(
             api_percentiles(),
@@ -1208,7 +1245,7 @@ async def _warm_percentile_caches():
         )
         logger.info("Pre-warmed percentile + prediction + prev-close caches")
     except Exception as e:
-        logger.debug("Cache warm failed (non-critical): %s", e)
+        logger.debug("Upstream cache warm failed (non-critical): %s", e)
 
 
 @app.exception_handler(Exception)
@@ -1502,18 +1539,29 @@ class CachedOptions:
     source: str = "unknown"    # "csv_exports", "ibkr", "streaming_cache"
 
 
+# ── In-process L1 dicts backed by Redis L2 ──────────────────────────────────
+# Sync reads hit the L1 dict (instant). Writes go to both L1 + Redis (async,
+# fire-and-forget).  On startup, L1 is populated from Redis so data survives
+# restarts.  Redis TTL = max(market, closed); freshness checked at read time.
+
 _options_cache: dict[str, CachedOptions] = {}  # key: "{symbol}_{expiration}_{type}"
 _expirations_cache: dict[str, tuple[list[str], float, str]] = {}  # symbol -> (exps, mono_ts, utc_iso)
 _prefetch_in_progress: set[str] = set()
 
 OPTIONS_CACHE_TTL_MARKET = 120  # 2 minutes during market hours
 
-# ── Quote Cache ──────────────────────────────────────────────────────────────
-# Short-lived cache to deduplicate concurrent daemon requests.  The daemon's
-# streaming cache is the authoritative source — this just avoids redundant
-# HTTP round-trips (e.g. ticker bar + options-grid both needing SPX price).
 QUOTE_CACHE_TTL = 5  # seconds — uniform regardless of market hours
 _quote_cache: dict[str, tuple[dict, float]] = {}  # symbol -> (quote_data, monotonic_ts)
+
+
+def _redis_write_bg(key: str, data: Any, ttl_market: int = 300, ttl_closed: int = 86400, version: str = "") -> None:
+    """Fire-and-forget write to Redis (non-blocking from sync code)."""
+    try:
+        loop = asyncio.get_running_loop()
+        from app.services.redis_cache import cache_set
+        loop.create_task(cache_set(key, data, ttl_market=ttl_market, ttl_closed=ttl_closed, version=version))
+    except Exception:
+        pass  # No running loop or Redis unavailable — L1 still works
 
 
 def _get_cached_quote(symbol: str) -> dict | None:
@@ -1528,8 +1576,9 @@ def _get_cached_quote(symbol: str) -> dict | None:
 
 
 def _put_cached_quote(symbol: str, data: dict) -> None:
-    """Cache a quote result."""
+    """Cache a quote result (L1 + Redis)."""
     _quote_cache[symbol] = (data, time.time())
+    _redis_write_bg(f"utp:voice:quote:{symbol}", data, ttl_market=10, ttl_closed=10)
 
 
 def _is_market_hours() -> bool:
@@ -1588,6 +1637,12 @@ def _put_cached_options(
         fetched_at_utc=fetched_at_utc or _now_iso(),
         symbol=symbol, source=source,
     )
+    _redis_write_bg(
+        f"utp:voice:options:{symbol}:{expiration}:{option_type}",
+        {"quotes": data, "source": source, "fetched_at": fetched_at_utc or _now_iso()},
+        ttl_market=OPTIONS_CACHE_TTL_MARKET, ttl_closed=86400,
+        version=f"{source}:{fetched_at_utc or _now_iso()}",
+    )
 
 
 def _get_cached_expirations(symbol: str) -> list[str] | None:
@@ -1601,6 +1656,7 @@ def _get_cached_expirations(symbol: str) -> list[str] | None:
 
 def _put_cached_expirations(symbol: str, exps: list[str]) -> None:
     _expirations_cache[symbol] = (exps, time.time(), _now_iso())
+    _redis_write_bg(f"utp:voice:expirations:{symbol}", exps, ttl_market=3600, ttl_closed=86400)
 
 
 # ── CSV Exports Reader ────────────────────────────────────────────────────────
@@ -2869,6 +2925,19 @@ async def api_prev_closes(
     if result:
         _prev_close_cache = result
         _prev_close_cache_at = time.time()
+        _redis_write_bg("utp:voice:prev_closes", result, ttl_market=300, ttl_closed=3600)
+
+    # Try Redis if still empty
+    if not result:
+        from app.services.redis_cache import cache_get
+        try:
+            cached = await cache_get("utp:voice:prev_closes", ttl_market=300, ttl_closed=3600)
+            if cached:
+                result = cached
+                _prev_close_cache = cached
+                _prev_close_cache_at = time.time()
+        except Exception:
+            pass
 
     return result
 
@@ -2890,9 +2959,21 @@ async def api_percentiles(_u: str | None = Depends(optional_session)):
             if resp.status_code == 200:
                 _percentile_cache = resp.json()
                 _percentile_cache_at = time.time()
+                _redis_write_bg("utp:voice:percentiles", _percentile_cache, ttl_market=300, ttl_closed=86400)
                 return _percentile_cache
     except Exception as e:
         logger.warning("Percentile server unavailable: %s", e)
+
+    # Try Redis if L1 empty
+    if not _percentile_cache:
+        from app.services.redis_cache import cache_get
+        try:
+            cached = await cache_get("utp:voice:percentiles", ttl_market=300, ttl_closed=86400)
+            if cached:
+                _percentile_cache = cached
+                _percentile_cache_at = time.time()
+        except Exception:
+            pass
 
     if _percentile_cache:
         return _percentile_cache
@@ -2947,7 +3028,19 @@ async def api_predictions(_u: str | None = Depends(optional_session)):
     if result:
         _predictions_cache = result
         _predictions_cache_at = time.time()
+        _redis_write_bg("utp:voice:predictions", result, ttl_market=300, ttl_closed=86400)
         return result
+
+    # Try Redis if L1 empty
+    if not _predictions_cache:
+        from app.services.redis_cache import cache_get
+        try:
+            cached = await cache_get("utp:voice:predictions", ttl_market=300, ttl_closed=86400)
+            if cached:
+                _predictions_cache = cached
+                _predictions_cache_at = time.time()
+        except Exception:
+            pass
 
     if _predictions_cache:
         return _predictions_cache

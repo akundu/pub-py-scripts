@@ -321,6 +321,7 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
             <option value="8">&#xb1;8%</option>
           </select>
           <span class="refresh-btn" onclick="loadOptionsGrid()">&#x21bb;</span>
+          <span id="opt-last-updated" style="font-size:11px;color:var(--yellow);font-weight:600"></span>
           <span id="opt-activity" style="font-size:10px;color:var(--blue);display:none"><span class="spinner" style="width:9px;height:9px;border-width:1px;vertical-align:middle;margin-right:3px"></span>Updating</span>
         </div>
         <div class="grid-controls" style="margin-bottom:8px;font-size:11px">
@@ -355,6 +356,7 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
       <div class="panel">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
           <span class="card-title" style="margin:0">Best Credit Spreads</span>
+          <span id="recs-last-updated" style="font-size:11px;color:var(--yellow);font-weight:600"></span>
           <span id="recs-activity" style="font-size:10px;color:var(--blue);display:none"><span class="spinner" style="width:9px;height:9px;border-width:1px;vertical-align:middle;margin-right:3px"></span>Updating</span>
           <span class="refresh-btn" onclick="loadRecommendations()">&#x21bb;</span>
         </div>
@@ -642,13 +644,30 @@ function scheduleRenderRecs() {
   _recsRenderTimer = setTimeout(() => { _recsRenderTimer = null; renderRecs(); }, 200);
 }
 
-// Activity indicators — show/hide based on fetch state
+// Activity indicators + last-updated timestamps
+let _optLastUpdatedAt = 0;   // monotonic ms when options grid last got fresh data
+let _recsLastUpdatedAt = 0;  // monotonic ms when picks last got fresh data
+
 function _updateActivityIndicators() {
   const optEl = document.getElementById('opt-activity');
   const recsEl = document.getElementById('recs-activity');
   if (optEl) optEl.style.display = (_optGridLoading || _optRefreshing) ? '' : 'none';
   if (recsEl) recsEl.style.display = (_chainActiveFetches > 0 || _recsRenderTimer) ? '' : 'none';
 }
+
+function _refreshLastUpdatedLabels() {
+  const optEl = document.getElementById('opt-last-updated');
+  const recsEl = document.getElementById('recs-last-updated');
+  if (optEl && _optLastUpdatedAt) {
+    const secs = Math.round((Date.now() - _optLastUpdatedAt) / 1000);
+    optEl.textContent = secs < 5 ? 'just now' : secs + 's ago';
+  }
+  if (recsEl && _recsLastUpdatedAt) {
+    const secs = Math.round((Date.now() - _recsLastUpdatedAt) / 1000);
+    recsEl.textContent = secs < 5 ? 'just now' : secs + 's ago';
+  }
+}
+setInterval(_refreshLastUpdatedLabels, 5000);
 
 async function _fetchChainJob(job) {
   // Skip if the options grid is already showing & refreshing this exact symbol+exp
@@ -1645,6 +1664,8 @@ function _renderOptionsGridFromData(d, otype, grid) {
   });
 
   startOptAutoRefresh();
+  _optLastUpdatedAt = Date.now();
+  _refreshLastUpdatedLabels();
 }
 
 function formatTimestamp(d) {
@@ -2006,7 +2027,7 @@ async function refreshOptionPrices() {
     updateDataSourceBar([{sym:d.symbol, source:d.source, time:d.fetched_at}, {label:'Mkt', source: d.market_open?'open':'closed'}]);
 
   } catch(e) { /* silent — don't disrupt UI on refresh failure */ }
-  finally { _optRefreshing = false; _updateActivityIndicators(); }
+  finally { _optRefreshing = false; _optLastUpdatedAt = Date.now(); _updateActivityIndicators(); _refreshLastUpdatedLabels(); }
 }
 
 // ── Multi-Leg Order Builder ──────────────────────────────────────────────────
@@ -2758,6 +2779,8 @@ function renderRecs() {
   }
   updateDataSourceBar(srcEntries);
   el.innerHTML = html || '<div class="empty-msg">No data</div>';
+  _recsLastUpdatedAt = Date.now();
+  _refreshLastUpdatedLabels();
 }
 
 async function tradeRec(sym, type, short_s, long_s, exp) {
@@ -3289,6 +3312,31 @@ async function init() {
   document.getElementById('app').style.display = 'flex';
   initVoice();
 
+  // Hydrate from IndexedDB (instant — shows cached data before any network calls)
+  await _openIDB();
+  try {
+    const [cachedPrices, cachedPrevCloses, cachedPctl, cachedPred] = await Promise.all([
+      idbGet('realtimePrices'), idbGet('prevCloses'),
+      idbGet('pctlByTicker'), idbGet('predictionsData'),
+    ]);
+    if (cachedPrices) _realtimePrices = cachedPrices;
+    if (cachedPrevCloses) _prevCloses = cachedPrevCloses;
+    if (cachedPctl) _pctlByTicker = cachedPctl;
+    if (cachedPred) predictionsData = cachedPred;
+    for (const sym of CHAIN_TICKERS) {
+      const cc = await idbGet('chainCache_'+sym);
+      if (cc) {
+        chainCache[sym] = cc;
+        for (const [k, v] of Object.entries(cc)) {
+          if (v?.ts && typeof v.ts === 'string') v.ts = new Date(v.ts);
+        }
+      }
+    }
+    if (Object.keys(_realtimePrices).length) {
+      console.log('Hydrated from IndexedDB:', Object.keys(_realtimePrices).length, 'prices,', Object.keys(chainCache).length, 'chain tickers');
+    }
+  } catch(e) { console.log('IDB hydration skipped:', e); }
+
   // Quick auth check — lightweight, no daemon call
   try {
     const r = await fetch('/api/auth-check');
@@ -3298,7 +3346,7 @@ async function init() {
     }
   } catch(e) {}
 
-  // Load public data
+  // Load public data (network refresh — updates stale IDB data)
   loadAll();
 
   // Apply hash route — default depends on auth state
