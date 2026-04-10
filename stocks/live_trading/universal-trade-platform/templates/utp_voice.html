@@ -1121,23 +1121,41 @@ async function checkHealth() {
 }
 
 // ── Portfolio Tab ────────────────────────────────────────────────────────────
+let _portfolioData = null;  // last portfolio response for IDB caching
+
 async function loadPortfolio() {
   const tbl = document.getElementById('portfolio-table');
   const kpis = document.getElementById('portfolio-kpis');
-  // Only show "Loading" if we have no data yet; otherwise keep stale view
-  if (!tbl.innerHTML.includes('tbl')) {
-    tbl.innerHTML = '<div class="loading">Loading</div>';
+
+  // Show cached portfolio immediately if we have no rendered data yet
+  if (!tbl.innerHTML.includes('tbl') && !_portfolioData) {
+    const cached = await idbGet('portfolioData');
+    if (cached) {
+      _portfolioData = cached;
+      _renderPortfolio(cached, tbl, kpis);
+    } else {
+      tbl.innerHTML = '<div class="loading">Loading</div>';
+    }
   }
+
   try {
     const r = await fetch('/api/portfolio');
     if (r.status===401) { showLogin(); return; }
     const d = await r.json();
+    _portfolioData = d;
+    idbSetDebounced('portfolioData', d, 2000);
+    _renderPortfolio(d, tbl, kpis);
+  } catch(e) {
+    if (!tbl.innerHTML.includes('tbl')) {
+      tbl.innerHTML = `<div class="msg-error">${e.message}</div>`;
+    }
+  }
+}
 
-    // KPIs — /dashboard/portfolio puts balances in a sub-object
+function _renderPortfolio(d, tbl, kpis) {
     const bal = d.balances || {};
     const nlv = bal.net_liquidation||0, bp = bal.buying_power||0;
     const upnl = d.unrealized_pnl||0, rpnl = d.realized_pnl||0;
-    const daily = d.daily_pnl||0;
     kpis.innerHTML = `
       <div class="kpi"><div class="label">Net Liq</div><div class="value">$${fmt(nlv)}</div></div>
       <div class="kpi"><div class="label">Buying Power</div><div class="value">$${fmt(bp)}</div></div>
@@ -1145,7 +1163,6 @@ async function loadPortfolio() {
       <div class="kpi"><div class="label">Realized</div><div class="value ${rpnl>=0?'pos':'neg'}">${rpnl>=0?'+':'-'}$${fmt(rpnl)}</div></div>
     `;
 
-    // Positions — /dashboard/portfolio returns grouped spreads in "positions" (not "active_positions")
     const positions = d.positions || [];
     if (!positions.length) { tbl.innerHTML = '<div class="empty-msg">No open positions</div>'; return; }
 
@@ -1271,12 +1288,6 @@ async function loadPortfolio() {
       srcEntries.push({label:'Quotes', source:'questdb/ibkr', time: new Date().toISOString()});
     }
     updateDataSourceBar(srcEntries);
-  } catch(e) {
-    // Only show error if we have no existing data
-    if (!tbl.innerHTML.includes('tbl')) {
-      tbl.innerHTML = `<div class="msg-error">${e.message}</div>`;
-    }
-  }
 }
 
 function toggleDetail(pid) {
