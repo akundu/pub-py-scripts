@@ -4984,6 +4984,93 @@ def _run_ibkr_process_entry(args_dict: dict, ibkr_port: int) -> None:
         pass
 
 
+async def _run_multiprocess_daemon(
+    args, mode: str, server_host: str, server_port: int, num_workers: int, log_level: str,
+) -> int:
+    """Parent orchestrator for multi-process daemon mode.
+
+    Spawns a dedicated IBKR process (background tasks + internal API) and
+    N uvicorn workers (external HTTP, proxy IBKR calls to internal port).
+    The parent process does NO IBKR connection or task setup.
+    """
+    import multiprocessing
+    import signal
+    import uvicorn
+
+    ibkr_port = server_port + 1
+    print(f"  Multi-process: {num_workers} HTTP workers + 1 IBKR process")
+    print(f"  External API: {server_host}:{server_port}")
+    print(f"  Internal IBKR API: 127.0.0.1:{ibkr_port}")
+
+    # Spawn IBKR process
+    args_dict = {k: v for k, v in vars(args).items() if not callable(v)}
+    ibkr_proc = multiprocessing.Process(
+        target=_run_ibkr_process_entry,
+        args=(args_dict, ibkr_port),
+        name="ibkr-process",
+        daemon=False,
+    )
+    ibkr_proc.start()
+    print(f"  IBKR process started (PID {ibkr_proc.pid})")
+
+    # Wait for IBKR process to be ready
+    import httpx
+    for _retry in range(30):
+        await asyncio.sleep(1)
+        try:
+            async with httpx.AsyncClient(timeout=2.0) as _hc:
+                r = await _hc.get(f"http://127.0.0.1:{ibkr_port}/health")
+                if r.status_code == 200:
+                    print(f"  IBKR process ready")
+                    break
+        except Exception:
+            pass
+    else:
+        print("  WARNING: IBKR process not responding after 30s — starting workers anyway")
+
+    # Start uvicorn workers on external port — they proxy IBKR to internal port
+    os.environ["_UTP_DAEMON_WORKER"] = "1"
+    os.environ["_UTP_DAEMON_PORT"] = str(ibkr_port)
+    import app.main
+    app.main._daemon_mode = True
+
+    shutdown_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, lambda: shutdown_event.set())
+
+    config = uvicorn.Config(
+        "app.main:app",
+        host=server_host,
+        port=server_port,
+        log_level=log_level.lower(),
+        workers=num_workers,
+    )
+    server = uvicorn.Server(config)
+    server_task = asyncio.create_task(server.serve())
+
+    # Wait for shutdown signal
+    await shutdown_event.wait()
+
+    print("\n  Shutting down multi-process daemon...")
+    server.should_exit = True
+    try:
+        await asyncio.wait_for(server_task, timeout=5.0)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        pass
+
+    # Terminate IBKR process
+    if ibkr_proc.is_alive():
+        ibkr_proc.terminate()
+        ibkr_proc.join(timeout=5)
+        if ibkr_proc.is_alive():
+            ibkr_proc.kill()
+            ibkr_proc.join(timeout=2)
+    print(f"  IBKR process stopped")
+    print("  Daemon stopped.")
+    return 0
+
+
 async def _cmd_daemon(args) -> int:
     """Start long-running daemon: IBKR connection + background loops + HTTP API."""
     import signal
@@ -5001,6 +5088,15 @@ async def _cmd_daemon(args) -> int:
     mode = _get_mode(args)
     if mode == "dry-run":
         mode = "paper"  # daemon should always connect
+
+    server_host = getattr(args, "server_host", "0.0.0.0")
+    server_port = getattr(args, "server_port", 8000)
+    num_workers = getattr(args, "workers", 1)
+
+    # Multi-process mode: parent is just an orchestrator — skip IBKR/tasks,
+    # spawn a dedicated IBKR process + N uvicorn workers
+    if num_workers > 1:
+        return await _run_multiprocess_daemon(args, mode, server_host, server_port, num_workers, log_level)
 
     data_dir = _resolve_data_dir(getattr(args, "data_dir", "data/utp"), mode)
     init_ledger(data_dir)
@@ -5367,130 +5463,40 @@ async def _cmd_daemon(args) -> int:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, lambda: shutdown_event.set())
 
-    num_workers = getattr(args, "workers", 1)
+    # ── Single-process HTTP server ─────────────────────────────────────────
+    config = uvicorn.Config(
+        "app.main:app",
+        host=server_host,
+        port=server_port,
+        log_level=log_level.lower(),
+    )
+    server = uvicorn.Server(config)
+    server_task = asyncio.create_task(server.serve())
 
-    if num_workers > 1:
-        # ── Multi-process mode ──────────────────────────────────────────────
-        # Parent orchestrates: IBKR process (dedicated) + N worker processes.
-        # IBKR process holds the socket + runs background tasks + internal HTTP.
-        # Workers serve external HTTP and proxy IBKR calls to the internal port.
-        import multiprocessing
+    # Wait for shutdown signal
+    await shutdown_event.wait()
 
-        ibkr_port = server_port + 1
-        print(f"  Multi-process: {num_workers} HTTP workers + 1 IBKR process")
-        print(f"  External API: {server_host}:{server_port}")
-        print(f"  Internal IBKR API: 127.0.0.1:{ibkr_port}")
+    print("\n  Shutting down daemon...")
 
-        # Cancel background tasks in parent (they'll run in the IBKR process)
-        for t in bg_tasks:
-            t.cancel()
-            try:
-                await t
-            except asyncio.CancelledError:
-                pass
-        bg_tasks.clear()
-
-        # Disconnect provider in parent (IBKR process will have its own)
-        if live_provider:
-            await live_provider.disconnect()
-        ProviderRegistry.clear()
-
-        # Spawn IBKR process
-        args_dict = {k: v for k, v in vars(args).items() if not callable(v)}
-        ibkr_proc = multiprocessing.Process(
-            target=_run_ibkr_process_entry,
-            args=(args_dict, ibkr_port),
-            name="ibkr-process",
-            daemon=False,
-        )
-        ibkr_proc.start()
-        print(f"  IBKR process started (PID {ibkr_proc.pid})")
-
-        # Wait for IBKR process to be ready
-        import httpx
-        for _retry in range(30):
-            await asyncio.sleep(1)
-            try:
-                async with httpx.AsyncClient(timeout=2.0) as _hc:
-                    r = await _hc.get(f"http://127.0.0.1:{ibkr_port}/health")
-                    if r.status_code == 200:
-                        print(f"  IBKR process ready")
-                        break
-            except Exception:
-                pass
-        else:
-            print("  WARNING: IBKR process not responding after 30s — starting workers anyway")
-
-        # Start uvicorn workers on external port — they proxy IBKR to internal port
-        os.environ["_UTP_DAEMON_WORKER"] = "1"
-        os.environ["_UTP_DAEMON_PORT"] = str(ibkr_port)
-        import app.main
-        app.main._daemon_mode = True
-
-        config = uvicorn.Config(
-            "app.main:app",
-            host=server_host,
-            port=server_port,
-            log_level=log_level.lower(),
-            workers=num_workers,
-        )
-        server = uvicorn.Server(config)
-        server_task = asyncio.create_task(server.serve())
-
-        # Wait for shutdown signal
-        await shutdown_event.wait()
-
-        print("\n  Shutting down multi-process daemon...")
-        server.should_exit = True
+    # Cancel background tasks
+    for t in bg_tasks:
+        t.cancel()
         try:
-            await asyncio.wait_for(server_task, timeout=5.0)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
+            await t
+        except asyncio.CancelledError:
             pass
 
-        # Terminate IBKR process
-        if ibkr_proc.is_alive():
-            ibkr_proc.terminate()
-            ibkr_proc.join(timeout=5)
-            if ibkr_proc.is_alive():
-                ibkr_proc.kill()
-                ibkr_proc.join(timeout=2)
-        print(f"  IBKR process stopped")
+    # Stop HTTP server
+    server.should_exit = True
+    try:
+        await asyncio.wait_for(server_task, timeout=5.0)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        pass
 
-    else:
-        # ── Single-process mode (default) ───────────────────────────────────
-        config = uvicorn.Config(
-            "app.main:app",
-            host=server_host,
-            port=server_port,
-            log_level=log_level.lower(),
-        )
-        server = uvicorn.Server(config)
-        server_task = asyncio.create_task(server.serve())
-
-        # Wait for shutdown signal
-        await shutdown_event.wait()
-
-        print("\n  Shutting down daemon...")
-
-        # Cancel background tasks
-        for t in bg_tasks:
-            t.cancel()
-            try:
-                await t
-            except asyncio.CancelledError:
-                pass
-
-        # Stop HTTP server
-        server.should_exit = True
-        try:
-            await asyncio.wait_for(server_task, timeout=5.0)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            pass
-
-        # Disconnect provider
-        if live_provider:
-            await live_provider.disconnect()
-        ProviderRegistry.clear()
+    # Disconnect provider
+    if live_provider:
+        await live_provider.disconnect()
+    ProviderRegistry.clear()
 
     print("  Daemon stopped.")
     return 0
