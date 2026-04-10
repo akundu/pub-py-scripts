@@ -5031,36 +5031,38 @@ async def _run_multiprocess_daemon(
     else:
         print("  WARNING: IBKR process not responding after 30s — starting workers anyway")
 
-    # Start uvicorn workers on external port — they proxy IBKR to internal port
-    os.environ["_UTP_DAEMON_WORKER"] = "1"
-    os.environ["_UTP_DAEMON_PORT"] = str(ibkr_port)
-    import app.main
-    app.main._daemon_mode = True
+    # Start uvicorn workers as a subprocess (not via asyncio — fork() inside event
+    # loop hangs on macOS). Workers proxy IBKR calls to internal port.
+    import subprocess
+    env = os.environ.copy()
+    env["_UTP_DAEMON_WORKER"] = "1"
+    env["_UTP_DAEMON_PORT"] = str(ibkr_port)
+
+    worker_cmd = [
+        sys.executable, "-m", "uvicorn", "app.main:app",
+        "--host", server_host, "--port", str(server_port),
+        "--workers", str(num_workers), "--log-level", log_level.lower(),
+    ]
+    worker_proc = subprocess.Popen(worker_cmd, env=env)
+    print(f"  Workers started (PID {worker_proc.pid})")
 
     shutdown_event = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, lambda: shutdown_event.set())
 
-    config = uvicorn.Config(
-        "app.main:app",
-        host=server_host,
-        port=server_port,
-        log_level=log_level.lower(),
-        workers=num_workers,
-    )
-    server = uvicorn.Server(config)
-    server_task = asyncio.create_task(server.serve())
-
     # Wait for shutdown signal
     await shutdown_event.wait()
 
     print("\n  Shutting down multi-process daemon...")
-    server.should_exit = True
+
+    # Terminate worker processes
+    worker_proc.terminate()
     try:
-        await asyncio.wait_for(server_task, timeout=5.0)
-    except (asyncio.TimeoutError, asyncio.CancelledError):
-        pass
+        worker_proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        worker_proc.kill()
+        worker_proc.wait(timeout=2)
 
     # Terminate IBKR process
     if ibkr_proc.is_alive():
