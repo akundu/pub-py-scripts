@@ -984,6 +984,7 @@ let _loginCallback = null;  // Called after successful login
 async function handleLogout() {
   await fetch('/api/logout',{method:'POST'});
   _isLoggedIn = false;
+  localStorage.removeItem('utp_auth_day');
   document.getElementById('login-btn-area').innerHTML = '<button class="hbtn" onclick="showLoginModal()">Login</button>';
 }
 
@@ -3414,13 +3415,23 @@ async function init() {
   // Start loading data immediately — don't wait for auth check
   loadAll();
 
-  // Auth check in parallel (non-blocking)
-  fetch('/api/auth-check').then(r => {
-    if (r.status !== 401) {
-      _isLoggedIn = true;
-      document.getElementById('login-btn-area').innerHTML = '<button class="hbtn" onclick="handleLogout()">Out</button>';
-    }
-  }).catch(() => {});
+  // Auth check in parallel (non-blocking) — cached once per day
+  const today = new Date().toISOString().slice(0, 10);
+  const cachedAuth = localStorage.getItem('utp_auth_day');
+  if (cachedAuth === today) {
+    _isLoggedIn = true;
+    document.getElementById('login-btn-area').innerHTML = '<button class="hbtn" onclick="handleLogout()">Out</button>';
+  } else {
+    fetch('/api/auth-check').then(r => {
+      if (r.status !== 401) {
+        _isLoggedIn = true;
+        localStorage.setItem('utp_auth_day', today);
+        document.getElementById('login-btn-area').innerHTML = '<button class="hbtn" onclick="handleLogout()">Out</button>';
+      } else {
+        localStorage.removeItem('utp_auth_day');
+      }
+    }).catch(() => {});
+  }
 
   // Apply hash route — default depends on auth state
   if (!window.location.hash) {

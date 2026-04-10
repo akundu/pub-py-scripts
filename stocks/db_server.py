@@ -5168,7 +5168,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
 
                 <div class="control-group">
                     <label for="lookbackInput" style="color:var(--text-secondary);font-size:13px;">Training days:</label>
-                    <input type="number" id="lookbackInput" min="30" max="1260" value="180"
+                    <input type="number" id="lookbackInput" min="30" max="1260" value="150"
                         style="width:60px;padding:3px 6px;border-radius:4px;border:1px solid #444;background:#1a1f2e;color:#e6edf3;font-size:13px;"
                         onchange="onLookbackChange()">
                 </div>
@@ -5267,7 +5267,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
         // State
         let currentTicker = '{ticker}';
         let currentDays = 0;  // 0 = today, any positive int = N days ahead
-        let currentLookback = 180;  // training days (30-1260)
+        let currentLookback = 150;  // training days (30-1260)
         let currentStrategy = 'combined';  // used for band table display
         let predictionData = null;
         let bandChart = null;
@@ -9763,10 +9763,10 @@ async def handle_predictions_page(request: web.Request) -> web.Response:
         if not cache:
             return web.json_response({'error': 'Prediction cache not initialized'}, status=500)
         try:
-            lookback = int(request.query.get('lookback', '180'))
+            lookback = int(request.query.get('lookback', '150'))
             lookback = max(30, min(1260, lookback))
         except (ValueError, TypeError):
-            lookback = 180
+            lookback = 150
         force_refresh = not params['cache']
         today_result = await fetch_today_prediction(
             ticker,
@@ -9833,15 +9833,15 @@ async def handle_predictions_api_index(request: web.Request) -> web.Response:
                 "path": "/predictions/api/lazy/today/{ticker}",
                 "method": "GET",
                 "description": "Today's prediction bands and current price.",
-                "query": "?lookback=180&cache=true",
-                "example": f"{base.rstrip('/')}/predictions/api/lazy/today/NDX?lookback=180",
+                "query": "?lookback=150&cache=true",
+                "example": f"{base.rstrip('/')}/predictions/api/lazy/today/NDX?lookback=150",
             },
             {
                 "path": "/predictions/api/lazy/future/{ticker}/{days}",
                 "method": "GET",
                 "description": "N-day-ahead forecast prediction data.",
-                "query": "?lookback=180&cache=true",
-                "example": f"{base.rstrip('/')}/predictions/api/lazy/future/NDX/3?lookback=180",
+                "query": "?lookback=150&cache=true",
+                "example": f"{base.rstrip('/')}/predictions/api/lazy/future/NDX/3?lookback=150",
             },
             {
                 "path": "/predictions/api/lazy/band_history/{ticker}",
@@ -9854,14 +9854,14 @@ async def handle_predictions_api_index(request: web.Request) -> web.Response:
                 "path": "/predictions/api/lazy/historical/{ticker}/{date}",
                 "method": "GET",
                 "description": "Historical prediction bands for a past date (backtest shape).",
-                "query": "?lookback=180",
+                "query": "?lookback=150",
                 "example": f"{base.rstrip('/')}/predictions/api/lazy/historical/NDX/2025-03-01",
             },
             {
                 "path": "/predictions/api/prewarm",
                 "method": "GET",
                 "description": "Pre-warm cache (e.g. cron). Tickers run in parallel (max 5 subprocess workers when disk cache is enabled).",
-                "query": "?ticker=NDX,SPX&days=1,3,5&lookback=180",
+                "query": "?ticker=NDX,SPX&days=1,3,5&lookback=150",
                 "example": f"{base.rstrip('/')}/predictions/api/prewarm?ticker=NDX,SPX",
             },
         ],
@@ -9890,10 +9890,10 @@ async def handle_lazy_load_today_prediction(request: web.Request) -> web.Respons
     force_refresh = request.query.get('cache', 'true').lower() == 'false'
 
     try:
-        lookback = int(request.query.get('lookback', '180'))
+        lookback = int(request.query.get('lookback', '150'))
         lookback = max(30, min(1260, lookback))
     except (ValueError, TypeError):
-        lookback = 180
+        lookback = 150
 
     # Always use fetch_today_prediction so cache TTL is enforced (stale entries
     # are regenerated; the old handler fast-path returned disk cache regardless of age).
@@ -9936,10 +9936,10 @@ async def handle_lazy_load_future_prediction(request: web.Request) -> web.Respon
     force_refresh = request.query.get('cache', 'true').lower() == 'false'
 
     try:
-        lookback = int(request.query.get('lookback', '180'))
+        lookback = int(request.query.get('lookback', '150'))
         lookback = max(30, min(1260, lookback))
     except (ValueError, TypeError):
-        lookback = 180
+        lookback = 150
 
     # Fast path: serve from cache immediately (regardless of age) to avoid
     # expensive recomputation. Prewarm cron handles keeping cache fresh.
@@ -10100,10 +10100,10 @@ async def handle_lazy_load_historical_prediction(request: web.Request) -> web.Re
         return web.json_response({'error': 'Prediction cache not initialized'}, status=500)
 
     try:
-        lookback = int(request.query.get('lookback', '180'))
+        lookback = int(request.query.get('lookback', '150'))
         lookback = max(30, min(1260, lookback))
     except (ValueError, TypeError):
-        lookback = 180
+        lookback = 150
 
     if fetch_historical_prediction is None:
         return web.json_response({'error': 'Historical predictions not available'}, status=500)
@@ -10142,10 +10142,10 @@ async def handle_prewarm_predictions(request: web.Request) -> web.Response:
         prewarm_days = compute_default_prediction_days()
 
     try:
-        lookback = int(request.query.get('lookback', '180'))
+        lookback = int(request.query.get('lookback', '150'))
         lookback = max(30, min(1260, lookback))
     except (ValueError, TypeError):
-        lookback = 180
+        lookback = 150
 
     cache = request.app.get('prediction_cache')
     history = request.app.get('prediction_history')

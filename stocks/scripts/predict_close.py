@@ -268,7 +268,7 @@ def clear_model_files(ticker, output_dir=Path('models/production')):
     return cleared
 
 
-async def train_0dte_model(ticker, lookback=180, db_config=None):
+async def train_0dte_model(ticker, lookback=150, db_config=None):
     """Train 0DTE LightGBM model and save to cache. Returns the predictor."""
     print(f"\n{'='*80}")
     print(f"TRAINING 0DTE MODEL - {ticker}")
@@ -588,7 +588,7 @@ def train_multi_day_models(ticker, train_days=180, validate_days=30,
     return ensemble_stats
 
 
-async def predict_future_close(ticker: str, days_ahead: int, current_price: float, lookback: int = 180):
+async def predict_future_close(ticker: str, days_ahead: int, current_price: float, lookback: int = 150):
     """Predict close price N trading days in the future using historical patterns.
 
     Args:
@@ -1387,7 +1387,7 @@ async def _predict_future_close_unified(ticker: str, days_ahead: int, lookback: 
     return pred
 
 
-async def predict_close(ticker='NDX', lookback=180, force_retrain=False, similar_days_count=10, db_config=None, days_ahead=0, target_date=None, use_time_decay=True, use_intraday_vol=True):
+async def predict_close(ticker='NDX', lookback=150, force_retrain=False, similar_days_count=10, db_config=None, days_ahead=0, target_date=None, use_time_decay=True, use_intraday_vol=True):
     """Make a prediction for today's close (or future date) using LIVE QuestDB data.
 
     Args:
@@ -1863,6 +1863,108 @@ async def predict_close(ticker='NDX', lookback=180, force_retrain=False, similar
         print("❌ Prediction failed")
         return
 
+    # ── Directional analysis (consecutive-day streaks + mean reversion) ──
+    # Same logic used by multi-day predictions, now applied to 0DTE.
+    try:
+        from scripts.close_predictor.directional_analysis import compute_directional_analysis
+        from scripts.close_predictor.multi_day_features import MarketContext
+
+        # Extract daily close-to-close returns from pct_df
+        daily_closes_df = pct_df.drop_duplicates(subset=['date']).sort_values('date')
+        daily_prev = daily_closes_df['prev_close'].values
+        daily_close = daily_closes_df['day_close'].values
+        daily_returns = ((daily_close - daily_prev) / daily_prev * 100).astype(float)
+
+        # Count consecutive up/down days from hist_ctx
+        consecutive = 0
+        for i in range(1, 20):
+            day_data = hist_ctx.get(f'day_{i}')
+            prev_day = hist_ctx.get(f'day_{i+1}')
+            if not day_data or not prev_day:
+                break
+            if day_data['close'] > prev_day['close']:
+                if consecutive >= 0 and (i == 1 or consecutive > 0):
+                    consecutive += 1
+                else:
+                    break
+            elif day_data['close'] < prev_day['close']:
+                if consecutive <= 0 and (i == 1 or consecutive < 0):
+                    consecutive -= 1
+                else:
+                    break
+            else:
+                break
+
+        # 5-day return
+        close_5d = hist_ctx.get('day_5', {}).get('close')
+        return_5d = ((prev_close - close_5d) / close_5d) if close_5d else 0.0
+
+        # Build lightweight MarketContext for directional analysis
+        ctx_0dte = MarketContext(
+            consecutive_days=consecutive,
+            return_5d=return_5d,
+        )
+
+        # Build historical contexts (one per day) with consecutive_days
+        hist_contexts = []
+        dates_sorted = sorted(daily_closes_df['date'].unique())
+        close_by_date = dict(zip(daily_closes_df['date'], daily_closes_df['day_close']))
+        for idx, d in enumerate(dates_sorted):
+            c = 0
+            for j in range(1, 10):
+                if idx - j < 0 or idx - j - 1 < 0:
+                    break
+                prev_d = dates_sorted[idx - j]
+                prev_prev_d = dates_sorted[idx - j - 1]
+                chg = close_by_date.get(prev_d, 0) - close_by_date.get(prev_prev_d, 0)
+                if chg > 0:
+                    if c >= 0 and (j == 1 or c > 0):
+                        c += 1
+                    else:
+                        break
+                elif chg < 0:
+                    if c <= 0 and (j == 1 or c < 0):
+                        c -= 1
+                    else:
+                        break
+                else:
+                    break
+            r5 = 0.0
+            if idx >= 5:
+                c5 = close_by_date.get(dates_sorted[idx - 5], 0)
+                if c5 > 0:
+                    r5 = (close_by_date.get(d, 0) - c5) / c5
+            hist_contexts.append(MarketContext(consecutive_days=c, return_5d=r5))
+
+        if len(daily_returns) >= 20:
+            directional_0dte = compute_directional_analysis(
+                current_context=ctx_0dte,
+                current_price=current_price,
+                n_day_returns=daily_returns,
+                historical_contexts=hist_contexts[:len(daily_returns)],
+                days_ahead=0,
+            )
+            pred.directional_analysis = directional_0dte
+
+            ms = directional_0dte.momentum_state
+            dp = directional_0dte.direction_probability
+            print(f"\n{'='*80}")
+            print("DIRECTIONAL ANALYSIS (0DTE)")
+            print(f"{'='*80}")
+            print(f"  Streak:          {ms.consecutive_days:+d} days ({'extended' if ms.is_extended_streak else 'normal'})")
+            print(f"  Trend:           {ms.trend_label}")
+            print(f"  5-day return:    {ms.return_5d*100:+.2f}%")
+            print(f"  P(up):           {dp.p_up:.1%}  ({dp.up_count}/{dp.total_samples})")
+            print(f"  P(down):         {dp.p_down:.1%}  ({dp.down_count}/{dp.total_samples})")
+            print(f"  Mean reversion:  {dp.mean_reversion_prob:.1%}")
+            print(f"  Confidence:      {dp.confidence} ({dp.total_samples} samples)")
+        else:
+            print(f"⚠️  Not enough data for directional analysis ({len(daily_returns)} days, need 20)")
+
+    except Exception as e:
+        print(f"⚠️  Directional analysis failed for 0DTE: {e}")
+        import traceback; traceback.print_exc()
+
     # Add all prediction methods as a dynamic attribute (for 0DTE comparison display)
     def bands_to_dict_0dte(bands):
         if not bands:
@@ -2153,8 +2255,8 @@ def _build_predict_parser(parser):
                         help='Predict close N trading days ahead (e.g., 5 for next Friday)')
     parser.add_argument('--target-date', type=str, metavar='YYYY-MM-DD',
                         help='Predict close for specific future date (e.g., 2026-02-20)')
-    parser.add_argument('--lookback', type=int, default=180, metavar='N',
-                        help='Number of historical trading days for training (default: 180)')
+    parser.add_argument('--lookback', type=int, default=150, metavar='N',
+                        help='Number of historical trading days for training (default: 150)')
     parser.add_argument('--db', type=str, default=None, metavar='CONNECTION_STRING',
                         help='QuestDB connection string (default: QUEST_DB_STRING env)')
     parser.add_argument('--no-time-decay', action='store_true', dest='no_time_decay',
@@ -2168,8 +2270,8 @@ def _build_train_parser(parser):
     from common.prediction_config import get_prediction_tickers
     parser.add_argument('ticker', nargs='?', default='NDX', choices=get_prediction_tickers(),
                         help='Ticker symbol to train (default: NDX)')
-    parser.add_argument('--lookback', type=int, default=180, metavar='N',
-                        help='0DTE training lookback in trading days (default: 180)')
+    parser.add_argument('--lookback', type=int, default=150, metavar='N',
+                        help='0DTE training lookback in trading days (default: 150)')
     parser.add_argument('--db', type=str, default=None, metavar='CONNECTION_STRING',
                         help='QuestDB connection string (default: QUEST_DB_STRING env)')
     parser.add_argument('--max-dte', type=int, default=0, metavar='N',

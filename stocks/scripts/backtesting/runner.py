@@ -131,6 +131,7 @@ Examples:
     import scripts.backtesting.strategies.credit_spread.vmaxmin             # noqa: F401
     import scripts.backtesting.strategies.credit_spread.netdebit_maxmin    # noqa: F401
     import scripts.backtesting.strategies.credit_spread.backtest_v6_delta  # noqa: F401
+    import scripts.backtesting.strategies.credit_spread.backtest_v5_roi   # noqa: F401
 
     # Check for grid sweep mode
     if config.report.grid_sweep:

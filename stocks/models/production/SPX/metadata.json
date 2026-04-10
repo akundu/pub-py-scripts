@@ -1,11 +1,11 @@
 {
-    "retrained_at": "20260407_031919",
-    "retrained_date": "20260407",
+    "retrained_at": "20260410_032127",
+    "retrained_date": "20260410",
     "train_days": 250,
     "test_days": 30,
     "max_dte": 20,
     "ticker": "SPX",
-    "validation_rmse": 1.49,
+    "validation_rmse": 1.61,
     "validation_hit_rate": 100.0,
-    "backup_location": "models/backup_SPX_20260407"
+    "backup_location": "models/backup_SPX_20260410"
 }
