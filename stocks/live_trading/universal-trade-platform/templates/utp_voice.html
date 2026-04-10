@@ -359,6 +359,7 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
           <span id="recs-last-updated" style="font-size:11px;color:var(--yellow);font-weight:600"></span>
           <span id="recs-activity" style="font-size:10px;color:var(--blue);display:none"><span class="spinner" style="width:9px;height:9px;border-width:1px;vertical-align:middle;margin-right:3px"></span>Updating</span>
           <span class="refresh-btn" onclick="loadRecommendations()">&#x21bb;</span>
+          <button class="hbtn" style="font-size:9px;padding:2px 6px;color:var(--muted)" onclick="resetRecFilters()" title="Reset filters to defaults">Reset</button>
         </div>
         <div class="grid-controls" style="margin-bottom:10px">
           <label style="color:var(--muted);font-size:11px">DTE</label>
@@ -2490,7 +2491,48 @@ async function loadRecommendations() {
   }
 }
 
+// Filter IDs and their default values
+const REC_FILTER_DEFAULTS = {
+  'rec-dte': '0', 'rec-min-roi': '1.5', 'rec-min-credit': '0',
+  'rec-min-otm': '0', 'rec-min-otm-pc': '1.5', 'rec-width': '0',
+  'rec-type-filter': 'ALL', 'rec-min-pctl': '90', 'rec-min-pred': '90',
+  'rec-max-delta': '', 'rec-qty': '25', 'rec-min-total-credit': '500',
+  'rec-max-total-loss': '100000', 'rec-ticker-filter': 'ALL', 'rec-top-n': '20',
+};
+const REC_FILTERS_KEY = 'utp_rec_filters';
+
+function _saveRecFilters() {
+  const vals = {};
+  for (const id of Object.keys(REC_FILTER_DEFAULTS)) {
+    const el = document.getElementById(id);
+    if (el) vals[id] = el.value;
+  }
+  try { localStorage.setItem(REC_FILTERS_KEY, JSON.stringify(vals)); } catch(e) {}
+}
+
+function _restoreRecFilters() {
+  try {
+    const raw = localStorage.getItem(REC_FILTERS_KEY);
+    if (!raw) return;
+    const vals = JSON.parse(raw);
+    for (const [id, val] of Object.entries(vals)) {
+      const el = document.getElementById(id);
+      if (el && val != null) el.value = val;
+    }
+  } catch(e) {}
+}
+
+function resetRecFilters() {
+  for (const [id, val] of Object.entries(REC_FILTER_DEFAULTS)) {
+    const el = document.getElementById(id);
+    if (el) el.value = val;
+  }
+  try { localStorage.removeItem(REC_FILTERS_KEY); } catch(e) {}
+  filterRecs();
+}
+
 function filterRecs() {
+  _saveRecFilters();
   const selectedDte = parseInt(document.getElementById('rec-dte')?.value) || 0;
 
   // If user selected a DTE, check if we have fresh-enough data for it.
@@ -3345,6 +3387,9 @@ async function init() {
       document.getElementById('login-btn-area').innerHTML = '<button class="hbtn" onclick="handleLogout()">Out</button>';
     }
   } catch(e) {}
+
+  // Restore saved filter settings from localStorage
+  _restoreRecFilters();
 
   // Load public data (network refresh — updates stale IDB data)
   loadAll();
