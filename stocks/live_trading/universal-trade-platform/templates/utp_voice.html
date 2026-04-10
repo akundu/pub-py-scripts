@@ -367,12 +367,12 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
             <option value="5">5DTE</option>
           </select>
           <label style="color:var(--muted);font-size:11px">Min D/ROI%</label>
-          <input type="number" id="rec-min-roi" class="select-styled" style="width:65px" value="1.5" min="0" step="0.5" onchange="filterRecs()">
+          <input type="number" id="rec-min-roi" class="select-styled" style="width:75px" value="1.5" min="0" step="0.5" onchange="filterRecs()">
           <input type="hidden" id="rec-min-credit" value="0">
           <label style="color:var(--muted);font-size:11px" title="OTM% from current price">OTM% cur</label>
-          <input type="number" id="rec-min-otm" class="select-styled" style="width:55px" value="0.5" min="0" step="0.5" placeholder="0" onchange="filterRecs()">
+          <input type="number" id="rec-min-otm" class="select-styled" style="width:70px" value="0.5" min="0" step="0.5" placeholder="0" onchange="filterRecs()">
           <label style="color:var(--muted);font-size:11px" title="OTM% from previous close">OTM% pc</label>
-          <input type="number" id="rec-min-otm-pc" class="select-styled" style="width:55px" value="1.5" min="0" step="0.5" onchange="filterRecs()">
+          <input type="number" id="rec-min-otm-pc" class="select-styled" style="width:70px" value="1.5" min="0" step="0.5" onchange="filterRecs()">
           <label style="color:var(--muted);font-size:11px">Width</label>
           <input type="number" id="rec-width" class="select-styled" style="width:65px" value="0" min="0" step="5" placeholder="Auto" onchange="filterRecs()">
           <select id="rec-type-filter" class="select-styled" onchange="filterRecs()">
@@ -566,6 +566,53 @@ Examples:
   };
 })();
 
+// ── Number Formatting ────────────────────────────────────────────────────────
+// Format a number to at most 2 decimal places with comma grouping.
+// $fmt(1960.0000000000002) → "1,960"  |  $fmt(3.5) → "3.50"  |  $fmt(0.25) → "0.25"
+function $fmt(n, minDec=0) {
+  if (n == null || isNaN(n)) return '--';
+  return n.toLocaleString('en-US', {minimumFractionDigits: minDec, maximumFractionDigits: 2});
+}
+// Format as dollar string: $fmt$(1960.00000002) → "$1,960"
+function $fmt$(n) { return n == null || isNaN(n) ? '--' : '$' + $fmt(n); }
+
+// ── IndexedDB Cache (survives page reloads) ─────────────────────────────────
+let _idb = null;
+function _openIDB() {
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.open('utp_voice_cache', 1);
+      req.onupgradeneeded = (e) => { e.target.result.createObjectStore('kv'); };
+      req.onsuccess = (e) => { _idb = e.target.result; resolve(_idb); };
+      req.onerror = () => resolve(null);
+    } catch(e) { resolve(null); }
+  });
+}
+async function idbGet(key) {
+  if (!_idb) return null;
+  return new Promise((resolve) => {
+    try {
+      const tx = _idb.transaction('kv','readonly');
+      const req = tx.objectStore('kv').get(key);
+      req.onsuccess = () => resolve(req.result ?? null);
+      req.onerror = () => resolve(null);
+    } catch(e) { resolve(null); }
+  });
+}
+async function idbSet(key, value) {
+  if (!_idb) return;
+  try {
+    const tx = _idb.transaction('kv','readwrite');
+    tx.objectStore('kv').put(value, key);
+  } catch(e) {}
+}
+// Debounced IDB writer — avoids hammering IndexedDB on rapid updates
+let _idbWriteTimers = {};
+function idbSetDebounced(key, value, delayMs = 5000) {
+  if (_idbWriteTimers[key]) clearTimeout(_idbWriteTimers[key]);
+  _idbWriteTimers[key] = setTimeout(() => { idbSet(key, value); delete _idbWriteTimers[key]; }, delayMs);
+}
+
 // ── State ────────────────────────────────────────────────────────────────────
 let rawMode = false, isProcessing = false, recognition = null, isRecording = false;
 let conversationHistory = [];
@@ -628,6 +675,8 @@ async function _fetchChainJob(job) {
       optGridData = d;
     }
     scheduleRenderRecs();
+    // Persist chain cache to IndexedDB (debounced per symbol)
+    idbSetDebounced('chainCache_'+job.sym, chainCache[job.sym], 3000);
   } catch(e) { /* silent */ }
   finally { _chainActiveFetches--; _updateActivityIndicators(); }
 }
@@ -720,6 +769,7 @@ async function fetchPercentiles() {
       }
     }
     scheduleRenderRecs();
+    idbSet('pctlByTicker', _pctlByTicker);
   } catch(e) { /* silent */ }
 }
 
@@ -806,7 +856,7 @@ async function fetchPrevCloses() {
     const r = await fetch('/api/prev-closes?symbols=SPX,NDX,RUT');
     if (!r.ok) return;
     const d = await r.json();
-    if (d && !d.error) _prevCloses = d;
+    if (d && !d.error) { _prevCloses = d; idbSet('prevCloses', d); }
   } catch(e) { /* silent */ }
 }
 
@@ -818,7 +868,7 @@ async function fetchPredictions() {
     const r = await fetch('/api/predictions');
     if (!r.ok) return;
     const d = await r.json();
-    if (!d.error) { predictionsData = d; scheduleRenderRecs(); }
+    if (!d.error) { predictionsData = d; scheduleRenderRecs(); idbSet('predictionsData', d); }
   } catch(e) { /* silent */ }
 }
 
@@ -1006,6 +1056,7 @@ function connectPriceWebSocket() {
         _updateTickerItem(d.symbol, d.price);
         // Also update options price bar if viewing this symbol
         if (optGridData?.symbol === d.symbol) _updateOptPriceBar(d.symbol, d.price);
+        idbSetDebounced('realtimePrices', _realtimePrices, 10000);
       }
     } catch(e) {}
   };
@@ -1137,17 +1188,17 @@ async function loadPortfolio() {
       // Entry section
       html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:11px;margin-bottom:8px;padding:8px;background:var(--bg);border-radius:6px">`;
       html += `<div style="color:var(--blue);font-weight:bold;grid-column:1/-1">ENTRY</div>`;
-      html += `<div>Time: ${entryTime}</div><div>Underlying: $${entryPrice ? entryPrice.toLocaleString() : '--'}</div>`;
-      if (avgCost != null) html += `<div>Avg Cost: $${avgCost.toFixed(2)}</div>`;
-      if (sm.derived_credit) html += `<div>Credit: $${sm.derived_credit.toLocaleString()}</div>`;
+      html += `<div>Time: ${entryTime}</div><div>Underlying: ${$fmt$(entryPrice)}</div>`;
+      if (avgCost != null) html += `<div>Avg Cost: ${$fmt$(avgCost)}</div>`;
+      if (sm.derived_credit) html += `<div>Credit: ${$fmt$(sm.derived_credit)}</div>`;
       html += `<div>ID: ${pid.substring(0,8)}</div><div>Source: ${p.source||''}</div>`;
       html += `</div>`;
 
       // Current section
       html += `<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 16px;font-size:11px;margin-bottom:8px;padding:8px;background:var(--bg);border-radius:6px">`;
       html += `<div style="color:var(--green-b);font-weight:bold;grid-column:1/-1">CURRENT</div>`;
-      if (markPrice != null) html += `<div>Mark: $${markPrice.toFixed(2)}/sh</div>`;
-      if (mktVal != null) html += `<div>Value: $${mktVal.toLocaleString()}</div>`;
+      if (markPrice != null) html += `<div>Mark: ${$fmt$(markPrice)}/sh</div>`;
+      if (mktVal != null) html += `<div>Value: ${$fmt$(mktVal)}</div>`;
       html += `<div>Unrealized: <span class="${pnl>=0?'pos':'neg'}">${pnl>=0?'+':'-'}$${fmt(pnl)}</span></div>`;
       if (dailyPnl) html += `<div>Today: <span class="${dailyPnl>=0?'pos':'neg'}">${dailyPnl>=0?'+':'-'}$${fmt(dailyPnl)}</span></div>`;
       html += `<div>P&L vs Risk: ${pnlVsRisk}%</div><div>Time in pos: ${timeInPos}</div>`;
@@ -1158,7 +1209,7 @@ async function loadPortfolio() {
       html += `<div style="color:var(--yellow);font-weight:bold;grid-column:1/-1">RISK</div>`;
       if (bs) html += `<div>Breach: <span class="badge badge-${bs.severity}">${bs.severity}</span> ${bs.distance_pct}% away</div>`;
       html += `<div>DTE: ${dte_days}</div>`;
-      if (sm.max_loss) html += `<div>Max Loss: $${sm.max_loss.toLocaleString()}</div>`;
+      if (sm.max_loss) html += `<div>Max Loss: ${$fmt$(sm.max_loss)}</div>`;
       if (sm.roi_pct) html += `<div>ROI: ${sm.roi_pct}%</div>`;
       html += `</div>`;
 
@@ -2276,8 +2327,8 @@ async function verifyAndShowTrade(data, sym, type, shortStrike, longStrike, exp)
       <div>Short ${shortStrike} bid: <b>$${liveBid.toFixed(2)}</b>${bidDelta ? ` <span style="color:${deltaColor(bidDelta)}">(${bidDelta>0?'+':''}${bidDelta})</span>` : ''}</div>
       <div>Long ${longStrike} ask: <b>$${liveAsk.toFixed(2)}</b>${askDelta ? ` <span style="color:${deltaColor(askDelta)}">(${askDelta>0?'+':''}${askDelta})</span>` : ''}</div>
       <div style="margin-top:6px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;text-align:center">
-        <div style="padding:6px;background:var(--bg2);border-radius:4px"><div style="font-size:10px;color:var(--muted)">Total Credit</div><div style="font-weight:bold;color:var(--green-b);font-size:14px">$${totalCredit.toLocaleString()}</div><div style="font-size:9px;color:var(--muted)">${qty}x @ $${liveCredit.toFixed(2)}</div></div>
-        <div style="padding:6px;background:var(--bg2);border-radius:4px"><div style="font-size:10px;color:var(--muted)">Total Max Loss</div><div style="font-weight:bold;color:var(--red-b);font-size:14px">$${totalMaxLoss.toLocaleString()}</div><div style="font-size:9px;color:var(--muted)">${qty}x @ $${liveMaxLoss.toFixed(2)}</div></div>
+        <div style="padding:6px;background:var(--bg2);border-radius:4px"><div style="font-size:10px;color:var(--muted)">Total Credit</div><div style="font-weight:bold;color:var(--green-b);font-size:14px">${$fmt$(totalCredit)}</div><div style="font-size:9px;color:var(--muted)">${qty}x @ ${$fmt$(liveCredit)}</div></div>
+        <div style="padding:6px;background:var(--bg2);border-radius:4px"><div style="font-size:10px;color:var(--muted)">Total Max Loss</div><div style="font-weight:bold;color:var(--red-b);font-size:14px">${$fmt$(totalMaxLoss)}</div><div style="font-size:9px;color:var(--muted)">${qty}x @ ${$fmt$(liveMaxLoss)}</div></div>
         <div style="padding:6px;background:var(--bg2);border-radius:4px"><div style="font-size:10px;color:var(--muted)">ROI</div><div style="font-weight:bold;color:var(--green-b);font-size:14px">${liveRoi}%</div></div>
       </div>
     </div>`;
@@ -2585,8 +2636,8 @@ function renderRecs() {
       html += `<td>${s.short_strike}</td><td>${s.long_strike}</td>`;
       html += `<td style="font-size:11px">${expShort}</td>`;
       html += `<td class="num">${s._dte}</td>`;
-      html += `<td class="num pos">$${totalCr.toLocaleString()}<div style="font-size:8px;color:var(--muted)">$${s.credit_per_contract}/c</div></td>`;
-      html += `<td class="num" style="color:var(--red-b)">$${totalML.toLocaleString()}<div style="font-size:8px;color:var(--muted)">$${s.max_loss}/c</div></td>`;
+      html += `<td class="num pos">${$fmt$(totalCr)}<div style="font-size:8px;color:var(--muted)">${$fmt$(s.credit_per_contract)}/c</div></td>`;
+      html += `<td class="num" style="color:var(--red-b)">${$fmt$(totalML)}<div style="font-size:8px;color:var(--muted)">${$fmt$(s.max_loss)}/c</div></td>`;
       html += `<td class="num">${s.roi_pct}%</td>`;
       html += `<td class="num" style="color:var(--yellow);font-weight:bold">${s._dailyRoi}%</td>`;
       html += `<td class="num">${s.otm_pct}%</td>`;
@@ -2642,7 +2693,7 @@ function renderRecs() {
     const pctlMeta = _pctlByTicker[sym];
     const streakInfo = pctlMeta ? `${pctlMeta.streak}d ${pctlMeta.streak>0?'up':'dn'}` : '';
 
-    html += `<div class="card"><div class="card-title">${sym} <span style="color:var(--text);font-weight:normal">${cp?.toLocaleString()} | Exp: ${exp} | Width: ${width}${streakInfo ? ' | '+streakInfo : ''}</span></div>`;
+    html += `<div class="card"><div class="card-title">${sym} <span style="color:var(--text);font-weight:normal">${$fmt(cp)} | Exp: ${exp} | Width: ${width}${streakInfo ? ' | '+streakInfo : ''}</span></div>`;
 
     const showMatches = spreads.slice(0, 10);
     const needNearMiss = showMatches.length < 10;
@@ -2661,8 +2712,8 @@ function renderRecs() {
       html += `<tr>`;
       html += `<td><span class="badge ${s.option_type==='PUT'?'badge-safe':'badge-watch'}">${s.option_type}</span></td>`;
       html += `<td>${s.short_strike}</td><td>${s.long_strike}</td>`;
-      html += `<td class="num pos">$${totalCr.toLocaleString()}<div style="font-size:9px;color:var(--muted)">$${s.credit_per_contract.toLocaleString()}/c</div></td>`;
-      html += `<td class="num" style="color:var(--red-b)">$${totalML.toLocaleString()}<div style="font-size:9px;color:var(--muted)">$${s.max_loss.toLocaleString()}/c</div></td>`;
+      html += `<td class="num pos">${$fmt$(totalCr)}<div style="font-size:9px;color:var(--muted)">${$fmt$(s.credit_per_contract)}/c</div></td>`;
+      html += `<td class="num" style="color:var(--red-b)">${$fmt$(totalML)}<div style="font-size:9px;color:var(--muted)">${$fmt$(s.max_loss)}/c</div></td>`;
       html += `<td class="num rec-roi">${s.roi_pct}%</td>`;
       html += `<td class="num">${s.otm_pct}%</td>`;
       html += `<td class="num" style="color:var(--yellow)">${s.otm_pct_pc}%</td>`;
@@ -2681,9 +2732,9 @@ function renderRecs() {
         html += `<tr style="opacity:0.45">`;
         html += `<td><span class="badge ${s.option_type==='PUT'?'badge-safe':'badge-watch'}">${s.option_type}</span></td>`;
         html += `<td>${s.short_strike}</td><td>${s.long_strike}</td>`;
-        html += `<td class="num">$${totalCr.toLocaleString()}<div style="font-size:9px">$${s.credit_per_contract.toLocaleString()}/c</div></td>`;
-        html += `<td class="num">$${totalML.toLocaleString()}<div style="font-size:9px">$${s.max_loss.toLocaleString()}/c</div></td>`;
-        html += `<td class="num">${s.roi_pct}%</td>`;
+        html += `<td class="num">${$fmt$(totalCr)}<div style="font-size:9px">${$fmt$(s.credit_per_contract)}/c</div></td>`;
+        html += `<td class="num">${$fmt$(totalML)}<div style="font-size:9px">${$fmt$(s.max_loss)}/c</div></td>`;
+        html += `<td class="num">${$fmt(s.roi_pct)}%</td>`;
         html += `<td class="num">${s.otm_pct}%</td>`;
         html += `<td class="num" style="color:var(--yellow)">${s.otm_pct_pc}%</td>`;
         html += `<td>${pctlBadge(s._pctl)}</td>`;
@@ -2946,8 +2997,8 @@ async function loadAutoTradeHistory(page) {
       // KPIs
       html += `<div style="display:flex;gap:12px;margin-bottom:6px;font-size:12px">`;
       html += `<div>Trades: <b>${trades}</b></div>`;
-      html += `<div>Credit: <b class="pos">$${credit.toLocaleString()}</b></div>`;
-      if (maxLoss) html += `<div>Max Loss: <b class="neg">$${maxLoss.toLocaleString()}</b></div>`;
+      html += `<div>Credit: <b class="pos">${$fmt$(credit)}</b></div>`;
+      if (maxLoss) html += `<div>Max Loss: <b class="neg">${$fmt$(maxLoss)}</b></div>`;
       html += `<div style="color:var(--muted)">Top ${cfg.top_n||3} / ${cfg.interval_minutes||3}m / until ${cfg.end_time_utc||'?'} ET</div>`;
       html += `</div>`;
 
