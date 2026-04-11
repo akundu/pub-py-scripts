@@ -4484,32 +4484,60 @@ async def fetch_earnings_date(symbol: str) -> str:
         return "N/A"
 
 
-def compute_default_prediction_days() -> list:
-    """Compute default prediction day tabs based on current day of week.
+def _get_upcoming_trading_days(count: int = 30) -> list:
+    """Return list of upcoming trading dates (YYYY-MM-DD strings) using exchange_calendars."""
+    try:
+        from common.market_hours import is_trading_day
+        from datetime import date as _d
+        today = _d.today()
+        result = []
+        d = today
+        for _ in range(count * 2):
+            if is_trading_day(d):
+                result.append(d)
+                if len(result) >= count:
+                    break
+            d += timedelta(days=1)
+        return result
+    except Exception:
+        # Fallback: weekdays only
+        from datetime import date as _d
+        today = _d.today()
+        result = []
+        d = today
+        for _ in range(count * 2):
+            if d.weekday() < 5:
+                result.append(d)
+                if len(result) >= count:
+                    break
+            d += timedelta(days=1)
+        return result
 
-    Returns trading days (weekdays only):
-    - 0 (today / 0DTE)
+
+def compute_default_prediction_days() -> list:
+    """Compute default prediction day tabs based on trading calendar.
+
+    Uses exchange_calendars for holiday awareness. Returns trading day offsets:
+    - 0 (next trading day / 0DTE)
     - 1-day increments through this Friday (minimum 5 trading days)
     - The Friday after this Friday
     - Milestones: 10, 20 trading days
 
-    Examples:
-      Mon: [0, 1, 2, 3, 4, 9, 10, 20]
-      Tue: [0, 1, 2, 3, 8, 10, 20]
-      Wed: [0, 1, 2, 7, 10, 20]
-      Thu: [0, 1, 2, 3, 4, 5, 6, 10, 20]  (1-day to 5 since Fri < 5D away)
-      Fri: [0, 1, 2, 3, 4, 5, 10, 20]     (1-day to 5 since Fri = 0D away)
+    DTE0 = next trading day (today if market day, else Monday/next).
     """
-    now = datetime.now(ET_TZ)
-    today_weekday = now.weekday()  # 0=Mon, 4=Fri
+    upcoming = _get_upcoming_trading_days(25)
+    if not upcoming:
+        return [0, 1, 2, 3, 4, 5, 10, 20]
 
-    days = {0}  # Always include today (0DTE)
+    # DTE0 = upcoming[0] (next trading day)
+    dte0_date = upcoming[0]
+    dte0_weekday = dte0_date.weekday()  # 0=Mon, 4=Fri
+
+    days = {0}  # Always include 0DTE
 
     # Trading days to this Friday
-    # weekday 0(Mon)->4, 1(Tue)->3, 2(Wed)->2, 3(Thu)->1, 4(Fri)->0
-    trading_days_to_friday = max(0, 4 - today_weekday)
+    trading_days_to_friday = max(0, 4 - dte0_weekday)
 
-    # 1-day increments to this Friday
     for d in range(1, trading_days_to_friday + 1):
         days.add(d)
 
@@ -4522,7 +4550,6 @@ def compute_default_prediction_days() -> list:
         for d in range(1, 6):
             days.add(d)
 
-    # Add milestones
     for m in [10, 20]:
         days.add(m)
 
@@ -9783,15 +9810,27 @@ async def handle_predictions_page(request: web.Request) -> web.Response:
             )
         band_history_date = request.query.get('date')
         if not band_history_date and history:
-            now_et = datetime.now(ET_TZ)
-            candidate = now_et.date()
-            while candidate.weekday() >= 5:
-                candidate -= timedelta(days=1)
-            if candidate == now_et.date() and (now_et.hour < 9 or (now_et.hour == 9 and now_et.minute < 30)):
-                candidate -= timedelta(days=1)
+            # Use exchange_calendars for holiday-aware "last trading day"
+            try:
+                from common.market_hours import previous_trading_day, is_trading_day, is_market_hours
+                now_et = datetime.now(ET_TZ)
+                today = now_et.date()
+                if is_trading_day(today) and (now_et.hour >= 9 and (now_et.hour > 9 or now_et.minute >= 30)):
+                    candidate = today  # Market open today → use today
+                else:
+                    candidate = previous_trading_day(today)  # Before open or non-trading day
+                band_history_date = candidate.strftime('%Y-%m-%d')
+            except Exception:
+                # Fallback: weekday skip
+                now_et = datetime.now(ET_TZ)
+                candidate = now_et.date()
                 while candidate.weekday() >= 5:
                     candidate -= timedelta(days=1)
-            band_history_date = candidate.strftime('%Y-%m-%d')
+                if candidate == now_et.date() and (now_et.hour < 9 or (now_et.hour == 9 and now_et.minute < 30)):
+                    candidate -= timedelta(days=1)
+                    while candidate.weekday() >= 5:
+                        candidate -= timedelta(days=1)
+                band_history_date = candidate.strftime('%Y-%m-%d')
         snapshots = []
         if history and band_history_date:
             snapshots = await history.get_snapshots(ticker, band_history_date)
@@ -9801,12 +9840,15 @@ async def handle_predictions_page(request: web.Request) -> web.Response:
             'snapshots': snapshots,
             'count': len(snapshots),
         }
+        # Include trading day calendar for correct DTE→date mapping
+        trading_days = [d.isoformat() for d in _get_upcoming_trading_days(30)]
         return web.json_response({
             'ticker': ticker,
             'today': today_result,
             'future': future_results,
             'band_history': band_history,
             'params': {'day_tabs': day_tabs, 'lookback': lookback},
+            '_trading_days': trading_days,
         })
 
     # Generate HTML page

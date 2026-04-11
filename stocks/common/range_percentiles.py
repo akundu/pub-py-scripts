@@ -33,18 +33,33 @@ DEFAULT_WINDOW = 0  # window=0 represents today (0DTE)
 
 
 def compute_default_windows() -> list:
-    """Compute smart default windows based on current day of week.
+    """Compute smart default windows based on trading calendar.
 
-    Returns: [0] + 1-day increments to this Friday, 5, day increments
-    to next Friday, then 10 and 20. All values are trading days.
+    Uses exchange_calendars for holiday awareness. Returns: [0] + 1-day
+    increments to this Friday, 5, day increments to next Friday, then 10 and 20.
+    All values are trading day offsets from the last trading day.
     """
-    now = datetime.now(timezone.utc)
-    today_weekday = now.weekday()  # 0=Mon, 4=Fri
+    # Determine the next trading day's weekday (not today's calendar weekday)
+    try:
+        from common.market_hours import is_trading_day
+        from datetime import date as _d, timedelta as _td
+        today = _d.today()
+        # Find next trading day (could be today)
+        d = today
+        for _ in range(10):
+            if is_trading_day(d):
+                break
+            d += _td(days=1)
+        next_td_weekday = d.weekday()
+    except Exception:
+        next_td_weekday = datetime.now(timezone.utc).weekday()
+        if next_td_weekday >= 5:
+            next_td_weekday = 0  # Weekend → treat as Monday
 
     days = {0}  # Always include 0DTE
 
     # Trading days to this Friday (1-day increments)
-    trading_days_to_friday = max(0, 4 - today_weekday)
+    trading_days_to_friday = max(0, 4 - next_td_weekday)
     for d in range(1, trading_days_to_friday + 1):
         days.add(d)
 
@@ -56,11 +71,9 @@ def compute_default_windows() -> list:
         next_friday_trading = trading_days_to_friday + 5
     else:
         next_friday_trading = 5
-    # Day increments from this Friday+1 to next Friday
     for d in range(trading_days_to_friday + 1, next_friday_trading + 1):
         days.add(d)
 
-    # Add milestones
     days.add(10)
     days.add(20)
 
