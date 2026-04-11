@@ -265,6 +265,50 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
   #trade-modal { align-items:center; }
   #trade-modal-content { border-radius:12px; max-height:60vh; }
 }
+
+/* ── Mobile Overrides (≤767px) ────────────────────────────────── */
+@media (max-width:767px) {
+  html, body { font-size:14px; }
+
+  /* Tables: horizontal scroll, relaxed wrapping, readable sizes */
+  .tbl { display:block; overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  .tbl th, .tbl td { white-space:nowrap; padding:4px 5px; font-size:12px; }
+  .tbl th { font-size:11px; }
+
+  /* Ticker bar: compact */
+  .ticker-item { min-width:65px; padding:4px 6px; }
+  .ticker-item .sym { font-size:10px; }
+  .ticker-item .price { font-size:12px; }
+
+  /* Filter controls: tighter, allow wrapping */
+  .grid-controls { gap:3px 6px; }
+  .grid-controls label { font-size:10px; }
+  .grid-controls input[type="number"], .grid-controls select { font-size:13px; }
+
+  /* Options price bar: wrap */
+  #opt-price-bar { flex-wrap:wrap; font-size:11px; gap:6px 12px; }
+
+  /* Trade modal: full-width, more padding */
+  #trade-modal-content { max-width:100%; margin:0 4px; }
+
+  /* Portfolio detail grids: single column */
+  .pos-detail > div[style*="grid-template-columns"] { grid-template-columns:1fr !important; }
+
+  /* Activity/timestamp: slightly larger */
+  #opt-last-updated, #recs-last-updated { font-size:11px; }
+
+  /* Options chain column: full width */
+  .options-chain-col { overflow-x:auto; }
+}
+
+/* ── Extra small screens (≤480px) ─────────────────────────────── */
+@media (max-width:480px) {
+  .hide-sm { display:none !important; }
+  .tbl th, .tbl td { padding:3px 4px; font-size:11px; }
+  .grid-controls input[type="number"] { width:50px !important; }
+  .grid-controls select { max-width:70px; }
+  #opt-price-bar { font-size:10px; gap:4px 8px; }
+}
 </style>
 </head>
 <body>
@@ -3050,8 +3094,8 @@ function renderRecs() {
     const topCollapsed = document.getElementById('top-picks-body')?.style.display === 'none';
     const caretChar = topCollapsed ? '&#9654;' : '&#9660;';
     html += `<div class="card"><div class="card-title" style="cursor:pointer" onclick="const b=document.getElementById('top-picks-body');b.style.display=b.style.display==='none'?'':'none';this.querySelector('.caret').innerHTML=b.style.display==='none'?'&#9654;':'&#9660;'"><span class="caret">${caretChar}</span> Top Picks <span style="color:var(--muted);font-weight:normal;font-size:11px">across all tickers &amp; DTEs &middot; sorted by daily ROI</span></div>`;
-    html += `<div id="top-picks-body" style="max-height:400px;overflow-y:auto;${topCollapsed ? 'display:none' : ''}">`;
-    html += `<table class="tbl"><thead><tr><th>Tkr</th><th>Type</th><th>Short</th><th>Long</th><th>Exp</th><th class="num">DTE</th><th class="num">Credit</th><th class="num">MaxLoss</th><th class="num">ROI%</th><th class="num" style="color:var(--yellow)">D/ROI</th><th class="num">OTM%</th><th class="num" title="OTM% from prev close">pc%</th><th>H</th><th>P</th><th></th></tr></thead><tbody>`;
+    html += `<div id="top-picks-body" style="max-height:400px;overflow-y:auto;overflow-x:auto;-webkit-overflow-scrolling:touch;${topCollapsed ? 'display:none' : ''}">`;
+    html += `<table class="tbl"><thead><tr><th>Tkr</th><th>Type</th><th>Short</th><th>Long</th><th class="hide-sm">Exp</th><th class="num">DTE</th><th class="num">Credit</th><th class="num hide-sm">MaxLoss</th><th class="num">ROI%</th><th class="num" style="color:var(--yellow)">D/ROI</th><th class="num">OTM%</th><th class="num hide-sm" title="OTM% from prev close">pc%</th><th class="hide-sm">H</th><th class="hide-sm">P</th><th></th></tr></thead><tbody>`;
     for (const s of allTopSpreads.slice(0, topN)) {
       const totalCr = s.credit_per_contract * recQty;
       const totalML = s.max_loss * recQty;
@@ -3060,16 +3104,16 @@ function renderRecs() {
       html += `<td style="font-weight:bold">${s._sym}</td>`;
       html += `<td><span class="badge ${s.option_type==='PUT'?'badge-safe':'badge-watch'}">${s.option_type[0]}</span></td>`;
       html += `<td>${s.short_strike}</td><td>${s.long_strike}</td>`;
-      html += `<td style="font-size:11px">${expShort}</td>`;
+      html += `<td class="hide-sm" style="font-size:11px">${expShort}</td>`;
       html += `<td class="num">${s._dte}</td>`;
       html += `<td class="num pos">${$fmt$(totalCr)}<div style="font-size:8px;color:var(--muted)">${$fmt$(s.credit_per_contract)}/c</div></td>`;
-      html += `<td class="num" style="color:var(--red-b)">${$fmt$(totalML)}<div style="font-size:8px;color:var(--muted)">${$fmt$(s.max_loss)}/c</div></td>`;
+      html += `<td class="num hide-sm" style="color:var(--red-b)">${$fmt$(totalML)}<div style="font-size:8px;color:var(--muted)">${$fmt$(s.max_loss)}/c</div></td>`;
       html += `<td class="num">${s.roi_pct}%</td>`;
       html += `<td class="num" style="color:var(--yellow);font-weight:bold">${s._dailyRoi}%</td>`;
       html += `<td class="num">${s.otm_pct}%</td>`;
-      html += `<td class="num" style="color:var(--yellow)">${s.otm_pct_pc}%</td>`;
-      html += `<td>${pctlBadge(s._pctl)}</td>`;
-      html += `<td>${predBadge(s._pred)}</td>`;
+      html += `<td class="num hide-sm" style="color:var(--yellow)">${s.otm_pct_pc}%</td>`;
+      html += `<td class="hide-sm">${pctlBadge(s._pctl)}</td>`;
+      html += `<td class="hide-sm">${predBadge(s._pred)}</td>`;
       html += `<td><button class="btn btn-green btn-sm" onclick="tradeRec('${s._sym}','${s.option_type}',${s.short_strike},${s.long_strike},'${s._exp}')">Trade</button></td>`;
       html += '</tr>';
     }
@@ -3131,7 +3175,7 @@ function renderRecs() {
       continue;
     }
 
-    html += `<table class="tbl"><thead><tr><th>Type</th><th>Short</th><th>Long</th><th class="num">Credit</th><th class="num">MaxLoss</th><th class="num">ROI%</th><th class="num">OTM%</th><th class="num" title="OTM% from prev close">pc%</th><th>Hist</th><th>Pred</th><th></th></tr></thead><tbody>`;
+    html += `<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table class="tbl"><thead><tr><th>Type</th><th>Short</th><th>Long</th><th class="num">Credit</th><th class="num">MaxLoss</th><th class="num">ROI%</th><th class="num">OTM%</th><th class="num hide-sm" title="OTM% from prev close">pc%</th><th class="hide-sm">Hist</th><th class="hide-sm">Pred</th><th></th></tr></thead><tbody>`;
 
     for (const s of showMatches) {
       const totalCr = s.credit_per_contract * recQty;
@@ -3143,9 +3187,9 @@ function renderRecs() {
       html += `<td class="num" style="color:var(--red-b)">${$fmt$(totalML)}<div style="font-size:9px;color:var(--muted)">${$fmt$(s.max_loss)}/c</div></td>`;
       html += `<td class="num rec-roi">${s.roi_pct}%</td>`;
       html += `<td class="num">${s.otm_pct}%</td>`;
-      html += `<td class="num" style="color:var(--yellow)">${s.otm_pct_pc}%</td>`;
-      html += `<td>${pctlBadge(s._pctl)}</td>`;
-      html += `<td>${predBadge(s._pred)}</td>`;
+      html += `<td class="num hide-sm" style="color:var(--yellow)">${s.otm_pct_pc}%</td>`;
+      html += `<td class="hide-sm">${pctlBadge(s._pctl)}</td>`;
+      html += `<td class="hide-sm">${predBadge(s._pred)}</td>`;
       html += `<td><button class="btn btn-green btn-sm" onclick="tradeRec('${sym}','${s.option_type}',${s.short_strike},${s.long_strike},'${exp}')">Trade</button></td>`;
       html += '</tr>';
     }
@@ -3163,15 +3207,15 @@ function renderRecs() {
         html += `<td class="num">${$fmt$(totalML)}<div style="font-size:9px">${$fmt$(s.max_loss)}/c</div></td>`;
         html += `<td class="num">${$fmt(s.roi_pct)}%</td>`;
         html += `<td class="num">${s.otm_pct}%</td>`;
-        html += `<td class="num" style="color:var(--yellow)">${s.otm_pct_pc}%</td>`;
-        html += `<td>${pctlBadge(s._pctl)}</td>`;
-        html += `<td>${predBadge(s._pred)}</td>`;
+        html += `<td class="num hide-sm" style="color:var(--yellow)">${s.otm_pct_pc}%</td>`;
+        html += `<td class="hide-sm">${pctlBadge(s._pctl)}</td>`;
+        html += `<td class="hide-sm">${predBadge(s._pred)}</td>`;
         html += `<td><button class="btn btn-muted btn-sm" style="opacity:0.7;font-size:10px" onclick="tradeRec('${sym}','${s.option_type}',${s.short_strike},${s.long_strike},'${exp}')">Trade</button> ${failTags}</td>`;
         html += '</tr>';
       }
     }
 
-    html += '</tbody></table>';
+    html += '</tbody></table></div>';  // Close overflow-x wrapper + table
     html += freshnessBanner({ source: srcLabel, fetchedAt: _fetchedAtIso, cachedAt: _cachedAtIso });
     html += '</div>';
   }
