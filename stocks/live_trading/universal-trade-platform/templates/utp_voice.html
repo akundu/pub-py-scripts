@@ -693,7 +693,9 @@ function _refreshLastUpdatedLabels() {
     const iso = el.dataset.iso;
     if (iso) {
       const secs = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
-      el.textContent = secs < 5 ? 'just now' : secs < 60 ? secs+'s ago' : timeSince(iso) + ' ago';
+      const age = secs < 5 ? 'just now' : secs < 60 ? secs+'s ago' : timeSince(iso) + ' ago';
+      const prefix = el.dataset.prefix || '';
+      el.textContent = prefix ? `${prefix} ${age}` : age;
     }
   });
 }
@@ -717,7 +719,11 @@ async function _fetchChainJob(job) {
     if (!chainCache[job.sym]) chainCache[job.sym] = {};
     const exp = d.expiration || job.exp;
     chainCache[job.sym][exp] = {chain: d.chain, current_price: d.current_price, source: d.source, fetched_at: d.fetched_at, cached_at: d.cached_at, ts: new Date()};
-    chainCache[job.sym]._expirations = d.expirations || [];
+    // Filter expirations to trading days only (server should already do this, but defense-in-depth)
+    const rawExps = d.expirations || [];
+    chainCache[job.sym]._expirations = _tradingDaysCalendar.length
+      ? rawExps.filter(e => new Set(_tradingDaysCalendar).has(e))
+      : rawExps;
     chainCache[job.sym]._current_price = d.current_price;
 
     if (optGridData?.symbol === job.sym && optGridData?.expiration === exp) {
@@ -1728,8 +1734,8 @@ async function loadOptionsGrid() {
           cell.textContent = val;
         });
         _updateOptPriceBar(sym, d.current_price);
-        const tsDiv = document.querySelector('#options-grid div[style*="text-align:right"]');
-        if (tsDiv) tsDiv.innerHTML = formatTimestamp(d).replace(/<div[^>]*>|<\/div>/g, '');
+        const tsDiv = document.querySelector('#options-grid .freshness-banner') || document.querySelector('#options-grid div[style*="text-align:right"]');
+        if (tsDiv) tsDiv.outerHTML = formatTimestamp(d);
       }
     } else {
       // No grid yet (cache was empty) — do full render
@@ -2173,8 +2179,8 @@ async function refreshOptionPrices() {
     }
 
     // Update timestamp footer
-    const tsDiv = document.querySelector('#options-grid div[style*="text-align:right"]');
-    if (tsDiv) tsDiv.innerHTML = formatTimestamp(d).replace(/<div[^>]*>|<\/div>/g, '');
+    const tsDiv = document.querySelector('#options-grid .freshness-banner') || document.querySelector('#options-grid div[style*="text-align:right"]');
+    if (tsDiv) tsDiv.outerHTML = formatTimestamp(d);
 
     // Update price bar in-place
     _updateOptPriceBar(sym, d.current_price);
@@ -2824,19 +2830,18 @@ function renderRecs() {
       srcInventory += `<span><span class="src-dot ${dot}" style="width:5px;height:5px;border-radius:50;display:inline-block"></span> ${sym}: ${srcN} ${t} (<span class="freshness-age" data-iso="${c.fetched_at||c.ts?.toISOString()||''}">${age} ago</span>)</span>`;
     }
   }
-  // Percentiles freshness
+  // Percentiles freshness — data date + (downloaded X ago)
   if (_pctlFetchedAt) {
-    const pT = new Date(_pctlFetchedAt).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true});
+    const pLastDay = Object.values(_pctlByTicker)[0]?.lastDay || '';
     const pAge = timeSince(_pctlFetchedAt);
-    srcInventory += `<span>| Pctl: ${pT} (<span class="freshness-age" data-iso="${_pctlFetchedAt}">${pAge} ago</span>)</span>`;
+    srcInventory += `<span>| Pctl: ${pLastDay} (<span class="freshness-age" data-iso="${_pctlFetchedAt}" data-prefix="downloaded">downloaded ${pAge} ago</span>)</span>`;
   } else {
     srcInventory += '<span>| Pctl: <span style="color:var(--yellow)">loading</span></span>';
   }
-  // Predictions freshness
+  // Predictions freshness — (downloaded X ago)
   if (_predFetchedAt) {
-    const prT = new Date(_predFetchedAt).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true});
     const prAge = timeSince(_predFetchedAt);
-    srcInventory += `<span>| Pred: ${prT} (<span class="freshness-age" data-iso="${_predFetchedAt}">${prAge} ago</span>)</span>`;
+    srcInventory += `<span>| Pred (<span class="freshness-age" data-iso="${_predFetchedAt}" data-prefix="downloaded">downloaded ${prAge} ago</span>)</span>`;
   } else {
     srcInventory += '<span>| Pred: <span style="color:var(--yellow)">loading</span></span>';
   }
@@ -3576,6 +3581,11 @@ async function init() {
         chainCache[sym] = cc;
         for (const [k, v] of Object.entries(cc)) {
           if (v?.ts && typeof v.ts === 'string') v.ts = new Date(v.ts);
+        }
+        // Filter cached expirations to trading days only (remove stale weekends/holidays)
+        if (cc._expirations && _tradingDaysCalendar.length) {
+          const tdSet = new Set(_tradingDaysCalendar);
+          chainCache[sym]._expirations = cc._expirations.filter(exp => tdSet.has(exp));
         }
       }
     }

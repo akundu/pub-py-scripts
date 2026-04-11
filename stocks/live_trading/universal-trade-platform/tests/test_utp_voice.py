@@ -1102,6 +1102,27 @@ class TestCSVExpirations:
         finally:
             utp_voice.CSV_EXPORTS_DIR = original
 
+    def test_csv_expirations_filter_non_trading_days(self, tmp_path):
+        """CSV expirations should exclude weekends and holidays."""
+        csv_dir = tmp_path / "SPX"
+        csv_dir.mkdir()
+        # 2026-04-11 = Saturday, 2026-04-12 = Sunday, 2026-04-13 = Monday
+        (csv_dir / "2026-04-11.csv").write_text("header\n")
+        (csv_dir / "2026-04-12.csv").write_text("header\n")
+        (csv_dir / "2026-04-13.csv").write_text("header\n")
+        (csv_dir / "2026-04-14.csv").write_text("header\n")
+
+        original = utp_voice.CSV_EXPORTS_DIR
+        utp_voice.CSV_EXPORTS_DIR = str(tmp_path)
+        try:
+            exps = utp_voice._get_csv_expirations("SPX")
+            assert "2026-04-11" not in exps  # Saturday
+            assert "2026-04-12" not in exps  # Sunday
+            assert "2026-04-13" in exps      # Monday
+            assert "2026-04-14" in exps      # Tuesday
+        finally:
+            utp_voice.CSV_EXPORTS_DIR = original
+
 
 class TestCSVReader:
     def test_load_options_from_csv(self, tmp_path):
@@ -1569,6 +1590,31 @@ class TestPercentileTradingDays:
                     d = _d.fromisoformat(td)
                     assert d.weekday() < 5  # No weekends
 
+    def test_percentiles_include_voice_meta(self, client, auth_cookie):
+        """Percentiles response includes _voice_meta with source and fetched_at."""
+        import sys
+        stocks_root = str(Path(__file__).resolve().parents[3])
+        if stocks_root not in sys.path:
+            sys.path.insert(0, stocks_root)
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"tickers": []}
+
+        with patch("httpx.AsyncClient") as MockClient:
+            instance = AsyncMock()
+            instance.get.return_value = mock_resp
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+            with patch.object(utp_voice, "_is_market_hours", return_value=False):
+                resp = client.get("/api/percentiles", cookies=auth_cookie)
+                assert resp.status_code == 200
+                data = resp.json()
+                meta = data["_voice_meta"]
+                assert meta["source"] == "percentile_server"
+                assert "fetched_at" in meta
+
     def test_trading_days_no_weekends(self):
         """Trading day calendar from exchange_calendars excludes weekends."""
         import sys
@@ -1592,3 +1638,25 @@ class TestPercentileTradingDays:
         from common.market_hours import is_trading_day
         from datetime import date
         assert is_trading_day(date(2026, 4, 3)) is False
+
+    def test_predictions_include_voice_meta(self, client, auth_cookie):
+        """Predictions response includes _voice_meta with source and fetched_at."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"ticker": "SPX", "today": {}, "future": {}}
+
+        with patch("httpx.AsyncClient") as MockClient:
+            instance = AsyncMock()
+            instance.get.return_value = mock_resp
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+            with patch.object(utp_voice, "_is_market_hours", return_value=False):
+                utp_voice._predictions_cache.clear()
+                utp_voice._predictions_cache_at = 0
+                resp = client.get("/api/predictions", cookies=auth_cookie)
+                assert resp.status_code == 200
+                data = resp.json()
+                meta = data["_voice_meta"]
+                assert meta["source"] == "prediction_server"
+                assert "fetched_at" in meta

@@ -1676,20 +1676,35 @@ def _get_csv_expirations(symbol: str) -> list[str]:
     """Get available expiration dates from CSV exports directory.
 
     Lists {CSV_EXPORTS_DIR}/{symbol}/*.csv, parses filenames as dates,
-    returns sorted dates >= today.
+    returns sorted dates that are valid trading days >= today.
+    Filters out weekends and market holidays via exchange_calendars.
     """
     csv_dir = Path(CSV_EXPORTS_DIR) / symbol.upper()
     if not csv_dir.is_dir():
         return []
 
     today = datetime.now().strftime("%Y-%m-%d")
+
+    try:
+        from common.market_hours import is_trading_day as _is_td
+        def _valid(d_str: str) -> bool:
+            if d_str < today:
+                return False
+            try:
+                from datetime import date as _d
+                return _is_td(_d.fromisoformat(d_str))
+            except Exception:
+                return True
+    except Exception:
+        def _valid(d_str: str) -> bool:
+            return d_str >= today
+
     expirations = []
     for f in csv_dir.iterdir():
         if f.suffix == ".csv" and len(f.stem) == 10:  # YYYY-MM-DD
             try:
-                # Validate date format
                 datetime.strptime(f.stem, "%Y-%m-%d")
-                if f.stem >= today:
+                if _valid(f.stem):
                     expirations.append(f.stem)
             except ValueError:
                 continue
