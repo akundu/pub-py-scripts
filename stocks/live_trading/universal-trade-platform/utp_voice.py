@@ -2847,14 +2847,13 @@ async def api_prev_closes(
     symbols: str = "SPX,NDX,RUT",
     _u: str | None = Depends(optional_session),
 ):
-    """Get previous close price from QuestDB daily_prices via db_server.
+    """Get close prices from QuestDB daily_prices via db_server.
 
-    During market hours: the "previous close" is the most recent close BEFORE today
-    (yesterday's close).  This is the reference for intraday change calculations.
-
-    After market close: today's close may be ingested.  We still want yesterday's
-    close so the displayed change reflects "today vs yesterday" — same as Bloomberg/
-    Yahoo Finance.  Query: WHERE date < today ORDER BY date DESC LIMIT 1.
+    Returns the last 2 closes per symbol with dates so the frontend can pick
+    the correct reference based on time-of-day:
+    - Pre-market / market hours: reference = last close before today (yesterday)
+    - After close (today's close ingested): reference = today's close
+    - Frontend logic handles the selection.
     """
     global _prev_close_cache, _prev_close_cache_at
     tickers = [s.strip().upper() for s in symbols.split(",") if s.strip()]
@@ -2865,28 +2864,15 @@ async def api_prev_closes(
         if all(sym in _prev_close_cache for sym in tickers):
             return _prev_close_cache
 
-    # Today's date in ET (market calendar uses ET)
-    try:
-        from zoneinfo import ZoneInfo
-        today_et = datetime.now(ZoneInfo("America/New_York")).strftime("%Y-%m-%d")
-    except Exception:
-        today_et = (datetime.now(UTC) - timedelta(hours=4)).strftime("%Y-%m-%d")
-
-    result: dict[str, float | None] = {}
+    result: dict[str, dict] = {}
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             for sym in tickers:
                 try:
-                    # Most recent close BEFORE today = previous trading day's close.
-                    # Works correctly regardless of whether today's close is ingested:
-                    # - Market open: today's close doesn't exist yet → returns yesterday's
-                    # - Market closed, pre-ingestion: same as above
-                    # - Market closed, post-ingestion: today's close exists but date < today
-                    #   filters it out → still returns yesterday's
+                    # Fetch the last 2 closes (most recent + previous)
                     sql = (
-                        f"SELECT close FROM daily_prices "
-                        f"WHERE ticker = '{sym}' AND date < '{today_et}' "
-                        f"ORDER BY date DESC LIMIT 1"
+                        f"SELECT date, close FROM daily_prices "
+                        f"WHERE ticker = '{sym}' ORDER BY date DESC LIMIT 2"
                     )
                     resp = await client.get(
                         f"{DB_SERVER_URL}/api/execute_sql",
@@ -2895,10 +2881,20 @@ async def api_prev_closes(
                     if resp.status_code == 200:
                         data = resp.json()
                         rows = data.get("data", data.get("results", data.get("rows", [])))
-                        if rows:
-                            close_val = rows[0].get("close") or rows[0].get("Close")
-                            if close_val:
-                                result[sym] = float(close_val)
+                        if len(rows) >= 2:
+                            result[sym] = {
+                                "last_close": float(rows[0].get("close", 0)),
+                                "last_close_date": str(rows[0].get("date", ""))[:10],
+                                "prev_close": float(rows[1].get("close", 0)),
+                                "prev_close_date": str(rows[1].get("date", ""))[:10],
+                            }
+                        elif len(rows) == 1:
+                            result[sym] = {
+                                "last_close": float(rows[0].get("close", 0)),
+                                "last_close_date": str(rows[0].get("date", ""))[:10],
+                                "prev_close": float(rows[0].get("close", 0)),
+                                "prev_close_date": str(rows[0].get("date", ""))[:10],
+                            }
                 except Exception as e:
                     logger.debug("prev-close fetch failed for %s: %s", sym, e)
     except Exception as e:
@@ -2908,18 +2904,17 @@ async def api_prev_closes(
     if not result or len(result) < len(tickers):
         for sym in tickers:
             if sym not in result:
-                # Try predictions first, then percentiles
                 pred_close = None
                 if _predictions_cache and sym in _predictions_cache:
                     pred_close = _predictions_cache[sym].get("today", {}).get("prev_close")
                 if pred_close:
-                    result[sym] = float(pred_close)
+                    result[sym] = {"last_close": float(pred_close), "last_close_date": "", "prev_close": float(pred_close), "prev_close_date": ""}
                 elif _percentile_cache:
                     for t in _percentile_cache.get("tickers", []):
                         if t.get("ticker") == sym:
                             pc = t.get("metadata", {}).get("previous_close")
                             if pc:
-                                result[sym] = float(pc)
+                                result[sym] = {"last_close": float(pc), "last_close_date": "", "prev_close": float(pc), "prev_close_date": ""}
                             break
 
     if result:

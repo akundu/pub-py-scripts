@@ -880,6 +880,41 @@ async function fetchPrevCloses() {
   } catch(e) { /* silent */ }
 }
 
+// Get the correct reference close for a symbol based on time-of-day.
+// - Pre-market / market hours: yesterday's close (for intraday change)
+// - After close (today's close ingested): today's close (for after-hours change)
+function getRefClose(sym) {
+  const data = _prevCloses[sym];
+  if (!data) {
+    // Fallback for old format (plain number) or missing data
+    if (typeof _prevCloses[sym] === 'number') return _prevCloses[sym];
+    return predictionsData?.[sym]?.today?.prev_close || _pctlByTicker[sym]?.close || 0;
+  }
+  if (typeof data === 'number') return data;  // Old format compatibility
+
+  // Determine today's date in ET
+  const now = new Date();
+  const etStr = now.toLocaleString('en-US', {timeZone: 'America/New_York'});
+  const etDate = new Date(etStr);
+  const todayET = etDate.toISOString().slice(0, 10);
+  const etHour = etDate.getHours();
+
+  // After market close (4 PM ET+) and today's close is in the DB:
+  // reference = today's close (shows after-hours movement)
+  if (etHour >= 16 && data.last_close_date === todayET) {
+    return data.last_close;
+  }
+
+  // Before/during market hours: reference = previous trading day's close
+  // If last_close_date == today → today's close was ingested (cron ran early)
+  //   → use prev_close (second-to-last = yesterday)
+  // If last_close_date < today → last_close IS yesterday's close
+  if (data.last_close_date === todayET) {
+    return data.prev_close;
+  }
+  return data.last_close;
+}
+
 // ── Predictions Data (model-based bands) ─────────────────────────────────────
 let predictionsData = null;  // {SPX: {today:{...}, future:{0:{...}, 1:{...}, ...}}, ...}
 
@@ -1060,7 +1095,7 @@ let _priceWs = null;
 function _updateTickerItem(sym, p) {
   const el = document.getElementById('tk-'+sym);
   if (!el || !p) return;
-  const prevClose = _prevCloses[sym] || predictionsData?.[sym]?.today?.prev_close || _pctlByTicker[sym]?.close || 0;
+  const prevClose = getRefClose(sym);
   const change = prevClose ? p - prevClose : 0;
   const changePct = prevClose ? ((change / prevClose) * 100) : 0;
   const dir = change > 0 ? 'up' : change < 0 ? 'down' : 'flat';
@@ -1757,7 +1792,7 @@ function distPct(strike, cp, sym) {
     const pct = ((strike - cp) / cp * 100).toFixed(1);
     html += `<div style="font-size:9px;color:var(--muted);font-weight:normal" data-dist="cur">${pct>0?'+':''}${pct}%</div>`;
   }
-  const pc = sym ? (_prevCloses[sym] || predictionsData?.[sym]?.today?.prev_close || _pctlByTicker[sym]?.close) : 0;
+  const pc = sym ? getRefClose(sym) : 0;
   if (pc) {
     const pct2 = ((strike - pc) / pc * 100).toFixed(1);
     html += `<div style="font-size:8px;color:var(--yellow);font-weight:normal" data-dist="prev">${pct2>0?'+':''}${pct2}% pc</div>`;
@@ -1804,7 +1839,7 @@ function renderChainGrid(puts, calls, cp, sym, exp) {
   const width = DEFAULT_WIDTHS[sym] || 20;
 
   // Price summary bar: Prev Close | Current | Change
-  const prevClose = _prevCloses[sym] || predictionsData?.[sym]?.today?.prev_close || _pctlByTicker[sym]?.close || 0;
+  const prevClose = getRefClose(sym);
   const rtPrice = _realtimePrices[sym]?.price || cp;
   const chg = prevClose ? rtPrice - prevClose : 0;
   const chgPct = prevClose ? (chg / prevClose * 100) : 0;
@@ -1915,7 +1950,7 @@ function renderSingleChain(options, cp, type, sym, exp) {
   const prefix = type === 'CALL' ? 'c' : 'p';
 
   // Price summary bar (same as BOTH view)
-  const prevClose = _prevCloses[sym] || predictionsData?.[sym]?.today?.prev_close || _pctlByTicker[sym]?.close || 0;
+  const prevClose = getRefClose(sym);
   const rtPrice = _realtimePrices[sym]?.price || cp;
   const chg = prevClose ? rtPrice - prevClose : 0;
   const chgPct = prevClose ? (chg / prevClose * 100) : 0;
@@ -1958,7 +1993,7 @@ function stopOptAutoRefresh() {
 }
 
 function _updateOptPriceBar(sym, cp) {
-  const prevClose = _prevCloses[sym] || predictionsData?.[sym]?.today?.prev_close || _pctlByTicker[sym]?.close || 0;
+  const prevClose = getRefClose(sym);
   const rtPrice = _realtimePrices[sym]?.price || cp || 0;
   const fmtP = (v) => v ? v.toLocaleString(undefined,{minimumFractionDigits:1,maximumFractionDigits:1}) : '--';
   const elPrev = document.getElementById('opt-prev-close');
@@ -2438,7 +2473,7 @@ function closeTrade() {
 // ── Client-Side Spread Scanner (Picks) ───────────────────────────────────────
 
 function computeSpreads(chain, sym, currentPrice, width) {
-  const prevClose = _prevCloses[sym] || predictionsData?.[sym]?.today?.prev_close || _pctlByTicker[sym]?.close || 0;
+  const prevClose = getRefClose(sym);
   const spreads = [];
   for (const optType of ['PUT', 'CALL']) {
     const quotes = chain[optType.toLowerCase()] || [];

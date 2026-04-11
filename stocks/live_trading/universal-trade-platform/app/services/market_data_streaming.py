@@ -147,6 +147,33 @@ class MarketDataStreamingService:
             "close_band_pct": self._config.close_band_pct,
         }
 
+    async def _seed_prev_close_from_db(self) -> None:
+        """Seed prev_close from QuestDB daily_prices instead of from the first tick.
+
+        Queries db_server for the most recent close for each symbol. This ensures
+        the price validation gate uses the actual previous close, not the current
+        price (which is what first-tick seeding produces after a restart).
+        """
+        import os
+        db_url = os.environ.get("DB_SERVER_URL", "http://localhost:9102")
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                for sym in self._config.symbols:
+                    try:
+                        sql = f"SELECT close FROM daily_prices WHERE ticker = '{sym}' ORDER BY date DESC LIMIT 1"
+                        resp = await client.get(f"{db_url}/api/execute_sql", params={"sql": sql})
+                        if resp.status_code == 200:
+                            rows = resp.json().get("data", [])
+                            if rows and rows[0].get("close"):
+                                close = float(rows[0]["close"])
+                                self._prev_close[sym] = close
+                                logger.info("Seeded prev_close for %s from QuestDB: %.2f", sym, close)
+                    except Exception as e:
+                        logger.debug("Failed to seed prev_close for %s from QuestDB: %s", sym, e)
+        except Exception as e:
+            logger.debug("QuestDB prev_close seeding unavailable: %s", e)
+
     async def start(self) -> None:
         """Start streaming: connect to Redis/QuestDB, subscribe to IBKR market data."""
         if self._running:
@@ -163,6 +190,9 @@ class MarketDataStreamingService:
         # Connect to QuestDB
         if self._config.questdb_enabled:
             await self._connect_questdb()
+
+        # Seed prev_close from QuestDB daily_prices (not from first tick)
+        await self._seed_prev_close_from_db()
 
         # Select tick source based on config and available provider
         mode = self._config.streaming_mode  # auto, websocket, polling
