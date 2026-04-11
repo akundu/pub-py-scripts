@@ -5657,15 +5657,30 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                 ? `<div class="summary-value" style="font-size:13px;color:#8b949e;">N/A (Historical)</div>`
                 : `<div class="summary-value" id="summaryHoursToClose">${{getHoursToClose().toFixed(1)}} hrs</div>`;
 
+            // Compute change from prev close
+            const curChg = (data.current_price && data.prev_close) ? data.current_price - data.prev_close : 0;
+            const curChgPct = data.prev_close ? (curChg / data.prev_close * 100) : 0;
+            const curChgColor = curChg >= 0 ? '#3fb950' : '#f85149';
+            const curChgHtml = data.prev_close && data.current_price !== data.prev_close
+                ? `<div style="font-size:11px;color:${{curChgColor}}">${{curChg >= 0 ? '+' : ''}}${{curChg.toFixed(2)}} (${{curChgPct >= 0 ? '+' : ''}}${{curChgPct.toFixed(2)}}%)</div>`
+                : '';
+            // Compute change for prev close vs close before that
+            const prevChg = (data.prev_close && data.prev_prev_close) ? data.prev_close - data.prev_prev_close : 0;
+            const prevChgPct = data.prev_prev_close ? (prevChg / data.prev_prev_close * 100) : 0;
+            const prevChgColor = prevChg >= 0 ? '#3fb950' : '#f85149';
+            const prevChgHtml = data.prev_prev_close
+                ? `<div style="font-size:11px;color:${{prevChgColor}}">${{prevChg >= 0 ? '+' : ''}}${{prevChg.toFixed(2)}} (${{prevChgPct >= 0 ? '+' : ''}}${{prevChgPct.toFixed(2)}}%)</div>`
+                : '';
+
             // Update summary
             const summaryHTML = `
                 <div class="summary-item">
                     <div class="summary-label">Current Price</div>
-                    <div class="summary-value" id="summaryLivePrice">$${{fmtPrice(data.current_price)}}</div>
+                    <div class="summary-value" id="summaryLivePrice">$${{fmtPrice(data.current_price)}}${{curChgHtml}}</div>
                 </div>
                 <div class="summary-item">
                     <div class="summary-label">Previous Close</div>
-                    <div class="summary-value">$${{fmtPrice(data.prev_close)}}</div>
+                    <div class="summary-value">$${{fmtPrice(data.prev_close)}}${{prevChgHtml}}</div>
                 </div>
                 <div class="summary-item">
                     <div class="summary-label">${{dateLabel}}</div>
@@ -5726,22 +5741,30 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                 }}
             }}
 
+            // Compute change from prev close for future display
+            const fCurChg = (data.current_price && data.prev_close) ? data.current_price - data.prev_close : 0;
+            const fCurChgPct = data.prev_close ? (fCurChg / data.prev_close * 100) : 0;
+            const fCurChgColor = fCurChg >= 0 ? '#3fb950' : '#f85149';
+            const fCurChgHtml = data.prev_close && data.current_price !== data.prev_close
+                ? `<div style="font-size:11px;color:${{fCurChgColor}}">${{fCurChg >= 0 ? '+' : ''}}${{fCurChg.toFixed(2)}} (${{fCurChgPct >= 0 ? '+' : ''}}${{fCurChgPct.toFixed(2)}}%)</div>`
+                : '';
+
             // Update summary
             const summaryHTML = `
                 <div class="summary-item">
                     <div class="summary-label">Current Price</div>
-                    <div class="summary-value" id="summaryLivePrice">$${{fmtPrice(data.current_price)}}</div>
+                    <div class="summary-value" id="summaryLivePrice">$${{fmtPrice(data.current_price)}}${{fCurChgHtml}}</div>
                 </div>
                 <div class="summary-item">
                     <div class="summary-label">Reference Price</div>
                     <div class="summary-value" style="font-size: 14px; color: #8b949e;">$${{fmtPrice(data.current_price)}}</div>
                 </div>
                 <div class="summary-item">
-                    <div class="summary-label">Target Date (${{currentDays}}d)</div>
+                    <div class="summary-label">Target Date (${{currentDays}}DTE)</div>
                     <div class="summary-value" style="font-size: 14px;">${{data.target_date_str || (data.target_date ? data.target_date : 'N/A')}}</div>
                 </div>
                 <div class="summary-item">
-                    <div class="summary-label">Expected Price (${{currentDays}}d)</div>
+                    <div class="summary-label">Expected Price (${{currentDays}}DTE)</div>
                     <div class="summary-value">$${{fmtPrice(data.expected_price)}}</div>
                 </div>
                 <div class="summary-item">
@@ -9816,11 +9839,14 @@ async def handle_predictions_page(request: web.Request) -> web.Response:
                 result['target_date_str'] = td.strftime('%A, %B %d, %Y')
             future_results[str(days)] = result
 
-        # Also fix today's target_date
+        # Also fix today's target_date and prev_close
         if isinstance(today_result, dict) and upcoming_td:
             td0 = upcoming_td[0]
             today_result['target_date'] = td0.isoformat()
             today_result['target_date_str'] = td0.strftime('%A, %B %d, %Y')
+            if today_result.get('current_price') and today_result.get('prev_close'):
+                today_result['prev_prev_close'] = today_result['prev_close']
+                today_result['prev_close'] = today_result['current_price']
 
         band_history_date = request.query.get('date')
         if not band_history_date and history:
@@ -9970,13 +9996,12 @@ async def handle_lazy_load_today_prediction(request: web.Request) -> web.Respons
             result['target_date'] = td0.isoformat()
             result['target_date_str'] = td0.strftime('%A, %B %d, %Y')
 
-        # Fix prev_close: the prediction engine's prev_close is "close before
-        # reference bar" (T-2), but display should show the most recent official
-        # close (T-1 = current_price when market is closed).
+        # Fix prev_close for display:
+        # Engine's prev_close = T-2 close (Thursday), current_price = T-1 close (Friday)
+        # Display should show: prev_close = Friday's close, prev_prev_close = Thursday's
         if result.get('current_price') and result.get('prev_close'):
-            # current_price = last close (Friday's close)
-            # prev_close should be this for display purposes
-            result['prev_close'] = result['current_price']
+            result['prev_prev_close'] = result['prev_close']  # T-2 (Thursday)
+            result['prev_close'] = result['current_price']     # T-1 (Friday)
 
     return web.json_response(result)
 
