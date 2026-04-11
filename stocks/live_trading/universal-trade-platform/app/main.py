@@ -216,14 +216,15 @@ async def worker_proxy_middleware(request: Request, call_next):
     query = str(request.url.query) if request.url.query else ""
     target = f"{path}?{query}" if query else path
 
-    # GET requests: try Redis cache first
+    # GET requests: try Redis cache first (with 2s timeout to avoid blocking)
     if request.method == "GET":
         try:
+            import asyncio as _aio
             from app.services.redis_cache import get_redis
-            r = await get_redis()
+            r = await _aio.wait_for(get_redis(), timeout=2.0)
             if r:
                 cache_key = f"utp:http_cache:{path}?{query}" if query else f"utp:http_cache:{path}"
-                cached = await r.get(cache_key)
+                cached = await _aio.wait_for(r.get(cache_key), timeout=2.0)
                 if cached:
                     return Response(
                         content=cached.encode() if isinstance(cached, str) else cached,
@@ -231,7 +232,7 @@ async def worker_proxy_middleware(request: Request, call_next):
                         media_type="application/json",
                     )
         except Exception:
-            pass  # Redis down — fall through to proxy
+            pass  # Redis down or slow — fall through to proxy
 
     # Proxy to IBKR process (shared connection pool)
     try:
@@ -245,14 +246,15 @@ async def worker_proxy_middleware(request: Request, call_next):
             content=body if body else None,
         )
 
-        # Cache successful GET responses in Redis (short TTL)
+        # Cache successful GET responses in Redis (short TTL, fire-and-forget)
         if request.method == "GET" and resp.status_code == 200:
             try:
+                import asyncio as _aio
                 from app.services.redis_cache import get_redis
-                r = await get_redis()
+                r = await _aio.wait_for(get_redis(), timeout=1.0)
                 if r:
                     cache_key = f"utp:http_cache:{path}?{query}" if query else f"utp:http_cache:{path}"
-                    await r.setex(cache_key, 5, resp.content)
+                    await _aio.wait_for(r.setex(cache_key, 5, resp.content), timeout=1.0)
             except Exception:
                 pass
 
