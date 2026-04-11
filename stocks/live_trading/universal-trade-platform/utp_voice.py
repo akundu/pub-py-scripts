@@ -1797,14 +1797,31 @@ def _normalize_date(d: str) -> str:
 def _merge_expirations(*expiration_lists: list[str]) -> list[str]:
     """Merge multiple expiration lists, normalize dates, deduplicate, sort.
 
-    Filters out past dates — only returns expirations >= today.
+    Filters out past dates and non-trading days (weekends, holidays).
+    Only returns expirations that are valid trading days >= today.
     """
     today = datetime.now().strftime("%Y-%m-%d")
     combined = set()
+
+    # Build a trading day checker (holiday-aware)
+    try:
+        from common.market_hours import is_trading_day as _is_td
+        def _valid_exp(date_str: str) -> bool:
+            if date_str < today:
+                return False
+            try:
+                from datetime import date as _d
+                return _is_td(_d.fromisoformat(date_str))
+            except Exception:
+                return True  # Can't check — include it
+    except Exception:
+        def _valid_exp(date_str: str) -> bool:
+            return date_str >= today
+
     for exp_list in expiration_lists:
         for d in exp_list:
             nd = _normalize_date(d)
-            if nd >= today:
+            if _valid_exp(nd):
                 combined.add(nd)
     return sorted(combined)
 
@@ -2452,6 +2469,12 @@ async def api_portfolio(username: str = Depends(require_session)):
         # Trigger background pre-fetch (fire-and-forget, doesn't block response)
         asyncio.create_task(prefetch_all_tickers())
 
+        # Attach freshness metadata for the UI
+        data["_voice_meta"] = {
+            "source": "ibkr_daemon" if data.get("balances", {}).get("net_liquidation") else "local",
+            "fetched_at": _now_iso(),
+        }
+
         return data
     except httpx.ConnectError:
         raise HTTPException(status_code=502, detail="Cannot connect to UTP daemon")
@@ -2987,6 +3010,10 @@ async def api_percentiles(_u: str | None = Depends(optional_session)):
                     data["_trading_days"] = td_list
                 except Exception:
                     pass
+                data["_voice_meta"] = {
+                    "source": "percentile_server",
+                    "fetched_at": _now_iso(),
+                }
                 _percentile_cache = data
                 _percentile_cache_at = time.time()
                 _redis_write_bg("utp:voice:percentiles", _percentile_cache, ttl_market=300, ttl_closed=86400)
@@ -3056,6 +3083,10 @@ async def api_predictions(_u: str | None = Depends(optional_session)):
         logger.warning("Predictions server unavailable: %s", e)
 
     if result:
+        result["_voice_meta"] = {
+            "source": "prediction_server",
+            "fetched_at": _now_iso(),
+        }
         _predictions_cache = result
         _predictions_cache_at = time.time()
         _redis_write_bg("utp:voice:predictions", result, ttl_market=300, ttl_closed=86400)
@@ -3134,7 +3165,8 @@ async def api_trades_list(
     """List trades from CSV with optional date filter, paginated, newest first."""
     import csv as csv_mod
     if not TRADES_CSV_PATH.exists():
-        return {"trades": [], "total": 0, "page": 1, "pages": 0, "summary": {}}
+        return {"trades": [], "total": 0, "page": 1, "pages": 0, "summary": {},
+                "_voice_meta": {"source": "trades_csv", "csv_modified_at": None, "fetched_at": _now_iso()}}
 
     trades = []
     with open(TRADES_CSV_PATH) as f:
@@ -3161,6 +3193,13 @@ async def api_trades_list(
     start = (page - 1) * per_page
     page_trades = trades[start:start + per_page]
 
+    # CSV file modification time for freshness
+    csv_mtime = None
+    if TRADES_CSV_PATH.exists():
+        csv_mtime = datetime.fromtimestamp(
+            os.path.getmtime(TRADES_CSV_PATH), UTC
+        ).isoformat(timespec="seconds")
+
     return {
         "trades": page_trades,
         "total": total,
@@ -3173,6 +3212,11 @@ async def api_trades_list(
             "manual_trades": manual_count,
             "total_credit": round(total_credit, 2),
             "total_max_loss": round(total_max_loss, 2),
+        },
+        "_voice_meta": {
+            "source": "trades_csv",
+            "csv_modified_at": csv_mtime,
+            "fetched_at": _now_iso(),
         },
     }
 

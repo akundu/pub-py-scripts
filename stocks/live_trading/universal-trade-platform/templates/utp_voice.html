@@ -236,6 +236,16 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
 #data-source-bar .src-cache { background:var(--blue); }
 #data-source-bar .src-questdb { background:var(--green-b); }
 
+/* ── Freshness Banner ─────────────────────────────────────────── */
+.freshness-banner { padding:4px 10px; font-size:11px; color:var(--text); border-radius:4px; margin:4px 0; display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+.freshness-banner.src-ibkr { background:rgba(63,185,80,0.08); }
+.freshness-banner.src-csv { background:rgba(219,175,40,0.08); }
+.freshness-banner.src-local { background:rgba(100,100,100,0.08); }
+.freshness-banner .src-dot { width:6px; height:6px; border-radius:50%; flex-shrink:0; }
+.freshness-banner .lbl { font-weight:bold; }
+.freshness-banner .sep { color:var(--muted); margin:0 2px; }
+.freshness-banner .age { color:var(--muted); }
+
 /* ── Trade Modal ────────────────────────────────────────────────── */
 #trade-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:100; align-items:flex-end; justify-content:center; }
 #trade-modal.show { display:flex; }
@@ -661,12 +671,31 @@ function _refreshLastUpdatedLabels() {
   const recsEl = document.getElementById('recs-last-updated');
   if (optEl && _optLastUpdatedAt) {
     const secs = Math.round((Date.now() - _optLastUpdatedAt) / 1000);
-    optEl.textContent = secs < 5 ? 'just now' : secs + 's ago';
+    const src = optGridData?.source === 'ibkr' ? 'IBKR' : optGridData?.source === 'csv_exports' ? 'CSV' : '';
+    const age = secs < 5 ? 'just now' : secs + 's ago';
+    optEl.textContent = src ? `${src} · ${age}` : age;
   }
   if (recsEl && _recsLastUpdatedAt) {
     const secs = Math.round((Date.now() - _recsLastUpdatedAt) / 1000);
-    recsEl.textContent = secs < 5 ? 'just now' : secs + 's ago';
+    const age = secs < 5 ? 'just now' : secs + 's ago';
+    // Show which data sources are loaded
+    const srcs = [];
+    const hasPctl = Object.keys(_pctlByTicker).length > 0;
+    const hasPred = !!predictionsData;
+    const chainCount = Object.keys(chainCache).filter(s => getCachedChain(s)).length;
+    if (chainCount) srcs.push(`${chainCount} chains`);
+    if (hasPctl) srcs.push('pctl');
+    if (hasPred) srcs.push('pred');
+    recsEl.textContent = srcs.length ? `${srcs.join('+')} · ${age}` : age;
   }
+  // Auto-refresh all freshness-age spans in banners
+  document.querySelectorAll('.freshness-age').forEach(el => {
+    const iso = el.dataset.iso;
+    if (iso) {
+      const secs = Math.round((Date.now() - new Date(iso).getTime()) / 1000);
+      el.textContent = secs < 5 ? 'just now' : secs < 60 ? secs+'s ago' : timeSince(iso) + ' ago';
+    }
+  });
 }
 setInterval(_refreshLastUpdatedLabels, 5000);
 
@@ -687,7 +716,7 @@ async function _fetchChainJob(job) {
 
     if (!chainCache[job.sym]) chainCache[job.sym] = {};
     const exp = d.expiration || job.exp;
-    chainCache[job.sym][exp] = {chain: d.chain, current_price: d.current_price, source: d.source, fetched_at: d.fetched_at, ts: new Date()};
+    chainCache[job.sym][exp] = {chain: d.chain, current_price: d.current_price, source: d.source, fetched_at: d.fetched_at, cached_at: d.cached_at, ts: new Date()};
     chainCache[job.sym]._expirations = d.expirations || [];
     chainCache[job.sym]._current_price = d.current_price;
 
@@ -763,6 +792,7 @@ function stopChainRefresh() {
 // ── Percentile Data ───────────────────────────────────────────────────────────
 let percentileData = null;  // Raw response from /api/percentiles
 let _pctlByTicker = {};     // Processed: {SPX: {lastDay, close, windows: {0: {up:{p75,p90,...}, down:{...}}, ...}}}
+let _pctlFetchedAt = null;  // ISO string: when percentile data was last fetched from server
 
 async function fetchPercentiles() {
   try {
@@ -771,6 +801,8 @@ async function fetchPercentiles() {
     const d = await r.json();
     if (d.error) return;
     percentileData = d;
+    // Track fetch timestamp
+    _pctlFetchedAt = d._voice_meta?.fetched_at || new Date().toISOString();
     // Build lookup
     _pctlByTicker = {};
     for (const t of d.tickers || []) {
@@ -936,13 +968,19 @@ function getRefClose(sym) {
 
 // ── Predictions Data (model-based bands) ─────────────────────────────────────
 let predictionsData = null;  // {SPX: {today:{...}, future:{0:{...}, 1:{...}, ...}}, ...}
+let _predFetchedAt = null;   // ISO string: when prediction data was last fetched from server
 
 async function fetchPredictions() {
   try {
     const r = await fetch('/api/predictions');
     if (!r.ok) return;
     const d = await r.json();
-    if (!d.error) { predictionsData = d; scheduleRenderRecs(); idbSet('predictionsData', d); }
+    if (!d.error) {
+      _predFetchedAt = d._voice_meta?.fetched_at || new Date().toISOString();
+      predictionsData = d;
+      scheduleRenderRecs();
+      idbSet('predictionsData', d);
+    }
   } catch(e) { /* silent */ }
 }
 
@@ -1351,14 +1389,21 @@ function _renderPortfolio(d, tbl, kpis) {
       html += '</div>';
     }
 
-    // Add last-updated timestamp
-    html += `<div style="margin-top:6px;font-size:10px;color:var(--muted);text-align:right">Updated ${new Date().toLocaleTimeString()}</div>`;
+    // Add freshness banner
+    const _pMeta = d._voice_meta || {};
+    const _pSrc = _pMeta.source === 'ibkr_daemon' ? 'IBKR Daemon' : 'Local Store';
+    const _pPositions = (d.positions || []).length;
+    html += freshnessBanner({
+      source: _pSrc,
+      fetchedAt: _pMeta.fetched_at,
+      cachedAt: new Date().toISOString(),
+      extra: `${_pPositions} position${_pPositions !== 1 ? 's' : ''}`,
+    });
     tbl.innerHTML = html;
 
     // Update data source bar for portfolio tab
-    const srcEntries = [{label:'Portfolio', source: d.balances?.net_liquidation ? 'ibkr' : 'local', time: new Date().toISOString()}];
+    const srcEntries = [{label:'Portfolio', source: d.balances?.net_liquidation ? 'ibkr' : 'local', time: _pMeta.fetched_at || new Date().toISOString()}];
     if (d.quotes) {
-      // Quote sources from the daemon's QuestDB batch fetch
       srcEntries.push({label:'Quotes', source:'questdb/ibkr', time: new Date().toISOString()});
     }
     updateDataSourceBar(srcEntries);
@@ -1756,31 +1801,21 @@ function _renderOptionsGridFromData(d, otype, grid) {
 
 function formatTimestamp(d) {
   const src = d.source || 'unknown';
-  const parts = [];
+  let srcLabel = src;
+  if (src === 'csv_exports') srcLabel = 'CSV snapshot';
+  else if (src === 'ibkr') srcLabel = 'IBKR live';
+  else if (src === 'streaming_cache') srcLabel = 'Streaming';
 
-  // Source label with color coding
-  if (src === 'csv_exports') {
-    parts.push('<span style="color:var(--yellow)">CSV snapshot</span>');
-  } else if (src === 'ibkr') {
-    parts.push('<span style="color:var(--green-b)">IBKR live</span>');
-  } else if (src === 'streaming_cache') {
-    parts.push('<span style="color:var(--green-b)">Streaming</span>');
-  } else {
-    parts.push(src);
-  }
+  const mkt = d.market_open
+    ? '<span style="color:var(--green-b)">Mkt Open</span>'
+    : '<span style="color:var(--muted)">Mkt Closed</span>';
 
-  // When the data was originally captured at the source
-  if (d.fetched_at) {
-    const age = timeSince(d.fetched_at);
-    const readable = formatDateShort(d.fetched_at);
-    parts.push(`data from ${readable} (${age} ago)`);
-  }
-
-  // Market status
-  const mkt = d.market_open ? '<span style="color:var(--green-b)">Mkt Open</span>' : '<span style="color:var(--muted)">Mkt Closed</span>';
-  parts.push(mkt);
-
-  return `<div style="margin-top:6px;font-size:10px;color:var(--muted);text-align:right">${parts.join(' &middot; ')}</div>`;
+  return freshnessBanner({
+    source: srcLabel,
+    fetchedAt: d.fetched_at,
+    cachedAt: d.cached_at,
+    extra: mkt,
+  });
 }
 
 function formatDateShort(isoStr) {
@@ -1821,6 +1856,41 @@ function distPct(strike, cp, sym) {
 }
 
 // ── Data Source Banner ────────────────────────────────────────────────────────
+
+function freshnessBanner(config) {
+  // config: { source, fetchedAt, cachedAt, extra? }
+  const src = (config.source || 'unknown').toLowerCase();
+  let dotCls = 'src-cache', bgCls = 'src-local';
+  if (src.includes('ibkr') || src === 'streaming' || src === 'streaming_cache') {
+    dotCls = 'src-ibkr'; bgCls = 'src-ibkr';
+  } else if (src.includes('csv') || src.includes('polygon')) {
+    dotCls = 'src-csv'; bgCls = 'src-csv';
+  }
+
+  function fmtTime(iso) {
+    try { return new Date(iso).toLocaleTimeString('en-US', {hour:'numeric', minute:'2-digit', second:'2-digit', hour12:true}); } catch { return ''; }
+  }
+
+  const parts = [];
+  parts.push(`<span class="src-dot ${dotCls}"></span>`);
+  parts.push(`<span class="lbl">${config.source || 'Unknown'}</span>`);
+
+  if (config.fetchedAt) {
+    const t = fmtTime(config.fetchedAt);
+    const age = timeSince(config.fetchedAt);
+    parts.push(`<span class="sep">&middot;</span> data: ${t} (<span class="freshness-age age" data-iso="${config.fetchedAt}">${age} ago</span>)`);
+  }
+  if (config.cachedAt) {
+    const t = fmtTime(config.cachedAt);
+    const age = timeSince(config.cachedAt);
+    parts.push(`<span class="sep">&middot;</span> fetched: ${t} (<span class="freshness-age age" data-iso="${config.cachedAt}">${age} ago</span>)`);
+  }
+  if (config.extra) {
+    parts.push(`<span class="sep">&middot;</span> ${config.extra}`);
+  }
+
+  return `<div class="freshness-banner ${bgCls}">${parts.join(' ')}</div>`;
+}
 
 function updateDataSourceBar(entries) {
   // entries: [{label, source, time, sym?}]
@@ -2740,7 +2810,39 @@ function renderRecs() {
     </div>`;
   }
 
-  let html = statusHtml;
+  // ── Data Sources Inventory ──
+  let srcInventory = '<div style="margin-bottom:8px;padding:6px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;font-size:10px;color:var(--muted);display:flex;flex-wrap:wrap;gap:4px 14px;align-items:center">';
+  srcInventory += '<span style="font-weight:600;color:var(--text)">Data Sources</span>';
+  // Per-ticker options chain freshness
+  for (const sym of filteredTickers) {
+    const c = getCachedChain(sym);
+    if (c) {
+      const dot = c.source === 'ibkr' ? 'src-ibkr' : c.source === 'csv_exports' ? 'src-csv' : 'src-cache';
+      const srcN = c.source === 'ibkr' ? 'IBKR' : c.source === 'csv_exports' ? 'CSV' : (c.source||'cache');
+      const t = c.fetched_at ? new Date(c.fetched_at).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true}) : '';
+      const age = c.fetched_at ? timeSince(c.fetched_at) : (c.ts ? timeSince(c.ts.toISOString()) : '?');
+      srcInventory += `<span><span class="src-dot ${dot}" style="width:5px;height:5px;border-radius:50;display:inline-block"></span> ${sym}: ${srcN} ${t} (<span class="freshness-age" data-iso="${c.fetched_at||c.ts?.toISOString()||''}">${age} ago</span>)</span>`;
+    }
+  }
+  // Percentiles freshness
+  if (_pctlFetchedAt) {
+    const pT = new Date(_pctlFetchedAt).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true});
+    const pAge = timeSince(_pctlFetchedAt);
+    srcInventory += `<span>| Pctl: ${pT} (<span class="freshness-age" data-iso="${_pctlFetchedAt}">${pAge} ago</span>)</span>`;
+  } else {
+    srcInventory += '<span>| Pctl: <span style="color:var(--yellow)">loading</span></span>';
+  }
+  // Predictions freshness
+  if (_predFetchedAt) {
+    const prT = new Date(_predFetchedAt).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true});
+    const prAge = timeSince(_predFetchedAt);
+    srcInventory += `<span>| Pred: ${prT} (<span class="freshness-age" data-iso="${_predFetchedAt}">${prAge} ago</span>)</span>`;
+  } else {
+    srcInventory += '<span>| Pred: <span style="color:var(--yellow)">loading</span></span>';
+  }
+  srcInventory += '</div>';
+
+  let html = statusHtml + srcInventory;
 
   // ═══ TOP PICKS — combined across all tickers × all DTEs ═══
   const allTopSpreads = [];
@@ -2843,8 +2945,9 @@ function renderRecs() {
     }
     nearMisses.sort((a, b) => a._fails.length - b._fails.length || b.roi_pct - a.roi_pct);
 
-    const srcLabel = cached.source === 'csv_exports' ? 'CSV' : cached.source === 'ibkr' ? 'IBKR' : (cached.source||'cache');
-    const age = cached.ts ? timeSince(cached.ts.toISOString()) : '?';
+    const srcLabel = cached.source === 'csv_exports' ? 'CSV' : cached.source === 'ibkr' ? 'IBKR' : cached.source === 'streaming_cache' ? 'Streaming' : (cached.source||'cache');
+    const _fetchedAtIso = cached.fetched_at || (cached.ts ? cached.ts.toISOString() : null);
+    const _cachedAtIso = cached.cached_at || (cached.ts ? cached.ts.toISOString() : null);
     const pctlMeta = _pctlByTicker[sym];
     const streakInfo = pctlMeta ? `${pctlMeta.streak}d ${pctlMeta.streak>0?'up':'dn'}` : '';
 
@@ -2900,7 +3003,7 @@ function renderRecs() {
     }
 
     html += '</tbody></table>';
-    html += `<div style="font-size:9px;color:var(--muted);text-align:right;padding:2px 4px">${srcLabel} · ${age} ago</div>`;
+    html += freshnessBanner({ source: srcLabel, fetchedAt: _fetchedAtIso, cachedAt: _cachedAtIso });
     html += '</div>';
   }
 
@@ -3001,7 +3104,13 @@ async function loadTradesList(page) {
       html += '</div>';
     }
 
-    html += `<div style="margin-top:6px;font-size:10px;color:var(--muted);text-align:right">Updated ${new Date().toLocaleTimeString()}</div>`;
+    const _tMeta = d._voice_meta || {};
+    html += freshnessBanner({
+      source: 'Local CSV',
+      fetchedAt: _tMeta.csv_modified_at,
+      cachedAt: _tMeta.fetched_at,
+      extra: `${d.total} trade${d.total !== 1 ? 's' : ''}`,
+    });
     list.innerHTML = html;
   } catch(e) { list.innerHTML = `<div class="msg-error">${e.message}</div>`; }
 }

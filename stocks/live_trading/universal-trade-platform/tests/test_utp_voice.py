@@ -5,9 +5,15 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
+
+# Ensure common/ package is importable (for market_hours, etc.)
+_stocks_root = str(Path(__file__).resolve().parents[3])
+if _stocks_root not in sys.path:
+    sys.path.insert(0, _stocks_root)
 
 import httpx
 import pytest
@@ -867,6 +873,58 @@ class TestPortfolioAPI:
             assert pos["breach_status"]["severity"] == "safe"
             assert pos["spread_metrics"]["spread_width"] == 20
 
+    def test_portfolio_voice_meta_ibkr(self, client, auth_cookie):
+        """Portfolio response includes _voice_meta with source and fetched_at."""
+        mock_client = AsyncMock()
+        mock_client.get_portfolio.return_value = {
+            "positions": [],
+            "balances": {"net_liquidation": 500000},
+        }
+        with patch.object(utp_voice, "get_daemon_client", return_value=mock_client):
+            resp = client.get("/api/portfolio", cookies=auth_cookie)
+            assert resp.status_code == 200
+            data = resp.json()
+            meta = data["_voice_meta"]
+            assert meta["source"] == "ibkr_daemon"
+            assert "fetched_at" in meta
+
+    def test_portfolio_voice_meta_local(self, client, auth_cookie):
+        """When no net_liquidation, source is 'local'."""
+        mock_client = AsyncMock()
+        mock_client.get_portfolio.return_value = {
+            "positions": [],
+            "balances": {},
+        }
+        with patch.object(utp_voice, "get_daemon_client", return_value=mock_client):
+            resp = client.get("/api/portfolio", cookies=auth_cookie)
+            data = resp.json()
+            assert data["_voice_meta"]["source"] == "local"
+
+
+class TestTradesListAPI:
+    def test_trades_list_voice_meta(self, client, auth_cookie, tmp_path):
+        """Trades list response includes _voice_meta with CSV mtime."""
+        csv_path = tmp_path / "trades.csv"
+        csv_path.write_text("timestamp,symbol\n2026-04-10,SPX\n")
+        with patch.object(utp_voice, "TRADES_CSV_PATH", csv_path):
+            resp = client.get("/api/trades/list", cookies=auth_cookie)
+            assert resp.status_code == 200
+            data = resp.json()
+            meta = data["_voice_meta"]
+            assert meta["source"] == "trades_csv"
+            assert meta["csv_modified_at"] is not None
+            assert meta["fetched_at"] is not None
+
+    def test_trades_list_no_csv(self, client, auth_cookie, tmp_path):
+        """When CSV doesn't exist, csv_modified_at is null."""
+        csv_path = tmp_path / "nonexistent.csv"
+        with patch.object(utp_voice, "TRADES_CSV_PATH", csv_path):
+            resp = client.get("/api/trades/list", cookies=auth_cookie)
+            assert resp.status_code == 200
+            data = resp.json()
+            meta = data["_voice_meta"]
+            assert meta["csv_modified_at"] is None
+
 
 class TestQuotesAPI:
     def test_quotes_requires_auth_by_default(self, client):
@@ -1153,6 +1211,15 @@ class TestMergeExpirations:
     def test_merge_empty_lists(self):
         assert utp_voice._merge_expirations([], []) == []
         assert utp_voice._merge_expirations(["2099-04-06"], []) == ["2099-04-06"]
+
+    def test_merge_filters_non_trading_days(self):
+        """Weekends and holidays should be excluded from expirations."""
+        # 2026-04-11 is Saturday, 2026-04-12 is Sunday, 2026-04-13 is Monday
+        exps = ["2026-04-11", "2026-04-12", "2026-04-13"]
+        result = utp_voice._merge_expirations(exps)
+        assert "2026-04-11" not in result  # Saturday
+        assert "2026-04-12" not in result  # Sunday
+        assert "2026-04-13" in result      # Monday (trading day)
 
 
 class TestSpreadMetrics:
