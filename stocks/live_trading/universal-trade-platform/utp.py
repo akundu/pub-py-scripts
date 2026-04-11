@@ -128,7 +128,17 @@ def _print_order_row(o: dict) -> None:
 
 
 def _next_trading_day() -> str:
-    """Return the next weekday as YYYY-MM-DD."""
+    """Return the next trading day as YYYY-MM-DD (holiday-aware)."""
+    try:
+        from common.market_hours import is_trading_day
+        d = date.today() + timedelta(days=1)
+        for _ in range(10):
+            if is_trading_day(d):
+                return d.strftime("%Y-%m-%d")
+            d += timedelta(days=1)
+    except Exception:
+        pass
+    # Fallback: next weekday
     d = date.today() + timedelta(days=1)
     while d.weekday() >= 5:
         d += timedelta(days=1)
@@ -5386,11 +5396,16 @@ async def _cmd_daemon(args) -> int:
                     break
 
                 now = datetime.now(UTC)
-                # Only during market hours (13:30-20:00 UTC)
-                market_open = _time(13, 30)
-                market_close = _time(20, 0)
-                if not (market_open <= now.time() <= market_close):
-                    continue
+                # Only during market hours — holiday-aware
+                try:
+                    from common.market_hours import is_market_hours as _mh
+                    if not _mh(now):
+                        continue
+                except Exception:
+                    market_open = _time(13, 30)
+                    market_close = _time(20, 0)
+                    if not (market_open <= now.time() <= market_close):
+                        continue
 
                 if evaluator is None:
                     # Stub mode: just update timestamp

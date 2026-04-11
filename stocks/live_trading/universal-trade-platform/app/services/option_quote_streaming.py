@@ -209,10 +209,16 @@ _MARKET_CLOSE_UTC = 20.0 + 10 / 60.0  # 20:10 UTC = 4:10 PM ET
 
 
 def _is_market_hours() -> bool:
-    """True if within US equity market hours (±10 min buffer), Mon-Fri."""
+    """True if within US equity market hours (±10 min buffer) — holiday-aware."""
+    try:
+        from common.market_hours import is_trading_day
+        if not is_trading_day():
+            return False
+    except Exception:
+        now = datetime.now(timezone.utc)
+        if now.weekday() >= 5:
+            return False
     now = datetime.now(timezone.utc)
-    if now.weekday() >= 5:  # Saturday=5, Sunday=6
-        return False
     hour = now.hour + now.minute / 60.0
     return _MARKET_OPEN_UTC <= hour < _MARKET_CLOSE_UTC
 

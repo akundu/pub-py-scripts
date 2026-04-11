@@ -35,16 +35,21 @@ _redis = None
 
 
 def _is_market_hours() -> bool:
-    """Check if US equity markets are open (Mon-Fri 9:15a-4:15p ET)."""
+    """Check if US equity markets are open — holiday-aware."""
     try:
-        from zoneinfo import ZoneInfo
-        now_et = datetime.now(ZoneInfo("America/New_York"))
+        from common.market_hours import is_market_hours
+        return is_market_hours()
     except Exception:
-        now_et = datetime.now(UTC) - timedelta(hours=4)
-    if now_et.weekday() >= 5:
-        return False
-    minutes = now_et.hour * 60 + now_et.minute
-    return 555 <= minutes <= 975
+        # Fallback if common module not on path
+        try:
+            from zoneinfo import ZoneInfo
+            now_et = datetime.now(ZoneInfo("America/New_York"))
+        except Exception:
+            now_et = datetime.now(UTC) - timedelta(hours=4)
+        if now_et.weekday() >= 5:
+            return False
+        minutes = now_et.hour * 60 + now_et.minute
+        return 555 <= minutes <= 975
 
 
 async def get_redis():

@@ -1023,11 +1023,14 @@ class IBKRLiveProvider(BrokerProvider):
         right = "C" if option_type.upper() == "CALL" else "P"
 
         # Price cache: never during market hours; 1-hour TTL after close+5min
-        # Market hours: 13:30–20:00 UTC (9:30 AM – 4:00 PM ET)
-        now_utc = datetime.now(UTC).time()
-        market_open = _time(13, 30)
-        market_close_plus_5 = _time(20, 5)
-        is_market_hours = market_open <= now_utc <= market_close_plus_5
+        try:
+            from common.market_hours import is_market_hours as _mh_check
+            is_market_hours = _mh_check()
+        except Exception:
+            now_utc = datetime.now(UTC).time()
+            market_open = _time(13, 30)
+            market_close_plus_5 = _time(20, 5)
+            is_market_hours = market_open <= now_utc <= market_close_plus_5
 
         cache_key = f"{symbol}_{exp_yyyymmdd}_{right}_{strike_min}_{strike_max}"
         if not is_market_hours:
