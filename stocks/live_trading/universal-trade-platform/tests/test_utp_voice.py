@@ -1344,3 +1344,128 @@ class TestPositionLimits:
             result = await utp_voice._check_position_limits()
             assert result["allowed"] is False
             assert "Max open positions" in result["reason"]
+
+
+class TestPrevCloses:
+    """Tests for /api/prev-closes response format and market hours logic."""
+
+    def test_prev_closes_returns_both_closes(self, client, auth_cookie):
+        """API returns last_close + prev_close with dates."""
+        mock_client = AsyncMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"data": [
+            {"date": "2026-04-10T00:00:00Z", "close": 6816.89},
+            {"date": "2026-04-09T00:00:00Z", "close": 6824.66},
+        ]}
+
+        with patch("httpx.AsyncClient") as MockClient:
+            instance = AsyncMock()
+            instance.get.return_value = mock_resp
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+            with patch.object(utp_voice, "_is_market_hours", return_value=False):
+                resp = client.get("/api/prev-closes?symbols=SPX", cookies=auth_cookie)
+                assert resp.status_code == 200
+                data = resp.json()
+                assert "SPX" in data
+                spx = data["SPX"]
+                assert spx["last_close"] == 6816.89
+                assert spx["prev_close"] == 6824.66
+                assert spx["last_close_date"] == "2026-04-10"
+
+    def test_prev_closes_includes_meta(self, client, auth_cookie):
+        """Response includes _meta with is_trading_day and is_session_active."""
+        utp_voice._prev_close_cache = {
+            "SPX": {"last_close": 6816.89, "last_close_date": "2026-04-10",
+                    "prev_close": 6824.66, "prev_close_date": "2026-04-09"},
+        }
+        utp_voice._prev_close_cache_at = time.time()
+        with patch.object(utp_voice, "_is_market_hours", return_value=False), \
+             patch.dict("sys.modules", {"common": MagicMock(), "common.market_hours": MagicMock(
+                 is_trading_day=MagicMock(return_value=False),
+                 is_trading_session_active=MagicMock(return_value=False),
+             )}):
+            resp = client.get("/api/prev-closes?symbols=SPX", cookies=auth_cookie)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "_meta" in data
+            assert "is_trading_day" in data["_meta"]
+
+
+class TestMarketHoursHoliday:
+    """Tests for holiday-aware market hours."""
+
+    @classmethod
+    def setup_class(cls):
+        import sys
+        stocks_root = str(Path(__file__).resolve().parents[3])  # stocks/
+        if stocks_root not in sys.path:
+            sys.path.insert(0, stocks_root)
+
+    def test_is_market_hours_weekday(self):
+        """Regular weekday during market hours returns True."""
+        from common.market_hours import is_market_hours
+        from datetime import datetime, timezone
+        from zoneinfo import ZoneInfo
+        # Wed Apr 8 2026, 10:30 AM ET
+        dt = datetime(2026, 4, 8, 14, 30, tzinfo=timezone.utc)  # 10:30 AM ET
+        assert is_market_hours(dt) is True
+
+    def test_is_market_hours_weekend(self):
+        """Saturday returns False."""
+        from common.market_hours import is_market_hours
+        from datetime import datetime, timezone
+        # Sat Apr 11 2026
+        dt = datetime(2026, 4, 11, 14, 30, tzinfo=timezone.utc)
+        assert is_market_hours(dt) is False
+
+    def test_is_trading_day_regular(self):
+        """Regular weekday is a trading day."""
+        from common.market_hours import is_trading_day
+        from datetime import date
+        assert is_trading_day(date(2026, 4, 10)) is True  # Friday
+
+    def test_is_trading_day_weekend(self):
+        """Saturday is not a trading day."""
+        from common.market_hours import is_trading_day
+        from datetime import date
+        assert is_trading_day(date(2026, 4, 11)) is False  # Saturday
+
+    def test_is_trading_day_good_friday(self):
+        """Good Friday 2026 (Apr 3) is a market holiday."""
+        from common.market_hours import is_trading_day
+        from datetime import date
+        assert is_trading_day(date(2026, 4, 3)) is False
+
+    def test_previous_trading_day_monday(self):
+        """Previous trading day before Monday is Friday."""
+        from common.market_hours import previous_trading_day
+        from datetime import date
+        prev = previous_trading_day(date(2026, 4, 13))  # Monday
+        assert prev == date(2026, 4, 10)  # Friday
+
+    def test_previous_trading_day_after_holiday(self):
+        """Previous trading day before day after Good Friday is Thursday."""
+        from common.market_hours import previous_trading_day
+        from datetime import date
+        # Apr 4 is Saturday, Apr 3 is Good Friday (holiday)
+        # Previous trading day before Apr 6 (Monday) should skip Sat+Sun+Good Friday = Thursday Apr 2
+        prev = previous_trading_day(date(2026, 4, 6))
+        assert prev == date(2026, 4, 2)
+
+    def test_is_session_active_premarket(self):
+        """Pre-market (7 AM ET) on a trading day is session active."""
+        from common.market_hours import is_trading_session_active
+        from datetime import datetime, timezone
+        # Wed Apr 8 2026, 7:00 AM ET = 11:00 UTC
+        dt = datetime(2026, 4, 8, 11, 0, tzinfo=timezone.utc)
+        assert is_trading_session_active(dt) is True
+
+    def test_is_session_active_weekend(self):
+        """Saturday is not session active."""
+        from common.market_hours import is_trading_session_active
+        from datetime import datetime, timezone
+        dt = datetime(2026, 4, 11, 14, 0, tzinfo=timezone.utc)
+        assert is_trading_session_active(dt) is False

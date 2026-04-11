@@ -871,23 +871,19 @@ function pctlBadge(bracket) {
 }
 
 // ── Previous Close Prices (from QuestDB daily_prices) ────────────────────────
+let _prevClosesMeta = {};  // {is_trading_day, is_session_active}
 async function fetchPrevCloses() {
   try {
     const r = await fetch('/api/prev-closes?symbols=SPX,NDX,RUT');
     if (!r.ok) return;
     const d = await r.json();
-    if (d && !d.error) { _prevCloses = d; idbSet('prevCloses', d); }
+    if (d && !d.error) {
+      if (d._meta) { _prevClosesMeta = d._meta; delete d._meta; }
+      _prevCloses = d;
+      idbSet('prevCloses', d);
+      idbSet('prevClosesMeta', _prevClosesMeta);
+    }
   } catch(e) { /* silent */ }
-}
-
-// Check if US equity markets are currently open (Mon-Fri 9:30a-4:00p ET)
-function _jsMarketOpen() {
-  const etStr = new Date().toLocaleString('en-US', {timeZone: 'America/New_York'});
-  const et = new Date(etStr);
-  const dow = et.getDay();
-  if (dow === 0 || dow === 6) return false;  // Weekend
-  const mins = et.getHours() * 60 + et.getMinutes();
-  return mins >= 570 && mins <= 960;  // 9:30 AM - 4:00 PM
 }
 
 // Get the reference close for change calculations.
@@ -895,21 +891,26 @@ function _jsMarketOpen() {
 // Data: {last_close, last_close_date, prev_close, prev_close_date}
 //   last_close = most recent close (e.g. Friday)
 //   prev_close = second-to-last close (e.g. Thursday)
+// _prevClosesMeta: {is_trading_day, is_session_active} from server
 //
-// Market open/pre-market (weekday before close):
-//   Price = live, Ref = last_close (yesterday) → intraday change
-// Market closed (weekend/overnight/post-close):
-//   Price = last_close, Ref = prev_close (day before) → last session's change
+// Trading day + session active (pre-market/market/after-hours):
+//   Price = live, Ref = last_close (yesterday) → shows today's change
+// Non-trading day or session inactive (weekend/holiday/overnight):
+//   Price = last_close, Ref = prev_close → shows last trading day's move
 function getRefClose(sym) {
   const data = _prevCloses[sym];
   if (!data) return predictionsData?.[sym]?.today?.prev_close || _pctlByTicker[sym]?.close || 0;
   if (typeof data === 'number') return data;
 
-  if (_jsMarketOpen()) {
-    // Market open: compare live price to yesterday's close
+  // Server tells us if today is a trading day and if the session is active
+  // (pre-market through after-hours: 4AM-8PM ET on trading days)
+  const sessionActive = _prevClosesMeta.is_session_active;
+
+  if (sessionActive) {
+    // Session active: compare live price to most recent close (yesterday)
     return data.last_close || data.prev_close || 0;
   }
-  // Market closed: compare last close to the close before it
+  // Session inactive: compare last close to the close before it
   return data.prev_close || data.last_close || 0;
 }
 
@@ -3426,6 +3427,8 @@ async function init() {
     ]);
     if (cachedPrices) _realtimePrices = cachedPrices;
     if (cachedPrevCloses) _prevCloses = cachedPrevCloses;
+    const cachedMeta = await idbGet('prevClosesMeta');
+    if (cachedMeta) _prevClosesMeta = cachedMeta;
     if (cachedPctl) _pctlByTicker = cachedPctl;
     if (cachedPred) predictionsData = cachedPred;
     for (const sym of CHAIN_TICKERS) {

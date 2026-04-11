@@ -1582,24 +1582,30 @@ def _put_cached_quote(symbol: str, data: dict) -> None:
 
 
 def _is_market_hours() -> bool:
-    """Check if US equity markets are open (Mon-Fri 9:15a-4:15p ET).
+    """Check if US equity markets are open — holiday-aware via exchange_calendars.
 
-    Uses 15-min buffer on both sides per user request:
-    - Opens at 9:30 ET → we consider 'open' from 9:15 ET
-    - Closes at 16:00 ET → we consider 'closed' from 16:15 ET
+    Uses 15-min buffer: considers 'open' from 9:15 ET to 4:15 PM ET.
+    Returns False on weekends and market holidays (Good Friday, etc.).
     """
     try:
+        from common.market_hours import is_trading_day
         from zoneinfo import ZoneInfo
         now_et = datetime.now(ZoneInfo("America/New_York"))
+        if not is_trading_day(now_et.date()):
+            return False
+        minutes = now_et.hour * 60 + now_et.minute
+        return 555 <= minutes <= 975  # 9:15 AM to 4:15 PM
     except Exception:
-        now_et = datetime.now(UTC) - timedelta(hours=4)
-
-    if now_et.weekday() >= 5:  # Sat/Sun
-        return False
-
-    hour, minute = now_et.hour, now_et.minute
-    minutes_since_midnight = hour * 60 + minute
-    return 555 <= minutes_since_midnight <= 975
+        # Fallback if common module not available
+        try:
+            from zoneinfo import ZoneInfo
+            now_et = datetime.now(ZoneInfo("America/New_York"))
+        except Exception:
+            now_et = datetime.now(UTC) - timedelta(hours=4)
+        if now_et.weekday() >= 5:
+            return False
+        minutes = now_et.hour * 60 + now_et.minute
+        return 555 <= minutes <= 975
 
 
 def _cache_ttl() -> float:
@@ -2858,11 +2864,21 @@ async def api_prev_closes(
     global _prev_close_cache, _prev_close_cache_at
     tickers = [s.strip().upper() for s in symbols.split(",") if s.strip()]
 
+    def _add_meta(result: dict) -> dict:
+        """Add market metadata to response."""
+        out = dict(result)
+        try:
+            from common.market_hours import is_trading_day, is_trading_session_active
+            out["_meta"] = {"is_trading_day": is_trading_day(), "is_session_active": is_trading_session_active()}
+        except Exception:
+            out["_meta"] = {"is_trading_day": not (datetime.now(UTC).weekday() >= 5), "is_session_active": _is_market_hours()}
+        return out
+
     # Check cache — shorter TTL during market hours so it refreshes on date rollover
     ttl = PREV_CLOSE_CACHE_TTL if not _is_market_hours() else 300  # 5 min during market
     if _prev_close_cache and (time.time() - _prev_close_cache_at) < ttl:
         if all(sym in _prev_close_cache for sym in tickers):
-            return _prev_close_cache
+            return _add_meta(_prev_close_cache)
 
     result: dict[str, dict] = {}
     try:
@@ -2934,7 +2950,7 @@ async def api_prev_closes(
         except Exception:
             pass
 
-    return result
+    return _add_meta(result)
 
 
 @app.get("/api/percentiles")
