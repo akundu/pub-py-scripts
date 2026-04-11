@@ -5205,8 +5205,8 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
         </div>
 
         <div class="tabs">
-            <button class="tab active" onclick="switchPredictionTab(0)">Today</button>
-            {''.join(f'<button class="tab" onclick="switchPredictionTab({d})">{d} Day{"s" if d != 1 else ""}</button>' for d in day_tabs if d > 0)}
+            <button class="tab active" onclick="switchPredictionTab(0)">0DTE</button>
+            {''.join(f'<button class="tab" onclick="switchPredictionTab({d})">{d}DTE</button>' for d in day_tabs if d > 0)}
             <span class="tab-custom">
                 <input type="number" id="customDaysInput" min="1" max="252" placeholder="N days"
                     style="width:70px;padding:4px 6px;border-radius:4px;border:1px solid #444;background:#1a1f2e;color:#e6edf3;font-size:13px;"
@@ -9804,10 +9804,24 @@ async def handle_predictions_page(request: web.Request) -> web.Response:
             stock_db=request.app.get('db_instance'),
         )
         future_results = {}
+        upcoming_td = _get_upcoming_trading_days(25)
         for days in day_tabs:
-            future_results[str(days)] = await fetch_future_prediction(
+            result = await fetch_future_prediction(
                 ticker, days, cache, force_refresh=force_refresh, lookback=lookback
             )
+            # Override target_date with correct trading day from calendar
+            if isinstance(result, dict) and days < len(upcoming_td):
+                td = upcoming_td[days]
+                result['target_date'] = td.isoformat()
+                result['target_date_str'] = td.strftime('%A, %B %d, %Y')
+            future_results[str(days)] = result
+
+        # Also fix today's target_date
+        if isinstance(today_result, dict) and upcoming_td:
+            td0 = upcoming_td[0]
+            today_result['target_date'] = td0.isoformat()
+            today_result['target_date_str'] = td0.strftime('%A, %B %d, %Y')
+
         band_history_date = request.query.get('date')
         if not band_history_date and history:
             # Use exchange_calendars for holiday-aware "last trading day"
@@ -9948,6 +9962,14 @@ async def handle_lazy_load_today_prediction(request: web.Request) -> web.Respons
         stock_db=request.app.get('db_instance'),
     )
 
+    # Override target_date with next trading day (0DTE)
+    if isinstance(result, dict):
+        upcoming_td = _get_upcoming_trading_days(5)
+        if upcoming_td:
+            td0 = upcoming_td[0]
+            result['target_date'] = td0.isoformat()
+            result['target_date_str'] = td0.strftime('%A, %B %d, %Y')
+
     return web.json_response(result)
 
 
@@ -9991,10 +10013,25 @@ async def handle_lazy_load_future_prediction(request: web.Request) -> web.Respon
         if cached is not None:
             cached_data, cache_timestamp = cached
             if isinstance(cached_data, dict) and cached_data.get('current_price', 0) > 0:
-                return web.json_response({**cached_data, 'cache_timestamp': cache_timestamp})
+                resp = {**cached_data, 'cache_timestamp': cache_timestamp}
+                # Override target_date with trading day calendar
+                upcoming_td = _get_upcoming_trading_days(max(days + 1, 10))
+                if days < len(upcoming_td):
+                    td = upcoming_td[days]
+                    resp['target_date'] = td.isoformat()
+                    resp['target_date_str'] = td.strftime('%A, %B %d, %Y')
+                return web.json_response(resp)
 
     # No cache or force_refresh — compute fresh prediction
     result = await fetch_future_prediction(ticker, days, cache, force_refresh=force_refresh, lookback=lookback)
+
+    # Override target_date with trading day calendar
+    if isinstance(result, dict):
+        upcoming_td = _get_upcoming_trading_days(max(days + 1, 10))
+        if days < len(upcoming_td):
+            td = upcoming_td[days]
+            result['target_date'] = td.isoformat()
+            result['target_date_str'] = td.strftime('%A, %B %d, %Y')
 
     return web.json_response(result)
 
