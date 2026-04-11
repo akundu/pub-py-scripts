@@ -36,21 +36,15 @@ def _reset_state(tmp_path):
     utp_voice._daemon_client = None
     # Reset pending confirmations
     utp_voice._pending_confirmations.clear()
-    # Reset options caches
-    utp_voice._options_cache.clear()
-    utp_voice._expirations_cache.clear()
+    # Reset runtime coordination set (not a cache)
     utp_voice._prefetch_in_progress.clear()
-    utp_voice._quote_cache.clear()
     utp_voice.PUBLIC_MODE = False  # Default: require auth
     # Override credentials file to tmp
     utp_voice.CREDENTIALS_FILE = str(tmp_path / "credentials.json")
     yield
     utp_voice._daemon_client = None
     utp_voice._pending_confirmations.clear()
-    utp_voice._options_cache.clear()
-    utp_voice._expirations_cache.clear()
     utp_voice._prefetch_in_progress.clear()
-    utp_voice._quote_cache.clear()
     utp_voice.PUBLIC_MODE = False
 
 
@@ -946,31 +940,39 @@ class TestQuotesAPI:
             assert "NDX" in data
 
     def test_quotes_uses_cache(self, client, auth_cookie):
-        """Second call should serve from cache, not hit daemon again."""
+        """Second call should serve from Redis cache, not hit daemon again."""
         mock_client = AsyncMock()
         mock_client.get_quote.side_effect = [
             {"symbol": "SPX", "last": 6500},
         ]
-        # Populate cache
-        utp_voice._put_cached_quote("SPX", {"symbol": "SPX", "last": 6500})
+        # Mock Redis to return cached quote
+        mock_cache_get = AsyncMock(return_value={"symbol": "SPX", "last": 6500})
+        mock_cache_set = AsyncMock()
 
-        with patch.object(utp_voice, "get_daemon_client", return_value=mock_client):
+        with patch.object(utp_voice, "get_daemon_client", return_value=mock_client), \
+             patch("app.services.redis_cache.cache_get", mock_cache_get), \
+             patch("app.services.redis_cache.cache_set", mock_cache_set):
             resp = client.get("/api/quotes?symbols=SPX", cookies=auth_cookie)
             assert resp.status_code == 200
             data = resp.json()
             assert data["SPX"]["last"] == 6500
-            # Daemon should NOT have been called since cache was populated
+            # Daemon should NOT have been called since Redis cache returned data
             mock_client.get_quote.assert_not_called()
 
     def test_quotes_concurrent_fetch(self, client, auth_cookie):
         """Quotes for multiple symbols should be fetched concurrently."""
         mock_client = AsyncMock()
-        mock_client.get_quote.side_effect = [
-            {"symbol": "SPX", "last": 6500},
-            {"symbol": "NDX", "last": 21000},
-            {"symbol": "RUT", "last": 2500},
-        ]
-        with patch.object(utp_voice, "get_daemon_client", return_value=mock_client):
+        # Use keyword return values to avoid ordering issues with asyncio.gather
+        async def _mock_quote(sym):
+            return {"SPX": {"symbol": "SPX", "last": 6500},
+                    "NDX": {"symbol": "NDX", "last": 21000},
+                    "RUT": {"symbol": "RUT", "last": 2500}}[sym]
+        mock_client.get_quote.side_effect = _mock_quote
+        mock_cache_get = AsyncMock(return_value=None)
+        mock_cache_set = AsyncMock()
+        with patch.object(utp_voice, "get_daemon_client", return_value=mock_client), \
+             patch("app.services.redis_cache.cache_get", mock_cache_get), \
+             patch("app.services.redis_cache.cache_set", mock_cache_set):
             resp = client.get("/api/quotes?symbols=SPX,NDX,RUT", cookies=auth_cookie)
             assert resp.status_code == 200
             data = resp.json()
@@ -1275,21 +1277,44 @@ class TestSpreadMetrics:
 
 
 class TestCacheSourcePriority:
-    def test_ibkr_not_overwritten_by_csv(self):
-        """IBKR data should not be overwritten by CSV data."""
-        with patch.object(utp_voice, "_is_market_hours", return_value=False):
-            utp_voice._put_cached_options("SPX", "2026-04-06", "PUT", [{"strike": 6400}], source="ibkr")
-            utp_voice._put_cached_options("SPX", "2026-04-06", "PUT", [{"strike": 6400, "old": True}], source="csv_exports")
-            entry = utp_voice._get_cached_options("SPX", "2026-04-06", "PUT")
+    @pytest.mark.asyncio
+    async def test_ibkr_not_overwritten_by_csv(self):
+        """IBKR data should not be overwritten by CSV data (via Redis)."""
+        # Simulate Redis with an in-memory dict
+        _store = {}
+
+        async def _mock_cache_get(key, ttl_market=300, ttl_closed=86400):
+            entry = _store.get(key)
+            return entry.get("data") if entry else None
+
+        async def _mock_cache_set(key, data, ttl_market=300, ttl_closed=86400, version=""):
+            _store[key] = {"data": data, "cached_at": "2026-01-01T00:00:00+00:00"}
+
+        with patch("app.services.redis_cache.cache_get", _mock_cache_get), \
+             patch("app.services.redis_cache.cache_set", _mock_cache_set):
+            await utp_voice._put_cached_options("SPX", "2026-04-06", "PUT", [{"strike": 6400}], source="ibkr")
+            await utp_voice._put_cached_options("SPX", "2026-04-06", "PUT", [{"strike": 6400, "old": True}], source="csv_exports")
+            entry = await utp_voice._get_cached_options("SPX", "2026-04-06", "PUT")
             assert entry is not None
             assert entry.source == "ibkr"
 
-    def test_csv_can_be_overwritten_by_ibkr(self):
-        """CSV data should be overwritable by IBKR data."""
-        with patch.object(utp_voice, "_is_market_hours", return_value=False):
-            utp_voice._put_cached_options("SPX", "2026-04-06", "PUT", [{"old": True}], source="csv_exports")
-            utp_voice._put_cached_options("SPX", "2026-04-06", "PUT", [{"new": True}], source="ibkr")
-            entry = utp_voice._get_cached_options("SPX", "2026-04-06", "PUT")
+    @pytest.mark.asyncio
+    async def test_csv_can_be_overwritten_by_ibkr(self):
+        """CSV data should be overwritable by IBKR data (via Redis)."""
+        _store = {}
+
+        async def _mock_cache_get(key, ttl_market=300, ttl_closed=86400):
+            entry = _store.get(key)
+            return entry.get("data") if entry else None
+
+        async def _mock_cache_set(key, data, ttl_market=300, ttl_closed=86400, version=""):
+            _store[key] = {"data": data, "cached_at": "2026-01-01T00:00:00+00:00"}
+
+        with patch("app.services.redis_cache.cache_get", _mock_cache_get), \
+             patch("app.services.redis_cache.cache_set", _mock_cache_set):
+            await utp_voice._put_cached_options("SPX", "2026-04-06", "PUT", [{"old": True}], source="csv_exports")
+            await utp_voice._put_cached_options("SPX", "2026-04-06", "PUT", [{"new": True}], source="ibkr")
+            entry = await utp_voice._get_cached_options("SPX", "2026-04-06", "PUT")
             assert entry.source == "ibkr"
             assert entry.data == [{"new": True}]
 
@@ -1465,12 +1490,15 @@ class TestPrevCloses:
 
     def test_prev_closes_includes_meta(self, client, auth_cookie):
         """Response includes _meta with is_trading_day and is_session_active."""
-        utp_voice._prev_close_cache = {
+        cached_data = {
             "SPX": {"last_close": 6816.89, "last_close_date": "2026-04-10",
                     "prev_close": 6824.66, "prev_close_date": "2026-04-09"},
         }
-        utp_voice._prev_close_cache_at = time.time()
+        mock_cache_get = AsyncMock(return_value=cached_data)
+        mock_cache_set = AsyncMock()
         with patch.object(utp_voice, "_is_market_hours", return_value=False), \
+             patch("app.services.redis_cache.cache_get", mock_cache_get), \
+             patch("app.services.redis_cache.cache_set", mock_cache_set), \
              patch.dict("sys.modules", {"common": MagicMock(), "common.market_hours": MagicMock(
                  is_trading_day=MagicMock(return_value=False),
                  is_trading_session_active=MagicMock(return_value=False),
@@ -1643,15 +1671,19 @@ class TestPercentileTradingDays:
         mock_resp.status_code = 200
         mock_resp.json.return_value = {"ticker": "SPX", "today": {}, "future": {}}
 
+        mock_cache_get = AsyncMock(return_value=None)
+        mock_cache_set = AsyncMock()
+
         with patch("httpx.AsyncClient") as MockClient:
             instance = AsyncMock()
             instance.get.return_value = mock_resp
             instance.__aenter__ = AsyncMock(return_value=instance)
             instance.__aexit__ = AsyncMock(return_value=False)
             MockClient.return_value = instance
-            with patch.object(utp_voice, "_is_market_hours", return_value=False):
-                utp_voice._predictions_cache.clear()
-                utp_voice._predictions_cache_at = 0
+            with patch.object(utp_voice, "_is_market_hours", return_value=False), \
+                 patch("app.services.redis_cache.cache_get", mock_cache_get), \
+                 patch("app.services.redis_cache.cache_set", mock_cache_set), \
+                 patch("app.services.redis_cache.cache_get_raw", AsyncMock(return_value=None)):
                 resp = client.get("/api/predictions", cookies=auth_cookie)
                 assert resp.status_code == 200
                 data = resp.json()

@@ -228,7 +228,7 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
 .ot-actions .btn { flex:1; min-height:48px; font-size:14px; }
 
 /* ── Data Source Banner ─────────────────────────────────────────── */
-#data-source-bar { padding:3px 12px; background:var(--bg); border-bottom:1px solid var(--border); font-size:10px; color:var(--muted); display:flex; flex-wrap:wrap; gap:4px 12px; min-height:20px; flex-shrink:0; }
+#data-source-bar { padding:3px 12px; background:var(--bg); border-bottom:1px solid var(--border); font-size:10px; color:var(--muted); display:flex; flex-wrap:wrap; gap:4px 12px; min-height:20px; flex-shrink:0; align-items:center; }
 #data-source-bar .src-tag { display:inline-flex; align-items:center; gap:3px; }
 #data-source-bar .src-dot { width:6px; height:6px; border-radius:50%; flex-shrink:0; }
 #data-source-bar .src-ibkr { background:var(--green-b); }
@@ -245,6 +245,17 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
 .freshness-banner .lbl { font-weight:bold; }
 .freshness-banner .sep { color:var(--muted); margin:0 2px; }
 .freshness-banner .age { color:var(--muted); }
+
+/* ── Cache Clear Icons ────────────────────────────────────────── */
+.cache-clear-btn { cursor:pointer; color:var(--muted); font-size:12px; opacity:0.5; transition:opacity 0.15s; }
+.cache-clear-btn:hover { opacity:1; color:var(--red-b); }
+.cache-clear-all { cursor:pointer; color:var(--muted); font-size:13px; opacity:0.6; transition:opacity 0.15s; padding:4px 6px; }
+.cache-clear-all:hover { opacity:1; color:var(--red-b); }
+
+/* ── Collapsible Section ──────────────────────────────────────── */
+.collapse-toggle { cursor:pointer; user-select:none; }
+.collapse-toggle .caret { display:inline-block; transition:transform 0.15s; font-size:9px; margin-right:3px; }
+.collapse-toggle.collapsed .caret { transform:rotate(-90deg); }
 
 /* ── Trade Modal ────────────────────────────────────────────────── */
 #trade-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:100; align-items:flex-end; justify-content:center; }
@@ -280,6 +291,7 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
       <span class="title">UTP</span>
     </div>
     <div class="ctrls">
+      <span class="cache-clear-all" onclick="clearAllCaches()" title="Clear all cached data (IndexedDB + localStorage)">&#x1F5D1;</span>
       <button class="hbtn" id="raw-toggle" onclick="toggleRawMode()">Raw</button>
       <span id="login-btn-area"><button class="hbtn" onclick="showLoginModal()">Login</button></span>
     </div>
@@ -350,6 +362,7 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
           <label style="color:var(--muted)" title="Max absolute delta of short leg">Max Delta</label>
           <input type="number" id="opt-max-delta" class="select-styled" style="width:55px" value="" min="0" max="1" step="0.05" placeholder="Any" onchange="refilterChain()">
         </div>
+        <div id="opts-src-panel"></div>
         <div class="options-layout">
           <div class="options-chain-col">
             <div id="options-grid"></div>
@@ -625,6 +638,81 @@ function idbSetDebounced(key, value, delayMs = 5000) {
   if (_idbWriteTimers[key]) clearTimeout(_idbWriteTimers[key]);
   _idbWriteTimers[key] = setTimeout(() => { idbSet(key, value); delete _idbWriteTimers[key]; }, delayMs);
 }
+async function idbClear() {
+  if (!_idb) return;
+  try { const tx = _idb.transaction('kv','readwrite'); tx.objectStore('kv').clear(); } catch(e) {}
+}
+async function idbDel(key) {
+  if (!_idb) return;
+  try { const tx = _idb.transaction('kv','readwrite'); tx.objectStore('kv').delete(key); } catch(e) {}
+}
+
+// ── TTL-aware IDB helpers ──────────────────────────────────────────────────
+// Wrap every IDB write with a cached_at timestamp + TTLs so reads can expire.
+function idbSetWithTTL(key, data, ttlMarket, ttlClosed) {
+  idbSet(key, { data, cached_at: new Date().toISOString(), ttl_market: ttlMarket, ttl_closed: ttlClosed });
+}
+function idbSetWithTTLDebounced(key, data, ttlMarket, ttlClosed, delayMs = 5000) {
+  idbSetDebounced(key, { data, cached_at: new Date().toISOString(), ttl_market: ttlMarket, ttl_closed: ttlClosed }, delayMs);
+}
+function _isMarketHoursClient() {
+  // Use server-provided flag as primary, fallback to local clock
+  if (typeof _prevClosesMeta === 'object' && _prevClosesMeta.is_session_active !== undefined) {
+    return _prevClosesMeta.is_session_active;
+  }
+  const now = new Date();
+  const utcH = now.getUTCHours(), utcM = now.getUTCMinutes();
+  const etMinutes = (utcH - 4) * 60 + utcM;  // Approximate ET offset
+  const dow = now.getUTCDay();
+  return dow >= 1 && dow <= 5 && etMinutes >= 555 && etMinutes <= 975;
+}
+async function idbGetFresh(key, defaultTtlMarket, defaultTtlClosed) {
+  const entry = await idbGet(key);
+  if (!entry) return null;
+  // Legacy format (no wrapper) — treat as expired so fresh fetch happens
+  if (!entry.cached_at) return null;
+  const ageSec = (Date.now() - new Date(entry.cached_at).getTime()) / 1000;
+  const isMarket = _isMarketHoursClient();
+  const ttl = isMarket ? (entry.ttl_market || defaultTtlMarket) : (entry.ttl_closed || defaultTtlClosed);
+  return ageSec <= ttl ? entry.data : null;
+}
+
+// ── Cache Management ──────────────────────────────────────────────────────────
+async function clearAllCaches() {
+  if (!confirm('Clear ALL cached data? This will reload fresh data from the server.')) return;
+  await idbClear();
+  try { localStorage.clear(); } catch(e) {}
+  chainCache = {}; _realtimePrices = {}; _prevCloses = {}; _prevClosesMeta = {};
+  _pctlByTicker = {}; predictionsData = null; _pctlFetchedAt = null; _predFetchedAt = null;
+  _tradingDaysCalendar = [];
+  location.reload();
+}
+async function clearSymbolCache(sym) {
+  delete chainCache[sym];
+  await idbDel('chainCache_'+sym);
+  // Re-render active view
+  const activePane = document.querySelector('.tab-pane.active');
+  if (activePane?.id === 'pane-options') loadOptionsGrid();
+  else if (activePane?.id === 'pane-recs') { scheduleRenderRecs(); loadRecommendations(); }
+}
+async function clearViewCache(view) {
+  if (view === 'options') {
+    // Clear all chain caches
+    for (const sym of CHAIN_TICKERS) { delete chainCache[sym]; await idbDel('chainCache_'+sym); }
+    optGridData = null;
+    loadOptionsGrid();
+  } else if (view === 'picks') {
+    for (const sym of CHAIN_TICKERS) { delete chainCache[sym]; await idbDel('chainCache_'+sym); }
+    _pctlByTicker = {}; predictionsData = null; _pctlFetchedAt = null; _predFetchedAt = null;
+    await idbDel('pctlByTicker'); await idbDel('predictionsData');
+    loadRecommendations();
+  } else if (view === 'portfolio') {
+    await idbDel('portfolioData');
+    loadPortfolio();
+  } else if (view === 'trades') {
+    loadTradesList();
+  }
+}
 
 // ── State ────────────────────────────────────────────────────────────────────
 let rawMode = false, isProcessing = false, recognition = null, isRecording = false;
@@ -731,7 +819,7 @@ async function _fetchChainJob(job) {
     }
     scheduleRenderRecs();
     // Persist chain cache to IndexedDB (debounced per symbol)
-    idbSetDebounced('chainCache_'+job.sym, chainCache[job.sym], 3000);
+    idbSetWithTTLDebounced('chainCache_'+job.sym, chainCache[job.sym], 60, 3960, 3000);
   } catch(e) { /* silent */ }
   finally { _chainActiveFetches--; _updateActivityIndicators(); }
 }
@@ -829,10 +917,10 @@ async function fetchPercentiles() {
     // Extract trading day calendar (holiday-aware, from server's exchange_calendars)
     if (d._trading_days?.length) {
       _tradingDaysCalendar = d._trading_days;
-      idbSet('tradingDaysCalendar', _tradingDaysCalendar);
+      idbSetWithTTL('tradingDaysCalendar', _tradingDaysCalendar, 3960, 3960);
     }
     scheduleRenderRecs();
-    idbSet('pctlByTicker', _pctlByTicker);
+    idbSetWithTTL('pctlByTicker', _pctlByTicker, 150, 3960);
   } catch(e) { /* silent */ }
 }
 
@@ -944,9 +1032,10 @@ async function fetchPrevCloses() {
     const d = await r.json();
     if (d && !d.error) {
       if (d._meta) { _prevClosesMeta = d._meta; delete d._meta; }
+      if (d._voice_meta) delete d._voice_meta;
       _prevCloses = d;
-      idbSet('prevCloses', d);
-      idbSet('prevClosesMeta', _prevClosesMeta);
+      idbSetWithTTL('prevCloses', d, 150, 3960);
+      idbSetWithTTL('prevClosesMeta', _prevClosesMeta, 150, 3960);
     }
   } catch(e) { /* silent */ }
 }
@@ -992,7 +1081,7 @@ async function fetchPredictions() {
       _predFetchedAt = d._voice_meta?.fetched_at || new Date().toISOString();
       predictionsData = d;
       scheduleRenderRecs();
-      idbSet('predictionsData', d);
+      idbSetWithTTL('predictionsData', d, 60, 3960);
     }
   } catch(e) { /* silent */ }
 }
@@ -1192,7 +1281,7 @@ function connectPriceWebSocket() {
         _updateTickerItem(d.symbol, d.price);
         // Also update options price bar if viewing this symbol
         if (optGridData?.symbol === d.symbol) _updateOptPriceBar(d.symbol, d.price);
-        idbSetDebounced('realtimePrices', _realtimePrices, 10000);
+        idbSetWithTTLDebounced('realtimePrices', _realtimePrices, 15, 66, 10000);
       }
     } catch(e) {}
   };
@@ -1252,7 +1341,7 @@ async function loadPortfolio() {
 
   // Show cached portfolio immediately if we have no rendered data yet
   if (!tbl.innerHTML.includes('tbl') && !_portfolioData) {
-    const cached = await idbGet('portfolioData');
+    const cached = await idbGetFresh('portfolioData', 35, 3960);
     if (cached) {
       _portfolioData = cached;
       _renderPortfolio(cached, tbl, kpis);
@@ -1266,7 +1355,7 @@ async function loadPortfolio() {
     if (r.status===401) { showLogin(); return; }
     const d = await r.json();
     _portfolioData = d;
-    idbSetDebounced('portfolioData', d, 2000);
+    idbSetWithTTLDebounced('portfolioData', d, 35, 3960, 2000);
     _renderPortfolio(d, tbl, kpis);
   } catch(e) {
     if (!tbl.innerHTML.includes('tbl')) {
@@ -1679,6 +1768,7 @@ async function loadOptionsGrid() {
       symbol: sym, expiration: useExp, expirations: cachedExps,
       current_price: cachedPrice, chain: cached.chain,
       source: cached.source || 'cache', fetched_at: cached.fetched_at,
+      cached_at: cached.cached_at,
       market_open: true,
     }, otype, grid);
   }
@@ -1811,6 +1901,51 @@ function _renderOptionsGridFromData(d, otype, grid) {
   startOptAutoRefresh();
   _optLastUpdatedAt = Date.now();
   _refreshLastUpdatedLabels();
+  renderOptsSrcPanel(d);
+}
+
+function renderOptsSrcPanel(d) {
+  const panel = document.getElementById('opts-src-panel');
+  if (!panel) return;
+  const sym = d?.symbol || document.getElementById('opt-symbol')?.value || '';
+  const _oCollapsed = panel.querySelector('.collapsed');
+  let h = '<div style="padding:4px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;font-size:10px;color:var(--muted);margin-bottom:4px">';
+  h += '<div style="display:flex;justify-content:space-between;align-items:center">';
+  h += `<span class="collapse-toggle${_oCollapsed ? ' collapsed' : ''}" onclick="toggleSrcInventory(this)"><span class="caret">&#x25BC;</span><span style="font-weight:600;color:var(--text)">Data Sources</span></span>`;
+  h += `<span class="cache-clear-btn" onclick="clearViewCache('options')" title="Clear options cache">&#x1F5D1;</span>`;
+  h += '</div>';
+  h += `<div id="opts-src-inventory" style="display:flex;flex-wrap:wrap;gap:4px 14px;align-items:center;margin-top:4px${_oCollapsed ? ';display:none' : ''}" class="${_oCollapsed ? 'collapsed-body' : ''}">`;
+  // Current symbol chain source
+  if (d) {
+    const dot = d.source === 'ibkr' ? 'src-ibkr' : d.source === 'csv_exports' ? 'src-csv' : 'src-cache';
+    const srcN = d.source === 'ibkr' ? 'IBKR' : d.source === 'csv_exports' ? 'CSV' : (d.source||'cache');
+    const t = d.fetched_at ? new Date(d.fetched_at).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true}) : '';
+    const age = d.fetched_at ? timeSince(d.fetched_at) : '?';
+    h += `<span><span class="src-dot ${dot}" style="width:5px;height:5px;border-radius:50%;display:inline-block"></span> ${sym}: ${srcN} ${t} (<span class="freshness-age" data-iso="${d.fetched_at||''}">${age} ago</span>)</span>`;
+  }
+  // Other cached tickers
+  for (const s of CHAIN_TICKERS) {
+    if (s === sym) continue;
+    const c = getCachedChain(s);
+    if (!c) continue;
+    const dot2 = c.source === 'ibkr' ? 'src-ibkr' : c.source === 'csv_exports' ? 'src-csv' : 'src-cache';
+    const srcN2 = c.source === 'ibkr' ? 'IBKR' : c.source === 'csv_exports' ? 'CSV' : (c.source||'cache');
+    const t2 = c.fetched_at ? new Date(c.fetched_at).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true}) : '';
+    const age2 = c.fetched_at ? timeSince(c.fetched_at) : (c.ts ? timeSince(c.ts.toISOString()) : '?');
+    h += `<span style="opacity:0.6"><span class="src-dot ${dot2}" style="width:5px;height:5px;border-radius:50%;display:inline-block"></span> ${s}: ${srcN2} ${t2} (<span class="freshness-age" data-iso="${c.fetched_at||c.ts?.toISOString()||''}">${age2} ago</span>)</span>`;
+  }
+  // Percentiles and predictions
+  if (_pctlFetchedAt) {
+    const pLastDay = Object.values(_pctlByTicker)[0]?.lastDay || '';
+    const pAge = timeSince(_pctlFetchedAt);
+    h += `<span>| Pctl: ${pLastDay} (<span class="freshness-age" data-iso="${_pctlFetchedAt}" data-prefix="downloaded">downloaded ${pAge} ago</span>)</span>`;
+  }
+  if (_predFetchedAt) {
+    const prAge = timeSince(_predFetchedAt);
+    h += `<span>| Pred (<span class="freshness-age" data-iso="${_predFetchedAt}" data-prefix="downloaded">downloaded ${prAge} ago</span>)</span>`;
+  }
+  h += '</div></div>';
+  panel.innerHTML = h;
 }
 
 function formatTimestamp(d) {
@@ -1906,13 +2041,23 @@ function freshnessBanner(config) {
   return `<div class="freshness-banner ${bgCls}">${parts.join(' ')}</div>`;
 }
 
+function toggleSrcInventory(el) {
+  el.classList.toggle('collapsed');
+  const body = el.closest('div').parentElement.querySelector('#recs-src-inventory, #opts-src-inventory');
+  if (body) {
+    const hide = el.classList.contains('collapsed');
+    body.style.display = hide ? 'none' : 'flex';
+    body.classList.toggle('collapsed-body', hide);
+  }
+}
+
 function updateDataSourceBar(entries) {
   // entries: [{label, source, time, sym?}]
   const bar = document.getElementById('data-source-bar');
   if (!bar) return;
   if (!entries || !entries.length) { bar.innerHTML = ''; return; }
 
-  bar.innerHTML = entries.map(e => {
+  const tags = entries.map(e => {
     const src = (e.source || '').toLowerCase();
     let dotClass = 'src-cache';
     let srcName = e.source || 'unknown';
@@ -1925,6 +2070,11 @@ function updateDataSourceBar(entries) {
     const prefix = e.sym ? `${e.sym}: ` : (e.label ? `${e.label}: ` : '');
     return `<span class="src-tag"><span class="src-dot ${dotClass}"></span>${prefix}${srcName}${timeStr ? ' ' + timeStr : ''}</span>`;
   }).join('');
+  // Right-justified clear button for active view
+  const activePane = document.querySelector('.tab-pane.active');
+  const viewName = activePane?.id === 'pane-options' ? 'options' : activePane?.id === 'pane-recs' ? 'picks' : activePane?.id === 'pane-portfolio' ? 'portfolio' : activePane?.id === 'pane-trades' ? 'trades' : '';
+  const clearBtn = viewName ? `<span style="margin-left:auto;cursor:pointer;opacity:0.6;font-size:11px" class="cache-clear-btn" onclick="clearViewCache('${viewName}')" title="Clear ${viewName} cache">&#x2715;</span>` : '';
+  bar.innerHTML = tags + clearBtn;
 }
 
 function fmtGreek(val, decimals) {
@@ -2195,6 +2345,7 @@ async function refreshOptionPrices() {
 
     // Update data source bar on refresh too
     updateDataSourceBar([{sym:d.symbol, source:d.source, time:d.fetched_at}, {label:'Mkt', source: d.market_open?'open':'closed'}]);
+    renderOptsSrcPanel(d);
 
   } catch(e) { /* silent — don't disrupt UI on refresh failure */ }
   finally { _optRefreshing = false; _optLastUpdatedAt = Date.now(); _updateActivityIndicators(); _refreshLastUpdatedLabels(); }
@@ -2824,9 +2975,14 @@ function renderRecs() {
     </div>`;
   }
 
-  // ── Data Sources Inventory ──
-  let srcInventory = '<div style="margin-bottom:8px;padding:6px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;font-size:10px;color:var(--muted);display:flex;flex-wrap:wrap;gap:4px 14px;align-items:center">';
-  srcInventory += '<span style="font-weight:600;color:var(--text)">Data Sources</span>';
+  // ── Data Sources Inventory (collapsible) ──
+  const _srcCollapsed = document.getElementById('recs-src-inventory')?.classList.contains('collapsed-body');
+  let srcInventory = '<div style="margin-bottom:8px;padding:6px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;font-size:10px;color:var(--muted)">';
+  srcInventory += '<div style="display:flex;justify-content:space-between;align-items:center">';
+  srcInventory += `<span class="collapse-toggle${_srcCollapsed ? ' collapsed' : ''}" onclick="toggleSrcInventory(this)"><span class="caret">&#x25BC;</span><span style="font-weight:600;color:var(--text)">Data Sources</span></span>`;
+  srcInventory += `<span class="cache-clear-btn" onclick="clearViewCache('picks')" title="Clear picks cache (chains+pctl+pred)">&#x1F5D1;</span>`;
+  srcInventory += '</div>';
+  srcInventory += `<div id="recs-src-inventory" style="display:flex;flex-wrap:wrap;gap:4px 14px;align-items:center;margin-top:4px${_srcCollapsed ? ';display:none' : ''}" class="${_srcCollapsed ? 'collapsed-body' : ''}">`;
   // Per-ticker options chain freshness
   for (const sym of filteredTickers) {
     const c = getCachedChain(sym);
@@ -2835,7 +2991,7 @@ function renderRecs() {
       const srcN = c.source === 'ibkr' ? 'IBKR' : c.source === 'csv_exports' ? 'CSV' : (c.source||'cache');
       const t = c.fetched_at ? new Date(c.fetched_at).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true}) : '';
       const age = c.fetched_at ? timeSince(c.fetched_at) : (c.ts ? timeSince(c.ts.toISOString()) : '?');
-      srcInventory += `<span><span class="src-dot ${dot}" style="width:5px;height:5px;border-radius:50;display:inline-block"></span> ${sym}: ${srcN} ${t} (<span class="freshness-age" data-iso="${c.fetched_at||c.ts?.toISOString()||''}">${age} ago</span>)</span>`;
+      srcInventory += `<span><span class="src-dot ${dot}" style="width:5px;height:5px;border-radius:50%;display:inline-block"></span> ${sym}: ${srcN} ${t} (<span class="freshness-age" data-iso="${c.fetched_at||c.ts?.toISOString()||''}">${age} ago</span>)</span>`;
     }
   }
   // Percentiles freshness — data date + (downloaded X ago)
@@ -2853,7 +3009,7 @@ function renderRecs() {
   } else {
     srcInventory += '<span>| Pred: <span style="color:var(--yellow)">loading</span></span>';
   }
-  srcInventory += '</div>';
+  srcInventory += '</div></div>';
 
   let html = statusHtml + srcInventory;
 
@@ -3454,9 +3610,9 @@ function loadAll() {
   fetchPrevCloses();
   fetchPercentiles();
   fetchPredictions();
-  setInterval(fetchPrevCloses, 3600000);  // 1 hour — closes only change after daily ingestion
-  setInterval(fetchPercentiles, 300000);  // 5 min
-  setInterval(fetchPredictions, 300000);  // 5 min
+  setInterval(fetchPrevCloses, 150000);   // 150s = ½ of 300s Redis TTL
+  setInterval(fetchPercentiles, 150000);  // 150s = ½ of 300s Redis TTL
+  setInterval(fetchPredictions, 60000);   // 60s  = ½ of 120s Redis TTL
 
   // Phase 5: Start chain refresh + options refresh immediately.
   // Prefetch is fire-and-forget; chain refresh benefits from any cache it populates.
@@ -3568,23 +3724,25 @@ async function init() {
   document.getElementById('app').style.display = 'flex';
   initVoice();
 
-  // Hydrate from IndexedDB (instant — shows cached data before any network calls)
+  // Hydrate from IndexedDB with TTL checks (shows cached data before network calls)
   await _openIDB();
   try {
     const [cachedPrices, cachedPrevCloses, cachedPctl, cachedPred] = await Promise.all([
-      idbGet('realtimePrices'), idbGet('prevCloses'),
-      idbGet('pctlByTicker'), idbGet('predictionsData'),
+      idbGetFresh('realtimePrices', 15, 66),
+      idbGetFresh('prevCloses', 150, 3960),
+      idbGetFresh('pctlByTicker', 150, 3960),
+      idbGetFresh('predictionsData', 60, 3960),
     ]);
     if (cachedPrices) _realtimePrices = cachedPrices;
     if (cachedPrevCloses) _prevCloses = cachedPrevCloses;
-    const cachedMeta = await idbGet('prevClosesMeta');
+    const cachedMeta = await idbGetFresh('prevClosesMeta', 150, 3960);
     if (cachedMeta) _prevClosesMeta = cachedMeta;
     if (cachedPctl) _pctlByTicker = cachedPctl;
-    const cachedTradingDays = await idbGet('tradingDaysCalendar');
+    const cachedTradingDays = await idbGetFresh('tradingDaysCalendar', 3960, 3960);
     if (cachedTradingDays) _tradingDaysCalendar = cachedTradingDays;
     if (cachedPred) predictionsData = cachedPred;
     for (const sym of CHAIN_TICKERS) {
-      const cc = await idbGet('chainCache_'+sym);
+      const cc = await idbGetFresh('chainCache_'+sym, 60, 3960);
       if (cc) {
         chainCache[sym] = cc;
         for (const [k, v] of Object.entries(cc)) {

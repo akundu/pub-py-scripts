@@ -31,7 +31,7 @@ python3 scripts/equities_download.py I:VIX1D I:VIX SPY DJX I:DJX TQQQ QQQ I:NDX 
 #wait
 
 python3 scripts/options_chain_download.py SPX RUT NDX DJX \
-  --track-from $(date -v-10d +%Y-%m-%d) --track-end $(date +%Y-%m-%d) --track-days 7 --track-step 1 \
+  --track-from $(date -v-10d +%Y-%m-%d) --track-end $(date +%Y-%m-%d) --track-days 30 --track-step 1 \
   --interval-minutes 5 --chunk-days 7 --max-connections 20 \
   --num-processes 12 --window-workers 5 \
   --format-chain-csv --output-dir ./options_csv_output_full_5/
