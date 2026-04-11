@@ -2205,8 +2205,8 @@ function renderOrderTicket() {
     <div class="ot-legs">${legsHtml}</div>
     ${addLegBtn}
     <div class="ot-summary" id="ot-summary">
-      <div class="ot-metric"><div class="label">${creditLabel} /contract</div><div class="value" style="color:${creditColor}">$${Math.abs(m.credit).toFixed(2)}</div><div class="ot-metric-total" style="font-size:10px;color:${creditColor};margin-top:2px"></div></div>
-      <div class="ot-metric"><div class="label">Max Loss /contract</div><div class="value" style="color:var(--red-b)">$${m.maxLoss.toFixed(2)}</div><div class="ot-metric-total" style="font-size:10px;color:var(--red-b);margin-top:2px"></div></div>
+      <div class="ot-metric"><div class="label">${creditLabel}</div><div class="value ot-metric-total" style="color:${creditColor}"></div><div style="font-size:10px;color:${creditColor};margin-top:2px" class="ot-metric-pc">/contract $${Math.abs(m.credit).toFixed(2)}</div></div>
+      <div class="ot-metric"><div class="label">Max Loss</div><div class="value ot-metric-total" style="color:var(--red-b)"></div><div style="font-size:10px;color:var(--red-b);margin-top:2px" class="ot-metric-pc">/contract $${m.maxLoss.toFixed(2)}</div></div>
       <div class="ot-metric"><div class="label">ROI</div><div class="value" style="color:var(--green-b)">${m.roi.toFixed(1)}%</div></div>
       <div class="ot-metric"><div class="label">Width</div><div class="value">${m.width.toFixed(0)}</div></div>
     </div>
@@ -2271,11 +2271,19 @@ function updateTotal() {
   const totalCredit = Math.abs(m.credit) * 100 * qty;
   const totalMaxLoss = m.maxLoss * 100 * qty;
 
-  // Update the totals inside the metric boxes
+  // Update the totals (primary display) inside the metric boxes
   const totals = document.querySelectorAll('.ot-metric-total');
   if (totals.length >= 2) {
-    totals[0].innerHTML = `Total: <b>$${totalCredit.toLocaleString(undefined,{maximumFractionDigits:0})}</b> (${qty}x)`;
-    totals[1].innerHTML = `Total: <b>$${totalMaxLoss.toLocaleString(undefined,{maximumFractionDigits:0})}</b> (${qty}x)`;
+    totals[0].textContent = `$${totalCredit.toLocaleString(undefined,{maximumFractionDigits:0})}`;
+    totals[1].textContent = `$${totalMaxLoss.toLocaleString(undefined,{maximumFractionDigits:0})}`;
+  }
+  // Update per-contract line with quantity
+  const pcs = document.querySelectorAll('.ot-metric-pc');
+  if (pcs.length >= 2) {
+    const cr = Math.abs(m.credit).toFixed(2);
+    const ml = m.maxLoss.toFixed(2);
+    pcs[0].textContent = `/contract $${cr} (${qty}x)`;
+    pcs[1].textContent = `/contract $${ml} (${qty}x)`;
   }
 }
 
