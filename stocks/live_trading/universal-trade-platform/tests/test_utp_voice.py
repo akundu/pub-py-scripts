@@ -1590,16 +1590,11 @@ class TestPercentileTradingDays:
                     d = _d.fromisoformat(td)
                     assert d.weekday() < 5  # No weekends
 
-    def test_percentiles_include_voice_meta(self, client, auth_cookie):
-        """Percentiles response includes _voice_meta with source and fetched_at."""
-        import sys
-        stocks_root = str(Path(__file__).resolve().parents[3])
-        if stocks_root not in sys.path:
-            sys.path.insert(0, stocks_root)
-
+    def test_percentiles_include_trading_days(self, client, auth_cookie):
+        """Percentiles response includes _trading_days calendar."""
         mock_resp = MagicMock()
         mock_resp.status_code = 200
-        mock_resp.json.return_value = {"tickers": []}
+        mock_resp.json.return_value = {"tickers": [{"ticker": "SPX", "metadata": {}, "windows": {}}]}
 
         with patch("httpx.AsyncClient") as MockClient:
             instance = AsyncMock()
@@ -1611,9 +1606,12 @@ class TestPercentileTradingDays:
                 resp = client.get("/api/percentiles", cookies=auth_cookie)
                 assert resp.status_code == 200
                 data = resp.json()
-                meta = data["_voice_meta"]
-                assert meta["source"] == "percentile_server"
-                assert "fetched_at" in meta
+                assert "_trading_days" in data
+                # Should have trading days (not weekends)
+                for td in data["_trading_days"]:
+                    from datetime import date as _d
+                    d = _d.fromisoformat(td)
+                    assert d.weekday() < 5
 
     def test_trading_days_no_weekends(self):
         """Trading day calendar from exchange_calendars excludes weekends."""

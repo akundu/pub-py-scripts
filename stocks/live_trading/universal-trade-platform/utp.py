@@ -63,6 +63,11 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
+# Ensure common/ package is importable (for market_hours, etc.)
+_stocks_root = str(Path(__file__).resolve().parents[2])
+if _stocks_root not in sys.path:
+    sys.path.insert(0, _stocks_root)
+
 # Python 3.14 compat
 try:
     asyncio.get_event_loop()

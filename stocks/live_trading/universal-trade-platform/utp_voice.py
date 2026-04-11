@@ -37,6 +37,11 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+# Ensure common/ package is importable (for market_hours, etc.)
+_stocks_root = str(Path(__file__).resolve().parents[2])
+if _stocks_root not in sys.path:
+    sys.path.insert(0, _stocks_root)
+
 import bcrypt as _bcrypt
 import httpx
 from fastapi import FastAPI, Request, Response, HTTPException, Depends, Cookie, WebSocket, WebSocketDisconnect
@@ -3000,13 +3005,33 @@ async def api_prev_closes(
     return _add_meta(result)
 
 
+def _get_trading_days_calendar() -> list[str]:
+    """Get next 30 trading days using exchange_calendars."""
+    try:
+        from common.market_hours import is_trading_day
+        from datetime import date as _date
+        today = _date.today()
+        td_list = []
+        d = today
+        for _ in range(45):  # Scan 45 calendar days to get ~30 trading days
+            if is_trading_day(d):
+                td_list.append(d.isoformat())
+            d += timedelta(days=1)
+        return td_list
+    except Exception:
+        return []
+
+
 @app.get("/api/percentiles")
 async def api_percentiles(_u: str | None = Depends(optional_session)):
     """Proxy to range_percentiles server. Cached 60s during market hours, infinite when closed."""
     global _percentile_cache, _percentile_cache_at
     ttl = 120 if _is_market_hours() else float("inf")
     if _percentile_cache and (time.time() - _percentile_cache_at) < ttl:
-        return _percentile_cache
+        # Always ensure _trading_days is current (even in cached responses)
+        result = dict(_percentile_cache)
+        result["_trading_days"] = _get_trading_days_calendar()
+        return result
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -3016,25 +3041,7 @@ async def api_percentiles(_u: str | None = Depends(optional_session)):
             )
             if resp.status_code == 200:
                 data = resp.json()
-                # Add trading day calendar so frontend can compute DTE correctly
-                # (accounts for holidays via exchange_calendars)
-                try:
-                    from common.market_hours import is_trading_day
-                    from datetime import date as _date
-                    today = _date.today()
-                    td_list = []
-                    d = today
-                    for _ in range(30):  # Next 30 calendar days
-                        if is_trading_day(d):
-                            td_list.append(d.isoformat())
-                        d += timedelta(days=1)
-                    data["_trading_days"] = td_list
-                except Exception:
-                    pass
-                data["_voice_meta"] = {
-                    "source": "percentile_server",
-                    "fetched_at": _now_iso(),
-                }
+                data["_trading_days"] = _get_trading_days_calendar()
                 _percentile_cache = data
                 _percentile_cache_at = time.time()
                 _redis_write_bg("utp:voice:percentiles", _percentile_cache, ttl_market=300, ttl_closed=86400)

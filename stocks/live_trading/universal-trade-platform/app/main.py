@@ -6,8 +6,15 @@ import asyncio
 import ipaddress
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+
+# Ensure common/ package is importable (for market_hours, etc.)
+from pathlib import Path as _Path
+_stocks_root = str(_Path(__file__).resolve().parents[3])
+if _stocks_root not in sys.path:
+    sys.path.insert(0, _stocks_root)
 from pathlib import Path
 from typing import AsyncIterator
 
