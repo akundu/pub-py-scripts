@@ -39,6 +39,7 @@ def _reset_state(tmp_path):
     # Reset runtime coordination set (not a cache)
     utp_voice._prefetch_in_progress.clear()
     utp_voice.PUBLIC_MODE = False  # Default: require auth
+    utp_voice.CACHE_ENABLED = False  # Default: no cache (pure proxy)
     # Override credentials file to tmp
     utp_voice.CREDENTIALS_FILE = str(tmp_path / "credentials.json")
     yield
@@ -46,6 +47,7 @@ def _reset_state(tmp_path):
     utp_voice._pending_confirmations.clear()
     utp_voice._prefetch_in_progress.clear()
     utp_voice.PUBLIC_MODE = False
+    utp_voice.CACHE_ENABLED = False
 
 
 @pytest.fixture
@@ -941,6 +943,7 @@ class TestQuotesAPI:
 
     def test_quotes_uses_cache(self, client, auth_cookie):
         """Second call should serve from Redis cache, not hit daemon again."""
+        utp_voice.CACHE_ENABLED = True  # Enable cache for this test
         mock_client = AsyncMock()
         mock_client.get_quote.side_effect = [
             {"symbol": "SPX", "last": 6500},
@@ -1280,6 +1283,7 @@ class TestCacheSourcePriority:
     @pytest.mark.asyncio
     async def test_ibkr_not_overwritten_by_csv(self):
         """IBKR data should not be overwritten by CSV data (via Redis)."""
+        utp_voice.CACHE_ENABLED = True  # Cache tests need cache enabled
         # Simulate Redis with an in-memory dict
         _store = {}
 
@@ -1301,6 +1305,7 @@ class TestCacheSourcePriority:
     @pytest.mark.asyncio
     async def test_csv_can_be_overwritten_by_ibkr(self):
         """CSV data should be overwritable by IBKR data (via Redis)."""
+        utp_voice.CACHE_ENABLED = True  # Cache tests need cache enabled
         _store = {}
 
         async def _mock_cache_get(key, ttl_market=300, ttl_closed=86400):
@@ -1490,6 +1495,7 @@ class TestPrevCloses:
 
     def test_prev_closes_includes_meta(self, client, auth_cookie):
         """Response includes _meta with is_trading_day and is_session_active."""
+        utp_voice.CACHE_ENABLED = True  # Test relies on cache returning data
         cached_data = {
             "SPX": {"last_close": 6816.89, "last_close_date": "2026-04-10",
                     "prev_close": 6824.66, "prev_close_date": "2026-04-09"},
@@ -1690,3 +1696,64 @@ class TestPercentileTradingDays:
                 meta = data["_voice_meta"]
                 assert meta["source"] == "prediction_server"
                 assert "fetched_at" in meta
+
+
+# ── Cache Mode Tests ──────────────────────────────────────────────────────────
+
+
+class TestCacheMode:
+    """Tests for CACHE_ENABLED flag (default: disabled, pure proxy mode)."""
+
+    def test_cache_disabled_by_default(self):
+        """CACHE_ENABLED should be False by default."""
+        # The autouse fixture resets it to False each test
+        assert utp_voice.CACHE_ENABLED is False
+
+    @pytest.mark.asyncio
+    async def test_get_cached_quote_returns_none_when_disabled(self):
+        """_get_cached_quote returns None immediately when cache is disabled."""
+        assert utp_voice.CACHE_ENABLED is False
+        result = await utp_voice._get_cached_quote("SPX")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_put_cached_quote_noop_when_disabled(self):
+        """_put_cached_quote is a no-op when cache is disabled — no Redis call."""
+        assert utp_voice.CACHE_ENABLED is False
+        with patch("app.services.redis_cache.cache_set", new_callable=AsyncMock) as mock_set:
+            await utp_voice._put_cached_quote("SPX", {"bid": 5500, "ask": 5501})
+            mock_set.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_prefetch_skipped_when_disabled(self):
+        """prefetch_all_tickers() returns immediately when cache is disabled."""
+        assert utp_voice.CACHE_ENABLED is False
+        with patch.object(utp_voice, "_prefetch_options_for_symbol", new_callable=AsyncMock) as mock_pf:
+            await utp_voice.prefetch_all_tickers()
+            mock_pf.assert_not_called()
+
+    def test_api_prefetch_returns_disabled_status(self, client, auth_cookie):
+        """GET /api/prefetch returns cache_disabled status when cache is off."""
+        resp = client.get("/api/prefetch", cookies=auth_cookie)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "cache_disabled"
+
+    def test_quotes_bypass_cache_when_disabled(self, client, auth_cookie):
+        """GET /api/quotes should call daemon directly, no cache_get."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"SPX": {"bid": 5500, "ask": 5501, "last": 5500.5}}
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("httpx.AsyncClient", return_value=mock_client), \
+             patch("app.services.redis_cache.cache_get", new_callable=AsyncMock) as mock_cache:
+            resp = client.get("/api/quotes?symbols=SPX", cookies=auth_cookie)
+            assert resp.status_code == 200
+            # cache_get should not be called since CACHE_ENABLED is False
+            # (the _get_cached_quote guard returns None before calling cache_get)
+            mock_cache.assert_not_called()

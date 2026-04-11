@@ -6484,26 +6484,28 @@ option_quotes_num_expirations: 2
         result = cache.get("SPX", "2026-03-25", "CALL", max_age_seconds=60.0)
         assert result == fresh_quotes  # Still the fresh data
 
-    def test_get_cached_quotes_market_hours_5min_ttl(self):
-        """During market hours, get_cached_quotes uses 5-minute max age."""
+    def test_get_cached_quotes_market_hours_90s_ttl(self):
+        """During market hours, get_cached_quotes uses 90-second max age."""
         from app.services.option_quote_streaming import OptionQuoteStreamingService, CachedQuotes, _is_market_hours
         from app.services.streaming_config import StreamingConfig
         import app.services.option_quote_streaming as oqs_mod
 
         svc = OptionQuoteStreamingService(StreamingConfig(), provider=MagicMock())
-        # Insert entry that's 6 minutes old
+        # Insert entry that's 2 minutes old (> 90s)
         svc._cache._cache[("SPX", "2026-03-25", "CALL")] = CachedQuotes(
             quotes=[{"strike": 5500}],
-            fetched_at=time.monotonic() - 360,  # 6 min ago
+            fetched_at=time.monotonic() - 120,  # 2 min ago
             fetched_at_utc="2026-03-25T14:00:00+00:00",
         )
-        # During market hours: 6 min > 5 min limit → None
-        with patch.object(oqs_mod, "_is_market_hours", return_value=True):
+        # During market hours: 120s > 90s limit → None
+        with patch.object(oqs_mod, "_is_market_hours", return_value=True), \
+             patch("common.market_hours.is_market_hours", return_value=True):
             result = svc.get_cached_quotes("SPX", "2026-03-25", "CALL")
             assert result is None
 
-        # Outside market hours: serve regardless of age
-        with patch.object(oqs_mod, "_is_market_hours", return_value=False):
+        # Outside market hours: serve if < 3600s old
+        with patch.object(oqs_mod, "_is_market_hours", return_value=False), \
+             patch("common.market_hours.is_market_hours", return_value=False):
             result = svc.get_cached_quotes("SPX", "2026-03-25", "CALL")
             assert result is not None
             assert result[0]["strike"] == 5500

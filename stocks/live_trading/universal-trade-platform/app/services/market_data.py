@@ -46,13 +46,57 @@ from app.models import Broker, Quote
 
 logger = logging.getLogger(__name__)
 
+
+def _is_market_active() -> bool:
+    """True during market hours +/- 10 minutes (09:20-16:10 ET on trading days).
+
+    Use this to decide whether to fetch live data from IBKR/providers.
+    Outside this window, serve only cached data — no provider round-trips.
+    """
+    try:
+        from common.market_hours import is_market_hours, is_trading_day
+        from zoneinfo import ZoneInfo
+        now_utc = datetime.now(timezone.utc)
+        # If market is open right now, definitely active
+        if is_market_hours(now_utc):
+            return True
+        # Check 10 min buffer around market hours on trading days
+        now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
+        if not is_trading_day(now_et.date()):
+            return False
+        minutes = now_et.hour * 60 + now_et.minute
+        return 560 <= minutes <= 970  # 09:20 to 16:10
+    except Exception:
+        # Fallback: simple ET clock check (09:20-16:10)
+        from zoneinfo import ZoneInfo
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        if now_et.weekday() >= 5:
+            return False
+        minutes = now_et.hour * 60 + now_et.minute
+        return 560 <= minutes <= 970  # 09:20 to 16:10
+
+
+def _is_market_open() -> bool:
+    """True during regular market hours only (09:30-16:00 ET). Uses common/market_hours."""
+    try:
+        from common.market_hours import is_market_hours
+        return is_market_hours()
+    except Exception:
+        from zoneinfo import ZoneInfo
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        if now_et.weekday() >= 5:
+            return False
+        minutes = now_et.hour * 60 + now_et.minute
+        return 570 <= minutes <= 960
+
+
 # ── Quotes ──────────────────────────────────────────────────────────────────
 
 # TTLs for cache lookups (seconds)
-_QUOTE_STREAMING_TTL = 60.0   # streaming tick cache
-_QUOTE_STALE_TTL = 300.0      # stale fallback (5 min)
-_OPTION_CACHE_TTL = 0         # 0 = auto (5 min market, 1 day off-hours)
-_OPTION_STALE_TTL = 1800.0    # stale fallback (30 min)
+_QUOTE_STREAMING_TTL = 10.0   # streaming tick cache
+_QUOTE_STALE_TTL = 60.0       # stale fallback
+_OPTION_CACHE_TTL = 0         # 0 = auto (90s market, 3600s closed)
+_OPTION_STALE_TTL = 300.0     # stale fallback (5 min)
 
 
 # Absolute floor prices per index — reject garbage from TWS/CPG
@@ -99,7 +143,7 @@ async def get_quote(symbol: str, broker: Broker = Broker.IBKR) -> Quote:
 
     # 2. Stale streaming tick (any age — better than a slow provider round-trip)
     if svc and svc.is_running:
-        stale_tick = svc.get_last_tick(symbol, max_age_seconds=86400)  # 24h
+        stale_tick = svc.get_last_tick(symbol, max_age_seconds=3600)  # 1hr closed TTL
         if stale_tick and stale_tick.get("price", 0) > 0 and _is_valid_price(symbol, stale_tick["price"]):
             price = stale_tick["price"]
             logger.debug("Serving stale streaming tick for %s (age > %ds)", symbol, _QUOTE_STREAMING_TTL)
@@ -113,8 +157,10 @@ async def get_quote(symbol: str, broker: Broker = Broker.IBKR) -> Quote:
                 source="streaming_cache",
             )
 
-    # 3. Provider (has its own internal cache before hitting IBKR)
+    # 3. Provider (only fetch live when market is active +/- 10 min)
     provider = ProviderRegistry.get(broker)
+    if not _is_market_active() and hasattr(provider, "is_healthy"):
+        return Quote(symbol=symbol, bid=0, ask=0, last=0, volume=0, source="market_closed")
     quote = await provider.get_quote(symbol)
 
     # Validate provider response
@@ -169,8 +215,10 @@ async def get_option_quotes(
                          symbol, expiration, option_type, _OPTION_STALE_TTL)
             return stale
 
-    # 3. Provider (slow path)
+    # 3. Provider (only fetch live when market is active +/- 10 min)
     provider = ProviderRegistry.get(broker)
+    if not _is_market_active() and hasattr(provider, "is_healthy"):
+        return []  # No live data outside market window — cache-only
     if hasattr(provider, "get_option_quotes"):
         quotes = await provider.get_option_quotes(
             symbol, expiration, option_type,

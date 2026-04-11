@@ -1010,7 +1010,12 @@ class OptionQuoteStreamingService:
         - Outside market hours: serve whatever is cached (no age limit)
         """
         if max_age <= 0:
-            max_age = 300.0 if _is_market_hours() else 86400.0
+            try:
+                from common.market_hours import is_market_hours
+                is_open = is_market_hours()
+            except Exception:
+                is_open = _is_market_hours()  # local fallback
+            max_age = 90.0 if is_open else 3600.0
 
         quotes = self._cache.get(symbol, expiration, option_type, max_age_seconds=max_age)
         if quotes is None:
