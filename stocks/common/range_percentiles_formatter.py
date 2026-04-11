@@ -705,7 +705,43 @@ def _generate_ticker_content_html(result: dict, ticker_id: str) -> tuple[str, di
         Tuple of (html_content, chart_data_down, chart_data_up)
     """
     from datetime import date as _date, timedelta as _timedelta
-    today = _date.today()
+
+    # Build a list of upcoming trading days for accurate window→date mapping.
+    # Uses exchange_calendars for holidays; falls back to weekday-skip.
+    def _build_trading_days(start_date: _date, count: int = 30) -> list[_date]:
+        """Return the next `count` trading days starting after start_date."""
+        try:
+            from common.market_hours import is_trading_day
+            days = []
+            d = start_date + _timedelta(days=1)
+            for _ in range(count * 2):
+                if is_trading_day(d):
+                    days.append(d)
+                    if len(days) >= count:
+                        break
+                d += _timedelta(days=1)
+            return days
+        except Exception:
+            # Fallback: skip weekends only
+            days = []
+            d = start_date + _timedelta(days=1)
+            for _ in range(count * 2):
+                if d.weekday() < 5:
+                    days.append(d)
+                    if len(days) >= count:
+                        break
+                d += _timedelta(days=1)
+            return days
+
+    last_date_str = result.get("metadata", {}).get("last_trading_day", "")
+    try:
+        base_date = _date.fromisoformat(last_date_str) if last_date_str else _date.today()
+    except Exception:
+        base_date = _date.today()
+    upcoming_trading_days = _build_trading_days(base_date, 30)
+
+    # "today" for display = next trading day (DTE0)
+    today = upcoming_trading_days[0] if upcoming_trading_days else _date.today()
     today_str = today.strftime('%Y-%m-%d')
 
     ticker = result["ticker"]
@@ -758,16 +794,14 @@ def _generate_ticker_content_html(result: dict, ticker_id: str) -> tuple[str, di
 """)
 
     for i, window in enumerate(window_list):
-        # Window represents N days ahead: window=0 → 0DTE (today), window=1 → 1DTE (tomorrow), etc.
+        # Window = trading days ahead from last_trading_day.
+        # DTE0 = next trading day, DTE1 = 2nd trading day, etc.
         dte = window
-        if dte == 0:
-            date_str = today_str
-            label = "0d"
+        if dte < len(upcoming_trading_days):
+            date_str = upcoming_trading_days[dte].strftime('%Y-%m-%d')
         else:
-            # Approximate calendar date (trading days → calendar days with weekends)
-            calendar_days_approx = int(dte * 1.4)
-            date_str = (today + _timedelta(days=calendar_days_approx)).strftime('%Y-%m-%d')
-            label = f"{dte}d"
+            date_str = "—"
+        label = f"{dte}d"
         html_parts.append(f'                            <th colspan="2">{label}<br><small style="font-weight:normal;font-size:11px;opacity:0.8">{date_str}</small></th>\n')
 
     html_parts.append("""                        </tr>
@@ -825,16 +859,14 @@ def _generate_ticker_content_html(result: dict, ticker_id: str) -> tuple[str, di
 """)
 
     for i, window in enumerate(window_list):
-        # Window represents N days ahead: window=0 → 0DTE (today), window=1 → 1DTE (tomorrow), etc.
+        # Window = trading days ahead from last_trading_day.
+        # DTE0 = next trading day, DTE1 = 2nd trading day, etc.
         dte = window
-        if dte == 0:
-            date_str = today_str
-            label = "0d"
+        if dte < len(upcoming_trading_days):
+            date_str = upcoming_trading_days[dte].strftime('%Y-%m-%d')
         else:
-            # Approximate calendar date (trading days → calendar days with weekends)
-            calendar_days_approx = int(dte * 1.4)
-            date_str = (today + _timedelta(days=calendar_days_approx)).strftime('%Y-%m-%d')
-            label = f"{dte}d"
+            date_str = "—"
+        label = f"{dte}d"
         html_parts.append(f'                            <th colspan="2">{label}<br><small style="font-weight:normal;font-size:11px;opacity:0.8">{date_str}</small></th>\n')
 
     html_parts.append("""                        </tr>
