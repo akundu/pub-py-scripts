@@ -535,6 +535,10 @@ class MarketDataStreamingService:
 
     def _on_pending_tickers(self, tickers) -> None:
         """Callback from ib_insync pendingTickersEvent."""
+        if self._config.market_hours_only:
+            from app.services.market_data import _is_market_active
+            if not _is_market_active():
+                return  # Drop ticks outside market hours
         for ticker in tickers:
             symbol = getattr(ticker.contract, "symbol", None)
             if not symbol or symbol not in self._subscriptions:
@@ -608,6 +612,11 @@ class MarketDataStreamingService:
         logger.info("TWS polling started for %d symbols: %s", len(symbols), symbols)
 
         while self._running:
+            if self._config.market_hours_only:
+                from app.services.market_data import _is_market_active
+                if not _is_market_active():
+                    await asyncio.sleep(30)  # Re-check every 30s
+                    continue
             for symbol in symbols:
                 if not self._running:
                     break
@@ -749,6 +758,10 @@ class MarketDataStreamingService:
                         async for msg in ws:
                             if not self._running:
                                 break
+                            if self._config.market_hours_only:
+                                from app.services.market_data import _is_market_active
+                                if not _is_market_active():
+                                    continue  # Drop WS updates outside market hours
                             if msg.type == aiohttp.WSMsgType.TEXT:
                                 try:
                                     data = json.loads(msg.data)
@@ -800,6 +813,11 @@ class MarketDataStreamingService:
         await asyncio.sleep(0.5)
 
         while self._running:
+            if self._config.market_hours_only:
+                from app.services.market_data import _is_market_active
+                if not _is_market_active():
+                    await asyncio.sleep(30)  # Re-check every 30s
+                    continue
             try:
                 data = await self._ibkr._get(
                     "/iserver/marketdata/snapshot",

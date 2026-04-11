@@ -5397,7 +5397,7 @@ symbols:
         from app.services.market_data_streaming import MarketDataStreamingService
 
         cfg_file = tmp_path / "stream.yaml"
-        cfg_file.write_text("symbols:\n  - SPY\nredis_enabled: false\nquestdb_enabled: false\nws_broadcast_enabled: false\n")
+        cfg_file.write_text("symbols:\n  - SPY\nredis_enabled: false\nquestdb_enabled: false\nws_broadcast_enabled: false\nmarket_hours_only: false\n")
         config = load_streaming_config(cfg_file)
         svc = MarketDataStreamingService(config, ibkr_provider=None)
 
@@ -5425,7 +5425,7 @@ symbols:
         from app.services.market_data_streaming import MarketDataStreamingService
 
         cfg_file = tmp_path / "stream.yaml"
-        cfg_file.write_text("symbols:\n  - SPY\nredis_enabled: false\nquestdb_enabled: false\nws_broadcast_enabled: false\n")
+        cfg_file.write_text("symbols:\n  - SPY\nredis_enabled: false\nquestdb_enabled: false\nws_broadcast_enabled: false\nmarket_hours_only: false\n")
         config = load_streaming_config(cfg_file)
         svc = MarketDataStreamingService(config, ibkr_provider=None)
 
@@ -5451,7 +5451,7 @@ symbols:
         from app.services.market_data_streaming import MarketDataStreamingService
 
         cfg_file = tmp_path / "stream.yaml"
-        cfg_file.write_text("symbols:\n  - SPX\nredis_enabled: false\nquestdb_enabled: false\nws_broadcast_enabled: false\n")
+        cfg_file.write_text("symbols:\n  - SPX\nredis_enabled: false\nquestdb_enabled: false\nws_broadcast_enabled: false\nmarket_hours_only: false\n")
         config = load_streaming_config(cfg_file)
         svc = MarketDataStreamingService(config, ibkr_provider=None)
 
@@ -5476,7 +5476,7 @@ symbols:
         from app.services.market_data_streaming import MarketDataStreamingService
 
         cfg_file = tmp_path / "stream.yaml"
-        cfg_file.write_text("symbols:\n  - SPY\nredis_enabled: false\nquestdb_enabled: false\nws_broadcast_enabled: false\nclose_band_pct: 0.10\n")
+        cfg_file.write_text("symbols:\n  - SPY\nredis_enabled: false\nquestdb_enabled: false\nws_broadcast_enabled: false\nmarket_hours_only: false\nclose_band_pct: 0.10\n")
         config = load_streaming_config(cfg_file)
         assert config.close_band_pct == 0.10
         svc = MarketDataStreamingService(config, ibkr_provider=None)
@@ -5497,7 +5497,7 @@ symbols:
         from app.services.market_data_streaming import MarketDataStreamingService
 
         cfg_file = tmp_path / "stream.yaml"
-        cfg_file.write_text("symbols:\n  - SPY\nredis_enabled: false\nquestdb_enabled: false\nws_broadcast_enabled: false\n")
+        cfg_file.write_text("symbols:\n  - SPY\nredis_enabled: false\nquestdb_enabled: false\nws_broadcast_enabled: false\nmarket_hours_only: false\n")
         config = load_streaming_config(cfg_file)
         svc = MarketDataStreamingService(config, ibkr_provider=None)
         svc._subscriptions["SPY"] = MagicMock()
@@ -5520,6 +5520,122 @@ symbols:
         svc._on_pending_tickers([t2])
         # Anchor still 500, not 600
         assert svc._prev_close["SPY"] == 500.0
+
+    @pytest.mark.anyio
+    async def test_tws_poll_skips_outside_market_hours(self, tmp_path):
+        """TWS poll loop sleeps instead of calling get_quote outside market hours."""
+        from app.services.streaming_config import load_streaming_config
+        from app.services.market_data_streaming import MarketDataStreamingService
+
+        cfg_file = tmp_path / "stream.yaml"
+        cfg_file.write_text("symbols:\n  - SPX\nredis_enabled: false\nquestdb_enabled: false\nws_broadcast_enabled: false\nmarket_hours_only: true\n")
+        config = load_streaming_config(cfg_file)
+
+        mock_provider = MagicMock()
+        mock_provider._ib = MagicMock()
+        mock_provider.is_healthy = MagicMock(return_value=True)
+        mock_provider.get_quote = AsyncMock()
+
+        svc = MarketDataStreamingService(config, ibkr_provider=mock_provider)
+        svc._running = True
+
+        # Patch _is_market_active to return False, and make the loop run once then stop
+        call_count = 0
+        async def fake_sleep(duration):
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 1:
+                svc._running = False
+
+        with patch("app.services.market_data._is_market_active", return_value=False), \
+             patch("asyncio.sleep", side_effect=fake_sleep):
+            await svc._tws_poll_loop()
+
+        # get_quote should NOT have been called (market closed)
+        mock_provider.get_quote.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_tws_poll_runs_during_market_hours(self, tmp_path):
+        """TWS poll loop calls get_quote during market hours."""
+        from app.services.streaming_config import load_streaming_config
+        from app.services.market_data_streaming import MarketDataStreamingService
+
+        cfg_file = tmp_path / "stream.yaml"
+        cfg_file.write_text("symbols:\n  - SPY\nredis_enabled: false\nquestdb_enabled: false\nws_broadcast_enabled: false\nmarket_hours_only: true\n")
+        config = load_streaming_config(cfg_file)
+
+        mock_quote = MagicMock(last=510.0, bid=509.0, ask=511.0, volume=100)
+        mock_provider = MagicMock()
+        mock_provider._ib = MagicMock()
+        mock_provider.is_healthy = MagicMock(return_value=True)
+        mock_provider.get_quote = AsyncMock(return_value=mock_quote)
+
+        svc = MarketDataStreamingService(config, ibkr_provider=mock_provider)
+        svc._running = True
+        svc._prev_close["SPY"] = 500.0  # Seed close for validation
+
+        call_count = 0
+        async def fake_sleep(duration):
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 1:
+                svc._running = False
+
+        with patch("app.services.market_data._is_market_active", return_value=True), \
+             patch("asyncio.sleep", side_effect=fake_sleep):
+            await svc._tws_poll_loop()
+
+        # get_quote should have been called (market open)
+        assert mock_provider.get_quote.call_count >= 1
+
+    def test_on_pending_tickers_drops_outside_market(self, tmp_path):
+        """_on_pending_tickers drops all ticks when market is closed."""
+        from app.services.streaming_config import load_streaming_config
+        from app.services.market_data_streaming import MarketDataStreamingService
+
+        cfg_file = tmp_path / "stream.yaml"
+        cfg_file.write_text("symbols:\n  - SPY\nredis_enabled: false\nquestdb_enabled: false\nws_broadcast_enabled: false\nmarket_hours_only: true\n")
+        config = load_streaming_config(cfg_file)
+        svc = MarketDataStreamingService(config, ibkr_provider=None)
+        svc._subscriptions["SPY"] = MagicMock()
+        svc._prev_close["SPY"] = 500.0
+
+        ticker = MagicMock()
+        ticker.contract = MagicMock(symbol="SPY")
+        ticker.marketPrice.return_value = 510.0
+        ticker.bid = 509.0; ticker.ask = 511.0; ticker.last = 510.0
+        ticker.close = 500.0; ticker.volume = 100
+
+        with patch("app.services.market_data._is_market_active", return_value=False):
+            svc._on_pending_tickers([ticker])
+
+        # Tick should have been dropped — no data in pending or last_tick
+        assert "SPY" not in svc._pending_ticks
+        assert "SPY" not in svc._last_tick
+
+    def test_on_pending_tickers_accepts_during_market(self, tmp_path):
+        """_on_pending_tickers accepts ticks when market is open."""
+        from app.services.streaming_config import load_streaming_config
+        from app.services.market_data_streaming import MarketDataStreamingService
+
+        cfg_file = tmp_path / "stream.yaml"
+        cfg_file.write_text("symbols:\n  - SPY\nredis_enabled: false\nquestdb_enabled: false\nws_broadcast_enabled: false\nmarket_hours_only: true\n")
+        config = load_streaming_config(cfg_file)
+        svc = MarketDataStreamingService(config, ibkr_provider=None)
+        svc._subscriptions["SPY"] = MagicMock()
+
+        ticker = MagicMock()
+        ticker.contract = MagicMock(symbol="SPY")
+        ticker.marketPrice.return_value = 510.0
+        ticker.bid = 509.0; ticker.ask = 511.0; ticker.last = 510.0
+        ticker.close = 500.0; ticker.volume = 100
+
+        with patch("app.services.market_data._is_market_active", return_value=True):
+            svc._on_pending_tickers([ticker])
+
+        # Tick should have been accepted
+        assert "SPY" in svc._last_tick
+        assert svc._last_tick["SPY"]["price"] == 510.0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -6219,9 +6335,8 @@ option_quotes_num_expirations: 2
         # Pre-populate cache so the "warm cache once" logic doesn't trigger
         svc._cache.put("SPX", "2026-03-24", "CALL", [{"strike": 5500}])
 
-        # Patch _is_market_hours to return False
-        import app.services.option_quote_streaming as oqs_mod
-        with patch.object(oqs_mod, "_is_market_hours", return_value=False):
+        # Patch _is_market_active (now used instead of _is_market_hours)
+        with patch("app.services.market_data._is_market_active", return_value=False):
             await svc._run_one_cycle()
 
         # Provider should NOT have been called (market closed + cache warm)
@@ -6256,7 +6371,8 @@ option_quotes_num_expirations: 2
             with patch.object(oqs_mod, "date") as mock_date:
                 mock_date.today.return_value = date(2026, 3, 24)
                 mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
-                with patch("app.services.market_data.get_quote", new_callable=AsyncMock, return_value=mock_quote):
+                with patch("app.services.market_data.get_quote", new_callable=AsyncMock, return_value=mock_quote), \
+                     patch("app.services.market_data._is_market_active", return_value=True):
                     await svc._run_one_cycle()
 
         # Provider should have been called
@@ -6518,7 +6634,7 @@ option_quotes_num_expirations: 2
         cfg = StreamingConfig()
         assert cfg.option_quotes_csv_primary is True
         assert cfg.option_quotes_csv_dir == ""
-        assert cfg.option_quotes_greeks_interval == 30.0
+        assert cfg.option_quotes_greeks_interval == 45.0
 
     def test_streaming_config_csv_primary_yaml(self, tmp_path):
         """load_streaming_config parses CSV primary fields from YAML."""
@@ -6826,3 +6942,40 @@ option_quotes_greeks_interval: 30.0
         assert stats["csv_primary"]["greeks_interval"] == 45.0
         assert stats["csv_primary"]["csv_reads_ok"] == 0
         assert stats["csv_primary"]["csv_reads_failed"] == 0
+
+    async def test_run_one_cycle_uses_market_active(self):
+        """_run_one_cycle uses _is_market_active from market_data (not local _is_market_hours)."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig, StreamingSymbolConfig
+        provider = AsyncMock()
+        cfg = StreamingConfig(symbols=[StreamingSymbolConfig(symbol="SPX", sec_type="IND")])
+        svc = OptionQuoteStreamingService(cfg, provider=provider)
+        svc._cache.put("SPX", "2026-03-24", "CALL", [{"strike": 5500}])
+
+        # Patch _is_market_active on market_data module — this is what _run_one_cycle uses now
+        with patch("app.services.market_data._is_market_active", return_value=False) as mock_active:
+            await svc._run_one_cycle()
+            mock_active.assert_called_once()
+
+        assert svc._cycles_skipped_market_closed >= 1
+
+    async def test_option_chain_routes_through_market_data(self, client, api_key_headers):
+        """GET /market/options/{symbol}?list_expirations=true calls market_data.get_option_chain."""
+        from app.models import Broker
+        with patch("app.services.market_data.get_option_chain", new_callable=AsyncMock,
+                    return_value={"expirations": ["2026-04-11", "2026-04-12"]}) as mock_chain:
+            resp = await client.get(
+                "/market/options/SPX",
+                params={"list_expirations": "true"},
+                headers=api_key_headers,
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["expirations"] == ["2026-04-11", "2026-04-12"]
+            mock_chain.assert_called_once_with("SPX", Broker.IBKR)
+
+    def test_greeks_interval_default_is_45(self):
+        """StreamingConfig greeks interval default changed from 30 to 45."""
+        from app.services.streaming_config import StreamingConfig
+        cfg = StreamingConfig()
+        assert cfg.option_quotes_greeks_interval == 45.0

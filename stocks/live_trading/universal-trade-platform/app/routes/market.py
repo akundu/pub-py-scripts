@@ -122,15 +122,14 @@ async def get_options(
 ) -> dict:
     """Get option chain data — centralized cache → provider fallback."""
     from app.services.market_data import get_option_quotes as _get_opts
-
-    provider = ProviderRegistry.get(broker)
+    from app.services.market_data import get_option_chain as _get_chain
 
     if list_expirations:
-        chain = await provider.get_option_chain(symbol.upper())
+        chain = await _get_chain(symbol.upper(), broker)
         return {"symbol": symbol.upper(), "expirations": chain.get("expirations", [])}
 
     if not expiration:
-        chain = await provider.get_option_chain(symbol.upper())
+        chain = await _get_chain(symbol.upper(), broker)
         return {"symbol": symbol.upper(), "chain": chain}
 
     # Fetch quotes through centralized data layer (cache → stale → provider)

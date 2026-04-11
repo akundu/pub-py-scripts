@@ -228,6 +228,18 @@ async def get_option_quotes(
     return []
 
 
+async def get_option_chain(symbol: str, broker: Broker = Broker.IBKR) -> dict:
+    """Get option chain metadata (expirations, strikes).
+
+    Daily-cached metadata — the provider's OptionChainCache serves
+    from disk cache. No market hours gate needed since this is metadata
+    (not pricing) and already cached for the full trading day.
+    """
+    symbol = symbol.upper()
+    provider = ProviderRegistry.get(broker)
+    return await provider.get_option_chain(symbol)
+
+
 def _normalize_option_quotes(quotes: list[dict]) -> list[dict]:
     """Normalize option quotes to a consistent data contract.
 

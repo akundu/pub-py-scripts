@@ -829,7 +829,8 @@ class OptionQuoteStreamingService:
         and overlays IBKR greeks every greeks_interval seconds.
         Otherwise, uses the original IBKR-only fetch path.
         """
-        if not _is_market_hours():
+        from app.services.market_data import _is_market_active
+        if not _is_market_active():
             self._cycles_skipped_market_closed += 1
             if self._cache.stats()["entries"] > 0:
                 return

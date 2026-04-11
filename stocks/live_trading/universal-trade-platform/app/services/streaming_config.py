@@ -82,7 +82,7 @@ class StreamingConfig:
     # CSV exports as primary fast source for option quotes
     option_quotes_csv_primary: bool = True         # Use CSV exports as primary (instant bid/ask)
     option_quotes_csv_dir: str = ""                # Empty = auto-resolve ../../csv_exports/options
-    option_quotes_greeks_interval: float = 30.0    # Seconds between IBKR fetches (prices + greeks)
+    option_quotes_greeks_interval: float = 45.0    # Seconds between IBKR fetches (prices + greeks)
 
     def validate(self) -> list[str]:
         """Validate config. Returns list of errors (empty = valid)."""
