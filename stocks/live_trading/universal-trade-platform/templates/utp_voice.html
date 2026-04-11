@@ -197,7 +197,8 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
 .strike-row.leg-highlight-sell td { background:rgba(218,54,51,0.15); }
 .strike-row.leg-highlight-buy td { background:rgba(35,134,54,0.15); }
 .greek-col { font-size:10px; color:var(--muted); padding:4px 4px !important; white-space:nowrap; }
-@media (max-width:767px) { .greek-col { display:none; } }
+.pctl-col { font-size:10px; padding:4px 4px !important; white-space:nowrap; }
+@media (max-width:767px) { .greek-col { display:none; } /* pctl-col stays visible on mobile */ }
 
 /* ── Order Ticket ────────────────────────────────────────────────── */
 .order-ticket-body { padding:12px; }
@@ -2150,11 +2151,11 @@ function renderChainGrid(puts, calls, cp, sym, exp) {
 
   html += '<table class="tbl"><thead><tr>';
   html += '<th class="num greek-col">&delta;</th><th class="num greek-col">&theta;</th><th class="num greek-col">IV</th>';
-  html += '<th class="num greek-col" title="Hist / Pred">H/P</th>';
+  html += '<th class="num pctl-col" title="Hist / Pred">H/P</th>';
   html += '<th class="num" style="color:var(--green-b)">C Bid</th><th class="num" style="color:var(--green-b)">C Ask</th>';
   html += '<th class="num" style="color:var(--blue);text-align:center">Strike</th>';
   html += '<th class="num" style="color:var(--red-b)">P Bid</th><th class="num" style="color:var(--red-b)">P Ask</th>';
-  html += '<th class="num greek-col" title="Hist / Pred">H/P</th>';
+  html += '<th class="num pctl-col" title="Hist / Pred">H/P</th>';
   html += '<th class="num greek-col">&delta;</th><th class="num greek-col">&theta;</th><th class="num greek-col">IV</th>';
   html += '</tr></thead><tbody>';
   for (const s of strikes) {
@@ -2187,7 +2188,7 @@ function renderChainGrid(puts, calls, cp, sym, exp) {
     html += `<td class="num greek-col" data-field="c-theta" data-strike="${s}" style="${callBg}">${fmtGreek(cg.theta)}</td>`;
     html += `<td class="num greek-col" data-field="c-iv" data-strike="${s}" style="${callBg}">${cg.iv!=null?(cg.iv*100).toFixed(0)+'%':'--'}</td>`;
     // Call percentile (empirical + predicted combined)
-    html += `<td class="num greek-col" style="${callBg};white-space:nowrap">${pctlBadge(cPctl)}${cPred ? ' '+predBadge(cPred) : ''}</td>`;
+    html += `<td class="num pctl-col" style="${callBg};white-space:nowrap">${pctlBadge(cPctl)}${cPred ? ' '+predBadge(cPred) : ''}</td>`;
     // Calls
     html += `<td class="num cell-tap" data-field="c-bid" data-strike="${s}" style="${callBg}" onclick="addLeg(${s},'CALL','SELL','${sym}','${exp}')">${c?c.bid?.toFixed(2)||'--':'--'}</td>`;
     html += `<td class="num cell-tap" data-field="c-ask" data-strike="${s}" style="${callBg}" onclick="addLeg(${s},'CALL','BUY','${sym}','${exp}')">${c?c.ask?.toFixed(2)||'--':'--'}</td>`;
@@ -2197,7 +2198,7 @@ function renderChainGrid(puts, calls, cp, sym, exp) {
     html += `<td class="num cell-tap" data-field="p-bid" data-strike="${s}" style="${putBg}" onclick="addLeg(${s},'PUT','SELL','${sym}','${exp}')">${p?p.bid?.toFixed(2)||'--':'--'}</td>`;
     html += `<td class="num cell-tap" data-field="p-ask" data-strike="${s}" style="${putBg}" onclick="addLeg(${s},'PUT','BUY','${sym}','${exp}')">${p?p.ask?.toFixed(2)||'--':'--'}</td>`;
     // Put percentile (empirical + predicted combined)
-    html += `<td class="num greek-col" style="${putBg};white-space:nowrap">${pctlBadge(pPctl)}${pPred ? ' '+predBadge(pPred) : ''}</td>`;
+    html += `<td class="num pctl-col" style="${putBg};white-space:nowrap">${pctlBadge(pPctl)}${pPred ? ' '+predBadge(pPred) : ''}</td>`;
     // Put greeks
     html += `<td class="num greek-col" data-field="p-delta" data-strike="${s}" style="${putBg}">${fmtGreek(pg.delta)}</td>`;
     html += `<td class="num greek-col" data-field="p-theta" data-strike="${s}" style="${putBg}">${fmtGreek(pg.theta)}</td>`;
@@ -3175,7 +3176,7 @@ function renderRecs() {
       continue;
     }
 
-    html += `<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table class="tbl"><thead><tr><th>Type</th><th>Short</th><th>Long</th><th class="num">Credit</th><th class="num">MaxLoss</th><th class="num">ROI%</th><th class="num">OTM%</th><th class="num hide-sm" title="OTM% from prev close">pc%</th><th class="hide-sm">Hist</th><th class="hide-sm">Pred</th><th></th></tr></thead><tbody>`;
+    html += `<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table class="tbl"><thead><tr><th>Type</th><th>Short</th><th>Long</th><th class="num">Credit</th><th class="num">MaxLoss</th><th class="num">ROI%</th><th class="num" style="color:var(--yellow)">D/ROI</th><th class="num">OTM%</th><th class="num hide-sm" title="OTM% from prev close">pc%</th><th class="hide-sm">Hist</th><th class="hide-sm">Pred</th><th></th></tr></thead><tbody>`;
 
     for (const s of showMatches) {
       const totalCr = s.credit_per_contract * recQty;
@@ -3185,7 +3186,9 @@ function renderRecs() {
       html += `<td>${s.short_strike}</td><td>${s.long_strike}</td>`;
       html += `<td class="num pos">${$fmt$(totalCr)}<div style="font-size:9px;color:var(--muted)">${$fmt$(s.credit_per_contract)}/c</div></td>`;
       html += `<td class="num" style="color:var(--red-b)">${$fmt$(totalML)}<div style="font-size:9px;color:var(--muted)">${$fmt$(s.max_loss)}/c</div></td>`;
+      const dRoi = +(s.roi_pct / (selectedDte + 1)).toFixed(2);
       html += `<td class="num rec-roi">${s.roi_pct}%</td>`;
+      html += `<td class="num" style="color:var(--yellow);font-weight:bold">${dRoi}%</td>`;
       html += `<td class="num">${s.otm_pct}%</td>`;
       html += `<td class="num hide-sm" style="color:var(--yellow)">${s.otm_pct_pc}%</td>`;
       html += `<td class="hide-sm">${pctlBadge(s._pctl)}</td>`;
@@ -3195,7 +3198,7 @@ function renderRecs() {
     }
 
     if (nearMissCount > 0) {
-      html += `<tr><td colspan="11" style="padding:4px 8px;font-size:10px;color:var(--muted);background:var(--bg);border-top:2px dashed var(--border)">Filtered out — closest to matching (${nearMisses.length} total)</td></tr>`;
+      html += `<tr><td colspan="12" style="padding:4px 8px;font-size:10px;color:var(--muted);background:var(--bg);border-top:2px dashed var(--border)">Filtered out — closest to matching (${nearMisses.length} total)</td></tr>`;
       for (const s of nearMisses.slice(0, nearMissCount)) {
         const totalCr = s.credit_per_contract * recQty;
         const totalML = s.max_loss * recQty;
@@ -3205,7 +3208,9 @@ function renderRecs() {
         html += `<td>${s.short_strike}</td><td>${s.long_strike}</td>`;
         html += `<td class="num">${$fmt$(totalCr)}<div style="font-size:9px">${$fmt$(s.credit_per_contract)}/c</div></td>`;
         html += `<td class="num">${$fmt$(totalML)}<div style="font-size:9px">${$fmt$(s.max_loss)}/c</div></td>`;
+        const nmDRoi = +(s.roi_pct / (selectedDte + 1)).toFixed(2);
         html += `<td class="num">${$fmt(s.roi_pct)}%</td>`;
+        html += `<td class="num" style="color:var(--yellow)">${nmDRoi}%</td>`;
         html += `<td class="num">${s.otm_pct}%</td>`;
         html += `<td class="num hide-sm" style="color:var(--yellow)">${s.otm_pct_pc}%</td>`;
         html += `<td class="hide-sm">${pctlBadge(s._pctl)}</td>`;
