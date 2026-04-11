@@ -1469,3 +1469,59 @@ class TestMarketHoursHoliday:
         from datetime import datetime, timezone
         dt = datetime(2026, 4, 11, 14, 0, tzinfo=timezone.utc)
         assert is_trading_session_active(dt) is False
+
+
+class TestPercentileTradingDays:
+    """Tests for trading day calendar in percentiles response."""
+
+    def test_percentiles_include_trading_days(self, client, auth_cookie):
+        """Percentiles response includes _trading_days from exchange_calendars."""
+        import sys
+        stocks_root = str(Path(__file__).resolve().parents[3])
+        if stocks_root not in sys.path:
+            sys.path.insert(0, stocks_root)
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"tickers": [{"ticker": "SPX", "metadata": {}, "windows": {}}]}
+
+        with patch("httpx.AsyncClient") as MockClient:
+            instance = AsyncMock()
+            instance.get.return_value = mock_resp
+            instance.__aenter__ = AsyncMock(return_value=instance)
+            instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = instance
+            with patch.object(utp_voice, "_is_market_hours", return_value=False):
+                resp = client.get("/api/percentiles", cookies=auth_cookie)
+                assert resp.status_code == 200
+                data = resp.json()
+                assert "_trading_days" in data
+                # Should have trading days (not weekends/holidays)
+                for td in data["_trading_days"]:
+                    from datetime import date as _d
+                    d = _d.fromisoformat(td)
+                    assert d.weekday() < 5  # No weekends
+
+    def test_trading_days_no_weekends(self):
+        """Trading day calendar from exchange_calendars excludes weekends."""
+        import sys
+        stocks_root = str(Path(__file__).resolve().parents[3])
+        if stocks_root not in sys.path:
+            sys.path.insert(0, stocks_root)
+        from common.market_hours import is_trading_day
+        from datetime import date, timedelta
+        today = date.today()
+        for i in range(30):
+            d = today + timedelta(days=i)
+            if is_trading_day(d):
+                assert d.weekday() < 5, f"{d} is a weekend but marked as trading day"
+
+    def test_good_friday_not_trading_day(self):
+        """Good Friday 2026 (Apr 3) is not a trading day."""
+        import sys
+        stocks_root = str(Path(__file__).resolve().parents[3])
+        if stocks_root not in sys.path:
+            sys.path.insert(0, stocks_root)
+        from common.market_hours import is_trading_day
+        from datetime import date
+        assert is_trading_day(date(2026, 4, 3)) is False

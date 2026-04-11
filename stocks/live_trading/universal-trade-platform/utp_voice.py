@@ -834,7 +834,7 @@ sells credit spreads on SPX, NDX, and RUT.
 
 Today's date: {today}
 Default tickers: SPX, RUT, NDX
-Default spread widths: SPX=20pt, RUT=20pt, NDX=50pt (unless user specifies otherwise)
+Default spread widths: {widths_str} (unless user specifies otherwise)
 
 Key behaviors:
 - For read-only queries (portfolio, quotes, options, history), call tools immediately
@@ -973,7 +973,8 @@ async def run_agent(
         )]
 
     client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-    system_prompt = SYSTEM_PROMPT.format(today=datetime.now().strftime("%Y-%m-%d"))
+    widths_str = ", ".join(f"{k}={v}pt" for k, v in DEFAULT_SPREAD_WIDTHS.items())
+    system_prompt = SYSTEM_PROMPT.format(today=datetime.now().strftime("%Y-%m-%d"), widths_str=widths_str)
 
     # Build messages: history + new user message
     messages = list(conversation_history)
@@ -1270,9 +1271,12 @@ def _serve_template(request: Request) -> HTMLResponse:
         return HTMLResponse("<h1>Template not found</h1>", status_code=500)
     html = template_path.read_text()
     base_path = _get_base_path(request)
+    widths_json = json.dumps(DEFAULT_SPREAD_WIDTHS)
+    inject = f'<script>window.__DEFAULT_WIDTHS={widths_json};'
     if base_path:
-        inject = f'<script>window.__BASE_PATH="{base_path}";</script>'
-        html = html.replace("<head>", f"<head>\n{inject}", 1)
+        inject += f'window.__BASE_PATH="{base_path}";'
+    inject += '</script>'
+    html = html.replace("<head>", f"<head>\n{inject}", 1)
     return HTMLResponse(html)
 
 
@@ -2725,8 +2729,7 @@ async def api_recommendations(
                 continue
             expiration = expirations[0]
 
-            spread_widths = {"SPX": 20, "NDX": 50, "RUT": 20}
-            width = spread_widths.get(symbol, 20)
+            width = DEFAULT_SPREAD_WIDTHS.get(symbol, 20)
 
             spreads = []
             for opt_type in ["PUT", "CALL"]:
@@ -2968,7 +2971,23 @@ async def api_percentiles(_u: str | None = Depends(optional_session)):
                 params={"ticker": "SPX,NDX,RUT", "windows": "0,1,2,3,5", "format": "json"},
             )
             if resp.status_code == 200:
-                _percentile_cache = resp.json()
+                data = resp.json()
+                # Add trading day calendar so frontend can compute DTE correctly
+                # (accounts for holidays via exchange_calendars)
+                try:
+                    from common.market_hours import is_trading_day
+                    from datetime import date as _date
+                    today = _date.today()
+                    td_list = []
+                    d = today
+                    for _ in range(30):  # Next 30 calendar days
+                        if is_trading_day(d):
+                            td_list.append(d.isoformat())
+                        d += timedelta(days=1)
+                    data["_trading_days"] = td_list
+                except Exception:
+                    pass
+                _percentile_cache = data
                 _percentile_cache_at = time.time()
                 _redis_write_bg("utp:voice:percentiles", _percentile_cache, ttl_market=300, ttl_closed=86400)
                 return _percentile_cache

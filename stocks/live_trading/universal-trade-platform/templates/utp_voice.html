@@ -625,7 +625,7 @@ let _prevCloses = {};  // {SPX: 6616.85, NDX: 24202.37, RUT: 2544.95}
 // Global chain cache — keeps option data for ALL default tickers fresh
 // chainCache[sym][expiration] = {chain, current_price, source, fetched_at, ts}
 // chainCache[sym]._expirations = [...], chainCache[sym]._current_price = N
-const DEFAULT_WIDTHS = {SPX:20, NDX:50, RUT:20};
+const DEFAULT_WIDTHS = window.__DEFAULT_WIDTHS || {SPX:20, NDX:50, RUT:20};
 const CHAIN_TICKERS = ['SPX','NDX','RUT'];
 const CHAIN_DTE_TARGETS = [0, 1, 2, 5];  // DTE 0 first, then 1, 2, 5 progressively
 let chainCache = {};
@@ -788,17 +788,37 @@ async function fetchPercentiles() {
         };
       }
     }
+    // Extract trading day calendar (holiday-aware, from server's exchange_calendars)
+    if (d._trading_days?.length) {
+      _tradingDaysCalendar = d._trading_days;
+      idbSet('tradingDaysCalendar', _tradingDaysCalendar);
+    }
     scheduleRenderRecs();
     idbSet('pctlByTicker', _pctlByTicker);
   } catch(e) { /* silent */ }
 }
 
-// Map an expiration date to a DTE window key (trading days from last trading day)
+// Map an expiration date to a DTE window key (trading days from last trading day).
+// Uses _tradingDaysCalendar from server (exchange_calendars, holiday-aware) when
+// available, falls back to weekend-skip counting.
+let _tradingDaysCalendar = [];  // ["2026-04-11", "2026-04-14", ...] from /api/percentiles
+
 function expirationToDTE(sym, expDate) {
   const meta = _pctlByTicker[sym];
   if (!meta?.lastDay || !expDate) return null;
-  // Count trading days between lastDay and expDate (approximate: skip weekends)
-  const start = new Date(meta.lastDay + 'T00:00:00');
+  const startDate = meta.lastDay;
+
+  // Use server-provided trading day calendar if available (holiday-aware)
+  if (_tradingDaysCalendar.length > 0) {
+    let count = 0;
+    for (const td of _tradingDaysCalendar) {
+      if (td > startDate && td <= expDate) count++;
+    }
+    return count;
+  }
+
+  // Fallback: skip weekends only
+  const start = new Date(startDate + 'T00:00:00');
   const end = new Date(expDate + 'T00:00:00');
   let tradingDays = 0;
   const d = new Date(start);
@@ -1055,6 +1075,7 @@ function hideLoginModal() {
 
 function onLoginSuccess() {
   _isLoggedIn = true;
+  localStorage.setItem('utp_auth_day', new Date().toISOString().slice(0, 10));
   hideLoginModal();
   document.getElementById('login-btn-area').innerHTML = '<button class="hbtn" onclick="handleLogout()">Out</button>';
   // Reload all data now that we're authenticated
@@ -2114,8 +2135,7 @@ function addLeg(strike, optType, action, sym, exp) {
 
   // Auto-complete credit spread: if first leg is SELL, add BUY at default width
   if (orderLegs.length === 1 && action === 'SELL') {
-    const widths = {SPX:20, NDX:50, RUT:20};
-    const w = widths[sym] || 20;
+    const w = DEFAULT_WIDTHS[sym] || 20;
     const longStrike = optType === 'PUT' ? strike - w : strike + w;
     const longQ = opts.find(o => o.strike === longStrike);
     if (longQ) {
@@ -3438,6 +3458,8 @@ async function init() {
     const cachedMeta = await idbGet('prevClosesMeta');
     if (cachedMeta) _prevClosesMeta = cachedMeta;
     if (cachedPctl) _pctlByTicker = cachedPctl;
+    const cachedTradingDays = await idbGet('tradingDaysCalendar');
+    if (cachedTradingDays) _tradingDaysCalendar = cachedTradingDays;
     if (cachedPred) predictionsData = cachedPred;
     for (const sym of CHAIN_TICKERS) {
       const cc = await idbGet('chainCache_'+sym);
