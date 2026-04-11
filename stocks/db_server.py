@@ -5648,9 +5648,9 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                     </div>`;
             }}
 
-            // Date display
-            const dateDisplay = isHist ? data.date : new Date().toLocaleDateString('en-CA');
-            const dateLabel = isHist ? 'Date (Historical)' : 'Date';
+            // Date display — use server's target_date (trading-day-aware) when available
+            const dateDisplay = isHist ? data.date : (data.target_date || new Date().toLocaleDateString('en-CA'));
+            const dateLabel = isHist ? 'Date (Historical)' : 'Target Date (0DTE)';
 
             // Hours to close
             const hoursHTML = isHist
@@ -9969,6 +9969,14 @@ async def handle_lazy_load_today_prediction(request: web.Request) -> web.Respons
             td0 = upcoming_td[0]
             result['target_date'] = td0.isoformat()
             result['target_date_str'] = td0.strftime('%A, %B %d, %Y')
+
+        # Fix prev_close: the prediction engine's prev_close is "close before
+        # reference bar" (T-2), but display should show the most recent official
+        # close (T-1 = current_price when market is closed).
+        if result.get('current_price') and result.get('prev_close'):
+            # current_price = last close (Friday's close)
+            # prev_close should be this for display purposes
+            result['prev_close'] = result['current_price']
 
     return web.json_response(result)
 
