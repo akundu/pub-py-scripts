@@ -836,10 +836,17 @@ async function fetchPercentiles() {
   } catch(e) { /* silent */ }
 }
 
+// Filter expirations list to trading days only
+function _filterExpsToTradingDays(exps) {
+  if (!_tradingDaysCalendar.length || !exps?.length) return exps || [];
+  const tdSet = new Set(_tradingDaysCalendar);
+  return exps.filter(e => tdSet.has(e));
+}
+
 // Map an expiration date to a DTE window key (trading days from last trading day).
 // Uses _tradingDaysCalendar from server (exchange_calendars, holiday-aware) when
 // available, falls back to weekend-skip counting.
-let _tradingDaysCalendar = [];  // ["2026-04-11", "2026-04-14", ...] from /api/percentiles
+let _tradingDaysCalendar = [];  // ["2026-04-13", "2026-04-14", ...] from /api/percentiles
 
 function expirationToDTE(sym, expDate) {
   const meta = _pctlByTicker[sym];
@@ -1700,7 +1707,8 @@ async function loadOptionsGrid() {
 
     const expSel = document.getElementById('opt-exp');
     if (d.expirations?.length) {
-      expSel.innerHTML = d.expirations.map(e => `<option value="${e}" ${e===d.expiration?'selected':''}>${e}</option>`).join('');
+      const _fExps = _filterExpsToTradingDays(d.expirations);
+      expSel.innerHTML = _fExps.map(e => `<option value="${e}" ${e===d.expiration?'selected':''}>${e}</option>`).join('');
     }
 
     // If grid is already rendered for this symbol (from cache above), update in-place

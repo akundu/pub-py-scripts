@@ -2566,6 +2566,7 @@ async def api_options_grid(
         current_price = quote.get("last") or quote.get("bid") or 0
 
         # Get expirations: merge CSV (has daily 0DTE) + IBKR (has further-out)
+        # _merge_expirations filters non-trading days (weekends, holidays)
         expirations = _get_cached_expirations(symbol)
         if not expirations:
             csv_exps = _get_csv_expirations(symbol)
@@ -2578,6 +2579,9 @@ async def api_options_grid(
             expirations = _merge_expirations(csv_exps, ibkr_exps)
             if expirations:
                 _put_cached_expirations(symbol, expirations)
+        else:
+            # Re-filter cached expirations (cache may predate the trading-day filter)
+            expirations = _merge_expirations(expirations)
 
         if not expirations:
             return {"symbol": symbol, "error": "No expirations available", "expirations": []}
@@ -2749,8 +2753,10 @@ async def api_recommendations(
                 results[symbol] = {"error": "No price data"}
                 continue
 
-            # Get nearest expiration (cached)
+            # Get nearest expiration (cached, filtered to trading days)
             expirations = _get_cached_expirations(symbol)
+            if expirations:
+                expirations = _merge_expirations(expirations)  # Re-filter
             if not expirations:
                 csv_exps = _get_csv_expirations(symbol)
                 ibkr_exps: list[str] = []
