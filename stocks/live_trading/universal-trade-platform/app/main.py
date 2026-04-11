@@ -172,6 +172,22 @@ app = FastAPI(
 )
 
 
+# Shared httpx client for worker → IBKR process proxying (connection pooling)
+_worker_proxy_client: "httpx.AsyncClient | None" = None
+
+
+def _get_worker_proxy_client():
+    global _worker_proxy_client
+    if _worker_proxy_client is None or _worker_proxy_client.is_closed:
+        import httpx
+        port = int(os.environ.get("_UTP_DAEMON_PORT", "8001"))
+        _worker_proxy_client = httpx.AsyncClient(
+            base_url=f"http://127.0.0.1:{port}",
+            timeout=60.0,
+        )
+    return _worker_proxy_client
+
+
 @app.middleware("http")
 async def worker_proxy_middleware(request: Request, call_next):
     """In multi-worker mode, route requests through Redis cache or IBKR process.
@@ -186,17 +202,12 @@ async def worker_proxy_middleware(request: Request, call_next):
     if os.environ.get("_UTP_DAEMON_WORKER") != "1" or request.url.path == "/health":
         return await call_next(request)
 
-    import httpx
-    import json as _json
     from starlette.responses import Response
     from fastapi.responses import JSONResponse
 
-    port = int(os.environ.get("_UTP_DAEMON_PORT", "8001"))
     path = request.url.path
     query = str(request.url.query) if request.url.query else ""
-    target = f"http://127.0.0.1:{port}{path}"
-    if query:
-        target += f"?{query}"
+    target = f"{path}?{query}" if query else path
 
     # GET requests: try Redis cache first
     if request.method == "GET":
@@ -215,35 +226,34 @@ async def worker_proxy_middleware(request: Request, call_next):
         except Exception:
             pass  # Redis down — fall through to proxy
 
-    # Proxy to IBKR process
+    # Proxy to IBKR process (shared connection pool)
     try:
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            body = await request.body()
-            resp = await client.request(
-                method=request.method,
-                url=target,
-                headers={k: v for k, v in request.headers.items()
-                         if k.lower() not in ("host", "content-length")},
-                content=body if body else None,
-            )
+        client = _get_worker_proxy_client()
+        body = await request.body()
+        resp = await client.request(
+            method=request.method,
+            url=target,
+            headers={k: v for k, v in request.headers.items()
+                     if k.lower() not in ("host", "content-length")},
+            content=body if body else None,
+        )
 
-            # Cache successful GET responses in Redis (short TTL for workers)
-            if request.method == "GET" and resp.status_code == 200:
-                try:
-                    from app.services.redis_cache import get_redis
-                    r = await get_redis()
-                    if r:
-                        cache_key = f"utp:http_cache:{path}?{query}" if query else f"utp:http_cache:{path}"
-                        # Short TTL: workers re-validate often; IBKR process is authoritative
-                        await r.setex(cache_key, 5, resp.content)
-                except Exception:
-                    pass
+        # Cache successful GET responses in Redis (short TTL)
+        if request.method == "GET" and resp.status_code == 200:
+            try:
+                from app.services.redis_cache import get_redis
+                r = await get_redis()
+                if r:
+                    cache_key = f"utp:http_cache:{path}?{query}" if query else f"utp:http_cache:{path}"
+                    await r.setex(cache_key, 5, resp.content)
+            except Exception:
+                pass
 
-            return Response(
-                content=resp.content,
-                status_code=resp.status_code,
-                headers=dict(resp.headers),
-            )
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            headers=dict(resp.headers),
+        )
     except Exception as e:
         return JSONResponse(
             status_code=502,
