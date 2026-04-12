@@ -491,6 +491,16 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
             <option value="50">50</option>
             <option value="100">100</option>
           </select>
+          <label style="color:var(--muted);font-size:11px">Max DTE</label>
+          <select id="rec-max-dte" class="select-styled" onchange="filterRecs()">
+            <option value="0">0</option>
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="5" selected>5</option>
+            <option value="10">10</option>
+            <option value="99">All</option>
+          </select>
         </div>
         <div id="recs-content"></div>
       </div>
@@ -2869,7 +2879,7 @@ const REC_FILTER_DEFAULTS = {
   'rec-min-otm': '0', 'rec-min-otm-pc': '1.5', 'rec-width': '0',
   'rec-type-filter': 'ALL', 'rec-min-pctl': '90', 'rec-min-pred': '90',
   'rec-max-delta': '', 'rec-qty': '25', 'rec-min-total-credit': '500',
-  'rec-max-total-loss': '100000', 'rec-ticker-filter': 'ALL', 'rec-top-n': '20',
+  'rec-max-total-loss': '100000', 'rec-ticker-filter': 'ALL', 'rec-top-n': '20', 'rec-max-dte': '5',
 };
 const REC_FILTERS_KEY = 'utp_rec_filters';
 
@@ -2977,6 +2987,7 @@ function renderRecs() {
   const maxDelta = parseFloat(document.getElementById('rec-max-delta')?.value) || Infinity;
   const selectedDte = parseInt(document.getElementById('rec-dte')?.value) || 0;
   const topN = parseInt(document.getElementById('rec-top-n')?.value) || 10;
+  const maxDte = parseInt(document.getElementById('rec-max-dte')?.value) || 99;
 
   const minOtmPc = parseFloat(document.getElementById('rec-min-otm-pc')?.value) || 0;
 
@@ -3066,8 +3077,8 @@ function renderRecs() {
     const exps = symCache?._expirations || [];
     if (!exps.length) continue;
     const width = customWidth || DEFAULT_WIDTHS[sym] || 20;
-    // Scan expirations up to index 5 (covers DTE 0,1,2,5)
-    const maxExpIdx = Math.min(exps.length, 6);
+    // Scan expirations up to maxDte (user-controlled, default 5)
+    const maxExpIdx = Math.min(exps.length, maxDte + 1);
     for (let ei = 0; ei < maxExpIdx; ei++) {
       const exp = exps[ei];
       if (!exp) continue;
