@@ -39,5 +39,4 @@ python3 scripts/options_chain_download.py SPX RUT NDX DJX \
 
 #build the close models
 rm /tmp/close_model.log /tmp/rebuild_prediction_data.log
-/bin/sh run_scripts/build_close_models.sh > /tmp/close_model.log 2>&1
-/bin/bash run_scripts/rebuild_prediction_data.sh > /tmp/rebuild_prediction_data.log 2>&1
+/bin/sh run_scripts/build_close_models.sh > /tmp/close_model.log 2>&1 && /bin/bash run_scripts/rebuild_prediction_data.sh > /tmp/rebuild_prediction_data.log 2>&1
