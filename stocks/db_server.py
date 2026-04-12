@@ -5172,6 +5172,38 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
             color: #c9d1d9;
             font-weight: 500;
         }}
+
+        /* ── Mobile Responsive ─────────────────────────────── */
+        @media (max-width: 767px) {{
+            .container {{ padding: 10px; max-width: 100%; }}
+            h1 {{ font-size: 20px; }}
+            h2 {{ font-size: 16px; }}
+            .controls {{ flex-wrap: wrap; gap: 6px; }}
+            .controls select, .controls input {{ font-size: 14px; padding: 10px; min-height: 44px; min-width: 0; width: auto; }}
+            .controls select {{ min-width: 120px !important; }}
+            .ticker-btn {{ min-height: 44px; padding: 10px 16px; font-size: 14px; }}
+            .tab {{ padding: 10px 14px; font-size: 13px; min-height: 44px; }}
+            .theme-toggle {{ min-height: 44px; padding: 10px 14px; }}
+            .summary-grid {{ grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }}
+            .summary-item {{ padding: 10px; }}
+            .detail-grid {{ grid-template-columns: 1fr !important; }}
+            .model-comparison {{ grid-template-columns: 1fr !important; }}
+            .band-table {{ font-size: 12px; }}
+            .band-table th, .band-table td {{ padding: 4px 6px; }}
+            table {{ font-size: 12px; }}
+            th, td {{ padding: 4px 6px; white-space: nowrap; }}
+            .chart-container {{ height: 250px !important; }}
+            /* Override inline 3-column grids */
+            div[style*="grid-template-columns: 1fr 1fr 1fr"] {{ grid-template-columns: 1fr !important; }}
+            div[style*="grid-template-columns:1fr 1fr 1fr"] {{ grid-template-columns: 1fr !important; }}
+        }}
+        @media (max-width: 480px) {{
+            .summary-grid {{ grid-template-columns: 1fr 1fr; gap: 6px; }}
+            .summary-value {{ font-size: 16px; }}
+            .tab {{ padding: 8px 10px; font-size: 12px; }}
+            table {{ font-size: 11px; }}
+            th, td {{ padding: 3px 4px; }}
+        }}
     </style>
 </head>
 <body>

@@ -1523,6 +1523,30 @@ def format_multi_window_as_html(result: dict | list[dict], params: dict = None, 
         .tab-content.active {
             display: block;
         }
+
+        /* ── Mobile Responsive ─────────────────────────────── */
+        @media (max-width: 767px) {
+            .container { padding: 8px; max-width: 100%; }
+            h1 { font-size: 20px; }
+            h2 { font-size: 16px; }
+            .header-info { flex-direction: column; gap: 4px; font-size: 12px; }
+            .controls { flex-direction: column; gap: 6px; }
+            .controls select, .controls input { width: 100%; font-size: 14px; padding: 10px; min-height: 44px; }
+            .controls button { width: 100%; min-height: 44px; font-size: 14px; }
+            .tab { padding: 10px 14px; font-size: 13px; min-height: 44px; }
+            .table-section { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+            .table-section table { font-size: 12px; }
+            .table-section th, .table-section td { padding: 4px 6px; white-space: nowrap; }
+            .chart-card { min-width: 100% !important; }
+            .chart-container { height: 250px !important; }
+            .charts-grid { grid-template-columns: 1fr !important; }
+            .theme-toggle { min-height: 44px; padding: 10px 14px; font-size: 13px; }
+        }
+        @media (max-width: 480px) {
+            .table-section table { font-size: 11px; }
+            .table-section th, .table-section td { padding: 3px 4px; }
+            .tab { padding: 8px 10px; font-size: 12px; }
+        }
     </style>
 </head>
 <body>
