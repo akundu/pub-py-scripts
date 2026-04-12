@@ -491,16 +491,6 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
             <option value="50">50</option>
             <option value="100">100</option>
           </select>
-          <label style="color:var(--muted);font-size:11px">Max DTE</label>
-          <select id="rec-max-dte" class="select-styled" onchange="filterRecs()">
-            <option value="0">0</option>
-            <option value="1">1</option>
-            <option value="2">2</option>
-            <option value="3">3</option>
-            <option value="5" selected>5</option>
-            <option value="10">10</option>
-            <option value="99">All</option>
-          </select>
         </div>
         <div id="recs-content"></div>
       </div>
@@ -2987,7 +2977,8 @@ function renderRecs() {
   const maxDelta = parseFloat(document.getElementById('rec-max-delta')?.value) || Infinity;
   const selectedDte = parseInt(document.getElementById('rec-dte')?.value) || 0;
   const topN = parseInt(document.getElementById('rec-top-n')?.value) || 10;
-  const maxDte = parseInt(document.getElementById('rec-max-dte')?.value) || 99;
+  const maxDteEl = document.getElementById('rec-max-dte');
+  const maxDte = maxDteEl ? parseInt(maxDteEl.value) : parseInt(REC_FILTER_DEFAULTS['rec-max-dte'] || '5');
 
   const minOtmPc = parseFloat(document.getElementById('rec-min-otm-pc')?.value) || 0;
 
@@ -3078,8 +3069,8 @@ function renderRecs() {
     if (!exps.length) continue;
     const width = customWidth || DEFAULT_WIDTHS[sym] || 20;
     // Scan expirations up to maxDte (user-controlled, default 5)
-    const maxExpIdx = Math.min(exps.length, maxDte + 1);
-    for (let ei = 0; ei < maxExpIdx; ei++) {
+    for (let ei = 0; ei < exps.length; ei++) {
+      if (ei > maxDte) break;  // Stop scanning beyond max DTE
       const exp = exps[ei];
       if (!exp) continue;
       const cached = symCache?.[exp];
@@ -3105,7 +3096,7 @@ function renderRecs() {
   if (allTopSpreads.length) {
     const topCollapsed = document.getElementById('top-picks-body')?.style.display === 'none';
     const caretChar = topCollapsed ? '&#9654;' : '&#9660;';
-    html += `<div class="card"><div class="card-title" style="cursor:pointer" onclick="const b=document.getElementById('top-picks-body');b.style.display=b.style.display==='none'?'':'none';this.querySelector('.caret').innerHTML=b.style.display==='none'?'&#9654;':'&#9660;'"><span class="caret">${caretChar}</span> Top Picks <span style="color:var(--muted);font-weight:normal;font-size:11px">across all tickers &amp; DTEs &middot; sorted by daily ROI</span></div>`;
+    html += `<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><div class="card-title" style="cursor:pointer;margin:0" onclick="const b=document.getElementById('top-picks-body');b.style.display=b.style.display==='none'?'':'none';this.querySelector('.caret').innerHTML=b.style.display==='none'?'&#9654;':'&#9660;'"><span class="caret">${caretChar}</span> Top Picks <span style="color:var(--muted);font-weight:normal;font-size:11px">sorted by D/ROI</span></div><div style="display:flex;align-items:center;gap:4px" onclick="event.stopPropagation()"><label style="color:var(--muted);font-size:10px">Max DTE</label><select id="rec-max-dte" class="select-styled" style="font-size:12px;padding:4px" onchange="filterRecs()">${[0,1,2,3,5,10,99].map(v => `<option value="${v}" ${v===maxDte?'selected':''}>${v===99?'All':v}</option>`).join('')}</select></div></div>`;
     html += `<div id="top-picks-body" style="max-height:400px;overflow-y:auto;overflow-x:auto;-webkit-overflow-scrolling:touch;${topCollapsed ? 'display:none' : ''}">`;
     html += `<table class="tbl"><thead><tr><th>Tkr</th><th>Type</th><th>Short</th><th>Long</th><th class="hide-sm">Exp</th><th class="num">DTE</th><th class="num">Credit</th><th class="num hide-sm">MaxLoss</th><th class="num">ROI%</th><th class="num" style="color:var(--yellow)">D/ROI</th><th class="num">OTM%</th><th class="num hide-sm" title="OTM% from prev close">pc%</th><th class="hide-sm">H</th><th class="hide-sm">P</th><th></th></tr></thead><tbody>`;
     for (const s of allTopSpreads.slice(0, topN)) {
