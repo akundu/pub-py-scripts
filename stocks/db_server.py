@@ -5704,15 +5704,19 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                 ? `<div style="font-size:11px;color:${{prevChgColor}}">${{prevChg >= 0 ? '+' : ''}}${{prevChg.toFixed(2)}} (${{prevChgPct >= 0 ? '+' : ''}}${{prevChgPct.toFixed(2)}}%)</div>`
                 : '';
 
+            // Date labels for price sources
+            const curDateHtml = data.date ? `<div style="font-size:9px;color:#8b949e">${{data.date}}</div>` : '';
+            const prevDateHtml = data.prev_close_date ? `<div style="font-size:9px;color:#8b949e">${{data.prev_close_date}}</div>` : '';
+
             // Update summary
             const summaryHTML = `
                 <div class="summary-item">
                     <div class="summary-label">Current Price</div>
-                    <div class="summary-value" id="summaryLivePrice">$${{fmtPrice(data.current_price)}}${{curChgHtml}}</div>
+                    <div class="summary-value" id="summaryLivePrice">$${{fmtPrice(data.current_price)}}${{curChgHtml}}${{curDateHtml}}</div>
                 </div>
                 <div class="summary-item">
                     <div class="summary-label">Previous Close</div>
-                    <div class="summary-value">$${{fmtPrice(data.prev_close)}}${{prevChgHtml}}</div>
+                    <div class="summary-value">$${{fmtPrice(data.prev_close)}}${{prevChgHtml}}${{prevDateHtml}}</div>
                 </div>
                 <div class="summary-item">
                     <div class="summary-label">${{dateLabel}}</div>
@@ -9876,9 +9880,22 @@ async def handle_predictions_page(request: web.Request) -> web.Response:
             td0 = upcoming_td[0]
             today_result['target_date'] = td0.isoformat()
             today_result['target_date_str'] = td0.strftime('%A, %B %d, %Y')
-            if today_result.get('current_price') and today_result.get('prev_close'):
-                today_result['prev_prev_close'] = today_result['prev_close']
-                today_result['prev_close'] = today_result['current_price']
+            # Fix prev_close: query QuestDB for actual previous trading day's close
+            try:
+                from common.market_hours import previous_trading_day as _ptd
+                prev_td = _ptd()
+                db_inst = request.app.get('db_instance')
+                if db_inst:
+                    _df = await db_inst.get_stock_data(ticker=ticker, start_date=prev_td.isoformat(),
+                                                       end_date=prev_td.isoformat(), interval='daily')
+                    if _df is not None and not _df.empty and 'close' in _df.columns:
+                        today_result['prev_prev_close'] = today_result.get('prev_close', 0)
+                        today_result['prev_close'] = float(_df['close'].iloc[-1])
+                        today_result['prev_close_date'] = prev_td.isoformat()
+            except Exception:
+                if today_result.get('current_price') and today_result.get('prev_close'):
+                    today_result['prev_prev_close'] = today_result['prev_close']
+                    today_result['prev_close'] = today_result['current_price']
 
         band_history_date = request.query.get('date')
         if not band_history_date and history:
@@ -10028,12 +10045,25 @@ async def handle_lazy_load_today_prediction(request: web.Request) -> web.Respons
             result['target_date'] = td0.isoformat()
             result['target_date_str'] = td0.strftime('%A, %B %d, %Y')
 
-        # Fix prev_close for display:
-        # Engine's prev_close = T-2 close (Thursday), current_price = T-1 close (Friday)
-        # Display should show: prev_close = Friday's close, prev_prev_close = Thursday's
-        if result.get('current_price') and result.get('prev_close'):
-            result['prev_prev_close'] = result['prev_close']  # T-2 (Thursday)
-            result['prev_close'] = result['current_price']     # T-1 (Friday)
+        # Fix prev_close: query QuestDB for actual previous trading day's close
+        # (the engine's prev_close/current_price may include today's ingested close)
+        try:
+            from common.market_hours import previous_trading_day
+            prev_td = previous_trading_day()
+            db_inst = request.app.get('db_instance')
+            if db_inst:
+                df = await db_inst.get_stock_data(ticker=ticker, start_date=prev_td.isoformat(),
+                                                   end_date=prev_td.isoformat(), interval='daily')
+                if df is not None and not df.empty and 'close' in df.columns:
+                    prev_close_val = float(df['close'].iloc[-1])
+                    result['prev_prev_close'] = result.get('prev_close', 0)
+                    result['prev_close'] = prev_close_val
+                    result['prev_close_date'] = prev_td.isoformat()
+        except Exception:
+            # Fallback: use engine's values
+            if result.get('current_price') and result.get('prev_close'):
+                result['prev_prev_close'] = result['prev_close']
+                result['prev_close'] = result['current_price']
 
     return web.json_response(result)
 
