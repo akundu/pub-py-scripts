@@ -1113,6 +1113,14 @@ function getRefClose(sym) {
   return data.prev_close || data.last_close || 0;
 }
 
+// Get the most recent close price for a symbol (for use as fallback current price)
+function _getPrevClosePrice(sym) {
+  const data = _prevCloses[sym];
+  if (!data) return 0;
+  if (typeof data === 'number') return data;
+  return data.last_close || data.prev_close || 0;
+}
+
 // ── Predictions Data (model-based bands) ─────────────────────────────────────
 let predictionsData = null;  // {SPX: {today:{...}, future:{0:{...}, 1:{...}, ...}}, ...}
 let _predFetchedAt = null;   // ISO string: when prediction data was last fetched from server
@@ -3075,7 +3083,9 @@ function renderRecs() {
       if (!exp) continue;
       const cached = symCache?.[exp];
       if (!cached?.chain) continue;
-      const cp = cached.current_price || symCache?._current_price || 0;
+      // Price priority: realtime WS > cached chain price > last close from QuestDB
+      const cp = _realtimePrices[sym]?.price || cached.current_price || symCache?._current_price || _getPrevClosePrice(sym) || 0;
+      if (!cp) continue;  // No price at all — skip
       const spreads = computeSpreads(cached.chain, sym, cp, width);
       // DTE number = expiration index (0, 1, 2, ...). D/ROI = ROI / (DTE + 1)
       const dteNum = ei;
@@ -3139,7 +3149,7 @@ function renderRecs() {
       html += `<div class="rec-card"><div class="rec-header"><span class="rec-ticker">${sym}</span></div><div style="padding:12px;color:var(--muted);font-size:12px">${loading} <span class="spinner"></span></div></div>`;
       continue;
     }
-    const cp = cached.current_price || symCache?._current_price || 0;
+    const cp = _realtimePrices[sym]?.price || cached.current_price || symCache?._current_price || _getPrevClosePrice(sym) || 0;
     const width = customWidth || DEFAULT_WIDTHS[sym] || 20;
     const allSpreads = computeSpreads(cached.chain, sym, cp, width);
 
@@ -3165,7 +3175,7 @@ function renderRecs() {
     const _fetchedAtIso = cached.fetched_at || (cached.ts ? cached.ts.toISOString() : null);
     const _cachedAtIso = cached.cached_at || (cached.ts ? cached.ts.toISOString() : null);
     const pctlMeta = _pctlByTicker[sym];
-    const streakInfo = pctlMeta ? `${pctlMeta.streak}d ${pctlMeta.streak>0?'up':'dn'}` : '';
+    const streakInfo = pctlMeta?.streak ? `${Math.abs(pctlMeta.streak)}d ${pctlMeta.streak>0?'up':'dn'}` : '';
 
     html += `<div class="card"><div class="card-title">${sym} <span style="color:var(--text);font-weight:normal">${$fmt(cp)} | Exp: ${exp} | Width: ${width}${streakInfo ? ' | '+streakInfo : ''}</span></div>`;
 
