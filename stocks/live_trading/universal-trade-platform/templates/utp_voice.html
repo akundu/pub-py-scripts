@@ -768,7 +768,7 @@ let _prevCloses = {};  // {SPX: 6616.85, NDX: 24202.37, RUT: 2544.95}
 // Global chain cache — keeps option data for ALL default tickers fresh
 // chainCache[sym][expiration] = {chain, current_price, source, fetched_at, ts}
 // chainCache[sym]._expirations = [...], chainCache[sym]._current_price = N
-const DEFAULT_WIDTHS = window.__DEFAULT_WIDTHS || {SPX:20, NDX:50, RUT:20};
+const DEFAULT_WIDTHS = window.__DEFAULT_WIDTHS || {SPX:25, NDX:50, RUT:25};
 const CHAIN_TICKERS = ['SPX','NDX','RUT'];
 const CHAIN_DTE_TARGETS = [0, 1, 2, 5];  // DTE 0 first, then 1, 2, 5 progressively
 let chainCache = {};
