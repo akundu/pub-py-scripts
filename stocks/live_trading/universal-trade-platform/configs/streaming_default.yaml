@@ -96,8 +96,8 @@ option_quotes_poll_interval: 15
 # Seconds between IBKR overlay fetches (live prices + greeks from broker)
 option_quotes_greeks_interval: 60
 
-# Strike range as percentage of current price (e.g., 3.5 = ±3.5%)
-option_quotes_strike_range_pct: 3.5
+# Strike range as percentage of current price (e.g., 5.0 = ±5%)
+option_quotes_strike_range_pct: 5.0
 
 # Number of upcoming expirations to fetch per symbol
 option_quotes_num_expirations: 6  # Cover DTE 0 through 5
