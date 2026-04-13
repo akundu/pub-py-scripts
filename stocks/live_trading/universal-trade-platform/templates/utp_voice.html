@@ -3076,19 +3076,21 @@ function renderRecs() {
     const exps = symCache?._expirations || [];
     if (!exps.length) continue;
     const width = customWidth || DEFAULT_WIDTHS[sym] || 20;
-    // Scan expirations up to maxDte (user-controlled, default 5)
+    // Scan expirations, filtered by actual DTE (not array index)
     for (let ei = 0; ei < exps.length; ei++) {
-      if (ei > maxDte) break;  // Stop scanning beyond max DTE
       const exp = exps[ei];
       if (!exp) continue;
+      // Check actual DTE against maxDte filter
+      const actualDte = expirationToDTE(sym, exp) ?? ei;
+      if (actualDte > maxDte) continue;  // Skip expirations beyond max DTE
       const cached = symCache?.[exp];
       if (!cached?.chain) continue;
       // Price priority: realtime WS > cached chain price > last close from QuestDB
       const cp = _realtimePrices[sym]?.price || cached.current_price || symCache?._current_price || _getPrevClosePrice(sym) || 0;
       if (!cp) continue;  // No price at all — skip
       const spreads = computeSpreads(cached.chain, sym, cp, width);
-      // DTE number = expiration index (0, 1, 2, ...). D/ROI = ROI / (DTE + 1)
-      const dteNum = ei;
+      // Compute actual DTE from trading day calendar (not array index)
+      const dteNum = expirationToDTE(sym, exp) ?? ei;
       for (const s of spreads) {
         const bracket = getPercentileBracket(sym, exp, s.option_type, s.otm_pct);
         const predicted = getPredictedBracket(sym, exp, s.option_type, s.otm_pct);

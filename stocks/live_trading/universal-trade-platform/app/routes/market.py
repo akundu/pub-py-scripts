@@ -126,7 +126,25 @@ async def get_options(
 
     if list_expirations:
         chain = await _get_chain(symbol.upper(), broker)
-        return {"symbol": symbol.upper(), "expirations": chain.get("expirations", [])}
+        ibkr_exps = chain.get("expirations", [])
+
+        # Merge with CSV-derived expirations from the streaming service
+        # (IBKR only lists weekly/monthly; CSV has daily 0DTE expirations)
+        from app.services.option_quote_streaming import get_option_quote_streaming
+        oqs = get_option_quote_streaming()
+        csv_exps = []
+        if oqs:
+            csv_exps = oqs._get_expirations_from_csv(symbol.upper())
+
+        # Merge, normalize, deduplicate
+        all_exps = set()
+        today_str = __import__("datetime").date.today().isoformat()
+        for e in list(ibkr_exps) + csv_exps:
+            norm = e.replace("-", "") if len(e) == 10 else e
+            iso = f"{norm[:4]}-{norm[4:6]}-{norm[6:8]}" if len(norm) == 8 else norm
+            if iso >= today_str:
+                all_exps.add(iso)
+        return {"symbol": symbol.upper(), "expirations": sorted(all_exps)}
 
     if not expiration:
         chain = await _get_chain(symbol.upper(), broker)
