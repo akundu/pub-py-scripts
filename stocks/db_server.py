@@ -6939,8 +6939,17 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                                 // Update current price in summary (by ID, works on both today and future tabs)
                                 const priceElement = document.getElementById('summaryLivePrice');
                                 if (priceElement) {{
-                                    const price = payload[0].price;
-                                    priceElement.textContent = `$${{fmtPrice(parseFloat(price))}}`;
+                                    const price = parseFloat(payload[0].price);
+                                    // Recompute change from prev_close (stored in predictionData)
+                                    const pc = predictionData?.prev_close;
+                                    let chgHtml = '';
+                                    if (pc && pc > 0) {{
+                                        const chg = price - pc;
+                                        const chgPct = (chg / pc) * 100;
+                                        const color = chg >= 0 ? '#3fb950' : '#f85149';
+                                        chgHtml = `<div style="font-size:12px;font-weight:600;color:${{color}}">${{chg >= 0 ? '+' : ''}}${{chg.toFixed(2)}} (${{chgPct >= 0 ? '+' : ''}}${{chgPct.toFixed(2)}}%)</div>`;
+                                    }}
+                                    priceElement.innerHTML = `$${{fmtPrice(price)}}${{chgHtml}}`;
                                 }}
                             }}
                         }}
