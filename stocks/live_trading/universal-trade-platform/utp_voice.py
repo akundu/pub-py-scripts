@@ -3115,15 +3115,12 @@ async def api_trades_list(
 ):
     """List trades from CSV with optional date filter, paginated, newest first."""
     import csv as csv_mod
-    if not TRADES_CSV_PATH.exists():
-        return {"trades": [], "total": 0, "page": 1, "pages": 0, "summary": {},
-                "_voice_meta": {"source": "trades_csv", "csv_modified_at": None, "fetched_at": _now_iso()}}
-
     trades = []
-    with open(TRADES_CSV_PATH) as f:
-        reader = csv_mod.DictReader(f)
-        for row in reader:
-            trades.append(row)
+    if TRADES_CSV_PATH.exists():
+        with open(TRADES_CSV_PATH) as f:
+            reader = csv_mod.DictReader(f)
+            for row in reader:
+                trades.append(row)
 
     # Date filter
     if days > 0:
@@ -3152,29 +3149,31 @@ async def api_trades_list(
         logger.info("Daemon trades fetch: got %s items (type=%s)", len(daemon_resp) if isinstance(daemon_resp, list) else "?", type(daemon_resp).__name__)
         if isinstance(daemon_resp, list):
             for pos in daemon_resp:
-                # Convert daemon position format to trades format
-                sym = pos.get("symbol", "")
-                legs = pos.get("legs", [])
-                sell_leg = next((l for l in legs if "SELL" in (l.get("action") or "")), None)
-                buy_leg = next((l for l in legs if "BUY" in (l.get("action") or "")), None)
-                daemon_trades.append({
-                    "timestamp": pos.get("entry_time") or pos.get("last_synced_at") or "",
-                    "symbol": sym,
-                    "option_type": sell_leg.get("option_type", "") if sell_leg else pos.get("order_type", ""),
-                    "short_strike": str(sell_leg.get("strike", "")) if sell_leg else "",
-                    "long_strike": str(buy_leg.get("strike", "")) if buy_leg else "",
-                    "quantity": str(abs(pos.get("quantity", 0))),
-                    "total_credit": str(abs(pos.get("entry_price", 0) or 0) * abs(pos.get("quantity", 0)) * 100),
-                    "total_max_loss": "",
-                    "roi_pct": "",
-                    "otm_pct": "",
-                    "status": pos.get("status", "open"),
-                    "source": "daemon",
-                    "position_id": pos.get("position_id", ""),
-                    "expiration": pos.get("expiration", ""),
-                    "pnl": pos.get("unrealized_pnl") or pos.get("pnl") or 0,
-                    "broker": pos.get("broker", "ibkr"),
-                })
+                try:
+                    sym = pos.get("symbol", "")
+                    legs = pos.get("legs") or []
+                    sell_leg = next((l for l in legs if "SELL" in (l.get("action") or "")), None)
+                    buy_leg = next((l for l in legs if "BUY" in (l.get("action") or "")), None)
+                    daemon_trades.append({
+                        "timestamp": pos.get("entry_time") or pos.get("last_synced_at") or "",
+                        "symbol": sym,
+                        "option_type": sell_leg.get("option_type", "") if sell_leg else pos.get("order_type", ""),
+                        "short_strike": str(sell_leg.get("strike", "")) if sell_leg else "",
+                        "long_strike": str(buy_leg.get("strike", "")) if buy_leg else "",
+                        "quantity": str(abs(pos.get("quantity", 0))),
+                        "total_credit": str(abs(float(pos.get("entry_price", 0) or 0)) * abs(float(pos.get("quantity", 0))) * 100),
+                        "total_max_loss": "",
+                        "roi_pct": "",
+                        "otm_pct": "",
+                        "status": pos.get("status", "open"),
+                        "source": "daemon",
+                        "position_id": pos.get("position_id", ""),
+                        "expiration": pos.get("expiration", ""),
+                        "pnl": pos.get("unrealized_pnl") or pos.get("pnl") or 0,
+                        "broker": pos.get("broker", "ibkr"),
+                    })
+                except Exception:
+                    continue  # Skip malformed positions
     except Exception as e:
         logger.warning("Failed to fetch daemon trades: %s", e)
 
