@@ -3168,65 +3168,56 @@ async def api_trades_list(
     daemon_trades = []
     try:
         client = get_daemon_client()
-        # Only fetch open positions + recent closed (not all 1000+ historical)
-        daemon_resp = await client._get("/account/trades", params={"days": days if days > 0 else 1, "include_all": "true"})
-        logger.info("Daemon trades fetch: got %s items (type=%s)", len(daemon_resp) if isinstance(daemon_resp, list) else "?", type(daemon_resp).__name__)
-        if isinstance(daemon_resp, list):
-            for pos in daemon_resp:
-                try:
-                    sym = pos.get("symbol", "")
-                    legs = pos.get("legs") or []
-                    sell_leg = next((l for l in legs if "SELL" in (l.get("action") or "")), None)
-                    buy_leg = next((l for l in legs if "BUY" in (l.get("action") or "")), None)
-                    qty = abs(float(pos.get("quantity", 0)))
-                    entry_price = abs(float(pos.get("entry_price", 0) or 0))
-                    order_type = pos.get("order_type", "")
+        # Use portfolio endpoint (groups spreads, has spread_metrics with credit/maxloss/ROI)
+        portfolio = await client.get_portfolio()
+        daemon_positions = portfolio.get("positions", [])
+        recent_closed = portfolio.get("recent_closed", [])
+        logger.info("Daemon portfolio: %d open, %d recent closed", len(daemon_positions), len(recent_closed))
 
-                    # Credit calculation: entry_price for options is already per-contract
-                    # (IBKR avg_cost). For equities it's per-share.
-                    if order_type in ("multi_leg", "option"):
-                        total_credit = round(entry_price * qty, 2)  # Already per-contract
-                    else:
-                        total_credit = round(entry_price * qty, 2)  # Per-share for equity
-
-                    # Extract strikes from legs_summary if legs are empty
-                    legs_summary = pos.get("legs_summary", "")
-                    short_strike = str(sell_leg.get("strike", "")) if sell_leg else ""
-                    long_strike = str(buy_leg.get("strike", "")) if buy_leg else ""
-                    opt_type = sell_leg.get("option_type", "") if sell_leg else ""
-
-                    # Parse legs_summary like "P6615/P6595" if no legs
-                    if not short_strike and legs_summary:
-                        import re
-                        strikes = re.findall(r'[PC](\d+)', legs_summary)
-                        if len(strikes) >= 2:
-                            short_strike = strikes[0]
-                            long_strike = strikes[1]
-                        if legs_summary.startswith("P"):
-                            opt_type = "PUT"
-                        elif legs_summary.startswith("C"):
-                            opt_type = "CALL"
-
-                    daemon_trades.append({
-                        "timestamp": pos.get("entry_time") or pos.get("last_synced_at") or "",
-                        "symbol": sym,
-                        "option_type": opt_type or order_type,
-                        "short_strike": short_strike,
-                        "long_strike": long_strike,
-                        "quantity": str(int(qty)) if qty == int(qty) else str(qty),
-                        "total_credit": str(total_credit),
-                        "total_max_loss": "",
-                        "roi_pct": "",
-                        "otm_pct": "",
-                        "status": pos.get("status", "open"),
-                        "source": "daemon",
-                        "position_id": pos.get("position_id", ""),
-                        "expiration": pos.get("expiration", ""),
-                        "pnl": pos.get("unrealized_pnl") or pos.get("pnl") or 0,
-                        "broker": pos.get("broker", "ibkr"),
-                    })
-                except Exception:
+        for pos in daemon_positions + recent_closed:
+            try:
+                import re as _re
+                sym = pos.get("symbol", "")
+                qty = abs(float(pos.get("quantity", 0)))
+                if qty == 0:
                     continue
+                legs_summary = pos.get("legs_summary", "")
+                sm = pos.get("spread_metrics") or {}
+                exp = pos.get("expiration", "")
+
+                # Parse strikes from legs_summary like "P6615/P6595"
+                short_strike = ""
+                long_strike = ""
+                opt_type = pos.get("order_type", "")
+                if legs_summary:
+                    strikes = _re.findall(r'[PC](\d+)', legs_summary)
+                    if len(strikes) >= 2:
+                        short_strike = strikes[0]
+                        long_strike = strikes[1]
+                    if "P" in legs_summary[:2]:
+                        opt_type = "PUT"
+                    elif "C" in legs_summary[:2]:
+                        opt_type = "CALL"
+
+                daemon_trades.append({
+                    "timestamp": pos.get("entry_time") or pos.get("last_synced_at") or "",
+                    "symbol": sym,
+                    "option_type": opt_type,
+                    "short_strike": short_strike,
+                    "long_strike": long_strike,
+                    "quantity": str(int(qty)) if qty == int(qty) else str(qty),
+                    "total_credit": str(round(sm.get("derived_credit", 0) or 0, 2)),
+                    "total_max_loss": str(round(sm.get("max_loss", 0) or 0, 2)),
+                    "roi_pct": str(sm.get("roi_pct", "")) if sm.get("roi_pct") else "",
+                    "status": pos.get("status", "open"),
+                    "source": "daemon",
+                    "position_id": pos.get("position_id", ""),
+                    "expiration": exp,
+                    "pnl": pos.get("unrealized_pnl") or pos.get("broker_unrealized_pnl") or pos.get("pnl") or 0,
+                    "broker": pos.get("broker", "ibkr"),
+                })
+            except Exception:
+                continue
     except Exception as e:
         logger.warning("Failed to fetch daemon trades: %s", e)
 
