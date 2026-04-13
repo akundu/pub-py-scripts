@@ -159,7 +159,8 @@ class MarketDataStreamingService:
         try:
             import httpx
             async with httpx.AsyncClient(timeout=10.0) as client:
-                for sym in self._config.symbols:
+                for sym_cfg in self._config.symbols:
+                    sym = sym_cfg.symbol if hasattr(sym_cfg, 'symbol') else str(sym_cfg)
                     try:
                         sql = f"SELECT close FROM daily_prices WHERE ticker = '{sym}' ORDER BY date DESC LIMIT 1"
                         resp = await client.get(f"{db_url}/api/execute_sql", params={"sql": sql})
@@ -170,9 +171,9 @@ class MarketDataStreamingService:
                                 self._prev_close[sym] = close
                                 logger.info("Seeded prev_close for %s from QuestDB: %.2f", sym, close)
                     except Exception as e:
-                        logger.debug("Failed to seed prev_close for %s from QuestDB: %s", sym, e)
+                        logger.warning("Failed to seed prev_close for %s from QuestDB: %s", sym, e)
         except Exception as e:
-            logger.debug("QuestDB prev_close seeding unavailable: %s", e)
+            logger.warning("QuestDB prev_close seeding unavailable: %s", e)
 
     async def start(self) -> None:
         """Start streaming: connect to Redis/QuestDB, subscribe to IBKR market data."""

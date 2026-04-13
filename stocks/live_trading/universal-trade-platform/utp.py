@@ -266,6 +266,144 @@ class TradingClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def trade_iron_condor(
+        self,
+        symbol: str,
+        put_short: float,
+        put_long: float,
+        call_short: float,
+        call_long: float,
+        expiration: str,
+        quantity: int = 1,
+        net_price: float | None = None,
+    ) -> dict:
+        """Execute an iron condor trade (4 legs). Returns order result.
+
+        Builds: SELL put_short, BUY put_long, SELL call_short, BUY call_long.
+        MARKET order by default; LIMIT if net_price provided.
+        """
+        legs = [
+            {
+                "symbol": symbol,
+                "expiration": expiration,
+                "strike": put_short,
+                "option_type": "PUT",
+                "action": "SELL_TO_OPEN",
+                "quantity": 1,
+            },
+            {
+                "symbol": symbol,
+                "expiration": expiration,
+                "strike": put_long,
+                "option_type": "PUT",
+                "action": "BUY_TO_OPEN",
+                "quantity": 1,
+            },
+            {
+                "symbol": symbol,
+                "expiration": expiration,
+                "strike": call_short,
+                "option_type": "CALL",
+                "action": "SELL_TO_OPEN",
+                "quantity": 1,
+            },
+            {
+                "symbol": symbol,
+                "expiration": expiration,
+                "strike": call_long,
+                "option_type": "CALL",
+                "action": "BUY_TO_OPEN",
+                "quantity": 1,
+            },
+        ]
+        payload = {
+            "multi_leg_order": {
+                "broker": "ibkr",
+                "legs": legs,
+                "order_type": "LIMIT" if net_price else "MARKET",
+                "net_price": net_price,
+                "quantity": quantity,
+            }
+        }
+        self._ensure_connected()
+        resp = await self._client.post("/trade/execute", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def trade_debit_spread(
+        self,
+        symbol: str,
+        long_strike: float,
+        short_strike: float,
+        option_type: str,
+        expiration: str,
+        quantity: int = 1,
+        net_price: float | None = None,
+    ) -> dict:
+        """Execute a debit spread trade (2 legs). Returns order result.
+
+        Builds: BUY_TO_OPEN long_strike, SELL_TO_OPEN short_strike.
+        MARKET order by default; LIMIT if net_price provided.
+        """
+        legs = [
+            {
+                "symbol": symbol,
+                "expiration": expiration,
+                "strike": long_strike,
+                "option_type": option_type.upper(),
+                "action": "BUY_TO_OPEN",
+                "quantity": 1,
+            },
+            {
+                "symbol": symbol,
+                "expiration": expiration,
+                "strike": short_strike,
+                "option_type": option_type.upper(),
+                "action": "SELL_TO_OPEN",
+                "quantity": 1,
+            },
+        ]
+        payload = {
+            "multi_leg_order": {
+                "broker": "ibkr",
+                "legs": legs,
+                "order_type": "LIMIT" if net_price else "MARKET",
+                "net_price": net_price,
+                "quantity": quantity,
+            }
+        }
+        self._ensure_connected()
+        resp = await self._client.post("/trade/execute", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def trade_multi_leg(
+        self,
+        legs: list[dict],
+        quantity: int = 1,
+        net_price: float | None = None,
+    ) -> dict:
+        """Execute a generic multi-leg trade (1-4 legs). Returns order result.
+
+        Each leg dict must contain: symbol, expiration, strike, option_type, action, quantity.
+        MARKET order by default; LIMIT if net_price provided. Max 4 legs (IBKR limit).
+        """
+        if len(legs) > 4:
+            raise ValueError("IBKR supports max 4 legs per combo order")
+        payload = {
+            "multi_leg_order": {
+                "broker": "ibkr",
+                "legs": legs,
+                "order_type": "LIMIT" if net_price else "MARKET",
+                "net_price": net_price,
+                "quantity": quantity,
+            }
+        }
+        self._ensure_connected()
+        resp = await self._client.post("/trade/execute", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
     async def trade_equity(
         self,
         symbol: str,
@@ -399,6 +537,15 @@ class TradingClientSync:
 
     def trade_credit_spread(self, **kwargs) -> dict:
         return self._get_loop().run_until_complete(self._async_client.trade_credit_spread(**kwargs))
+
+    def trade_iron_condor(self, **kwargs) -> dict:
+        return self._get_loop().run_until_complete(self._async_client.trade_iron_condor(**kwargs))
+
+    def trade_debit_spread(self, **kwargs) -> dict:
+        return self._get_loop().run_until_complete(self._async_client.trade_debit_spread(**kwargs))
+
+    def trade_multi_leg(self, **kwargs) -> dict:
+        return self._get_loop().run_until_complete(self._async_client.trade_multi_leg(**kwargs))
 
     def trade_equity(self, **kwargs) -> dict:
         return self._get_loop().run_until_complete(self._async_client.trade_equity(**kwargs))
@@ -3022,16 +3169,33 @@ async def _cmd_trade_http(args, server: str) -> int:
                     qd = qr.json()
                     ul_price = qd.get("last") or qd.get("bid") or qd.get("ask")
                     if ul_price and ul_price > 0:
-                        # Try to get prev close from streaming status
+                        # Get prev close: QuestDB (authoritative) → streaming status (fallback)
                         prev_close = None
                         try:
-                            sr = await client.get("/market/streaming/status")
-                            if sr.status_code == 200:
-                                sd = sr.json()
-                                ps = sd.get("per_symbol", {}).get(sym, {})
-                                prev_close = ps.get("prev_close")
+                            from common.market_hours import previous_trading_day
+                            from datetime import date as _d
+                            prev_td = previous_trading_day(_d.today())
+                            pc_sql = f"SELECT close FROM daily_prices WHERE ticker = '{sym}' AND date <= '{prev_td.isoformat()}' ORDER BY date DESC LIMIT 1"
+                            import httpx as _hx
+                            async with _hx.AsyncClient(timeout=5.0) as db_client:
+                                db_url = os.environ.get("DB_SERVER_URL", "http://localhost:9102")
+                                pcr = await db_client.get(f"{db_url}/api/execute_sql", params={"sql": pc_sql})
+                                if pcr.status_code == 200:
+                                    rows = pcr.json().get("data", [])
+                                    if rows and rows[0].get("close"):
+                                        prev_close = float(rows[0]["close"])
                         except Exception:
                             pass
+                        # Fallback: streaming status
+                        if not prev_close:
+                            try:
+                                sr = await client.get("/market/streaming/status")
+                                if sr.status_code == 200:
+                                    sd = sr.json()
+                                    ps = sd.get("per_symbol", {}).get(sym, {})
+                                    prev_close = ps.get("prev_close")
+                            except Exception:
+                                pass
                         if prev_close and prev_close > 0:
                             chg = ul_price - prev_close
                             chg_pct = (chg / prev_close) * 100
