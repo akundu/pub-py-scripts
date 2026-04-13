@@ -426,12 +426,20 @@ class MarketDataStreamingService:
         self._ticks_received += 1
         self._ticks_received_per_symbol[symbol] = self._ticks_received_per_symbol.get(symbol, 0) + 1
 
-        # Log SPX price periodically (~every 100 accepted ticks ≈ every 10-15s)
+        # Log SPX price periodically (every 5 ticks for CPG polling, every 100 for TWS)
         if symbol == "SPX":
             self._spx_log_counter += 1
-            if self._spx_log_counter % 100 == 0:
+            log_interval = 5 if self._streaming_mode in ("cpg_polling", "cpg_websocket") else 100
+            if self._spx_log_counter % log_interval == 0:
                 prev = self._prev_close.get("SPX", 0)
-                logger.info("SPX tick: price=%.2f bid=%s ask=%s close=%s prev_close=%.2f", price, bid, ask, close, prev)
+                accepted = self._ticks_accepted_per_symbol.get("SPX", 0)
+                rejected = self._reject_count.get("SPX", 0)
+                logger.info(
+                    "SPX tick #%d: price=%.2f bid=%s ask=%s close=%s prev_close=%.2f "
+                    "(accepted=%d rejected=%d mode=%s)",
+                    self._spx_log_counter, price, bid, ask, close, prev,
+                    accepted, rejected, self._streaming_mode,
+                )
 
         # Anchor previous close (once per symbol per session)
         # Use the same per-index floor prices to reject garbage close values from TWS
