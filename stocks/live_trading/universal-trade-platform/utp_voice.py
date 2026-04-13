@@ -2565,9 +2565,12 @@ async def api_options_grid(
         expirations = []
         try:
             exp_data = await client.get_options(symbol, list_expirations=True)
-            expirations = _merge_expirations(exp_data.get("expirations", []))
-        except Exception:
-            pass
+            raw_exps = exp_data.get("expirations", [])
+            expirations = _merge_expirations(raw_exps)
+            if not expirations and raw_exps:
+                logger.warning("All %d expirations for %s filtered out by _merge_expirations", len(raw_exps), symbol)
+        except Exception as e:
+            logger.warning("Failed to get expirations for %s from daemon: %s", symbol, e)
 
         if not expirations:
             return {"symbol": symbol, "error": "No expirations available", "expirations": []}
@@ -2575,6 +2578,20 @@ async def api_options_grid(
         # Use first expiration if none specified
         if not expiration:
             expiration = expirations[0]
+
+        # If no current price, use last close from QuestDB as fallback
+        if not current_price:
+            try:
+                async with httpx.AsyncClient(timeout=5.0) as db_client:
+                    sql = f"SELECT close FROM daily_prices WHERE ticker = '{symbol}' ORDER BY date DESC LIMIT 1"
+                    pcr = await db_client.get(f"{DB_SERVER_URL}/api/execute_sql", params={"sql": sql})
+                    if pcr.status_code == 200:
+                        rows = pcr.json().get("data", [])
+                        if rows and rows[0].get("close"):
+                            current_price = float(rows[0]["close"])
+                            logger.info("Using QuestDB close %.2f as fallback price for %s", current_price, symbol)
+            except Exception:
+                pass
 
         # Compute strike range
         strike_min = round(current_price * (1 - strike_range_pct / 100), 0)
