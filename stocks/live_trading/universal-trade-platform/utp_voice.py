@@ -3149,6 +3149,7 @@ async def api_trades_list(
     try:
         client = get_daemon_client()
         daemon_resp = await client._get("/account/trades", params={"days": days if days > 0 else 7, "include_all": "true"})
+        logger.info("Daemon trades fetch: got %s items (type=%s)", len(daemon_resp) if isinstance(daemon_resp, list) else "?", type(daemon_resp).__name__)
         if isinstance(daemon_resp, list):
             for pos in daemon_resp:
                 # Convert daemon position format to trades format
@@ -3175,7 +3176,7 @@ async def api_trades_list(
                     "broker": pos.get("broker", "ibkr"),
                 })
     except Exception as e:
-        logger.debug("Failed to fetch daemon trades: %s", e)
+        logger.warning("Failed to fetch daemon trades: %s", e)
 
     # Merge: add daemon trades that aren't already in the CSV (by position_id or timestamp+symbol)
     csv_keys = set()
