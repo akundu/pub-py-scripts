@@ -1008,6 +1008,33 @@ function expirationToDTE(sym, expDate) {
   return tradingDays;
 }
 
+// Display DTE: trading days from TODAY to expiration (0 = expires today)
+// Different from expirationToDTE which counts from last_trading_day (for percentile windows)
+function displayDTE(expDate) {
+  if (!expDate) return null;
+  const todayStr = new Date().toLocaleDateString('en-CA');  // YYYY-MM-DD
+  if (expDate <= todayStr) return 0;
+
+  if (_tradingDaysCalendar.length > 0) {
+    let count = 0;
+    for (const td of _tradingDaysCalendar) {
+      if (td > todayStr && td <= expDate) count++;
+    }
+    return count;
+  }
+
+  // Fallback: skip weekends
+  const start = new Date(todayStr + 'T00:00:00');
+  const end = new Date(expDate + 'T00:00:00');
+  let days = 0;
+  const d = new Date(start);
+  while (d < end) {
+    d.setDate(d.getDate() + 1);
+    if (d.getDay() !== 0 && d.getDay() !== 6) days++;
+  }
+  return days;
+}
+
 // Find the best matching window key for a given DTE
 function findWindowKey(sym, dte) {
   const meta = _pctlByTicker[sym];
@@ -3080,8 +3107,8 @@ function renderRecs() {
     for (let ei = 0; ei < exps.length; ei++) {
       const exp = exps[ei];
       if (!exp) continue;
-      // Check actual DTE against maxDte filter
-      const actualDte = expirationToDTE(sym, exp) ?? ei;
+      // Check display DTE against maxDte filter
+      const actualDte = displayDTE(exp) ?? ei;
       if (actualDte > maxDte) continue;  // Skip expirations beyond max DTE
       const cached = symCache?.[exp];
       if (!cached?.chain) continue;
@@ -3089,8 +3116,8 @@ function renderRecs() {
       const cp = _realtimePrices[sym]?.price || cached.current_price || symCache?._current_price || _getPrevClosePrice(sym) || 0;
       if (!cp) continue;  // No price at all — skip
       const spreads = computeSpreads(cached.chain, sym, cp, width);
-      // Compute actual DTE from trading day calendar (not array index)
-      const dteNum = expirationToDTE(sym, exp) ?? ei;
+      // Display DTE = trading days from today to expiration (0 = today)
+      const dteNum = displayDTE(exp) ?? ei;
       for (const s of spreads) {
         const bracket = getPercentileBracket(sym, exp, s.option_type, s.otm_pct);
         const predicted = getPredictedBracket(sym, exp, s.option_type, s.otm_pct);

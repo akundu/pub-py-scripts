@@ -6392,7 +6392,7 @@ class TestOptionQuoteStreaming:
         from app.services.streaming_config import StreamingConfig
         cfg = StreamingConfig()
         assert cfg.option_quotes_enabled is False
-        assert cfg.option_quotes_poll_interval == 2.0
+        assert cfg.option_quotes_poll_interval == 15.0  # CSV read interval
         assert cfg.option_quotes_strike_range_pct == 3.0
         assert cfg.option_quotes_num_expirations == 6  # Cover DTE 0-5
 
@@ -6817,7 +6817,7 @@ option_quotes_num_expirations: 2
         cfg = StreamingConfig()
         assert cfg.option_quotes_csv_primary is True
         assert cfg.option_quotes_csv_dir == ""
-        assert cfg.option_quotes_greeks_interval == 45.0
+        assert cfg.option_quotes_greeks_interval == 60.0  # IBKR overlay interval
 
     def test_streaming_config_csv_primary_yaml(self, tmp_path):
         """load_streaming_config parses CSV primary fields from YAML."""
@@ -7117,12 +7117,12 @@ option_quotes_greeks_interval: 30.0
         from app.services.option_quote_streaming import OptionQuoteStreamingService
         from app.services.streaming_config import StreamingConfig
 
-        cfg = StreamingConfig(option_quotes_csv_primary=True, option_quotes_greeks_interval=45.0)
+        cfg = StreamingConfig(option_quotes_csv_primary=True, option_quotes_greeks_interval=60.0)
         svc = OptionQuoteStreamingService(cfg, provider=MagicMock())
         stats = svc.stats
         assert "csv_primary" in stats
         assert stats["csv_primary"]["enabled"] is True
-        assert stats["csv_primary"]["greeks_interval"] == 45.0
+        assert stats["csv_primary"]["greeks_interval"] == 60.0
         assert stats["csv_primary"]["csv_reads_ok"] == 0
         assert stats["csv_primary"]["csv_reads_failed"] == 0
 
@@ -7146,7 +7146,7 @@ option_quotes_greeks_interval: 30.0
         """GET /market/options/{symbol}?list_expirations=true calls market_data.get_option_chain."""
         from app.models import Broker
         with patch("app.services.market_data.get_option_chain", new_callable=AsyncMock,
-                    return_value={"expirations": ["2026-04-11", "2026-04-12"]}) as mock_chain:
+                    return_value={"expirations": ["2026-04-14", "2026-04-15"]}) as mock_chain:
             resp = await client.get(
                 "/market/options/SPX",
                 params={"list_expirations": "true"},
@@ -7154,11 +7154,11 @@ option_quotes_greeks_interval: 30.0
             )
             assert resp.status_code == 200
             data = resp.json()
-            assert data["expirations"] == ["2026-04-11", "2026-04-12"]
+            assert data["expirations"] == ["2026-04-14", "2026-04-15"]
             mock_chain.assert_called_once_with("SPX", Broker.IBKR)
 
     def test_greeks_interval_default_is_45(self):
         """StreamingConfig greeks interval default changed from 30 to 45."""
         from app.services.streaming_config import StreamingConfig
         cfg = StreamingConfig()
-        assert cfg.option_quotes_greeks_interval == 45.0
+        assert cfg.option_quotes_greeks_interval == 60.0  # IBKR overlay interval
