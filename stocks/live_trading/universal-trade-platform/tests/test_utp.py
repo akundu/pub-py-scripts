@@ -4416,9 +4416,11 @@ class TestTradingClient:
         """All expected methods are present."""
         from utp import TradingClient
         methods = [
-            'health', 'trade_credit_spread', 'trade_equity', 'close_position',
-            'get_positions', 'get_quote', 'get_portfolio_summary', 'get_trades',
-            'get_orders', 'cancel_order', 'get_performance', 'get_options',
+            'health', 'trade_credit_spread', 'trade_iron_condor',
+            'trade_debit_spread', 'trade_multi_leg', 'trade_equity',
+            'close_position', 'get_positions', 'get_quote',
+            'get_portfolio_summary', 'get_trades', 'get_orders',
+            'cancel_order', 'get_performance', 'get_options',
             'get_advisor_recommendations', 'confirm_advisor_trade',
         ]
         for m in methods:
@@ -4428,9 +4430,11 @@ class TestTradingClient:
         """All expected sync methods are present."""
         from utp import TradingClientSync
         methods = [
-            'health', 'trade_credit_spread', 'trade_equity', 'close_position',
-            'get_positions', 'get_quote', 'get_portfolio_summary', 'get_trades',
-            'get_orders', 'cancel_order', 'get_performance', 'get_options',
+            'health', 'trade_credit_spread', 'trade_iron_condor',
+            'trade_debit_spread', 'trade_multi_leg', 'trade_equity',
+            'close_position', 'get_positions', 'get_quote',
+            'get_portfolio_summary', 'get_trades', 'get_orders',
+            'cancel_order', 'get_performance', 'get_options',
         ]
         for m in methods:
             assert hasattr(TradingClientSync, m), f"Missing method: {m}"
@@ -4491,6 +4495,185 @@ class TestTradingClient:
         assert payload["equity_order"]["symbol"] == "SPY"
         assert payload["equity_order"]["side"] == "BUY"
         assert payload["equity_order"]["order_type"] == "LIMIT"
+
+    @pytest.mark.anyio
+    async def test_trade_iron_condor_payload(self):
+        """Verify iron condor builds correct 4-leg payload."""
+        from utp import TradingClient
+
+        client = TradingClient("http://localhost:8000")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"order_id": "ic-123", "status": "SUBMITTED"}
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(return_value=mock_resp)
+        client._client = mock_http
+
+        result = await client.trade_iron_condor(
+            symbol="SPX", put_short=5500, put_long=5475,
+            call_short=5700, call_long=5725,
+            expiration="2026-03-20", quantity=2,
+        )
+
+        assert result["order_id"] == "ic-123"
+        call_args = mock_http.post.call_args
+        payload = call_args.kwargs.get("json") or call_args[1].get("json")
+        mlo = payload["multi_leg_order"]
+        assert len(mlo["legs"]) == 4
+        # Put legs
+        assert mlo["legs"][0]["strike"] == 5500
+        assert mlo["legs"][0]["option_type"] == "PUT"
+        assert mlo["legs"][0]["action"] == "SELL_TO_OPEN"
+        assert mlo["legs"][1]["strike"] == 5475
+        assert mlo["legs"][1]["option_type"] == "PUT"
+        assert mlo["legs"][1]["action"] == "BUY_TO_OPEN"
+        # Call legs
+        assert mlo["legs"][2]["strike"] == 5700
+        assert mlo["legs"][2]["option_type"] == "CALL"
+        assert mlo["legs"][2]["action"] == "SELL_TO_OPEN"
+        assert mlo["legs"][3]["strike"] == 5725
+        assert mlo["legs"][3]["option_type"] == "CALL"
+        assert mlo["legs"][3]["action"] == "BUY_TO_OPEN"
+        assert mlo["quantity"] == 2
+        assert mlo["order_type"] == "MARKET"
+        assert mlo["net_price"] is None
+
+    @pytest.mark.anyio
+    async def test_trade_iron_condor_limit_order(self):
+        """Iron condor with net_price uses LIMIT order type."""
+        from utp import TradingClient
+
+        client = TradingClient("http://localhost:8000")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"order_id": "ic-lim", "status": "SUBMITTED"}
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(return_value=mock_resp)
+        client._client = mock_http
+
+        await client.trade_iron_condor(
+            symbol="SPX", put_short=5500, put_long=5475,
+            call_short=5700, call_long=5725,
+            expiration="2026-03-20", quantity=1, net_price=5.00,
+        )
+
+        call_args = mock_http.post.call_args
+        payload = call_args.kwargs.get("json") or call_args[1].get("json")
+        mlo = payload["multi_leg_order"]
+        assert mlo["order_type"] == "LIMIT"
+        assert mlo["net_price"] == 5.00
+
+    @pytest.mark.anyio
+    async def test_trade_debit_spread_payload(self):
+        """Verify debit spread builds correct 2-leg payload with BUY first."""
+        from utp import TradingClient
+
+        client = TradingClient("http://localhost:8000")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"order_id": "ds-123", "status": "SUBMITTED"}
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(return_value=mock_resp)
+        client._client = mock_http
+
+        result = await client.trade_debit_spread(
+            symbol="QQQ", long_strike=480, short_strike=490,
+            option_type="CALL", expiration="2026-03-20",
+            quantity=3, net_price=4.00,
+        )
+
+        assert result["order_id"] == "ds-123"
+        call_args = mock_http.post.call_args
+        payload = call_args.kwargs.get("json") or call_args[1].get("json")
+        mlo = payload["multi_leg_order"]
+        assert len(mlo["legs"]) == 2
+        assert mlo["legs"][0]["strike"] == 480
+        assert mlo["legs"][0]["action"] == "BUY_TO_OPEN"
+        assert mlo["legs"][0]["option_type"] == "CALL"
+        assert mlo["legs"][1]["strike"] == 490
+        assert mlo["legs"][1]["action"] == "SELL_TO_OPEN"
+        assert mlo["legs"][1]["option_type"] == "CALL"
+        assert mlo["quantity"] == 3
+        assert mlo["order_type"] == "LIMIT"
+        assert mlo["net_price"] == 4.00
+
+    @pytest.mark.anyio
+    async def test_trade_multi_leg_payload(self):
+        """Verify generic multi-leg passes arbitrary legs."""
+        from utp import TradingClient
+
+        client = TradingClient("http://localhost:8000")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"order_id": "ml-123", "status": "SUBMITTED"}
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(return_value=mock_resp)
+        client._client = mock_http
+
+        legs = [
+            {"symbol": "SPX", "expiration": "2026-03-20", "strike": 5500,
+             "option_type": "PUT", "action": "SELL_TO_OPEN", "quantity": 1},
+            {"symbol": "SPX", "expiration": "2026-03-20", "strike": 5475,
+             "option_type": "PUT", "action": "BUY_TO_OPEN", "quantity": 1},
+        ]
+        result = await client.trade_multi_leg(legs=legs, quantity=5)
+
+        assert result["order_id"] == "ml-123"
+        call_args = mock_http.post.call_args
+        payload = call_args.kwargs.get("json") or call_args[1].get("json")
+        mlo = payload["multi_leg_order"]
+        assert mlo["legs"] == legs
+        assert mlo["quantity"] == 5
+        assert mlo["order_type"] == "MARKET"
+
+    @pytest.mark.anyio
+    async def test_trade_multi_leg_limit(self):
+        """Generic multi-leg with net_price uses LIMIT."""
+        from utp import TradingClient
+
+        client = TradingClient("http://localhost:8000")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"order_id": "ml-lim", "status": "SUBMITTED"}
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(return_value=mock_resp)
+        client._client = mock_http
+
+        legs = [
+            {"symbol": "RUT", "expiration": "2026-03-20", "strike": 2200,
+             "option_type": "CALL", "action": "SELL_TO_OPEN", "quantity": 1},
+        ]
+        await client.trade_multi_leg(legs=legs, quantity=1, net_price=2.50)
+
+        call_args = mock_http.post.call_args
+        payload = call_args.kwargs.get("json") or call_args[1].get("json")
+        mlo = payload["multi_leg_order"]
+        assert mlo["order_type"] == "LIMIT"
+        assert mlo["net_price"] == 2.50
+
+    @pytest.mark.anyio
+    async def test_trade_multi_leg_max_legs(self):
+        """Generic multi-leg rejects >4 legs."""
+        from utp import TradingClient
+
+        client = TradingClient("http://localhost:8000")
+        client._client = AsyncMock()  # connected
+
+        legs = [{"symbol": "SPX", "expiration": "2026-03-20", "strike": 5000 + i,
+                 "option_type": "PUT", "action": "SELL_TO_OPEN", "quantity": 1}
+                for i in range(5)]
+        with pytest.raises(ValueError, match="max 4 legs"):
+            await client.trade_multi_leg(legs=legs)
 
     @pytest.mark.anyio
     async def test_get_positions_extracts_active(self):
@@ -6211,7 +6394,7 @@ class TestOptionQuoteStreaming:
         assert cfg.option_quotes_enabled is False
         assert cfg.option_quotes_poll_interval == 2.0
         assert cfg.option_quotes_strike_range_pct == 3.0
-        assert cfg.option_quotes_num_expirations == 3
+        assert cfg.option_quotes_num_expirations == 6  # Cover DTE 0-5
 
     def test_streaming_config_loads_from_yaml(self, tmp_path):
         """load_streaming_config parses option quote fields from YAML."""

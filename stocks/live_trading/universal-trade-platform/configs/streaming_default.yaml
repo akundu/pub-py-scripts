@@ -97,7 +97,7 @@ option_quotes_poll_interval: 15
 option_quotes_strike_range_pct: 3.5
 
 # Number of upcoming expirations to fetch per symbol
-option_quotes_num_expirations: 5
+option_quotes_num_expirations: 6  # Cover DTE 0 through 5
 
 # CSV exports as primary fast source for option bid/ask/volume (~10ms per read)
 # IBKR greeks overlaid every greeks_interval seconds

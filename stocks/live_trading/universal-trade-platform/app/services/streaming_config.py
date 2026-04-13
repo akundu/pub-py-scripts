@@ -77,7 +77,7 @@ class StreamingConfig:
     option_quotes_enabled: bool = False
     option_quotes_poll_interval: float = 2.0
     option_quotes_strike_range_pct: float = 3.0
-    option_quotes_num_expirations: int = 3
+    option_quotes_num_expirations: int = 6  # Cover DTE 0 through 5
 
     # CSV exports as primary fast source for option quotes
     option_quotes_csv_primary: bool = True         # Use CSV exports as primary (instant bid/ask)

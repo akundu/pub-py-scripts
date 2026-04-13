@@ -658,10 +658,13 @@ class OptionQuoteStreamingService:
                     "open_interest": oi,
                 })
 
-            # Compute snapshot age
+            # Compute snapshot age (CSV timestamps are in US/Pacific)
             try:
+                from zoneinfo import ZoneInfo
                 snap_dt = datetime.fromisoformat(max_ts)
-                age = (datetime.now(timezone.utc) - snap_dt.replace(tzinfo=timezone.utc)).total_seconds()
+                if snap_dt.tzinfo is None:
+                    snap_dt = snap_dt.replace(tzinfo=ZoneInfo("America/Los_Angeles"))
+                age = (datetime.now(timezone.utc) - snap_dt.astimezone(timezone.utc)).total_seconds()
                 self._csv_latest_snapshot_age = max(0, age)
             except (ValueError, TypeError):
                 pass
@@ -885,6 +888,10 @@ class OptionQuoteStreamingService:
         else:
             await self._fetch_from_ibkr(fetch_jobs)
 
+    # Track last CSV snapshot timestamp per (symbol, exp, type) to avoid
+    # redundant cache updates when the CSV hasn't changed.
+    _csv_last_snap_ts: dict[str, str] = {}
+
     async def _run_csv_primary_cycle(self, fetch_jobs: list[tuple]) -> None:
         """CSV primary path: instant bid/ask from CSV, IBKR prices+greeks every greeks_interval."""
         self._cycle_phase = "csv_reading"
@@ -895,8 +902,15 @@ class OptionQuoteStreamingService:
                 symbol, exp, opt_type, strike_min=smin, strike_max=smax,
             )
             if csv_quotes:
+                # Only update cache if CSV has newer data than what we last cached
+                cache_key = f"{symbol}:{exp}:{opt_type}"
+                prev_snap_ts = self._csv_last_snap_ts.get(cache_key, "")
+                if snap_ts and snap_ts <= prev_snap_ts:
+                    continue  # CSV hasn't changed — skip cache update
+
                 merged = self._merge_greeks(csv_quotes, symbol, exp, opt_type)
                 self._cache.put(symbol, exp, opt_type, merged)
+                self._csv_last_snap_ts[cache_key] = snap_ts
                 self._fetches_ok += 1
                 self._symbol_last_fetch_utc[symbol] = fetch_ts
                 level = logging.INFO if self._cycles < 3 else logging.DEBUG
