@@ -414,6 +414,8 @@ class MarketDataStreamingService:
 
     # ── Tick ingestion (shared by ib_insync, CPG WS, CPG polling) ────────────
 
+    _spx_log_counter: int = 0
+
     def _ingest_tick(
         self, symbol: str, price: float,
         bid: float | None, ask: float | None,
@@ -423,6 +425,13 @@ class MarketDataStreamingService:
         """Validate and buffer a single tick. Returns True if accepted."""
         self._ticks_received += 1
         self._ticks_received_per_symbol[symbol] = self._ticks_received_per_symbol.get(symbol, 0) + 1
+
+        # Log SPX price periodically (~every 100 accepted ticks ≈ every 10-15s)
+        if symbol == "SPX":
+            self._spx_log_counter += 1
+            if self._spx_log_counter % 100 == 0:
+                prev = self._prev_close.get("SPX", 0)
+                logger.info("SPX tick: price=%.2f bid=%s ask=%s close=%s prev_close=%.2f", price, bid, ask, close, prev)
 
         # Anchor previous close (once per symbol per session)
         # Use the same per-index floor prices to reject garbage close values from TWS
