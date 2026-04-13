@@ -2576,37 +2576,13 @@ async def api_options_grid(
             # 1. Check server-side cache (may have CSV or IBKR data)
             entry = await _get_cached_options(symbol, expiration, ot)
             if entry is not None:
-                # During market hours, don't serve stale CSV — let it expire (2 min TTL)
-                # so IBKR data is fetched fresh below
                 chain_data[ot.lower()] = _filter_strikes(entry.data, strike_min, strike_max)
                 source = entry.source
                 fetched_at = entry.fetched_at_utc
                 cached_at = datetime.fromtimestamp(entry.cached_at, UTC).isoformat(timespec="seconds")
                 continue
 
-            # 2. During market hours: try daemon/IBKR FIRST (live prices + greeks)
-            #    During market closed: try CSV first (instant, IBKR won't have fresh data anyway)
-            if market_open:
-                try:
-                    data = await client.get_options(
-                        symbol, option_type=ot, expiration=expiration,
-                        strike_min=strike_min, strike_max=strike_max,
-                    )
-                    quotes_list = data.get("quotes", {}).get(ot.lower(), [])
-                    if quotes_list:
-                        await _put_cached_options(
-                            symbol, expiration, ot, quotes_list,
-                            source="ibkr", fetched_at_utc=_now_iso(),
-                        )
-                        chain_data[ot.lower()] = quotes_list
-                        source = "ibkr"
-                        fetched_at = _now_iso()
-                        cached_at = fetched_at
-                        continue
-                except Exception as e:
-                    logger.warning("IBKR fetch failed %s %s %s: %s", symbol, expiration, ot, e)
-
-            # 3. Fallback: CSV exports (instant, used when market closed or IBKR fails)
+            # 2. Always load CSV first (instant baseline — always available)
             csv_quotes, csv_ts = _load_options_from_csv(symbol, expiration, strike_min, strike_max)
             if csv_quotes:
                 by_type = _split_csv_quotes_by_type(csv_quotes)
@@ -2620,9 +2596,9 @@ async def api_options_grid(
                     source = "csv_exports"
                     fetched_at = csv_ts
                     cached_at = _now_iso()
-                    continue
 
-            # 4. Last resort: try daemon/IBKR
+            # 3. Overlay with IBKR data when available (live prices + greeks)
+            #    This replaces CSV data with fresher IBKR data if the daemon has it.
             try:
                 data = await client.get_options(
                     symbol, option_type=ot, expiration=expiration,
@@ -2634,13 +2610,15 @@ async def api_options_grid(
                         symbol, expiration, ot, quotes_list,
                         source="ibkr", fetched_at_utc=_now_iso(),
                     )
-                chain_data[ot.lower()] = quotes_list
-                source = "ibkr"
-                fetched_at = _now_iso()
-                cached_at = fetched_at
+                    chain_data[ot.lower()] = quotes_list
+                    source = "ibkr"
+                    fetched_at = _now_iso()
+                    cached_at = fetched_at
             except Exception as e:
-                logger.warning("Options fetch failed %s %s %s: %s", symbol, expiration, ot, e)
-                chain_data[ot.lower()] = []
+                # IBKR unavailable — CSV baseline already set above (or empty)
+                if not chain_data.get(ot.lower()):
+                    logger.debug("Options fetch failed %s %s %s (no CSV fallback): %s", symbol, expiration, ot, e)
+                    chain_data[ot.lower()] = []
 
             if not chain_data.get(ot.lower()):
                 any_empty = True
