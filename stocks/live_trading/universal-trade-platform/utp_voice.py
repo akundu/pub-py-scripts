@@ -1717,12 +1717,38 @@ def _load_options_from_csv(
     if not max_ts or not rows:
         return [], ""
 
-    # Filter to latest snapshot only
-    result = []
+    # Keep the latest row per strike that has a non-zero bid or ask.
+    # This avoids serving pre-market zero-bid snapshots when the file
+    # has earlier rows with real prices from the previous session.
+    best_by_strike: dict[tuple, dict] = {}  # (strike, type) -> row
     for row in rows:
-        if row.get("timestamp") != max_ts:
-            continue
+        strike = float(row.get("strike", 0) or 0)
+        opt_type = row.get("type", "").lower()
+        bid = float(row.get("bid", 0) or 0)
+        ask = float(row.get("ask", 0) or 0)
+        ts = row.get("timestamp", "")
+        key = (strike, opt_type)
 
+        existing = best_by_strike.get(key)
+        if existing is None:
+            best_by_strike[key] = row
+        else:
+            ex_bid = float(existing.get("bid", 0) or 0)
+            ex_ask = float(existing.get("ask", 0) or 0)
+            ex_ts = existing.get("timestamp", "")
+            # Prefer row with non-zero bid/ask; if both have prices, take the newer one
+            has_price = (bid > 0 or ask > 0)
+            ex_has_price = (ex_bid > 0 or ex_ask > 0)
+            if has_price and (not ex_has_price or ts > ex_ts):
+                best_by_strike[key] = row
+            elif not ex_has_price and ts > ex_ts:
+                best_by_strike[key] = row
+
+    # Recompute max_ts from selected rows (not the global max)
+    max_ts = max((r.get("timestamp", "") for r in best_by_strike.values()), default="")
+
+    result = []
+    for row in best_by_strike.values():
         strike = float(row.get("strike", 0) or 0)
         bid = float(row.get("bid", 0) or 0)
         ask = float(row.get("ask", 0) or 0)
