@@ -5689,12 +5689,12 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                 ? `<div class="summary-value" style="font-size:13px;color:#8b949e;">N/A (Historical)</div>`
                 : `<div class="summary-value" id="summaryHoursToClose">${{getHoursToClose().toFixed(1)}} hrs</div>`;
 
-            // Compute change from prev close
+            // Compute change from prev close — always show if prev_close is available
             const curChg = (data.current_price && data.prev_close) ? data.current_price - data.prev_close : 0;
             const curChgPct = data.prev_close ? (curChg / data.prev_close * 100) : 0;
             const curChgColor = curChg >= 0 ? '#3fb950' : '#f85149';
-            const curChgHtml = data.prev_close && data.current_price !== data.prev_close
-                ? `<div style="font-size:11px;color:${{curChgColor}}">${{curChg >= 0 ? '+' : ''}}${{curChg.toFixed(2)}} (${{curChgPct >= 0 ? '+' : ''}}${{curChgPct.toFixed(2)}}%)</div>`
+            const curChgHtml = data.prev_close
+                ? `<div style="font-size:12px;font-weight:600;color:${{curChgColor}}">${{curChg >= 0 ? '+' : ''}}${{curChg.toFixed(2)}} (${{curChgPct >= 0 ? '+' : ''}}${{curChgPct.toFixed(2)}}%)</div>`
                 : '';
             // Compute change for prev close vs close before that
             const prevChg = (data.prev_close && data.prev_prev_close) ? data.prev_close - data.prev_prev_close : 0;
@@ -5781,8 +5781,8 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
             const fCurChg = (data.current_price && data.prev_close) ? data.current_price - data.prev_close : 0;
             const fCurChgPct = data.prev_close ? (fCurChg / data.prev_close * 100) : 0;
             const fCurChgColor = fCurChg >= 0 ? '#3fb950' : '#f85149';
-            const fCurChgHtml = data.prev_close && data.current_price !== data.prev_close
-                ? `<div style="font-size:11px;color:${{fCurChgColor}}">${{fCurChg >= 0 ? '+' : ''}}${{fCurChg.toFixed(2)}} (${{fCurChgPct >= 0 ? '+' : ''}}${{fCurChgPct.toFixed(2)}}%)</div>`
+            const fCurChgHtml = data.prev_close
+                ? `<div style="font-size:12px;font-weight:600;color:${{fCurChgColor}}">${{fCurChg >= 0 ? '+' : ''}}${{fCurChg.toFixed(2)}} (${{fCurChgPct >= 0 ? '+' : ''}}${{fCurChgPct.toFixed(2)}}%)</div>`
                 : '';
 
             // Update summary
