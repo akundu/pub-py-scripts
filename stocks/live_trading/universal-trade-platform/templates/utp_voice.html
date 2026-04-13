@@ -3013,7 +3013,18 @@ function renderRecs() {
   const selectedDte = parseInt(document.getElementById('rec-dte')?.value) || 0;
   const topN = parseInt(document.getElementById('rec-top-n')?.value) || 10;
   const maxDteEl = document.getElementById('rec-max-dte');
-  const maxDte = maxDteEl ? parseInt(maxDteEl.value) : parseInt(REC_FILTER_DEFAULTS['rec-max-dte'] || '5');
+  // Read from DOM if exists, else from saved localStorage, else default
+  let maxDte;
+  if (maxDteEl) {
+    maxDte = parseInt(maxDteEl.value);
+  } else {
+    try {
+      const saved = JSON.parse(localStorage.getItem(REC_FILTERS_KEY) || '{}');
+      maxDte = parseInt(saved['rec-max-dte'] || REC_FILTER_DEFAULTS['rec-max-dte'] || '5');
+    } catch(e) {
+      maxDte = parseInt(REC_FILTER_DEFAULTS['rec-max-dte'] || '5');
+    }
+  }
 
   const minOtmPc = parseFloat(document.getElementById('rec-min-otm-pc')?.value) || 0;
 
