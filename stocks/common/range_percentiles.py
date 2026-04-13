@@ -177,6 +177,15 @@ async def compute_range_percentiles(
 
     try:
         end_date = datetime.now(timezone.utc).date()
+        # During market hours, exclude today from the data — today's close is
+        # not final (may be ingested early by the daily cron). The reference
+        # "last trading day" should be yesterday's official close.
+        try:
+            from common.market_hours import is_trading_day, is_market_hours
+            if is_trading_day(end_date) and is_market_hours():
+                end_date = end_date - timedelta(days=1)
+        except Exception:
+            pass
         # Convert trading days to calendar days (factor of 7/5 + buffer for holidays)
         calendar_days = int(lookback * 7 / 5) + 10
         start_date = end_date - timedelta(days=calendar_days)
@@ -790,6 +799,13 @@ async def compute_range_percentiles_multi_window(
 
     try:
         end_date = datetime.now(timezone.utc).date()
+        # During market hours, exclude today — same logic as single-window
+        try:
+            from common.market_hours import is_trading_day, is_market_hours
+            if is_trading_day(end_date) and is_market_hours():
+                end_date = end_date - timedelta(days=1)
+        except Exception:
+            pass
         # Convert trading days to calendar days (factor of 7/5 + buffer for holidays)
         calendar_days = int(lookback * 7 / 5) + 10
         start_date = end_date - timedelta(days=calendar_days)
