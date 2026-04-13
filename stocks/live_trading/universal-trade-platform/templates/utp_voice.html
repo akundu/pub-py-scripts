@@ -1135,12 +1135,20 @@ function getRefClose(sym) {
   if (!data) return predictionsData?.[sym]?.today?.prev_close || _pctlByTicker[sym]?.close || 0;
   if (typeof data === 'number') return data;
 
+  // Determine today's date in ET for comparison
+  const todayET = new Date().toLocaleDateString('en-CA', {timeZone: 'America/New_York'});
+
   // Server tells us if today is a trading day and if the session is active
-  // (pre-market through after-hours: 4AM-8PM ET on trading days)
   const sessionActive = _prevClosesMeta.is_session_active;
 
   if (sessionActive) {
-    // Session active: compare live price to most recent close (yesterday)
+    // Session active: reference = previous trading day's close.
+    // If last_close_date == today, today's close was already ingested (cron ran)
+    // but market is still open — use prev_close (yesterday) as reference.
+    if (data.last_close_date === todayET) {
+      return data.prev_close || data.last_close || 0;
+    }
+    // last_close_date < today → last_close IS yesterday's close
     return data.last_close || data.prev_close || 0;
   }
   // Session inactive: compare last close to the close before it
