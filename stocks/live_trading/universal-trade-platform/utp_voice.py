@@ -2561,23 +2561,13 @@ async def api_options_grid(
                 quote = cached_q or {}
         current_price = quote.get("last") or quote.get("bid") or 0
 
-        # Get expirations: merge CSV (has daily 0DTE) + IBKR (has further-out)
-        # _merge_expirations filters non-trading days (weekends, holidays)
-        expirations = await _get_cached_expirations(symbol)
-        if not expirations:
-            csv_exps = _get_csv_expirations(symbol)
-            ibkr_exps: list[str] = []
-            try:
-                exp_data = await client.get_options(symbol, list_expirations=True)
-                ibkr_exps = exp_data.get("expirations", [])
-            except Exception:
-                pass
-            expirations = _merge_expirations(csv_exps, ibkr_exps)
-            if expirations:
-                await _put_cached_expirations(symbol, expirations)
-        else:
-            # Re-filter cached expirations (cache may predate the trading-day filter)
-            expirations = _merge_expirations(expirations)
+        # Get expirations from daemon (daemon handles CSV + IBKR internally)
+        expirations = []
+        try:
+            exp_data = await client.get_options(symbol, list_expirations=True)
+            expirations = _merge_expirations(exp_data.get("expirations", []))
+        except Exception:
+            pass
 
         if not expirations:
             return {"symbol": symbol, "error": "No expirations available", "expirations": []}
@@ -2590,7 +2580,7 @@ async def api_options_grid(
         strike_min = round(current_price * (1 - strike_range_pct / 100), 0)
         strike_max = round(current_price * (1 + strike_range_pct / 100), 0)
 
-        # Fetch option quotes — check cache first, then CSV, then daemon
+        # Fetch option quotes from daemon only (daemon handles CSV + IBKR internally)
         types = ["PUT", "CALL"] if option_type == "BOTH" else [option_type.upper()]
         chain_data = {}
         source = "unknown"
@@ -2599,32 +2589,6 @@ async def api_options_grid(
         any_empty = False
 
         for ot in types:
-            # 1. Check server-side cache (may have CSV or IBKR data)
-            entry = await _get_cached_options(symbol, expiration, ot)
-            if entry is not None:
-                chain_data[ot.lower()] = _filter_strikes(entry.data, strike_min, strike_max)
-                source = entry.source
-                fetched_at = entry.fetched_at_utc
-                cached_at = datetime.fromtimestamp(entry.cached_at, UTC).isoformat(timespec="seconds")
-                continue
-
-            # 2. Always load CSV first (instant baseline — always available)
-            csv_quotes, csv_ts = _load_options_from_csv(symbol, expiration, strike_min, strike_max)
-            if csv_quotes:
-                by_type = _split_csv_quotes_by_type(csv_quotes)
-                quotes_for_type = by_type.get(ot.lower(), [])
-                if quotes_for_type:
-                    await _put_cached_options(
-                        symbol, expiration, ot, quotes_for_type,
-                        source="csv_exports", fetched_at_utc=csv_ts,
-                    )
-                    chain_data[ot.lower()] = quotes_for_type
-                    source = "csv_exports"
-                    fetched_at = csv_ts
-                    cached_at = _now_iso()
-
-            # 3. Overlay with IBKR data when available (live prices + greeks)
-            #    This replaces CSV data with fresher IBKR data if the daemon has it.
             try:
                 data = await client.get_options(
                     symbol, option_type=ot, expiration=expiration,
@@ -2632,19 +2596,15 @@ async def api_options_grid(
                 )
                 quotes_list = data.get("quotes", {}).get(ot.lower(), [])
                 if quotes_list:
-                    await _put_cached_options(
-                        symbol, expiration, ot, quotes_list,
-                        source="ibkr", fetched_at_utc=_now_iso(),
-                    )
                     chain_data[ot.lower()] = quotes_list
-                    source = "ibkr"
-                    fetched_at = _now_iso()
-                    cached_at = fetched_at
-            except Exception as e:
-                # IBKR unavailable — CSV baseline already set above (or empty)
-                if not chain_data.get(ot.lower()):
-                    logger.debug("Options fetch failed %s %s %s (no CSV fallback): %s", symbol, expiration, ot, e)
+                    source = data.get("source", "daemon")
+                    fetched_at = data.get("fetched_at", _now_iso())
+                    cached_at = _now_iso()
+                else:
                     chain_data[ot.lower()] = []
+            except Exception as e:
+                logger.debug("Options fetch from daemon failed %s %s %s: %s", symbol, expiration, ot, e)
+                chain_data[ot.lower()] = []
 
             if not chain_data.get(ot.lower()):
                 any_empty = True

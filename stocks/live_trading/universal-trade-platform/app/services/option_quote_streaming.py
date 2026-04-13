@@ -631,11 +631,15 @@ class OptionQuoteStreamingService:
             if not max_ts or not rows:
                 return [], ""
 
-            # Filter to max timestamp only
-            quotes = []
+            # Keep the last (most recent) row per strike — file is appended chronologically
+            # so the bottom rows are the newest.  This handles pre-market zeros correctly:
+            # if the latest snapshot is all zeros, that's the truth for now.
+            best_by_strike: dict[float, tuple] = {}
             for ts, strike, row in rows:
-                if ts != max_ts:
-                    continue
+                best_by_strike[strike] = (ts, strike, row)  # Last one wins
+
+            quotes = []
+            for ts, strike, row in best_by_strike.values():
                 try:
                     bid = float(row.get("bid", 0) or 0)
                     ask = float(row.get("ask", 0) or 0)
