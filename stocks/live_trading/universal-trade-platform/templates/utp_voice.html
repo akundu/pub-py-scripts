@@ -3331,9 +3331,10 @@ async function loadTradesList(page) {
 
     // KPIs
     kpis.innerHTML = `
-      <div class="kpi"><div class="label">Total Trades</div><div class="value">${s.total_trades||0}</div></div>
+      <div class="kpi"><div class="label">Total</div><div class="value">${s.total_trades||0}</div></div>
       <div class="kpi"><div class="label">Auto</div><div class="value">${s.auto_trades||0}</div></div>
       <div class="kpi"><div class="label">Manual</div><div class="value">${s.manual_trades||0}</div></div>
+      <div class="kpi"><div class="label">CLI/Daemon</div><div class="value">${s.daemon_trades||0}</div></div>
       <div class="kpi"><div class="label">Total Credit</div><div class="value pos">$${fmt(s.total_credit||0)}</div></div>
       <div class="kpi"><div class="label">Total Max Loss</div><div class="value neg">$${fmt(s.total_max_loss||0)}</div></div>
     `;
@@ -3345,29 +3346,39 @@ async function loadTradesList(page) {
 
     let html = '<div style="overflow-x:auto"><table class="tbl"><thead><tr>';
     html += '<th>Date</th><th>Symbol</th><th>Type</th><th>Short/Long</th><th class="num">Qty</th>';
-    html += '<th class="num">Credit</th><th class="num">MaxLoss</th><th class="num">ROI%</th>';
-    html += '<th class="num">OTM%</th><th>Status</th><th>Source</th>';
+    html += '<th class="num">Credit</th><th class="num hide-sm">MaxLoss</th><th class="num hide-sm">ROI%</th>';
+    html += '<th>Status</th><th>Source</th><th></th>';
     html += '</tr></thead><tbody>';
 
     for (const t of d.trades) {
       const isAuto = t.source === 'auto';
+      const isDaemon = t.source === 'daemon';
       const ts = t.timestamp ? formatDateShort(t.timestamp) : '--';
       const srcBadge = isAuto
         ? '<span class="badge badge-warning" style="font-size:9px">auto</span>'
-        : '<span style="font-size:10px;color:var(--muted)">manual</span>';
+        : isDaemon
+        ? '<span class="badge badge-safe" style="font-size:9px">cli</span>'
+        : '<span style="font-size:10px;color:var(--muted)">voice</span>';
 
-      html += `<tr style="${isAuto?'background:rgba(219,109,40,0.05)':''}">`;
+      const rowBg = isAuto ? 'background:rgba(219,109,40,0.05)' : isDaemon ? 'background:rgba(63,185,80,0.04)' : '';
+      const pnlVal = parseFloat(t.pnl || 0);
+      const pnlHtml = isDaemon && pnlVal ? `<div style="font-size:9px;color:${pnlVal>=0?'var(--green-b)':'var(--red-b)'}">${pnlVal>=0?'+':''}$${fmt(pnlVal)}</div>` : '';
+      const expHtml = t.expiration ? `<div style="font-size:9px;color:var(--muted)">${t.expiration}</div>` : '';
+
+      html += `<tr style="${rowBg}">`;
       html += `<td style="font-size:11px">${ts}</td>`;
-      html += `<td><b>${t.symbol||''}</b></td>`;
+      html += `<td><b>${t.symbol||''}</b>${expHtml}</td>`;
       html += `<td>${t.option_type||''}</td>`;
-      html += `<td>${t.short_strike||''}/${t.long_strike||''}</td>`;
+      html += `<td>${t.short_strike||''}${t.long_strike ? '/'+t.long_strike : ''}</td>`;
       html += `<td class="num">${t.quantity||''}</td>`;
-      html += `<td class="num pos">$${fmt(parseFloat(t.total_credit||0))}</td>`;
-      html += `<td class="num neg">$${fmt(parseFloat(t.total_max_loss||0))}</td>`;
-      html += `<td class="num">${t.roi_pct||''}%</td>`;
-      html += `<td class="num">${t.otm_pct||''}%</td>`;
+      html += `<td class="num pos">$${fmt(parseFloat(t.total_credit||0))}${pnlHtml}</td>`;
+      html += `<td class="num neg hide-sm">$${fmt(parseFloat(t.total_max_loss||0))}</td>`;
+      html += `<td class="num hide-sm">${t.roi_pct ? t.roi_pct+'%' : ''}</td>`;
       html += `<td style="font-size:10px">${t.status||''}</td>`;
       html += `<td>${srcBadge}</td>`;
+      // Actions: close button for open daemon positions
+      const pid = t.position_id || '';
+      html += `<td>${(isDaemon && t.status==='open' && pid) ? `<button class="btn btn-red btn-sm" style="font-size:9px" onclick="closeDaemonTrade('${pid}',${t.quantity||0})">Close</button>` : ''}</td>`;
       html += '</tr>';
     }
     html += '</tbody></table></div>';
@@ -3390,6 +3401,22 @@ async function loadTradesList(page) {
     });
     list.innerHTML = html;
   } catch(e) { list.innerHTML = `<div class="msg-error">${e.message}</div>`; }
+}
+
+async function closeDaemonTrade(positionId, qty) {
+  if (!confirm(`Close position ${positionId.substring(0,8)}?`)) return;
+  try {
+    const client = await fetch('/api/daemon-close', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({position_id: positionId, quantity: qty}),
+    });
+    const d = await client.json();
+    if (d.error) { alert('Close failed: ' + d.error); return; }
+    alert('Close submitted: ' + (d.message || d.status || 'OK'));
+    loadTradesList();
+    loadPortfolio();
+  } catch(e) { alert('Error: ' + e.message); }
 }
 
 // ── Auto-Trade Controls ──────────────────────────────────────────────────────

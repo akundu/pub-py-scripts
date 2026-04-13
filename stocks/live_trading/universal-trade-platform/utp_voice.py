@@ -3144,7 +3144,64 @@ async def api_trades_list(
     start = (page - 1) * per_page
     page_trades = trades[start:start + per_page]
 
-    # CSV file modification time for freshness
+    # Also fetch trades from daemon (includes trades made via utp.py CLI)
+    daemon_trades = []
+    try:
+        client = get_daemon_client()
+        daemon_resp = await client._get("/account/trades", params={"days": days if days > 0 else 7, "include_all": "true"})
+        if isinstance(daemon_resp, list):
+            for pos in daemon_resp:
+                # Convert daemon position format to trades format
+                sym = pos.get("symbol", "")
+                legs = pos.get("legs", [])
+                sell_leg = next((l for l in legs if "SELL" in (l.get("action") or "")), None)
+                buy_leg = next((l for l in legs if "BUY" in (l.get("action") or "")), None)
+                daemon_trades.append({
+                    "timestamp": pos.get("entry_time") or pos.get("last_synced_at") or "",
+                    "symbol": sym,
+                    "option_type": sell_leg.get("option_type", "") if sell_leg else pos.get("order_type", ""),
+                    "short_strike": str(sell_leg.get("strike", "")) if sell_leg else "",
+                    "long_strike": str(buy_leg.get("strike", "")) if buy_leg else "",
+                    "quantity": str(abs(pos.get("quantity", 0))),
+                    "total_credit": str(abs(pos.get("entry_price", 0) or 0) * abs(pos.get("quantity", 0)) * 100),
+                    "total_max_loss": "",
+                    "roi_pct": "",
+                    "otm_pct": "",
+                    "status": pos.get("status", "open"),
+                    "source": "daemon",
+                    "position_id": pos.get("position_id", ""),
+                    "expiration": pos.get("expiration", ""),
+                    "pnl": pos.get("unrealized_pnl") or pos.get("pnl") or 0,
+                    "broker": pos.get("broker", "ibkr"),
+                })
+    except Exception as e:
+        logger.debug("Failed to fetch daemon trades: %s", e)
+
+    # Merge: add daemon trades that aren't already in the CSV (by position_id or timestamp+symbol)
+    csv_keys = set()
+    for t in trades:
+        key = f"{t.get('timestamp', '')[:16]}_{t.get('symbol', '')}_{t.get('short_strike', '')}"
+        csv_keys.add(key)
+    for dt in daemon_trades:
+        key = f"{dt.get('timestamp', '')[:16]}_{dt.get('symbol', '')}_{dt.get('short_strike', '')}"
+        if key not in csv_keys:
+            trades.append(dt)
+
+    # Re-sort after merge
+    trades.sort(key=lambda t: t.get("timestamp", ""), reverse=True)
+
+    # Recompute summary with merged data
+    total_credit = sum(float(t.get("total_credit", 0) or 0) for t in trades)
+    total_max_loss = sum(float(t.get("total_max_loss", 0) or 0) for t in trades)
+    auto_count = sum(1 for t in trades if t.get("source") == "auto")
+    manual_count = sum(1 for t in trades if t.get("source") not in ("auto", "daemon"))
+    daemon_count = sum(1 for t in trades if t.get("source") == "daemon")
+
+    # Re-paginate
+    total = len(trades)
+    start = (page - 1) * per_page
+    page_trades = trades[start:start + per_page]
+
     csv_mtime = None
     if TRADES_CSV_PATH.exists():
         csv_mtime = datetime.fromtimestamp(
@@ -3161,11 +3218,12 @@ async def api_trades_list(
             "total_trades": total,
             "auto_trades": auto_count,
             "manual_trades": manual_count,
+            "daemon_trades": daemon_count,
             "total_credit": round(total_credit, 2),
             "total_max_loss": round(total_max_loss, 2),
         },
         "_voice_meta": {
-            "source": "trades_csv",
+            "source": "trades_csv+daemon",
             "csv_modified_at": csv_mtime,
             "fetched_at": _now_iso(),
         },
@@ -3278,6 +3336,24 @@ async def api_auto_trade_history(
         "per_page": per_page,
         "pages": (total + per_page - 1) // per_page,
     }
+
+
+@app.post("/api/daemon-close")
+async def api_daemon_close(request: Request, username: str = Depends(require_session)):
+    """Close a position via the daemon (for trades made through utp.py CLI)."""
+    body = await request.json()
+    position_id = body.get("position_id", "")
+    if not position_id:
+        raise HTTPException(status_code=400, detail="position_id required")
+
+    client = get_daemon_client()
+    try:
+        result = await client._post("/trade/close", json_data={
+            "position_id": position_id,
+        })
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
 
 
 @app.post("/api/quick-trade")

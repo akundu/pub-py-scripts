@@ -907,7 +907,7 @@ class TestTradesListAPI:
             assert resp.status_code == 200
             data = resp.json()
             meta = data["_voice_meta"]
-            assert meta["source"] == "trades_csv"
+            assert meta["source"] == "trades_csv+daemon"
             assert meta["csv_modified_at"] is not None
             assert meta["fetched_at"] is not None
 
