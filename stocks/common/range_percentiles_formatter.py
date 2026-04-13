@@ -709,11 +709,17 @@ def _generate_ticker_content_html(result: dict, ticker_id: str) -> tuple[str, di
     # Build a list of upcoming trading days for accurate window→date mapping.
     # Uses exchange_calendars for holidays; falls back to weekday-skip.
     def _build_trading_days(start_date: _date, count: int = 30) -> list[_date]:
-        """Return the next `count` trading days starting after start_date."""
+        """Return the next `count` trading days.
+
+        If start_date is today (data already ingested but market still open),
+        includes today as DTE0. Otherwise starts from the day after start_date.
+        """
+        today = _date.today()
         try:
             from common.market_hours import is_trading_day
             days = []
-            d = start_date + _timedelta(days=1)
+            # If start_date is today, include today as DTE0
+            d = start_date if start_date >= today else start_date + _timedelta(days=1)
             for _ in range(count * 2):
                 if is_trading_day(d):
                     days.append(d)
@@ -722,9 +728,8 @@ def _generate_ticker_content_html(result: dict, ticker_id: str) -> tuple[str, di
                 d += _timedelta(days=1)
             return days
         except Exception:
-            # Fallback: skip weekends only
             days = []
-            d = start_date + _timedelta(days=1)
+            d = start_date if start_date >= today else start_date + _timedelta(days=1)
             for _ in range(count * 2):
                 if d.weekday() < 5:
                     days.append(d)
