@@ -238,16 +238,24 @@ class IBKRRestProvider(BrokerProvider):
 
         month_mmmyy = _to_mmmyy(exp_clean)
 
-        # Try exchanges in order: SMART works for RUT/NDX, CBOE needed for SPX.
-        # For non-index symbols, only try SMART.
-        exchanges = ["SMART", "CBOE"] if symbol.upper() in self._INDEX_SYMBOLS else ["SMART"]
+        # Try without exchange first (returns all expirations), then with specific exchanges.
+        # CPG secdef/info fails with exchange=CBOE for some SPX contracts.
+        exchange_attempts = [None]  # None = no exchange param (returns all)
+        if symbol.upper() in self._INDEX_SYMBOLS:
+            exchange_attempts.extend(["SMART", "CBOE"])
+        else:
+            exchange_attempts.append("SMART")
+
         last_error = None
-        for exch in exchanges:
+        for exch in exchange_attempts:
             try:
-                data = await self._get("/iserver/secdef/info", params={
+                params = {
                     "conid": underlying_conid, "sectype": "OPT", "month": month_mmmyy,
-                    "strike": str(strike), "right": right, "exchange": exch,
-                })
+                    "strike": str(strike), "right": right,
+                }
+                if exch:
+                    params["exchange"] = exch
+                data = await self._get("/iserver/secdef/info", params=params)
             except Exception as e:
                 last_error = e
                 data = None
