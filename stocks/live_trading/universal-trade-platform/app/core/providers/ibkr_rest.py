@@ -699,6 +699,25 @@ class IBKRRestProvider(BrokerProvider):
 
         result = await self._place_order_with_confirmation(order_body)
         logger.info("CPG combo order result: %s", result)
+
+        # Check for rejection/error
+        if result.get("error"):
+            error_msg = result["error"]
+            # Extract rejection reason
+            if "NOT ACCEPTED" in str(error_msg).upper() or "REJECT" in str(error_msg).upper():
+                return OrderResult(
+                    order_id=str(uuid.uuid4()),
+                    broker=Broker.IBKR,
+                    status=OrderStatus.REJECTED,
+                    message=str(error_msg)[:500],
+                )
+            return OrderResult(
+                order_id=str(uuid.uuid4()),
+                broker=Broker.IBKR,
+                status=OrderStatus.FAILED,
+                message=str(error_msg)[:500],
+            )
+
         order_id = str(result.get("order_id", result.get("orderId", uuid.uuid4())))
 
         return OrderResult(
