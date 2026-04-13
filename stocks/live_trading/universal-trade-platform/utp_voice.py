@@ -2854,10 +2854,13 @@ async def api_prev_closes(
         out["_voice_meta"] = {"_cache_policy": make_meta(ttl_market=PREV_CLOSE_TTL_MARKET, ttl_closed=PREV_CLOSE_TTL_CLOSED)}
         return out
 
-    # Check Redis cache
+    # Check Redis cache — only use if all tickers have non-null last_close values
     if CACHE_ENABLED:
         cached = await cache_get("utp:voice:prev_closes", ttl_market=PREV_CLOSE_TTL_MARKET, ttl_closed=PREV_CLOSE_TTL_CLOSED)
-        if cached and all(sym in cached for sym in tickers):
+        if cached and all(
+            sym in cached and isinstance(cached[sym], dict) and cached[sym].get("last_close")
+            for sym in tickers
+        ):
             return _add_meta(cached)
 
     result: dict[str, dict] = {}
@@ -2917,13 +2920,16 @@ async def api_prev_closes(
     if CACHE_ENABLED and result:
         await cache_set("utp:voice:prev_closes", result, ttl_market=PREV_CLOSE_TTL_MARKET, ttl_closed=PREV_CLOSE_TTL_CLOSED)
 
-    # Try Redis if still empty (serve stale if available)
+    # Try Redis stale data if still empty — but validate it has actual values
     if CACHE_ENABLED and not result:
         from app.services.redis_cache import cache_get_raw
         try:
             raw = await cache_get_raw("utp:voice:prev_closes")
             if raw and raw.get("data"):
-                result = raw["data"]
+                stale = raw["data"]
+                # Only use if it has actual close values (not nulls from failed fetch)
+                if any(isinstance(stale.get(s), dict) and stale[s].get("last_close") for s in tickers):
+                    result = stale
         except Exception:
             pass
 
