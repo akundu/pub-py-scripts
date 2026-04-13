@@ -3168,7 +3168,8 @@ async def api_trades_list(
     daemon_trades = []
     try:
         client = get_daemon_client()
-        daemon_resp = await client._get("/account/trades", params={"days": days if days > 0 else 7, "include_all": "true"})
+        # Only fetch open positions + recent closed (not all 1000+ historical)
+        daemon_resp = await client._get("/account/trades", params={"days": days if days > 0 else 1, "include_all": "true"})
         logger.info("Daemon trades fetch: got %s items (type=%s)", len(daemon_resp) if isinstance(daemon_resp, list) else "?", type(daemon_resp).__name__)
         if isinstance(daemon_resp, list):
             for pos in daemon_resp:
@@ -3177,14 +3178,43 @@ async def api_trades_list(
                     legs = pos.get("legs") or []
                     sell_leg = next((l for l in legs if "SELL" in (l.get("action") or "")), None)
                     buy_leg = next((l for l in legs if "BUY" in (l.get("action") or "")), None)
+                    qty = abs(float(pos.get("quantity", 0)))
+                    entry_price = abs(float(pos.get("entry_price", 0) or 0))
+                    order_type = pos.get("order_type", "")
+
+                    # Credit calculation: entry_price for options is already per-contract
+                    # (IBKR avg_cost). For equities it's per-share.
+                    if order_type in ("multi_leg", "option"):
+                        total_credit = round(entry_price * qty, 2)  # Already per-contract
+                    else:
+                        total_credit = round(entry_price * qty, 2)  # Per-share for equity
+
+                    # Extract strikes from legs_summary if legs are empty
+                    legs_summary = pos.get("legs_summary", "")
+                    short_strike = str(sell_leg.get("strike", "")) if sell_leg else ""
+                    long_strike = str(buy_leg.get("strike", "")) if buy_leg else ""
+                    opt_type = sell_leg.get("option_type", "") if sell_leg else ""
+
+                    # Parse legs_summary like "P6615/P6595" if no legs
+                    if not short_strike and legs_summary:
+                        import re
+                        strikes = re.findall(r'[PC](\d+)', legs_summary)
+                        if len(strikes) >= 2:
+                            short_strike = strikes[0]
+                            long_strike = strikes[1]
+                        if legs_summary.startswith("P"):
+                            opt_type = "PUT"
+                        elif legs_summary.startswith("C"):
+                            opt_type = "CALL"
+
                     daemon_trades.append({
                         "timestamp": pos.get("entry_time") or pos.get("last_synced_at") or "",
                         "symbol": sym,
-                        "option_type": sell_leg.get("option_type", "") if sell_leg else pos.get("order_type", ""),
-                        "short_strike": str(sell_leg.get("strike", "")) if sell_leg else "",
-                        "long_strike": str(buy_leg.get("strike", "")) if buy_leg else "",
-                        "quantity": str(abs(pos.get("quantity", 0))),
-                        "total_credit": str(abs(float(pos.get("entry_price", 0) or 0)) * abs(float(pos.get("quantity", 0))) * 100),
+                        "option_type": opt_type or order_type,
+                        "short_strike": short_strike,
+                        "long_strike": long_strike,
+                        "quantity": str(int(qty)) if qty == int(qty) else str(qty),
+                        "total_credit": str(total_credit),
                         "total_max_loss": "",
                         "roi_pct": "",
                         "otm_pct": "",
@@ -3196,7 +3226,7 @@ async def api_trades_list(
                         "broker": pos.get("broker", "ibkr"),
                     })
                 except Exception:
-                    continue  # Skip malformed positions
+                    continue
     except Exception as e:
         logger.warning("Failed to fetch daemon trades: %s", e)
 
