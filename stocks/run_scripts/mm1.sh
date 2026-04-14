@@ -1,6 +1,10 @@
 #!/bin/sh
 git pull origin; rm stocks.out ; python fetch_all_data.py --types all --max-concurrent 2 --executor-type process --stock-executor-type process --client-timeout 180 --use-market-hours --data-source polygon  --db-path $QUEST_DB_STRING --continuous --interval-multiplier 3  > stocks.out 2>&1 #--fetch-once-before-wait 
 
+python scripts/fetch_options.py --force-fetch --use-csv --symbols I:SPX I:RUT I:NDX --force-fetch --continuous --executor-type thread --snapshot-max-concurrent 50  --strike-range-percent 50 --refresh-threshold-seconds 10 --interval-multiplier .001  --data-dir ./csv_exports/  --days-ahead 5 --fetch-once-before-wait --use-market-hours
+
+python scripts/fetch_options.py --force-fetch --use-csv --symbols I:SPX I:RUT I:NDX --force-fetch --continuous --executor-type thread --snapshot-max-concurrent 50 --strike-range-percent 25 --refresh-threshold-seconds 1 --interval-multiplier .001 --data-dir ./csv_exports/ --days-ahead 1 --fetch-once-before-wait --use-market-hours
+
 
 git pull origin; while true ; do rm out; ulimit -n 65536; date; time python fetch_all_data.py --types all --max-concurrent 3 --executor-type process --stock-executor-type process --client-timeout 180 --fetch-market-data  --fetch-ratios --data-source polygon  --db-path $QUEST_DB_STRING --start-date  $(date -v-3d +%Y-%m-%d) --end-date $(date -v-0d +%Y-%m-%d)  2>&1 | tee out;  date; sleep 43200; done
 
