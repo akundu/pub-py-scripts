@@ -1893,12 +1893,10 @@ def _render_slot_table(slots: dict, sorted_keys: list[str], percentiles: list[in
     for s in sorted_keys:
         info = slots[s]
         n = info.get(count_key, 0)
-        # Parse ET hour:min for client-side local time conversion
         et_h, et_m = s.split(":")
-        parts.append(f'                        <th colspan="2">{info["label_et"]}<br>'
-                     f'<small class="local-time-slot" data-et-hour="{et_h}" data-et-min="{et_m}" '
-                     f'style="font-weight:normal;font-size:11px;opacity:0.8">'
-                     f'{info["label_pt"]} (n={n})</small></th>\n')
+        parts.append(f'                        <th colspan="2">'
+                     f'<span class="local-time-slot" data-et-hour="{et_h}" data-et-min="{et_m}" '
+                     f'data-n="{n}" data-et-label="{info["label_et"]}"></span></th>\n')
 
     parts.append('                    </tr>\n                    <tr>\n                        <th></th>\n')
     for _ in sorted_keys:
@@ -2092,13 +2090,13 @@ def format_hourly_moves_as_html(hourly_data: dict) -> str:
         document.querySelectorAll('.local-time-slot').forEach(function(el) {
             var h = parseInt(el.dataset.etHour, 10);
             var m = parseInt(el.dataset.etMin, 10);
+            var n = el.dataset.n || '';
+            var etLabel = el.dataset.etLabel || '';
             // Convert ET time to UTC, then let browser show in local tz
             var utcDate = new Date(Date.UTC(2026, 0, 15, h + etOffset, m, 0));
             var localStr = utcDate.toLocaleTimeString('en-US', {hour: 'numeric', minute: '2-digit', timeZoneName: 'short'});
-            // Preserve n= count from existing text
-            var nMatch = el.textContent.match(/\\(n=\\d+\\)/);
-            var nText = nMatch ? ' ' + nMatch[0] : '';
-            el.textContent = localStr + nText;
+            el.innerHTML = localStr + '<br><small style="font-weight:normal;font-size:11px;opacity:0.8">'
+                + etLabel + ' (n=' + n + ')</small>';
         });
     })();
     </script>

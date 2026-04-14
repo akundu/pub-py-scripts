@@ -6349,7 +6349,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                         </div>
                         <div class="detail-item">
                             <div class="detail-label">Time</div>
-                            <div class="detail-value"><span id="detailTimeLabel">${{data.time_label ? data.time_label + ' ET (' + etTimeToLocal(data.time_label) + ')' : 'N/A'}}</span></div>
+                            <div class="detail-value"><span id="detailTimeLabel">${{data.time_label ? etTimeToLocal(data.time_label) + ' <small style="opacity:0.7">(' + data.time_label + ' ET)</small>' : 'N/A'}}</span></div>
                         </div>
                         <div class="detail-item">
                             <div class="detail-label">Data Source</div>
