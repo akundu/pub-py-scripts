@@ -9889,20 +9889,22 @@ async def handle_predictions_page(request: web.Request) -> web.Response:
             td0 = upcoming_td[0]
             today_result['target_date'] = td0.isoformat()
             today_result['target_date_str'] = td0.strftime('%A, %B %d, %Y')
-            # Fix prev_close: query QuestDB directly for previous trading day's close
+            # Fix prev_close: query QuestDB for previous trading day's close
             try:
                 from common.market_hours import previous_trading_day as _ptd
                 prev_td = _ptd()
                 db_inst = request.app.get('db_instance')
                 if db_inst:
-                    sql = f"SELECT close FROM daily_prices WHERE ticker = '{ticker}' AND date <= '{prev_td.isoformat()}' ORDER BY date DESC LIMIT 1"
+                    sql = f"SELECT date, close FROM daily_prices WHERE ticker = '{ticker}' AND date <= '{prev_td.isoformat()}' ORDER BY date DESC LIMIT 1"
                     rows = await db_inst.execute_query(sql)
                     if rows and len(rows) > 0:
-                        close_val = rows[0].get('close') if isinstance(rows[0], dict) else rows[0][0]
+                        row = rows[0]
+                        close_val = row.get('close') if isinstance(row, dict) else row[0]
+                        date_val = row.get('date') if isinstance(row, dict) else (row[1] if len(row) > 1 else '')
                         if close_val:
                             today_result['prev_prev_close'] = today_result.get('prev_close', 0)
                             today_result['prev_close'] = float(close_val)
-                            today_result['prev_close_date'] = prev_td.isoformat()
+                            today_result['prev_close_date'] = str(date_val)[:10]
             except Exception:
                 if today_result.get('current_price') and today_result.get('prev_close'):
                     today_result['prev_prev_close'] = today_result['prev_close']
@@ -10056,38 +10058,24 @@ async def handle_lazy_load_today_prediction(request: web.Request) -> web.Respons
             result['target_date'] = td0.isoformat()
             result['target_date_str'] = td0.strftime('%A, %B %d, %Y')
 
-        # Fix prev_close: query QuestDB directly for previous trading day's close
+        # Fix prev_close: query QuestDB for previous trading day's close
         try:
             from common.market_hours import previous_trading_day
             prev_td = previous_trading_day()
             db_inst = request.app.get('db_instance')
             if db_inst:
-                # Use direct SQL — get_stock_data may normalize ticker differently
-                sql = f"SELECT close FROM daily_prices WHERE ticker = '{ticker}' AND date = '{prev_td.isoformat()}'"
+                sql = f"SELECT date, close FROM daily_prices WHERE ticker = '{ticker}' AND date <= '{prev_td.isoformat()}' ORDER BY date DESC LIMIT 1"
                 rows = await db_inst.execute_query(sql)
                 if rows and len(rows) > 0:
-                    close_val = rows[0].get('close') if isinstance(rows[0], dict) else rows[0][0]
+                    row = rows[0]
+                    close_val = row.get('close') if isinstance(row, dict) else row[0]
+                    date_val = row.get('date') if isinstance(row, dict) else (row[1] if len(row) > 1 else '')
                     if close_val:
                         result['prev_prev_close'] = result.get('prev_close', 0)
                         result['prev_close'] = float(close_val)
-                        result['prev_close_date'] = prev_td.isoformat()
-                else:
-                    # Try broader query (date might not match exactly due to timezone)
-                    sql2 = f"SELECT date, close FROM daily_prices WHERE ticker = '{ticker}' AND date <= '{prev_td.isoformat()}' ORDER BY date DESC LIMIT 1"
-                    rows2 = await db_inst.execute_query(sql2)
-                    if rows2 and len(rows2) > 0:
-                        close_val = rows2[0].get('close') if isinstance(rows2[0], dict) else rows2[0][0]
-                        date_val = rows2[0].get('date') if isinstance(rows2[0], dict) else rows2[0][1] if len(rows2[0]) > 1 else ''
-                        if close_val:
-                            result['prev_prev_close'] = result.get('prev_close', 0)
-                            result['prev_close'] = float(close_val)
-                            result['prev_close_date'] = str(date_val)[:10]
+                        result['prev_close_date'] = str(date_val)[:10]
         except Exception as e:
             logger.debug("prev_close query failed for %s: %s", ticker, e)
-            # Fallback: use engine's values
-            if result.get('current_price') and result.get('prev_close'):
-                result['prev_prev_close'] = result['prev_close']
-                result['prev_close'] = result['current_price']
 
     return web.json_response(result)
 
