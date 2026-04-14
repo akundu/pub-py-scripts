@@ -5363,6 +5363,19 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
             return Math.max(0, hoursLeft);
         }}
 
+        // Convert ET time label (e.g. "10:30") to local timezone string
+        function etTimeToLocal(timeLabel) {{
+            if (!timeLabel) return '';
+            const match = timeLabel.match(/^(\\d{{1,2}}):(\\d{{2}})$/);
+            if (!match) return '';
+            const h = parseInt(match[1]), m = parseInt(match[2]);
+            // Check if New York is currently in EDT or EST
+            const nowStr = new Date().toLocaleString('en-US', {{timeZone: 'America/New_York', timeZoneName: 'short'}});
+            const etOffset = nowStr.indexOf('EDT') >= 0 ? 4 : 5;
+            const utcDate = new Date(Date.UTC(2026, 0, 15, h + etOffset, m));
+            return utcDate.toLocaleTimeString('en-US', {{hour: 'numeric', minute: '2-digit', timeZoneName: 'short'}});
+        }}
+
         // Update hours-to-close display elements (called every 30s)
         function refreshHoursToClose() {{
             const hrs = getHoursToClose();
@@ -6069,7 +6082,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
             // Extract timestamps and band data
             const labels = snapshots.map(s => {{
                 const date = new Date(s.timestamp);
-                return date.toLocaleTimeString('en-US', {{ hour: '2-digit', minute: '2-digit', timeZone: 'America/Los_Angeles' }});
+                return date.toLocaleTimeString('en-US', {{ hour: '2-digit', minute: '2-digit', timeZoneName: 'short' }});
             }});
 
             // Prepare datasets for each band level
@@ -6336,7 +6349,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                         </div>
                         <div class="detail-item">
                             <div class="detail-label">Time</div>
-                            <div class="detail-value">${{data.time_label || 'N/A'}}</div>
+                            <div class="detail-value"><span id="detailTimeLabel">${{data.time_label ? data.time_label + ' ET (' + etTimeToLocal(data.time_label) + ')' : 'N/A'}}</span></div>
                         </div>
                         <div class="detail-item">
                             <div class="detail-label">Data Source</div>

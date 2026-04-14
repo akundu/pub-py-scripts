@@ -1893,8 +1893,11 @@ def _render_slot_table(slots: dict, sorted_keys: list[str], percentiles: list[in
     for s in sorted_keys:
         info = slots[s]
         n = info.get(count_key, 0)
+        # Parse ET hour:min for client-side local time conversion
+        et_h, et_m = s.split(":")
         parts.append(f'                        <th colspan="2">{info["label_et"]}<br>'
-                     f'<small style="font-weight:normal;font-size:11px;opacity:0.8">'
+                     f'<small class="local-time-slot" data-et-hour="{et_h}" data-et-min="{et_m}" '
+                     f'style="font-weight:normal;font-size:11px;opacity:0.8">'
                      f'{info["label_pt"]} (n={n})</small></th>\n')
 
     parts.append('                    </tr>\n                    <tr>\n                        <th></th>\n')
@@ -2007,6 +2010,7 @@ def format_hourly_moves_as_html(hourly_data: dict) -> str:
     prev_close = hourly_data["previous_close"]
     percentiles = hourly_data["percentiles"]
     slots = hourly_data["slots"]
+    slots_15min = hourly_data.get("slots_15min", {})
     slots_10min = hourly_data.get("slots_10min", {})
     slots_5min = hourly_data.get("slots_5min", {})
     has_fine = hourly_data.get("has_fine_data", False)
@@ -2032,12 +2036,21 @@ def format_hourly_moves_as_html(hourly_data: dict) -> str:
         </div>
 """)
 
-    # --- Tier 1: Half-hour tables ---
-    html_parts.append(_render_slot_table(slots, sorted_slots, percentiles, "down",
-                                          "DOWN MOVES TO CLOSE (per half-hour)", ticker=ticker))
-    html_parts.append('        <div style="margin-top:30px"></div>\n')
-    html_parts.append(_render_slot_table(slots, sorted_slots, percentiles, "up",
-                                          "UP MOVES TO CLOSE (per half-hour)", ticker=ticker))
+    # --- Tier 1: Quarter-hour (15-min) tables ---
+    sorted_15 = sorted(slots_15min.keys())
+    if sorted_15:
+        html_parts.append(_render_slot_table(slots_15min, sorted_15, percentiles, "down",
+                                              "DOWN MOVES TO CLOSE (per 15-min)", ticker=ticker))
+        html_parts.append('        <div style="margin-top:30px"></div>\n')
+        html_parts.append(_render_slot_table(slots_15min, sorted_15, percentiles, "up",
+                                              "UP MOVES TO CLOSE (per 15-min)", ticker=ticker))
+    else:
+        # Fallback to half-hour if no 15-min data
+        html_parts.append(_render_slot_table(slots, sorted_slots, percentiles, "down",
+                                              "DOWN MOVES TO CLOSE (per half-hour)", ticker=ticker))
+        html_parts.append('        <div style="margin-top:30px"></div>\n')
+        html_parts.append(_render_slot_table(slots, sorted_slots, percentiles, "up",
+                                              "UP MOVES TO CLOSE (per half-hour)", ticker=ticker))
 
     # --- Tier 2: 10-min tables (last 30 min) ---
     sorted_10 = sorted(slots_10min.keys())
@@ -2067,4 +2080,28 @@ def format_hourly_moves_as_html(hourly_data: dict) -> str:
 """)
 
     html_parts.append('    </div>\n')
+
+    # Client-side script to convert ET times to browser local timezone
+    html_parts.append("""
+    <script>
+    (function() {
+        // Determine current ET offset: check if New York is in EDT or EST right now
+        var nowStr = new Date().toLocaleString('en-US', {timeZone: 'America/New_York', timeZoneName: 'short'});
+        var etOffset = nowStr.indexOf('EDT') >= 0 ? 4 : 5;  // EDT=UTC-4, EST=UTC-5
+
+        document.querySelectorAll('.local-time-slot').forEach(function(el) {
+            var h = parseInt(el.dataset.etHour, 10);
+            var m = parseInt(el.dataset.etMin, 10);
+            // Convert ET time to UTC, then let browser show in local tz
+            var utcDate = new Date(Date.UTC(2026, 0, 15, h + etOffset, m, 0));
+            var localStr = utcDate.toLocaleTimeString('en-US', {hour: 'numeric', minute: '2-digit', timeZoneName: 'short'});
+            // Preserve n= count from existing text
+            var nMatch = el.textContent.match(/\\(n=\\d+\\)/);
+            var nText = nMatch ? ' ' + nMatch[0] : '';
+            el.textContent = localStr + nText;
+        });
+    })();
+    </script>
+""")
+
     return "".join(html_parts)

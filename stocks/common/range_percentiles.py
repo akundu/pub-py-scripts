@@ -364,6 +364,16 @@ HALF_HOUR_SLOTS = [
     "13:00", "13:30", "14:00", "14:30", "15:00", "15:30",
 ]
 
+# Quarter-hour (15-min) slot definitions
+QUARTER_HOUR_SLOTS = [
+    "10:00", "10:15", "10:30", "10:45",
+    "11:00", "11:15", "11:30", "11:45",
+    "12:00", "12:15", "12:30", "12:45",
+    "13:00", "13:15", "13:30", "13:45",
+    "14:00", "14:15", "14:30", "14:45",
+    "15:00", "15:15", "15:30", "15:45",
+]
+
 # 10-min slots for last 30 min (3:30 PM - 4:00 PM ET)
 TEN_MIN_SLOTS = ["15:30", "15:40", "15:50"]
 
@@ -541,6 +551,10 @@ async def compute_hourly_moves_to_close(
         m30 = (m // 30) * 30
         hh_slot = f"{h}:{m30:02d}"
 
+        # Quarter-hour bucket: floor to nearest 15 min
+        m15 = (m // 15) * 15
+        qh_slot = f"{h}:{m15:02d}"
+
         # 10-min bucket (only for 15:30-15:59)
         ten_slot = None
         if h == 15 and m >= 30:
@@ -559,6 +573,7 @@ async def compute_hourly_moves_to_close(
             "day_close": day_close,
             "move_pct": move_pct,
             "slot_30": hh_slot,
+            "slot_15": qh_slot,
             "slot_10": ten_slot,
             "slot_5": five_slot,
         })
@@ -640,6 +655,31 @@ async def compute_hourly_moves_to_close(
             "when_down_day_count": n_down,
         }
 
+    # --- Aggregate quarter-hour (15-min) slots ---
+    slots_15min = {}
+    for slot_key in QUARTER_HOUR_SLOTS:
+        subset = records_df[records_df["slot_15"] == slot_key]
+        if subset.empty:
+            continue
+        day_agg = subset.sort_values("trading_date").drop_duplicates(subset="trading_date", keep="first")
+        if len(day_agg) < min_days:
+            continue
+        moves = day_agg["move_pct"]
+        mask_up = moves > 0
+        mask_down = moves < 0
+        n_up = int(mask_up.sum())
+        n_down = int(mask_down.sum())
+        labels = _et_label(slot_key)
+        slots_15min[slot_key] = {
+            "label_et": labels[0],
+            "label_pt": labels[1],
+            "total_days": len(day_agg),
+            "when_up": build_block(moves[mask_up], n_up, invert=False),
+            "when_up_day_count": n_up,
+            "when_down": build_block(moves[mask_down], n_down, invert=True),
+            "when_down_day_count": n_down,
+        }
+
     # --- Aggregate 10-min slots (last 30 min) ---
     slots_10min = {}
     for slot_key in TEN_MIN_SLOTS:
@@ -696,9 +736,10 @@ async def compute_hourly_moves_to_close(
         "lookback_trading_days": lookback,
         "percentiles": percentiles,
         "slots": slots_data,
+        "slots_15min": slots_15min,
         "slots_10min": slots_10min,
         "slots_5min": slots_5min,
-        "has_fine_data": bool(slots_10min or slots_5min),
+        "has_fine_data": bool(slots_15min or slots_10min or slots_5min),
     }
 
 
