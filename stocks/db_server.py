@@ -9889,22 +9889,20 @@ async def handle_predictions_page(request: web.Request) -> web.Response:
             td0 = upcoming_td[0]
             today_result['target_date'] = td0.isoformat()
             today_result['target_date_str'] = td0.strftime('%A, %B %d, %Y')
-            # Fix prev_close: query QuestDB for previous trading day's close
+            # Fix prev_close: query with date range to find previous trading day's close
             try:
                 from common.market_hours import previous_trading_day as _ptd
                 prev_td = _ptd()
                 db_inst = request.app.get('db_instance')
                 if db_inst:
-                    sql = f"SELECT date, close FROM daily_prices WHERE ticker = '{ticker}' AND date <= '{prev_td.isoformat()}' ORDER BY date DESC LIMIT 1"
-                    rows = await db_inst.execute_query(sql)
-                    if rows and len(rows) > 0:
-                        row = rows[0]
-                        close_val = row.get('close') if isinstance(row, dict) else row[0]
-                        date_val = row.get('date') if isinstance(row, dict) else (row[1] if len(row) > 1 else '')
-                        if close_val:
-                            today_result['prev_prev_close'] = today_result.get('prev_close', 0)
-                            today_result['prev_close'] = float(close_val)
-                            today_result['prev_close_date'] = str(date_val)[:10]
+                    _df = await db_inst.get_stock_data(
+                        ticker=ticker, start_date=(prev_td - timedelta(days=5)).isoformat(),
+                        end_date=prev_td.isoformat(), interval='daily',
+                    )
+                    if _df is not None and not _df.empty and 'close' in _df.columns:
+                        today_result['prev_prev_close'] = today_result.get('prev_close', 0)
+                        today_result['prev_close'] = float(_df['close'].iloc[-1])
+                        today_result['prev_close_date'] = prev_td.isoformat()
             except Exception:
                 if today_result.get('current_price') and today_result.get('prev_close'):
                     today_result['prev_prev_close'] = today_result['prev_close']
@@ -10058,22 +10056,21 @@ async def handle_lazy_load_today_prediction(request: web.Request) -> web.Respons
             result['target_date'] = td0.isoformat()
             result['target_date_str'] = td0.strftime('%A, %B %d, %Y')
 
-        # Fix prev_close: query QuestDB for previous trading day's close
+        # Fix prev_close: use get_stock_data which works reliably for SPX
+        # and set date from previous_trading_day() which is always correct
         try:
             from common.market_hours import previous_trading_day
             prev_td = previous_trading_day()
             db_inst = request.app.get('db_instance')
             if db_inst:
-                sql = f"SELECT date, close FROM daily_prices WHERE ticker = '{ticker}' AND date <= '{prev_td.isoformat()}' ORDER BY date DESC LIMIT 1"
-                rows = await db_inst.execute_query(sql)
-                if rows and len(rows) > 0:
-                    row = rows[0]
-                    close_val = row.get('close') if isinstance(row, dict) else row[0]
-                    date_val = row.get('date') if isinstance(row, dict) else (row[1] if len(row) > 1 else '')
-                    if close_val:
-                        result['prev_prev_close'] = result.get('prev_close', 0)
-                        result['prev_close'] = float(close_val)
-                        result['prev_close_date'] = str(date_val)[:10]
+                df = await db_inst.get_stock_data(
+                    ticker=ticker, start_date=(prev_td - timedelta(days=5)).isoformat(),
+                    end_date=prev_td.isoformat(), interval='daily',
+                )
+                if df is not None and not df.empty and 'close' in df.columns:
+                    result['prev_prev_close'] = result.get('prev_close', 0)
+                    result['prev_close'] = float(df['close'].iloc[-1])
+                    result['prev_close_date'] = prev_td.isoformat()
         except Exception as e:
             logger.debug("prev_close query failed for %s: %s", ticker, e)
 
