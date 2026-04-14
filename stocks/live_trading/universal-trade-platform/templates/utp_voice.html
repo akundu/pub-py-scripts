@@ -1083,6 +1083,8 @@ function getPercentileBracket(sym, expDate, optionType, otmPct) {
     {pctl: 98, val: Math.abs(pctData.p98 || 999)},
     {pctl: 95, val: Math.abs(pctData.p95 || 999)},
     {pctl: 90, val: Math.abs(pctData.p90 || 999)},
+    {pctl: 85, val: Math.abs(pctData.p85 || 999)},
+    {pctl: 80, val: Math.abs(pctData.p80 || 999)},
     {pctl: 75, val: Math.abs(pctData.p75 || 999)},
   ];
 
@@ -1101,6 +1103,8 @@ function pctlBadge(bracket) {
   if (p >= 99) cls = 'badge-safe';
   else if (p >= 95) cls = 'badge-safe';
   else if (p >= 90) cls = 'badge-watch';
+  else if (p >= 85) cls = 'badge-watch';
+  else if (p >= 80) cls = 'badge-warning';
   else if (p >= 75) cls = 'badge-warning';
   return `<span class="badge ${cls}">${bracket.label}</span>`;
 }

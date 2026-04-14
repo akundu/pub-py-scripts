@@ -26,7 +26,7 @@ except ImportError:
 
 # Constants — default 120 trading days
 DEFAULT_LOOKBACK = 120  # trading days (~6 months)
-DEFAULT_PERCENTILES = [75, 90, 95, 98, 99, 100]
+DEFAULT_PERCENTILES = [75, 80, 85, 90, 95, 98, 99, 100]
 MIN_DAYS_DEFAULT = 30
 MIN_DIRECTION_DAYS_DEFAULT = 5
 DEFAULT_WINDOW = 0  # window=0 represents today (0DTE)
@@ -761,7 +761,7 @@ async def compute_range_percentiles_multi_window(
                 "last_trading_day": "2026-02-15",
                 "previous_close": 21500.0,
                 "lookback_trading_days": 120,
-                "percentiles": [75, 90, 95, 98, 99, 100],
+                "percentiles": [75, 80, 85, 90, 95, 98, 99, 100],
                 "window_list": [1, 3, 5, 10, 15, 20],
                 "skipped_windows": [...]  # windows with insufficient data
             },
