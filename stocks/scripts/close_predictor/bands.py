@@ -55,7 +55,9 @@ def map_statistical_to_bands(
     if hasattr(prediction, 'percentile_moves') and prediction.percentile_moves:
         # Use actual percentiles (NEW APPROACH - accurate!)
         band_defs = {
+            "P75": (12.5, 87.5),
             "P80": (10.0, 90.0),
+            "P85": (7.5, 92.5),
             "P90": (5.0, 95.0),
             "P95": (2.5, 97.5),
             "P97": (1.5, 98.5),
@@ -150,7 +152,9 @@ def map_percentile_to_bands(
                  If provided, uses weighted_percentile instead of np.percentile.
     """
     band_defs = {
+        "P75": (12.5, 87.5),
         "P80": (10.0, 90.0),
+        "P85": (7.5, 92.5),
         "P90": (5.0, 95.0),
         "P95": (2.5, 97.5),
         "P97": (1.5, 98.5),

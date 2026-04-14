@@ -5664,7 +5664,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                 let badge = '';
                 if (bands) {{
                     // Check if actual close is inside each band, pick the tightest hit
-                    for (const bname of ['P80', 'P90', 'P95', 'P97', 'P98', 'P99', 'P100']) {{
+                    for (const bname of ['P75', 'P80', 'P85', 'P90', 'P95', 'P97', 'P98', 'P99', 'P100']) {{
                         const b = bands[bname];
                         if (b && data.actual_close >= b.lo_price && data.actual_close <= b.hi_price) {{
                             badge = `<span style="color:#3fb950;font-size:12px;margin-left:4px;">Hit ${{bname}}</span>`;
@@ -5930,7 +5930,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
             if (!predictionData || !predictionData.ensemble_methods) return;
 
             const methods = predictionData.ensemble_methods;
-            const bandNames = ['P80', 'P90', 'P95', 'P97', 'P98', 'P99'];
+            const bandNames = ['P75', 'P80', 'P85', 'P90', 'P95', 'P97', 'P98', 'P99'];
 
             // Hide the standard bands table
             const bandsTable = document.getElementById('bandsTable');
@@ -6367,7 +6367,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                         </p>
                         <ul class="band-list">
                 `;
-                ['P80', 'P90', 'P95', 'P97', 'P98', 'P99', 'P100'].forEach(bandName => {{
+                ['P75', 'P80', 'P85', 'P90', 'P95', 'P97', 'P98', 'P99', 'P100'].forEach(bandName => {{
                     if (data.statistical_bands[bandName]) {{
                         const band = data.statistical_bands[bandName];
                         html += `
@@ -6397,7 +6397,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                         </p>
                         <ul class="band-list">
                 `;
-                ['P80', 'P90', 'P95', 'P97', 'P98', 'P99', 'P100'].forEach(bandName => {{
+                ['P75', 'P80', 'P85', 'P90', 'P95', 'P97', 'P98', 'P99', 'P100'].forEach(bandName => {{
                     if (data.percentile_bands[bandName]) {{
                         const band = data.percentile_bands[bandName];
                         html += `
@@ -6427,7 +6427,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                         </p>
                         <ul class="band-list">
                 `;
-                ['P80', 'P90', 'P95', 'P97', 'P98', 'P99', 'P100'].forEach(bandName => {{
+                ['P75', 'P80', 'P85', 'P90', 'P95', 'P97', 'P98', 'P99', 'P100'].forEach(bandName => {{
                     if (data.empirical_continuous_bands[bandName]) {{
                         const band = data.empirical_continuous_bands[bandName];
                         html += `
@@ -6457,7 +6457,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                         </p>
                         <ul class="band-list">
                 `;
-                ['P80', 'P90', 'P95', 'P97', 'P98', 'P99', 'P100'].forEach(bandName => {{
+                ['P75', 'P80', 'P85', 'P90', 'P95', 'P97', 'P98', 'P99', 'P100'].forEach(bandName => {{
                     if (data.combined_bands[bandName]) {{
                         const band = data.combined_bands[bandName];
                         const midpoint = (band.lo_price + band.hi_price) / 2;
