@@ -9889,20 +9889,22 @@ async def handle_predictions_page(request: web.Request) -> web.Response:
             td0 = upcoming_td[0]
             today_result['target_date'] = td0.isoformat()
             today_result['target_date_str'] = td0.strftime('%A, %B %d, %Y')
-            # Fix prev_close: query with date range to find previous trading day's close
+            # Fix prev_close: get last 2 closes from QuestDB
             try:
                 from common.market_hours import previous_trading_day as _ptd
                 prev_td = _ptd()
                 db_inst = request.app.get('db_instance')
                 if db_inst:
                     _df = await db_inst.get_stock_data(
-                        ticker=ticker, start_date=(prev_td - timedelta(days=5)).isoformat(),
+                        ticker=ticker, start_date=(prev_td - timedelta(days=10)).isoformat(),
                         end_date=prev_td.isoformat(), interval='daily',
                     )
                     if _df is not None and not _df.empty and 'close' in _df.columns:
-                        today_result['prev_prev_close'] = today_result.get('prev_close', 0)
-                        today_result['prev_close'] = float(_df['close'].iloc[-1])
+                        closes = _df['close'].values
+                        today_result['prev_close'] = float(closes[-1])
                         today_result['prev_close_date'] = prev_td.isoformat()
+                        if len(closes) >= 2:
+                            today_result['prev_prev_close'] = float(closes[-2])
             except Exception:
                 if today_result.get('current_price') and today_result.get('prev_close'):
                     today_result['prev_prev_close'] = today_result['prev_close']
@@ -10056,21 +10058,23 @@ async def handle_lazy_load_today_prediction(request: web.Request) -> web.Respons
             result['target_date'] = td0.isoformat()
             result['target_date_str'] = td0.strftime('%A, %B %d, %Y')
 
-        # Fix prev_close: use get_stock_data which works reliably for SPX
-        # and set date from previous_trading_day() which is always correct
+        # Fix prev_close: get last 2 closes from QuestDB
+        # prev_close = yesterday's close, prev_prev_close = day before that
         try:
             from common.market_hours import previous_trading_day
             prev_td = previous_trading_day()
             db_inst = request.app.get('db_instance')
             if db_inst:
                 df = await db_inst.get_stock_data(
-                    ticker=ticker, start_date=(prev_td - timedelta(days=5)).isoformat(),
+                    ticker=ticker, start_date=(prev_td - timedelta(days=10)).isoformat(),
                     end_date=prev_td.isoformat(), interval='daily',
                 )
                 if df is not None and not df.empty and 'close' in df.columns:
-                    result['prev_prev_close'] = result.get('prev_close', 0)
-                    result['prev_close'] = float(df['close'].iloc[-1])
+                    closes = df['close'].values
+                    result['prev_close'] = float(closes[-1])
                     result['prev_close_date'] = prev_td.isoformat()
+                    if len(closes) >= 2:
+                        result['prev_prev_close'] = float(closes[-2])
         except Exception as e:
             logger.debug("prev_close query failed for %s: %s", ticker, e)
 
