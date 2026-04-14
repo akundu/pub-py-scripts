@@ -453,11 +453,6 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
           <input type="number" id="rec-min-otm-pc" class="select-styled" style="width:70px" value="1.5" min="0" step="0.5" onchange="filterRecs()">
           <label style="color:var(--muted);font-size:11px">Width</label>
           <input type="number" id="rec-width" class="select-styled" style="width:65px" value="0" min="0" step="5" placeholder="Auto" onchange="filterRecs()">
-          <select id="rec-type-filter" class="select-styled" onchange="filterRecs()">
-            <option value="ALL">All</option>
-            <option value="PUT">Puts</option>
-            <option value="CALL">Calls</option>
-          </select>
           <label style="color:var(--muted);font-size:11px">Min Pctl</label>
           <select id="rec-min-pctl" class="select-styled" onchange="filterRecs()">
             <option value="0">All</option>
@@ -479,8 +474,8 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
             <option value="98">&gt;P98</option>
             <option value="99">&gt;P99</option>
           </select>
-          <label style="color:var(--muted);font-size:11px" title="Max absolute delta of short leg (lower = further OTM)">Max Delta</label>
-          <input type="number" id="rec-max-delta" class="select-styled" style="width:60px" value="" min="0" max="1" step="0.05" placeholder="Any" onchange="filterRecs()">
+          <label style="color:var(--muted);font-size:11px;white-space:nowrap" title="Max absolute delta of short leg (lower = further OTM)">Max&nbsp;Delta</label>
+          <input type="number" id="rec-max-delta" class="select-styled" style="width:80px" value="" min="0" max="0.30" step="0.01" placeholder="Any" onchange="filterRecs()">
           <label style="color:var(--muted);font-size:11px">Qty</label>
           <input type="number" id="rec-qty" class="select-styled" style="width:60px" value="25" min="1" step="5" onchange="filterRecs()">
           <label style="color:var(--muted);font-size:11px">Min Tot Cr</label>
@@ -493,6 +488,12 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
             <option value="SPX">SPX</option>
             <option value="NDX">NDX</option>
             <option value="RUT">RUT</option>
+          </select>
+          <label style="color:var(--muted);font-size:11px">Type</label>
+          <select id="rec-type-filter" class="select-styled" onchange="filterRecs()">
+            <option value="ALL">Both</option>
+            <option value="PUT">Puts</option>
+            <option value="CALL">Calls</option>
           </select>
           <label style="color:var(--muted);font-size:11px">Show</label>
           <select id="rec-top-n" class="select-styled" onchange="filterRecs()">
@@ -1482,8 +1483,8 @@ function _renderPortfolio(d, tbl, kpis) {
     const positions = d.positions || [];
     if (!positions.length) { tbl.innerHTML = '<div class="empty-msg">No open positions</div>'; return; }
 
-    const NCOLS = 9;
-    let html = '<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>Symbol</th><th>Strikes</th><th class="num">Qty</th><th class="num">Cost</th><th class="num">Value</th><th class="num">P&L</th><th class="num">Cr/ROI/MaxL</th><th>Exp</th><th>Risk</th></tr></thead><tbody>';
+    const NCOLS = 10;
+    let html = '<div style="overflow-x:auto"><table class="tbl"><thead><tr><th>Symbol</th><th class="num">Price</th><th>Strikes</th><th class="num">Qty</th><th class="num hide-sm">Cost</th><th class="num hide-sm">Value</th><th class="num">P&L</th><th class="num hide-sm">Cr/ROI/MaxL</th><th>Exp</th><th class="hide-sm">Risk</th></tr></thead><tbody>';
     let totalCost = 0, totalValue = 0, totalPnl = 0, totalCredit = 0, totalMaxLoss = 0;
 
     for (const p of positions) {
@@ -1513,16 +1514,20 @@ function _renderPortfolio(d, tbl, kpis) {
         crRoiMaxL = `<span style="font-size:11px">${fmt(sm.derived_credit)}/<span class="pos">${sm.roi_pct}%</span>/${fmt(sm.max_loss||0)}</span>`;
       }
 
+      const curPrice = p.current_price || _realtimePrices[sym]?.price || 0;
+      const priceStr = curPrice ? `$${fmt(curPrice)}` : '--';
+
       html += `<tr class="pos-row" onclick="toggleDetail('${pid}')">`;
       html += `<td><b>${sym}</b></td>`;
+      html += `<td class="num">${priceStr}</td>`;
       html += `<td>${lsum||'--'}</td>`;
       html += `<td class="num">${qty}</td>`;
-      html += `<td class="num">$${fmt(cost)}</td>`;
-      html += `<td class="num">${value?'$'+fmt(value):'--'}</td>`;
+      html += `<td class="num hide-sm">$${fmt(cost)}</td>`;
+      html += `<td class="num hide-sm">${value?'$'+fmt(value):'--'}</td>`;
       html += `<td class="num ${pnlCls}">${pnl>=0?'+':'-'}$${fmt(pnl)}</td>`;
-      html += `<td class="num">${crRoiMaxL}</td>`;
+      html += `<td class="num hide-sm">${crRoiMaxL}</td>`;
       html += `<td style="font-size:11px;color:var(--muted)">${exp||'---'}</td>`;
-      html += `<td>${badge}</td></tr>`;
+      html += `<td class="hide-sm">${badge}</td></tr>`;
 
       // Detail card with entry, current, greeks, risk, actions
       const posJson = encodeURIComponent(JSON.stringify({pid,sym,qty,exp,legs,lsum,order_type:p.order_type}));
@@ -3130,6 +3135,9 @@ function renderRecs() {
 
   // ═══ TOP PICKS — combined across all tickers × all DTEs ═══
   const allTopSpreads = [];
+  const _filterFailCounts = {};  // track which filters block spreads, keyed by filter name
+  const _unfilteredTypeCounts = { PUT: 0, CALL: 0 };  // pre-filter type counts
+  let _totalCandidates = 0;
   const now = new Date();
   for (const sym of filteredTickers) {
     const symCache = chainCache[sym];
@@ -3152,6 +3160,8 @@ function renderRecs() {
       // Display DTE = trading days from today to expiration (0 = today)
       const dteNum = displayDTE(exp) ?? ei;
       for (const s of spreads) {
+        _totalCandidates++;
+        _unfilteredTypeCounts[s.option_type] = (_unfilteredTypeCounts[s.option_type] || 0) + 1;
         const bracket = getPercentileBracket(sym, exp, s.option_type, s.otm_pct);
         const predicted = getPredictedBracket(sym, exp, s.option_type, s.otm_pct);
         const enriched = {...s, _pctl: bracket, _pred: predicted, _sym: sym, _exp: exp, _dte: dteNum};
@@ -3159,49 +3169,77 @@ function renderRecs() {
         if (fails.length === 0) {
           enriched._dailyRoi = +(s.roi_pct / (dteNum + 1)).toFixed(2);
           allTopSpreads.push(enriched);
+        } else {
+          for (const f of fails) _filterFailCounts[f] = (_filterFailCounts[f] || 0) + 1;
         }
       }
     }
   }
   allTopSpreads.sort((a, b) => b._dailyRoi - a._dailyRoi);
 
+  // Always show Top Picks section (so Max DTE dropdown remains accessible)
+  const topCollapsed = document.getElementById('top-picks-body')?.style.display === 'none';
+  const caretChar = topCollapsed ? '&#9654;' : '&#9660;';
+  html += `<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><div class="card-title" style="cursor:pointer;margin:0" onclick="const b=document.getElementById('top-picks-body');b.style.display=b.style.display==='none'?'':'none';this.querySelector('.caret').innerHTML=b.style.display==='none'?'&#9654;':'&#9660;'"><span class="caret">${caretChar}</span> Top Picks <span style="color:var(--muted);font-weight:normal;font-size:11px">sorted by D/ROI</span></div><div style="display:flex;align-items:center;gap:4px" onclick="event.stopPropagation()"><label style="color:var(--muted);font-size:10px">Max DTE</label><select id="rec-max-dte" class="select-styled" style="font-size:12px;padding:4px" onchange="filterRecs()">${[0,1,2,3,4,5,10,99].map(v => `<option value="${v}" ${v===maxDte?'selected':''}>${v===99?'All':v}</option>`).join('')}</select></div></div>`;
+  html += `<div id="top-picks-body" style="max-height:400px;overflow-y:auto;overflow-x:auto;-webkit-overflow-scrolling:touch;${topCollapsed ? 'display:none' : ''}">`;
   if (allTopSpreads.length) {
-    const topCollapsed = document.getElementById('top-picks-body')?.style.display === 'none';
-    const caretChar = topCollapsed ? '&#9654;' : '&#9660;';
-    html += `<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><div class="card-title" style="cursor:pointer;margin:0" onclick="const b=document.getElementById('top-picks-body');b.style.display=b.style.display==='none'?'':'none';this.querySelector('.caret').innerHTML=b.style.display==='none'?'&#9654;':'&#9660;'"><span class="caret">${caretChar}</span> Top Picks <span style="color:var(--muted);font-weight:normal;font-size:11px">sorted by D/ROI</span></div><div style="display:flex;align-items:center;gap:4px" onclick="event.stopPropagation()"><label style="color:var(--muted);font-size:10px">Max DTE</label><select id="rec-max-dte" class="select-styled" style="font-size:12px;padding:4px" onchange="filterRecs()">${[0,1,2,3,4,5,10,99].map(v => `<option value="${v}" ${v===maxDte?'selected':''}>${v===99?'All':v}</option>`).join('')}</select></div></div>`;
-    html += `<div id="top-picks-body" style="max-height:400px;overflow-y:auto;overflow-x:auto;-webkit-overflow-scrolling:touch;${topCollapsed ? 'display:none' : ''}">`;
-    html += `<table class="tbl"><thead><tr><th>Tkr</th><th>Type</th><th>Short</th><th>Long</th><th class="hide-sm">Exp</th><th class="num">DTE</th><th class="num">Credit</th><th class="num hide-sm">MaxLoss</th><th class="num">ROI%</th><th class="num" style="color:var(--yellow)">D/ROI</th><th class="num">OTM%</th><th class="num hide-sm" title="OTM% from prev close">pc%</th><th class="hide-sm">H</th><th class="hide-sm">P</th><th></th></tr></thead><tbody>`;
+    html += `<table class="tbl"><thead><tr><th>Tkr</th><th>Type</th><th>Short</th><th>Long</th><th class="hide-sm">Exp</th><th class="num">DTE</th><th class="num">Credit</th><th class="num hide-sm">MaxLoss</th><th class="num">ROI%</th><th class="num" style="color:var(--yellow)">D/ROI</th><th class="num">OTM%</th><th class="num hide-sm" title="OTM% from prev close">pc%</th><th class="num hide-sm">&delta;</th><th class="hide-sm">H</th><th class="hide-sm">P</th><th></th></tr></thead><tbody>`;
     for (const s of allTopSpreads.slice(0, topN)) {
       const totalCr = s.credit_per_contract * recQty;
       const totalML = s.max_loss * recQty;
       const expShort = s._exp.slice(5);  // "04-10" from "2026-04-10"
+      const deltaStr = s.short_delta != null ? Math.abs(s.short_delta).toFixed(2) : '—';
       html += `<tr>`;
       html += `<td style="font-weight:bold">${s._sym}</td>`;
       html += `<td><span class="badge ${s.option_type==='PUT'?'badge-safe':'badge-watch'}">${s.option_type[0]}</span></td>`;
       html += `<td>${s.short_strike}</td><td>${s.long_strike}</td>`;
       html += `<td class="hide-sm" style="font-size:11px">${expShort}</td>`;
       html += `<td class="num">${s._dte}</td>`;
-      html += `<td class="num pos">${$fmt$(totalCr)}<div style="font-size:8px;color:var(--muted)">${$fmt$(s.credit_per_contract)}/c</div></td>`;
-      html += `<td class="num hide-sm" style="color:var(--red-b)">${$fmt$(totalML)}<div style="font-size:8px;color:var(--muted)">${$fmt$(s.max_loss)}/c</div></td>`;
+      html += `<td class="num pos">${$fmt$(totalCr)}<div style="font-size:8px;color:var(--muted)">${recQty}x ${$fmt$(s.credit_per_contract)}/c</div></td>`;
+      html += `<td class="num hide-sm" style="color:var(--red-b)">${$fmt$(totalML)}<div style="font-size:8px;color:var(--muted)">${recQty}x ${$fmt$(s.max_loss)}/c</div></td>`;
       html += `<td class="num">${s.roi_pct}%</td>`;
       html += `<td class="num" style="color:var(--yellow);font-weight:bold">${s._dailyRoi}%</td>`;
       html += `<td class="num">${s.otm_pct}%</td>`;
       html += `<td class="num hide-sm" style="color:var(--yellow)">${s.otm_pct_pc}%</td>`;
+      html += `<td class="num hide-sm">${deltaStr}</td>`;
       html += `<td class="hide-sm">${pctlBadge(s._pctl)}</td>`;
       html += `<td class="hide-sm">${predBadge(s._pred)}</td>`;
       html += `<td><button class="btn btn-green btn-sm" onclick="tradeRec('${s._sym}','${s.option_type}',${s.short_strike},${s.long_strike},'${s._exp}')">Trade</button></td>`;
       html += '</tr>';
     }
-    html += '</tbody></table></div>';
+    html += '</tbody></table>';
+  } else {
+    // No results — show empty state with guidance
+    if (_totalCandidates === 0) {
+      html += `<div style="text-align:center;padding:16px;color:var(--muted)">No option data available yet — waiting for chains to load</div>`;
+    } else {
+      // Spreads exist but all filtered out — show top blockers
+      const sorted = Object.entries(_filterFailCounts).sort((a,b) => b[1] - a[1]);
+      const topBlockers = sorted.slice(0, 3).map(([f, n]) => {
+        const labels = {Hist:'Min Pctl (Hist)',Pred:'Min Pctl (Pred)','D/ROI':'Min D/ROI',OTM:'Min OTM%','OTM-pc':'Min OTM% pc',Credit:'Min Credit',TotCr:'Min Tot Credit',MaxL:'Max Loss',Delta:'Max Delta',Type:'Type'};
+        return `${labels[f]||f} (${n})`;
+      }).join(', ');
+      html += `<div style="text-align:center;padding:16px;color:var(--yellow)">0 of ${_totalCandidates} spreads pass filters — top blockers: ${topBlockers}</div>`;
+    }
+  }
+    // Summary line (shown whether results or not)
     const putCount = allTopSpreads.filter(s => s.option_type === 'PUT').length;
     const callCount = allTopSpreads.filter(s => s.option_type === 'CALL').length;
     let summaryParts = [`${allTopSpreads.length} matches (${putCount}P/${callCount}C)`];
     if (allTopSpreads.length > topN) summaryParts.push(`showing top ${topN}`);
-    if (putCount > 0 && callCount === 0) summaryParts.push('no calls pass filters — try lowering OTM% pc');
-    if (callCount > 0 && putCount === 0) summaryParts.push('no puts pass filters — try lowering OTM% pc');
+    // Smart hint: identify which filter is blocking the missing type
+    for (const [type, label] of [['CALL','calls'],['PUT','puts']]) {
+      if ((type === 'CALL' ? callCount : putCount) === 0 && _unfilteredTypeCounts[type] > 0) {
+        // There are candidates of this type but none pass — find top blocker
+        // Re-check a sample to identify the filter(s)
+        const filterHint = Object.entries(_filterFailCounts).sort((a,b) => b[1] - a[1])[0];
+        const hintLabels = {Hist:'Hist Pctl',Pred:'Pred Pctl','D/ROI':'D/ROI',OTM:'OTM%','OTM-pc':'OTM% pc',Credit:'Credit',TotCr:'Tot Credit'};
+        const hintName = filterHint ? (hintLabels[filterHint[0]] || filterHint[0]) : 'filters';
+        summaryParts.push(`no ${label} pass — try lowering ${hintName}`);
+      }
+    }
     html += `<div style="font-size:9px;color:var(--muted);text-align:right;padding:2px 4px">${summaryParts.join(' · ')}</div>`;
-    html += '</div>';
-  }
+    html += '</div></div>';
 
   // ═══ PER-TICKER VIEW (selected DTE only) ═══
   for (const sym of filteredTickers) {
@@ -3254,21 +3292,23 @@ function renderRecs() {
       continue;
     }
 
-    html += `<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table class="tbl"><thead><tr><th>Type</th><th>Short</th><th>Long</th><th class="num">Credit</th><th class="num">MaxLoss</th><th class="num">ROI%</th><th class="num" style="color:var(--yellow)">D/ROI</th><th class="num">OTM%</th><th class="num hide-sm" title="OTM% from prev close">pc%</th><th class="hide-sm">Hist</th><th class="hide-sm">Pred</th><th></th></tr></thead><tbody>`;
+    html += `<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table class="tbl"><thead><tr><th>Type</th><th>Short</th><th>Long</th><th class="num">Credit</th><th class="num">MaxLoss</th><th class="num">ROI%</th><th class="num" style="color:var(--yellow)">D/ROI</th><th class="num">OTM%</th><th class="num hide-sm" title="OTM% from prev close">pc%</th><th class="num hide-sm">&delta;</th><th class="hide-sm">Hist</th><th class="hide-sm">Pred</th><th></th></tr></thead><tbody>`;
 
     for (const s of showMatches) {
       const totalCr = s.credit_per_contract * recQty;
       const totalML = s.max_loss * recQty;
+      const deltaStr = s.short_delta != null ? Math.abs(s.short_delta).toFixed(2) : '—';
       html += `<tr>`;
       html += `<td><span class="badge ${s.option_type==='PUT'?'badge-safe':'badge-watch'}">${s.option_type}</span></td>`;
       html += `<td>${s.short_strike}</td><td>${s.long_strike}</td>`;
-      html += `<td class="num pos">${$fmt$(totalCr)}<div style="font-size:9px;color:var(--muted)">${$fmt$(s.credit_per_contract)}/c</div></td>`;
-      html += `<td class="num" style="color:var(--red-b)">${$fmt$(totalML)}<div style="font-size:9px;color:var(--muted)">${$fmt$(s.max_loss)}/c</div></td>`;
+      html += `<td class="num pos">${$fmt$(totalCr)}<div style="font-size:9px;color:var(--muted)">${recQty}x ${$fmt$(s.credit_per_contract)}/c</div></td>`;
+      html += `<td class="num" style="color:var(--red-b)">${$fmt$(totalML)}<div style="font-size:9px;color:var(--muted)">${recQty}x ${$fmt$(s.max_loss)}/c</div></td>`;
       const dRoi = +(s.roi_pct / (selectedDte + 1)).toFixed(2);
       html += `<td class="num rec-roi">${s.roi_pct}%</td>`;
       html += `<td class="num" style="color:var(--yellow);font-weight:bold">${dRoi}%</td>`;
       html += `<td class="num">${s.otm_pct}%</td>`;
       html += `<td class="num hide-sm" style="color:var(--yellow)">${s.otm_pct_pc}%</td>`;
+      html += `<td class="num hide-sm">${deltaStr}</td>`;
       html += `<td class="hide-sm">${pctlBadge(s._pctl)}</td>`;
       html += `<td class="hide-sm">${predBadge(s._pred)}</td>`;
       html += `<td><button class="btn btn-green btn-sm" onclick="tradeRec('${sym}','${s.option_type}',${s.short_strike},${s.long_strike},'${exp}')">Trade</button></td>`;
@@ -3276,21 +3316,23 @@ function renderRecs() {
     }
 
     if (nearMissCount > 0) {
-      html += `<tr><td colspan="12" style="padding:4px 8px;font-size:10px;color:var(--muted);background:var(--bg);border-top:2px dashed var(--border)">Filtered out — closest to matching (${nearMisses.length} total)</td></tr>`;
+      html += `<tr><td colspan="13" style="padding:4px 8px;font-size:10px;color:var(--muted);background:var(--bg);border-top:2px dashed var(--border)">Filtered out — closest to matching (${nearMisses.length} total)</td></tr>`;
       for (const s of nearMisses.slice(0, nearMissCount)) {
         const totalCr = s.credit_per_contract * recQty;
         const totalML = s.max_loss * recQty;
+        const deltaStr = s.short_delta != null ? Math.abs(s.short_delta).toFixed(2) : '—';
         const failTags = s._fails.map(f => `<span style="background:rgba(218,54,51,0.15);color:var(--red-b);padding:1px 4px;border-radius:3px;font-size:9px;margin-left:2px">${f}</span>`).join('');
         html += `<tr style="opacity:0.45">`;
         html += `<td><span class="badge ${s.option_type==='PUT'?'badge-safe':'badge-watch'}">${s.option_type}</span></td>`;
         html += `<td>${s.short_strike}</td><td>${s.long_strike}</td>`;
-        html += `<td class="num">${$fmt$(totalCr)}<div style="font-size:9px">${$fmt$(s.credit_per_contract)}/c</div></td>`;
-        html += `<td class="num">${$fmt$(totalML)}<div style="font-size:9px">${$fmt$(s.max_loss)}/c</div></td>`;
+        html += `<td class="num">${$fmt$(totalCr)}<div style="font-size:9px">${recQty}x ${$fmt$(s.credit_per_contract)}/c</div></td>`;
+        html += `<td class="num">${$fmt$(totalML)}<div style="font-size:9px">${recQty}x ${$fmt$(s.max_loss)}/c</div></td>`;
         const nmDRoi = +(s.roi_pct / (selectedDte + 1)).toFixed(2);
         html += `<td class="num">${$fmt(s.roi_pct)}%</td>`;
         html += `<td class="num" style="color:var(--yellow)">${nmDRoi}%</td>`;
         html += `<td class="num">${s.otm_pct}%</td>`;
         html += `<td class="num hide-sm" style="color:var(--yellow)">${s.otm_pct_pc}%</td>`;
+        html += `<td class="num hide-sm">${deltaStr}</td>`;
         html += `<td class="hide-sm">${pctlBadge(s._pctl)}</td>`;
         html += `<td class="hide-sm">${predBadge(s._pred)}</td>`;
         html += `<td><button class="btn btn-muted btn-sm" style="opacity:0.7;font-size:10px" onclick="tradeRec('${sym}','${s.option_type}',${s.short_strike},${s.long_strike},'${exp}')">Trade</button> ${failTags}</td>`;

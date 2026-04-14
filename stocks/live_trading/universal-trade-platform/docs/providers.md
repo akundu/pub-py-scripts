@@ -40,16 +40,67 @@ Every method is `async` to support non-blocking I/O with real broker APIs.
 
 ### E\*TRADE (`app/core/providers/etrade.py`)
 
+The E\*TRADE provider has **two implementations** in the same file:
+
+#### `EtradeProvider` (Stub)
+
 | Feature | Implementation |
 |---------|---------------|
 | Auth | Consumer key/secret + OAuth token/secret (from env vars) |
 | Equity IDs | Uppercase ticker symbol |
 | Option IDs | `{symbol}:{YYYYMMDD}:{strike_padded}:{C\|P}` format |
 | Order tracking | In-memory dict |
-| Status | **Stub** |
+| Status | **Stub** -- returns simulated responses |
+| When used | `ETRADE_ACCOUNT_ID` or `ETRADE_CONSUMER_KEY` is empty (default) |
 
 **Stub Quote:** bid=99.95, ask=100.10, last=100.00, volume=500K
 **Stub Position:** QQQ 50 shares @ $380
+
+#### `EtradeLiveProvider` (Real)
+
+| Feature | Implementation |
+|---------|---------------|
+| Auth | OAuth 1.0a via `pyetrade` library |
+| Token persistence | `data/utp/etrade_tokens.json` (configurable via `etrade_token_file`) |
+| Token renewal | Background renewal every 90 minutes to prevent 2-hour inactivity timeout |
+| Token expiry | Tokens expire at midnight ET daily; `_load_tokens()` rejects stale tokens |
+| Quotes | `/v1/market/quote/{SYMBOLS}` with 5-second cache |
+| Positions | `/v1/accounts/{id}/portfolio` -- returns equity + option positions with strikes/expiration |
+| Balances | Account balance endpoint with real-time NAV |
+| Option chains | `/v1/market/optionchains` -- returns expirations + strikes |
+| Order execution | 2-step preview→place flow; preview returns previewId (valid 3 min), then place with that ID |
+| Multi-leg | SPREADS with NET_CREDIT/NET_DEBIT price types. Action mapping: BUY_TO_OPEN→BUY_OPEN, SELL_TO_OPEN→SELL_OPEN, etc. |
+| Order status | Maps E\*TRADE statuses: OPEN→SUBMITTED, EXECUTED→FILLED, CANCELLED→CANCELLED, REJECTED→REJECTED, PARTIAL→PARTIAL_FILL, EXPIRED→CANCELLED |
+| Open orders | `/v1/accounts/{id}/orders?status=OPEN` |
+| Cancel | `/v1/accounts/{id}/orders/cancel` |
+| Margin check | Uses preview endpoint (doesn't execute) to get estimated costs |
+| Portfolio items | `get_portfolio_items()` for per-position P&L |
+| Safety | `ETRADE_READONLY=true` (default) blocks all order submissions |
+| When used | `ETRADE_ACCOUNT_ID` and `ETRADE_CONSUMER_KEY` are both set |
+
+**Token management:**
+- `_load_tokens()` loads from disk and checks freshness (rejects if issued before midnight ET)
+- `_save_tokens()` persists tokens after successful auth
+- CLI: `python utp.py etrade-auth` for interactive OAuth flow
+
+**Configuration:**
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `etrade_account_id` | (empty) | E\*TRADE account ID |
+| `etrade_consumer_key` | (empty) | OAuth consumer key |
+| `etrade_sandbox` | `true` | Use sandbox API endpoints |
+| `etrade_readonly` | `true` | Block all order submissions |
+| `etrade_token_file` | `data/utp/etrade_tokens.json` | Token persistence path |
+
+**Selection logic in `app/main.py`:**
+
+```python
+if settings.etrade_account_id and settings.etrade_consumer_key:
+    etrade_provider = EtradeLiveProvider()  # Real pyetrade
+else:
+    etrade_provider = EtradeProvider()       # Stub
+```
 
 ### IBKR (`app/core/providers/ibkr.py`)
 
@@ -99,6 +150,13 @@ The IBKR provider has **two implementations** in the same file:
 **Selection logic in `app/main.py`:**
 
 ```python
+# E*TRADE: live or stub
+if settings.etrade_account_id and settings.etrade_consumer_key:
+    etrade_provider = EtradeLiveProvider()
+else:
+    etrade_provider = EtradeProvider()
+
+# IBKR: live or stub
 if settings.ibkr_account_id:
     ibkr_provider = IBKRLiveProvider()  # Real ib_insync
 else:
@@ -176,8 +234,9 @@ Providers are registered and connected during the FastAPI lifespan startup:
 ```python
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    etrade_provider = EtradeLiveProvider() if (settings.etrade_account_id and settings.etrade_consumer_key) else EtradeProvider()
     ibkr_provider = IBKRLiveProvider() if settings.ibkr_account_id else IBKRProvider()
-    providers = [RobinhoodProvider(), EtradeProvider(), ibkr_provider]
+    providers = [RobinhoodProvider(), etrade_provider, ibkr_provider]
     for p in providers:
         ProviderRegistry.register(p)
         await p.connect()
@@ -283,10 +342,10 @@ async def test_schwab_equity_order(client, api_key_headers):
 
 ## Moving from Stubs to Real APIs
 
-The current Robinhood and E\*TRADE providers return simulated data. To connect to real broker APIs:
+The current Robinhood provider returns simulated data. To connect to real broker APIs:
 
 1. **Robinhood** -- integrate `robin_stocks` library in `connect()` and route orders through `robin_stocks.robinhood.order_option_spread()`
-2. **E\*TRADE** -- use the E\*TRADE Python SDK with OAuth1 session management
-3. **IBKR** -- already implemented via `IBKRLiveProvider` with `ib_insync`. Set `IBKR_ACCOUNT_ID` to activate.
+2. **E\*TRADE** -- implemented via `EtradeLiveProvider` with `pyetrade`. Set `ETRADE_ACCOUNT_ID` and run `python utp.py etrade-auth` to activate.
+3. **IBKR** -- implemented via `IBKRLiveProvider` with `ib_insync`. Set `IBKR_ACCOUNT_ID` to activate.
 
 The provider interface remains identical -- only the internal implementation changes. The position sync loop, ledger, and dashboard all work transparently with both stub and real providers.

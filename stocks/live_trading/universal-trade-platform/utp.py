@@ -1780,7 +1780,7 @@ async def _cmd_portfolio_http(args, server: str) -> int:
     import httpx
     async with httpx.AsyncClient(base_url=server, timeout=60.0) as client:
         recent_n = getattr(args, "recent", 0)
-        params = {}
+        params = {"include_quotes": "true"}
         if recent_n > 0:
             params["recent_count"] = recent_n
 
@@ -1834,8 +1834,8 @@ async def _cmd_portfolio_http(args, server: str) -> int:
             has_marks = any(p.get("avg_cost") is not None for p in positions)
 
             if has_marks:
-                print(f"  {'ID':<6} {'Symbol':>6} {'Strikes':>16} {'Qty':>5} {'Cost':>12} {'Value':>12} {'P&L':>12} {'Cr/ROI/MaxLoss':>22} {'Exp':>12}")
-                print(f"  {'─'*6} {'─'*6} {'─'*16} {'─'*5} {'─'*12} {'─'*12} {'─'*12} {'─'*22} {'─'*12}")
+                print(f"  {'ID':<6} {'Symbol':>6} {'Price':>10} {'Strikes':>16} {'Qty':>5} {'Cost':>12} {'Value':>12} {'P&L':>12} {'Cr/ROI/MaxLoss':>22} {'Exp':>12} {'Risk':>14}")
+                print(f"  {'─'*6} {'─'*6} {'─'*10} {'─'*16} {'─'*5} {'─'*12} {'─'*12} {'─'*12} {'─'*22} {'─'*12} {'─'*14}")
                 total_upnl = 0.0
                 total_daily = 0.0
                 total_max_loss = 0.0
@@ -1909,11 +1909,24 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                                 roi_pct = (derived_credit / max_loss) * 100
                                 risk_info = f"{derived_credit:,.0f}/{roi_pct:.1f}%/{max_loss:,.0f}"
 
-                        print(f"  {pid:<6} {sym:>6} {strikes_s:>16} {qty:>5.0f} "
-                              f"{cost_s:>12} {value_s:>12} {upnl_s:>20} {risk_info:>22} {exp:>12}")
+                        cur_price = p.get("current_price", 0)
+                        price_s = f"${cur_price:>9,.2f}" if cur_price else f"{'---':>10}"
+                        # Breach/risk status
+                        bs = p.get("breach_status") or {}
+                        if bs.get("severity"):
+                            sev = bs["severity"]
+                            dist = bs.get("distance_pct", 0)
+                            sev_colors = {"breached": "91", "critical": "91", "warning": "93", "watch": "93", "safe": "92"}
+                            risk_s = _color(f"{sev} {dist:.1f}%", sev_colors.get(sev, "0"))
+                        else:
+                            risk_s = ""
+                        print(f"  {pid:<6} {sym:>6} {price_s:>10} {strikes_s:>16} {qty:>5.0f} "
+                              f"{cost_s:>12} {value_s:>12} {upnl_s:>20} {risk_info:>22} {exp:>12} {risk_s:>14}")
                     else:
+                        cur_price = p.get("current_price", 0)
+                        price_s = f"${cur_price:>9,.2f}" if cur_price else f"{'---':>10}"
                         entry = p.get("entry_price", 0)
-                        print(f"  {pid:<6} {sym:>6} {strikes_s:>16} {qty:>5.0f} "
+                        print(f"  {pid:<6} {sym:>6} {price_s:>10} {strikes_s:>16} {qty:>5.0f} "
                               f"{'---':>12} {'---':>12} {'---':>12} {'':>22} {exp:>12}")
 
                 upnl_c = "92" if total_upnl >= 0 else "91"
@@ -1921,7 +1934,7 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                 if total_max_loss > 0:
                     total_roi_pct = (total_upnl / total_max_loss) * 100
                     total_risk_info = f"{total_credit:,.0f}/{total_roi_pct:+.1f}%/{total_max_loss:,.0f}"
-                print(f"  {'':>6} {'':>6} {'':>16} {'':>5} "
+                print(f"  {'':>6} {'':>6} {'':>10} {'':>16} {'':>5} "
                       f"${total_cost:>11,.2f} ${total_value:>11,.2f} "
                       f"{_color(f'${total_upnl:>+10,.2f}', upnl_c):>20} {total_risk_info:>22}")
             else:
@@ -1949,7 +1962,7 @@ async def _cmd_portfolio_http(args, server: str) -> int:
         if show_recent:
             _print_section(f"Recent Closed (last {len(show_recent)})")
             for pos in show_recent:
-                pnl = pos.get("pnl", 0)
+                pnl = pos.get("pnl") or 0
                 pc = "92" if pnl >= 0 else "91"
                 sym = pos.get("symbol", "?")
                 reason = pos.get("exit_reason", "?")
@@ -3300,22 +3313,26 @@ async def _cmd_trade_http(args, server: str) -> int:
             # Auto-validate with IBKR margin check when --live (catches rejections early)
             if mode in ("live", "paper") and trade_request.multi_leg_order and not nocheck:
                 order = trade_request.multi_leg_order
-                margin_payload = {"order": order.model_dump(), "timeout": 15.0}
+                margin_payload = {"order": order.model_dump(), "timeout": 20.0}
                 try:
                     mr = await client.post("/market/margin", json=margin_payload)
                     if mr.status_code == 200:
                         md = mr.json()
                         if md.get("error"):
                             err_msg = md["error"]
-                            # Distinguish real rejections from transient CPG issues
-                            is_margin_reject = any(kw in err_msg.upper() for kw in (
-                                "MARGIN", "EQUITY", "NOT ACCEPTED", "INSUFFICIENT",
+                            upper_msg = err_msg.upper()
+                            # Timeouts are not rejections — treat as informational
+                            is_timeout = "TIMED OUT" in upper_msg or "TIMEOUT" in upper_msg
+                            # Distinguish real rejections from transient issues
+                            is_margin_reject = not is_timeout and any(kw in upper_msg for kw in (
+                                "NOT ACCEPTED", "INSUFFICIENT",
                                 "BUYING POWER", "POSITION LIMIT",
                             ))
                             if is_margin_reject:
                                 print(f"\n  {_color(f'IBKR rejects: {err_msg}', '91')}")
                             else:
-                                print(f"\n  {_color(f'Margin check unavailable: {err_msg}', '93')}")
+                                label = "Margin check skipped" if is_timeout else "Margin check unavailable"
+                                print(f"\n  {_color(f'{label}: {err_msg}', '93')}")
                         else:
                             im = md.get("init_margin", 0)
                             mm = md.get("maint_margin", 0)
@@ -3640,7 +3657,7 @@ async def _cmd_portfolio(args) -> int:
         recent = sorted(closed, key=lambda p: p.get("exit_time", ""), reverse=True)[:5]
         _print_section("Recent Closed (last 5)")
         for pos in recent:
-            pnl = pos.get("pnl", 0)
+            pnl = pos.get("pnl") or 0
             pc = "92" if pnl >= 0 else "91"
             sym = pos.get("symbol", "?")
             reason = pos.get("exit_reason", "?")
@@ -4619,7 +4636,7 @@ async def _cmd_status(args) -> int:
     print(f"{'─' * 70}")
     if status.recent_closed:
         for pos in status.recent_closed[:10]:
-            pnl = pos.get("pnl", 0)
+            pnl = pos.get("pnl") or 0
             pnl_color = "92" if pnl >= 0 else "91"
             print(f"    {pos.get('symbol', '?'):>8} | "
                   f"P&L={_color(f'${pnl:+,.2f}', pnl_color)} | "
@@ -4999,6 +5016,121 @@ async def _cmd_readiness(args) -> int:
     return await _run_readiness_test(ready_args)
 
 
+# ── etrade-auth ──────────────────────────────────────────────────────────────
+
+def _cmd_etrade_auth(args) -> int:
+    """Interactive OAuth flow for E*TRADE API authorization."""
+    import json
+    import webbrowser
+    from pathlib import Path
+
+    sandbox = getattr(args, "sandbox", False)
+    list_accounts = getattr(args, "list_accounts", False)
+
+    try:
+        import pyetrade
+    except ImportError:
+        print("  ERROR: pyetrade not installed. Run: pip install pyetrade>=2.1.0")
+        return 1
+
+    consumer_key = os.environ.get("ETRADE_CONSUMER_KEY", "")
+    consumer_secret = os.environ.get("ETRADE_CONSUMER_SECRET", "")
+
+    if not consumer_key or not consumer_secret:
+        print("  ERROR: Set ETRADE_CONSUMER_KEY and ETRADE_CONSUMER_SECRET environment variables")
+        print("  Get keys at: https://us.etrade.com/etx/ris/apikey")
+        return 1
+
+    base_url = "https://apisb.etrade.com" if sandbox else "https://api.etrade.com"
+    env_label = "SANDBOX" if sandbox else "PRODUCTION"
+    print(f"\n  E*TRADE OAuth Authorization ({env_label})")
+    print(f"  Base URL: {base_url}")
+    print()
+
+    try:
+        # Step 1: Get request token
+        oauth = pyetrade.ETradeOAuth(consumer_key, consumer_secret, dev=sandbox)
+        authorize_url = oauth.get_request_token()
+
+        print(f"  Opening browser for authorization...")
+        print(f"  URL: {authorize_url}")
+        print()
+
+        try:
+            webbrowser.open(authorize_url)
+        except Exception:
+            print("  Could not open browser automatically. Please open the URL above manually.")
+
+        # Step 2: Get verification code from user
+        print("  After authorizing, E*TRADE will display a verification code.")
+        verifier = input("  Enter the verification code: ").strip()
+
+        if not verifier:
+            print("  ERROR: No verification code entered")
+            return 1
+
+        # Step 3: Exchange for access token
+        tokens = oauth.get_access_token(verifier)
+        oauth_token = tokens.get("oauth_token", "")
+        oauth_token_secret = tokens.get("oauth_token_secret", "")
+
+        if not oauth_token or not oauth_token_secret:
+            print("  ERROR: Failed to get access tokens")
+            return 1
+
+        # Step 4: Save tokens
+        from app.config import settings
+        token_path = Path(settings.etrade_token_file)
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_data = {
+            "oauth_token": oauth_token,
+            "oauth_token_secret": oauth_token_secret,
+            "saved_at": datetime.now().isoformat(),
+            "sandbox": sandbox,
+        }
+        token_path.write_text(json.dumps(token_data, indent=2))
+
+        print(f"\n  SUCCESS: OAuth tokens saved to {token_path}")
+        print(f"  Tokens expire at midnight ET — re-run this command daily if needed.")
+
+        # Step 5: Optionally list accounts
+        if list_accounts:
+            print("\n  Fetching accounts...")
+            accounts = pyetrade.ETradeAccounts(
+                consumer_key, consumer_secret,
+                oauth_token, oauth_token_secret,
+                dev=sandbox,
+            )
+            resp = accounts.list_accounts()
+            acct_list = (resp.get("AccountListResponse", {})
+                         .get("Accounts", {})
+                         .get("Account", []))
+            if not isinstance(acct_list, list):
+                acct_list = [acct_list]
+
+            if acct_list:
+                print(f"\n  {'Account ID Key':<40} {'Name':<30} {'Status'}")
+                print(f"  {'─' * 40} {'─' * 30} {'─' * 10}")
+                for acct in acct_list:
+                    key = acct.get("accountIdKey", "")
+                    name = acct.get("accountName", acct.get("accountDesc", ""))
+                    status = acct.get("accountStatus", "")
+                    print(f"  {key:<40} {name:<30} {status}")
+                print(f"\n  Set ETRADE_ACCOUNT_ID to one of the Account ID Keys above.")
+            else:
+                print("  No accounts found")
+
+        print()
+        return 0
+
+    except KeyboardInterrupt:
+        print("\n  Cancelled.")
+        return 1
+    except Exception as e:
+        print(f"\n  ERROR: {e}")
+        return 1
+
+
 # ── server ───────────────────────────────────────────────────────────────────
 
 def _cmd_server(args) -> int:
@@ -5334,7 +5466,14 @@ async def _cmd_daemon(args) -> int:
         from app.core.providers.robinhood import RobinhoodProvider
         from app.core.providers.etrade import EtradeProvider
         from app.core.providers.ibkr import IBKRProvider
-        for p in [RobinhoodProvider(), EtradeProvider(), IBKRProvider()]:
+        # Select E*TRADE provider: live or stub
+        import app.config as _daemon_cfg
+        if _daemon_cfg.settings.etrade_account_id and _daemon_cfg.settings.etrade_consumer_key:
+            from app.core.providers.etrade import EtradeLiveProvider
+            etrade_prov = EtradeLiveProvider()
+        else:
+            etrade_prov = EtradeProvider()
+        for p in [RobinhoodProvider(), etrade_prov, IBKRProvider()]:
             ProviderRegistry.register(p)
             await p.connect()
 
@@ -6139,7 +6278,7 @@ def _show_trade_detail(store, detail_id: str) -> int:
         print(f"  Exit Price:   ${match.get('exit_price', 0):.2f}")
         print(f"  Exit Time:    {match.get('exit_time', '—')}")
         print(f"  Exit Reason:  {match.get('exit_reason', '—')}")
-        pnl = match.get("pnl", 0)
+        pnl = match.get("pnl") or 0
         pc = "92" if pnl >= 0 else "91"
         print(f"  Realized P&L: {_color(f'${pnl:+,.2f}', pc)}")
     else:
@@ -7143,6 +7282,30 @@ Aliases: ready, test
                          help="1=live(paid), 4=delayed(free) (default: 4)")
     _add_connection_args(p_ready)
 
+    # ── etrade-auth ──
+    p_etrade_auth = subparsers.add_parser("etrade-auth",
+                                           help="Authorize E*TRADE API via OAuth",
+                                           description='''
+Perform the one-time OAuth 1.0a authorization flow for E*TRADE API access.
+Opens a browser for authorization, prompts for the verification code, and
+saves tokens to data/utp/etrade_tokens.json.
+
+Requires: ETRADE_CONSUMER_KEY and ETRADE_CONSUMER_SECRET env vars.
+Get API keys at: https://us.etrade.com/etx/ris/apikey
+                                           ''',
+                                           epilog='''
+Examples:
+  %(prog)s                         Interactive OAuth flow (production)
+  %(prog)s --sandbox               Use sandbox environment
+  %(prog)s --list-accounts         Show available accounts after auth
+  %(prog)s --sandbox --list-accounts  Sandbox + list accounts
+                                           ''',
+                                           formatter_class=argparse.RawDescriptionHelpFormatter)
+    p_etrade_auth.add_argument("--sandbox", action="store_true",
+                                help="Use sandbox environment (apisb.etrade.com)")
+    p_etrade_auth.add_argument("--list-accounts", action="store_true",
+                                help="List available accounts after authorization")
+
     # ── server ──
     p_server = subparsers.add_parser("server",
                                       help="Start standalone REST API server",
@@ -7635,6 +7798,8 @@ Aliases: exec
         rc = asyncio.run(_cmd_close(args))
     elif cmd == "executions":
         rc = asyncio.run(_cmd_executions(args))
+    elif cmd == "etrade-auth":
+        rc = _cmd_etrade_auth(args)
     else:
         parser.print_help()
         rc = 0

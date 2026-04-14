@@ -27,14 +27,18 @@ All configuration is managed through environment variables, loaded via `pydantic
 | `ROBINHOOD_PASSWORD` | (empty) | Robinhood account password |
 | `ROBINHOOD_TOTP_SEED` | (empty) | Base32-encoded TOTP seed for 2FA |
 
-### E\*TRADE Credentials
+### E\*TRADE Settings
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ETRADE_CONSUMER_KEY` | (empty) | OAuth1 consumer key |
+| `ETRADE_CONSUMER_KEY` | (empty) | OAuth1 consumer key (get at https://us.etrade.com/etx/ris/apikey) |
 | `ETRADE_CONSUMER_SECRET` | (empty) | OAuth1 consumer secret |
-| `ETRADE_OAUTH_TOKEN` | (empty) | OAuth1 access token |
+| `ETRADE_OAUTH_TOKEN` | (empty) | OAuth1 access token (set manually or via `etrade-auth`) |
 | `ETRADE_OAUTH_SECRET` | (empty) | OAuth1 access token secret |
+| `ETRADE_SANDBOX` | `true` | `true` = sandbox (`apisb.etrade.com`), `false` = production (`api.etrade.com`) |
+| `ETRADE_ACCOUNT_ID` | (empty) | Account ID key from `/v1/accounts` response. **Setting this + consumer key activates `EtradeLiveProvider`**; empty uses the stub. |
+| `ETRADE_READONLY` | `true` | **Safety**: `true` rejects all order submissions. Set `false` only when ready for live trading. |
+| `ETRADE_TOKEN_FILE` | `data/utp/etrade_tokens.json` | Path to persisted OAuth tokens (auto-created by `etrade-auth`) |
 
 ### IBKR Settings
 
@@ -108,6 +112,13 @@ JWT_SECRET_KEY=my-jwt-signing-secret
 ROBINHOOD_USERNAME=myuser@example.com
 ROBINHOOD_PASSWORD=hunter2
 ROBINHOOD_TOTP_SEED=JBSWY3DPEHPK3PXP
+
+# E*TRADE — real connectivity (remove ETRADE_ACCOUNT_ID for stub mode)
+ETRADE_CONSUMER_KEY=your_consumer_key
+ETRADE_CONSUMER_SECRET=your_consumer_secret
+ETRADE_ACCOUNT_ID=your_account_id_key
+ETRADE_SANDBOX=false
+ETRADE_READONLY=true
 
 # IBKR — real connectivity (remove IBKR_ACCOUNT_ID for stub mode)
 IBKR_HOST=127.0.0.1

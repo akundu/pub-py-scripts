@@ -106,7 +106,7 @@ python utp.py close <pos-id> --net-price 0.10 --live  # Close at specific debit
 
 ## Workflow 2: Start Daemon and Trade via CLI
 
-The daemon holds a persistent IBKR connection. All CLI commands auto-detect it.
+The daemon holds a persistent IBKR connection. All CLI commands auto-detect it. When `ETRADE_ACCOUNT_ID` and `ETRADE_CONSUMER_KEY` are set, the E\*TRADE live provider is also auto-selected and available alongside IBKR.
 
 ### Start the daemon
 
@@ -273,7 +273,30 @@ python utp.py readiness --symbol SPX --port 7496 --client-id 10  # Custom connec
 
 ---
 
-## Workflow 10: Order Management
+## Workflow 10: E\*TRADE Authorization
+
+```bash
+# 1. Set credentials
+export ETRADE_CONSUMER_KEY="your_key"
+export ETRADE_CONSUMER_SECRET="your_secret"
+
+# 2. Authorize (sandbox first)
+python utp.py etrade-auth --sandbox
+
+# 3. List accounts to find your account ID
+python utp.py etrade-auth --sandbox --list-accounts
+
+# 4. Set account ID
+export ETRADE_ACCOUNT_ID="your_account_id_key"
+
+# 5. Verify
+python utp.py quote SPY --broker etrade
+python utp.py portfolio --broker etrade
+```
+
+---
+
+## Workflow 11: Order Management
 
 ```bash
 # View open/working orders
@@ -288,7 +311,7 @@ python utp.py cancel --all --live
 
 ---
 
-## Workflow 11: Trade History & Performance
+## Workflow 12: Trade History & Performance
 
 ```bash
 # Today's trades
@@ -313,7 +336,7 @@ python utp.py journal --event-type TRADE_EXECUTED
 
 ---
 
-## Workflow 12: Real-Time Market Data Streaming
+## Workflow 13: Real-Time Market Data Streaming
 
 Stream real-time IBKR market data to Redis, QuestDB, and WebSocket clients. Uses the same message format as `polygon_realtime_streamer.py` for full compatibility.
 
@@ -363,7 +386,7 @@ ws.send(JSON.stringify({action: "unsubscribe", symbols: ["SPX"]}))
 
 ---
 
-## Workflow 13: View Execution History (Grouped Trades)
+## Workflow 14: View Execution History (Grouped Trades)
 
 ```bash
 # View IBKR executions grouped by permanent order ID (multi-leg trades shown together)
@@ -380,7 +403,7 @@ The execution store caches IBKR executions in `data/utp/live/executions.json` an
 
 ---
 
-## Workflow 14: Simulate a Trade (Margin Check Without Execution)
+## Workflow 15: Simulate a Trade (Margin Check Without Execution)
 
 ```bash
 # Qualifies contracts, checks margin, shows what would happen — but does NOT execute
@@ -398,7 +421,7 @@ The `--simulate` flag uses the live IBKR connection to qualify contracts and che
 
 ---
 
-## Workflow 15: Full System Reset and Rebuild
+## Workflow 16: Full System Reset and Rebuild
 
 ```bash
 # Hard reset: clears EVERYTHING (open + closed positions, ledger, executions)
@@ -413,7 +436,7 @@ python utp.py reconcile --show --live
 
 ---
 
-## Workflow 16: Close a Position by ID
+## Workflow 17: Close a Position by ID
 
 The `close` command submits a real IBKR closing order (not just local bookkeeping). It auto-derives the closing parameters from the position's legs.
 
@@ -441,7 +464,7 @@ The position ID can be a prefix — if it uniquely matches one open position, th
 
 ---
 
-## Workflow 17: Flush Local Data
+## Workflow 18: Flush Local Data
 
 The `flush` command clears local persisted data. It is blocked when a daemon is running — use `reconcile --flush` instead.
 
@@ -460,7 +483,7 @@ Note: `flush` is a local-only operation and does NOT affect the broker. For brok
 
 ---
 
-## Workflow 18: Validate Trade Types
+## Workflow 19: Validate Trade Types
 
 Test that all 5 trade types work without placing real orders:
 
@@ -519,12 +542,13 @@ Every CLI command auto-detects a running daemon via HTTP health check. When a da
 | `activity` | `trades` |
 | `cl` | `close` |
 | `exec` | `executions` |
+| `ea` | `etrade-auth` |
 
 ## Common Flags (all subcommands with IBKR connection)
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--broker` | `ibkr` | Broker to use |
+| `--broker` | `ibkr` | Broker to use (`ibkr`, `robinhood`, `etrade`) |
 | `--host` | `127.0.0.1` | IBKR TWS/Gateway host |
 | `--port` | auto | IBKR port (7496=live, 7497=paper) |
 | `--client-id` | `10` | IBKR client ID |

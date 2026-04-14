@@ -277,14 +277,15 @@ dd {
     <a href="authentication.html">Authentication</a>
     <a href="testing.html" class="active">Testing</a>
     <a href="ibkr_setup_guide.html">IBKR Setup</a>
+    <a href="etrade_setup_guide.html">E*TRADE Setup</a>
     <a href="symbology.html">Symbology</a>
     <a href="websockets.html">WebSockets</a>
     </nav>
     <div class="container">
     <h1 id="testing">Testing</h1>
 <h2 id="overview">Overview</h2>
-<p>The test suite uses <code>pytest</code> with <code>pytest-asyncio</code> and <code>httpx</code> to test all REST endpoints, authentication flows, symbology mapping, WebSocket broadcasting, and the full persistence/dashboard/sync stack against mocked broker providers.</p>
-<p><strong>Total:</strong> 454 tests in a single file (<code>tests/test_utp.py</code>), all passing</p>
+<p>The test suite uses <code>pytest</code> with <code>pytest-asyncio</code> and <code>httpx</code> to test all REST endpoints, authentication flows, symbology mapping, WebSocket broadcasting, IBKR and E*TRADE provider logic, and the full persistence/dashboard/sync stack against mocked broker providers.</p>
+<p><strong>Total:</strong> 498 tests in a single file (<code>tests/test_utp.py</code>), all passing</p>
 <h2 id="running-tests">Running Tests</h2>
 <div class="codehilite"><pre><span></span><code><span class="c1"># All tests</span>
 python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span>tests/<span class="w"> </span>-v
@@ -498,6 +499,11 @@ python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> <
 <td><code>TestFillTracking</code></td>
 <td>8</td>
 <td>Order fill polling, callbacks, timeouts</td>
+</tr>
+<tr>
+<td><code>TestEtradeProvider</code></td>
+<td>18</td>
+<td>E*TRADE stub, live provider init, readonly safety, equity preview/place, multi-leg payload, quote parsing, position parsing, status mapping, balances, token freshness, sandbox/prod URLs, connect, option chain, cancel, config</td>
 </tr>
 <tr>
 <td><code>TestIBKRProvider</code></td>

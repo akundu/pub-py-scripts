@@ -355,10 +355,10 @@ class PlatformPositionStore:
         closed_positions = self.get_closed_positions()
 
         cash_deployed = sum(
-            abs(p.get("entry_price", 0)) * abs(p.get("quantity", 0))
+            abs(p.get("entry_price") or 0) * abs(p.get("quantity") or 0)
             for p in open_positions
         )
-        realized_pnl = sum(p.get("pnl", 0) for p in closed_positions)
+        realized_pnl = sum(p.get("pnl") or 0 for p in closed_positions)
         unrealized_pnl = sum(p.get("unrealized_pnl") or 0 for p in open_positions)
 
         return {

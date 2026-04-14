@@ -7162,3 +7162,432 @@ option_quotes_greeks_interval: 30.0
         from app.services.streaming_config import StreamingConfig
         cfg = StreamingConfig()
         assert cfg.option_quotes_greeks_interval == 60.0  # IBKR overlay interval
+
+
+class TestEtradeProvider:
+    """Tests for E*TRADE provider — stub, live provider, config, token management."""
+
+    def test_etrade_live_provider_init(self):
+        """Constructor sets defaults."""
+        from app.core.providers.etrade import EtradeLiveProvider
+
+        provider = EtradeLiveProvider()
+        assert provider.broker == Broker.ETRADE
+        assert provider._connected is False
+        assert provider._account_id_key == ""
+        assert provider._orders == {}
+        assert provider._session is None
+        assert provider._accounts is None
+
+    def test_etrade_is_healthy_disconnected(self):
+        """is_healthy returns False when not connected."""
+        from app.core.providers.etrade import EtradeLiveProvider
+
+        provider = EtradeLiveProvider()
+        assert provider.is_healthy() is False
+
+    def test_etrade_is_healthy_connected(self):
+        """is_healthy returns True when connected with accounts client."""
+        from app.core.providers.etrade import EtradeLiveProvider
+
+        provider = EtradeLiveProvider()
+        provider._connected = True
+        provider._accounts = MagicMock()
+        assert provider.is_healthy() is True
+
+    @pytest.mark.asyncio
+    async def test_etrade_readonly_blocks_equity_orders(self):
+        """Orders rejected when etrade_readonly=true."""
+        from app.core.providers.etrade import EtradeLiveProvider
+
+        provider = EtradeLiveProvider()
+        provider._connected = True
+        provider._orders_client = MagicMock()
+        provider._account_id_key = "test_acct"
+
+        with patch("app.config.settings") as mock_settings:
+            mock_settings.etrade_readonly = True
+            order = EquityOrder(
+                broker=Broker.ETRADE, symbol="SPY", side=OrderSide.BUY,
+                quantity=100, order_type=OrderType.MARKET,
+            )
+            result = await provider.execute_equity_order(order)
+            assert result.status == OrderStatus.REJECTED
+            assert "read-only" in result.message
+
+    @pytest.mark.asyncio
+    async def test_etrade_readonly_blocks_multi_leg_orders(self):
+        """Multi-leg orders rejected when etrade_readonly=true."""
+        from app.core.providers.etrade import EtradeLiveProvider
+
+        provider = EtradeLiveProvider()
+        provider._connected = True
+        provider._orders_client = MagicMock()
+        provider._account_id_key = "test_acct"
+
+        with patch("app.config.settings") as mock_settings:
+            mock_settings.etrade_readonly = True
+            order = MultiLegOrder(
+                broker=Broker.ETRADE,
+                legs=[
+                    OptionLeg(symbol="SPX", expiration="2026-03-20", strike=5500.0,
+                              option_type=OptionType.PUT, action=OptionAction.SELL_TO_OPEN, quantity=1),
+                    OptionLeg(symbol="SPX", expiration="2026-03-20", strike=5475.0,
+                              option_type=OptionType.PUT, action=OptionAction.BUY_TO_OPEN, quantity=1),
+                ],
+                order_type=OrderType.LIMIT, net_price=2.50,
+            )
+            result = await provider.execute_multi_leg_order(order)
+            assert result.status == OrderStatus.REJECTED
+
+    @pytest.mark.asyncio
+    async def test_etrade_equity_order_preview_place(self):
+        """2-step preview → place flow for equity orders."""
+        from app.core.providers.etrade import EtradeLiveProvider
+
+        provider = EtradeLiveProvider()
+        provider._connected = True
+        provider._account_id_key = "test_acct"
+
+        mock_orders = MagicMock()
+        mock_orders.preview_equity_order = MagicMock(return_value={
+            "PreviewOrderResponse": {
+                "PreviewIds": [{"previewId": "preview_123"}],
+            }
+        })
+        mock_orders.place_equity_order = MagicMock(return_value={
+            "PlaceOrderResponse": {
+                "OrderIds": [{"orderId": 99001}],
+            }
+        })
+        provider._orders_client = mock_orders
+
+        with patch("app.config.settings") as mock_settings:
+            mock_settings.etrade_readonly = False
+            order = EquityOrder(
+                broker=Broker.ETRADE, symbol="SPY", side=OrderSide.BUY,
+                quantity=100, order_type=OrderType.MARKET,
+            )
+            result = await provider.execute_equity_order(order)
+
+        assert result.status == OrderStatus.SUBMITTED
+        assert result.order_id == "99001"
+        mock_orders.preview_equity_order.assert_called_once()
+        mock_orders.place_equity_order.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_etrade_multi_leg_order_payload(self):
+        """Correct spread order construction with preview → place."""
+        from app.core.providers.etrade import EtradeLiveProvider
+
+        provider = EtradeLiveProvider()
+        provider._connected = True
+        provider._account_id_key = "test_acct"
+
+        mock_orders = MagicMock()
+        mock_orders.preview_option_order = MagicMock(return_value={
+            "PreviewOrderResponse": {
+                "PreviewIds": [{"previewId": "prev_456"}],
+            }
+        })
+        mock_orders.place_option_order = MagicMock(return_value={
+            "PlaceOrderResponse": {
+                "OrderIds": [{"orderId": 99002}],
+            }
+        })
+        provider._orders_client = mock_orders
+
+        with patch("app.config.settings") as mock_settings:
+            mock_settings.etrade_readonly = False
+            order = MultiLegOrder(
+                broker=Broker.ETRADE,
+                legs=[
+                    OptionLeg(symbol="SPX", expiration="2026-03-20", strike=5500.0,
+                              option_type=OptionType.PUT, action=OptionAction.SELL_TO_OPEN, quantity=1),
+                    OptionLeg(symbol="SPX", expiration="2026-03-20", strike=5475.0,
+                              option_type=OptionType.PUT, action=OptionAction.BUY_TO_OPEN, quantity=1),
+                ],
+                order_type=OrderType.LIMIT, net_price=2.50, quantity=1,
+            )
+            result = await provider.execute_multi_leg_order(order)
+
+        assert result.status == OrderStatus.SUBMITTED
+        assert result.order_id == "99002"
+        assert "credit" in result.message
+
+        # Verify preview was called with correct structure
+        call_kwargs = mock_orders.preview_option_order.call_args[1]
+        order_payload = call_kwargs["order"][0]
+        assert order_payload["priceType"] == "NET_CREDIT"
+        assert len(order_payload["Instrument"]) == 2
+        assert order_payload["Instrument"][0]["orderAction"] == "SELL_OPEN"
+        assert order_payload["Instrument"][1]["orderAction"] == "BUY_OPEN"
+
+    @pytest.mark.asyncio
+    async def test_etrade_get_quote_parsing(self):
+        """Quote response → Quote model."""
+        from app.core.providers.etrade import EtradeLiveProvider
+
+        provider = EtradeLiveProvider()
+        provider._connected = True
+
+        mock_market = MagicMock()
+        mock_market.get_quote = MagicMock(return_value={
+            "QuoteResponse": {
+                "QuoteData": [{
+                    "All": {
+                        "bid": 450.50,
+                        "ask": 451.00,
+                        "lastTrade": 450.75,
+                        "totalVolume": 1500000,
+                    }
+                }]
+            }
+        })
+        provider._market = mock_market
+
+        quote = await provider.get_quote("SPY")
+        assert quote.symbol == "SPY"
+        assert quote.bid == 450.50
+        assert quote.ask == 451.00
+        assert quote.last == 450.75
+        assert quote.volume == 1500000
+        assert quote.source == "etrade"
+
+    @pytest.mark.asyncio
+    async def test_etrade_get_positions_parsing(self):
+        """Portfolio response → Position list."""
+        from app.core.providers.etrade import EtradeLiveProvider
+
+        provider = EtradeLiveProvider()
+        provider._connected = True
+        provider._account_id_key = "test_acct"
+
+        mock_accounts = MagicMock()
+        mock_accounts.get_account_portfolio = MagicMock(return_value={
+            "PortfolioResponse": {
+                "AccountPortfolio": [{
+                    "Position": [
+                        {
+                            "Product": {"symbol": "AAPL", "securityType": "EQ"},
+                            "quantity": 100,
+                            "costPerShare": 175.00,
+                            "marketValue": 18500.00,
+                            "totalGain": 1000.00,
+                        },
+                        {
+                            "Product": {
+                                "symbol": "SPY", "securityType": "OPTN",
+                                "callPut": "PUT", "strikePrice": 450.0,
+                                "expiryYear": "2026", "expiryMonth": "3", "expiryDay": "20",
+                            },
+                            "quantity": -5,
+                            "costPerShare": 3.50,
+                            "marketValue": -1500.00,
+                            "totalGain": 250.00,
+                        },
+                    ]
+                }]
+            }
+        })
+        provider._accounts = mock_accounts
+
+        positions = await provider.get_positions()
+        assert len(positions) == 2
+
+        # Equity position
+        assert positions[0].symbol == "AAPL"
+        assert positions[0].quantity == 100
+        assert positions[0].sec_type == "STK"
+
+        # Option position
+        assert positions[1].symbol == "SPY"
+        assert positions[1].quantity == -5
+        assert positions[1].sec_type == "OPT"
+        assert positions[1].strike == 450.0
+        assert positions[1].right == "P"
+        assert positions[1].expiration == "20260320"
+
+    def test_etrade_order_status_mapping(self):
+        """E*TRADE statuses → OrderStatus enum."""
+        from app.core.providers.etrade import _ETRADE_STATUS_MAP
+
+        assert _ETRADE_STATUS_MAP["OPEN"] == OrderStatus.SUBMITTED
+        assert _ETRADE_STATUS_MAP["EXECUTED"] == OrderStatus.FILLED
+        assert _ETRADE_STATUS_MAP["CANCELLED"] == OrderStatus.CANCELLED
+        assert _ETRADE_STATUS_MAP["REJECTED"] == OrderStatus.REJECTED
+        assert _ETRADE_STATUS_MAP["PARTIAL"] == OrderStatus.PARTIAL_FILL
+        assert _ETRADE_STATUS_MAP["EXPIRED"] == OrderStatus.CANCELLED
+        assert _ETRADE_STATUS_MAP["CANCEL_REQUESTED"] == OrderStatus.SUBMITTED
+
+    @pytest.mark.asyncio
+    async def test_etrade_account_balances(self):
+        """Balance response → AccountBalances model."""
+        from app.core.providers.etrade import EtradeLiveProvider
+
+        provider = EtradeLiveProvider()
+        provider._connected = True
+        provider._account_id_key = "test_acct"
+
+        mock_accounts = MagicMock()
+        mock_accounts.get_account_balance = MagicMock(return_value={
+            "BalanceResponse": {
+                "Computed": {
+                    "cashAvailableForInvestment": 50000.00,
+                    "cashBuyingPower": 100000.00,
+                    "marginBuyingPower": 25000.00,
+                    "RealTimeValues": {"netMv": 150000.00},
+                },
+            }
+        })
+        provider._accounts = mock_accounts
+
+        balances = await provider.get_account_balances()
+        assert balances.broker == "etrade"
+        assert balances.cash == 50000.00
+        assert balances.buying_power == 100000.00
+        assert balances.net_liquidation == 150000.00
+
+    def test_etrade_token_freshness_check(self, tmp_path):
+        """Stale tokens (before midnight ET) are rejected."""
+        from app.core.providers.etrade import EtradeLiveProvider
+
+        provider = EtradeLiveProvider()
+        token_file = tmp_path / "etrade_tokens.json"
+
+        # Write stale tokens (yesterday)
+        stale_time = (datetime.now(UTC) - timedelta(days=1)).isoformat()
+        token_file.write_text(json.dumps({
+            "oauth_token": "old_token",
+            "oauth_token_secret": "old_secret",
+            "saved_at": stale_time,
+        }))
+
+        with patch("app.config.settings") as mock_settings:
+            mock_settings.etrade_token_file = str(token_file)
+            result = provider._load_tokens()
+            # Stale tokens should be None
+            assert result is None
+
+    def test_etrade_token_fresh_check(self, tmp_path):
+        """Fresh tokens (saved recently) are loaded."""
+        from app.core.providers.etrade import EtradeLiveProvider
+
+        provider = EtradeLiveProvider()
+        token_file = tmp_path / "etrade_tokens.json"
+
+        # Write fresh tokens (just now)
+        fresh_time = datetime.now(UTC).isoformat()
+        token_file.write_text(json.dumps({
+            "oauth_token": "fresh_token",
+            "oauth_token_secret": "fresh_secret",
+            "saved_at": fresh_time,
+        }))
+
+        with patch("app.config.settings") as mock_settings:
+            mock_settings.etrade_token_file = str(token_file)
+            result = provider._load_tokens()
+            assert result is not None
+            assert result["oauth_token"] == "fresh_token"
+
+    def test_etrade_sandbox_vs_prod_urls(self):
+        """URL selection based on etrade_sandbox setting."""
+        from app.core.providers.etrade import EtradeLiveProvider
+
+        provider = EtradeLiveProvider()
+
+        with patch("app.config.settings") as mock_settings:
+            mock_settings.etrade_sandbox = True
+            assert provider.base_url == "https://apisb.etrade.com"
+
+            mock_settings.etrade_sandbox = False
+            assert provider.base_url == "https://api.etrade.com"
+
+    @pytest.mark.asyncio
+    async def test_etrade_connect_no_tokens_warns(self):
+        """connect() warns when no tokens available."""
+        from app.core.providers.etrade import EtradeLiveProvider
+
+        provider = EtradeLiveProvider()
+
+        with patch("app.config.settings") as mock_settings:
+            mock_settings.etrade_consumer_key = "test_key"
+            mock_settings.etrade_consumer_secret = "test_secret"
+            mock_settings.etrade_sandbox = True
+            mock_settings.etrade_account_id = ""
+            mock_settings.etrade_oauth_token = ""
+            mock_settings.etrade_oauth_secret = ""
+            mock_settings.etrade_token_file = "/nonexistent/tokens.json"
+
+            # Should not crash, just warn
+            await provider.connect()
+            assert provider._connected is False
+
+    @pytest.mark.asyncio
+    async def test_etrade_option_chain_parsing(self):
+        """Option chain response → expirations + strikes."""
+        from app.core.providers.etrade import EtradeLiveProvider
+
+        provider = EtradeLiveProvider()
+        provider._connected = True
+
+        mock_market = MagicMock()
+        mock_market.get_option_chains = MagicMock(return_value={
+            "OptionChainResponse": {
+                "OptionPair": [
+                    {
+                        "Call": {
+                            "strikePrice": 100.0,
+                            "expirationYear": 2026, "expirationMonth": 3, "expirationDay": 20,
+                        },
+                        "Put": {
+                            "strikePrice": 100.0,
+                            "expirationYear": 2026, "expirationMonth": 3, "expirationDay": 20,
+                        },
+                    },
+                    {
+                        "Call": {
+                            "strikePrice": 105.0,
+                            "expirationYear": 2026, "expirationMonth": 3, "expirationDay": 20,
+                        },
+                        "Put": {
+                            "strikePrice": 105.0,
+                            "expirationYear": 2026, "expirationMonth": 3, "expirationDay": 20,
+                        },
+                    },
+                ]
+            }
+        })
+        provider._market = mock_market
+
+        chain = await provider.get_option_chain("SPY")
+        assert "2026-03-20" in chain["expirations"]
+        assert 100.0 in chain["strikes"]
+        assert 105.0 in chain["strikes"]
+
+    @pytest.mark.asyncio
+    async def test_etrade_cancel_order_readonly(self):
+        """Cancel blocked when readonly."""
+        from app.core.providers.etrade import EtradeLiveProvider
+
+        provider = EtradeLiveProvider()
+        provider._connected = True
+
+        with patch("app.config.settings") as mock_settings:
+            mock_settings.etrade_readonly = True
+            result = await provider.cancel_order("order_123")
+            assert result.status == OrderStatus.REJECTED
+
+    def test_etrade_config_settings(self):
+        """New E*TRADE config fields have correct defaults."""
+        from app.config import Settings
+
+        s = Settings(
+            _env_file=None,
+            etrade_consumer_key="",
+            etrade_consumer_secret="",
+        )
+        assert s.etrade_sandbox is True
+        assert s.etrade_account_id == ""
+        assert s.etrade_readonly is True
+        assert s.etrade_token_file == "data/utp/etrade_tokens.json"

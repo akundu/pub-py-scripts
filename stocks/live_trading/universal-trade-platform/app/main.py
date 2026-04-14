@@ -22,7 +22,7 @@ from fastapi import FastAPI, Request
 
 from app.config import settings
 from app.core.provider import ProviderRegistry
-from app.core.providers.etrade import EtradeProvider
+from app.core.providers.etrade import EtradeProvider, EtradeLiveProvider
 from app.core.providers.ibkr import IBKRProvider, IBKRLiveProvider
 from app.core.providers.robinhood import RobinhoodProvider
 from app.routes import account, auth_routes, market, trade, ws
@@ -123,7 +123,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     else:
         ibkr_provider = IBKRProvider()
 
-    providers = [RobinhoodProvider(), EtradeProvider(), ibkr_provider]
+    # Select E*TRADE provider: live or stub
+    if settings.etrade_account_id and settings.etrade_consumer_key:
+        etrade_provider = EtradeLiveProvider()
+    else:
+        etrade_provider = EtradeProvider()
+
+    providers = [RobinhoodProvider(), etrade_provider, ibkr_provider]
     for p in providers:
         ProviderRegistry.register(p)
         await p.connect()

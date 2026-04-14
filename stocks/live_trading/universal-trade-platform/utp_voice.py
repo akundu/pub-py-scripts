@@ -1106,6 +1106,8 @@ DB_SERVER_WS_URL = os.environ.get(
 async def _ws_relay_loop():
     """Connect to db_server WebSocket for each ticker and relay ticks to browser clients."""
     import websockets
+    # Suppress noisy ConnectionClosedError tracebacks from websockets library
+    logging.getLogger("websockets").setLevel(logging.WARNING)
 
     symbols = DEFAULT_TICKERS  # SPX, NDX, RUT
 
@@ -2243,7 +2245,7 @@ async def _auto_trade_loop(state: dict) -> None:
 # Profit target monitoring runs in the UTP daemon, not here.
 # Voice app just proxies CRUD operations to the daemon's endpoints.
 
-MAX_OPEN_POSITIONS = int(os.environ.get("MAX_OPEN_POSITIONS", "10"))
+MAX_OPEN_POSITIONS = int(os.environ.get("MAX_OPEN_POSITIONS", "100"))
 MAX_DAILY_TRADES = int(os.environ.get("MAX_DAILY_TRADES", "20"))
 
 
@@ -2472,10 +2474,8 @@ async def api_portfolio(username: str = Depends(require_session)):
     """
     client = get_daemon_client()
     try:
-        # Don't use include_quotes — it adds 4+ seconds for equity quote fetching.
-        # The web UI already has live prices from the ticker bar and can compute
-        # breach status client-side from those cached prices.
-        data = await client.get_portfolio(include_quotes=False)
+        # include_quotes adds current_price + breach_status to each position
+        data = await client.get_portfolio(include_quotes=True)
 
         # Trigger background pre-fetch (fire-and-forget, doesn't block response)
         asyncio.create_task(prefetch_all_tickers())

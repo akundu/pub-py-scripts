@@ -378,7 +378,7 @@ async def _fetch_prices_from_db_server(tickers: list[str]) -> dict[str, float]:
     """
     import httpx as _httpx
     try:
-        async with _httpx.AsyncClient(timeout=5.0) as client:
+        async with _httpx.AsyncClient(timeout=2.0) as client:
             resp = await client.post(
                 f"{DB_SERVER_URL}/db_command",
                 json={"command": "get_latest_prices", "tickers": tickers},
@@ -392,17 +392,56 @@ async def _fetch_prices_from_db_server(tickers: list[str]) -> dict[str, float]:
     return {}
 
 
+def _prefill_prices_from_portfolio(positions: list[dict], portfolio_items: list[dict]) -> None:
+    """Pre-populate current_price on positions using IBKR portfolio item prices.
+
+    For equity positions, the portfolio item's market_price IS the current price.
+    For option positions, we need the underlying price — IBKR portfolio items
+    don't directly give this, but the streaming cache usually has it for indices.
+    This avoids slow individual quote fetches for equities like GBTC/IBKR.
+    """
+    if not portfolio_items:
+        return
+
+    # Build symbol → market_price from equity portfolio items
+    equity_prices: dict[str, float] = {}
+    for item in portfolio_items:
+        sec = item.get("sec_type", "STK")
+        sym = item.get("symbol", "")
+        mp = item.get("market_price", 0)
+        if sec == "STK" and sym and mp and mp > 0:
+            equity_prices[sym] = mp
+
+    for pos in positions:
+        sym = pos.get("symbol", "")
+        if pos.get("current_price"):
+            continue  # Already set
+        # Match equity positions: no legs, or sec_type STK, or order_type equity
+        is_equity = (
+            sym in equity_prices
+            and (not pos.get("legs")
+                 or pos.get("sec_type") == "STK"
+                 or pos.get("order_type") == "equity")
+        )
+        if is_equity:
+            pos["current_price"] = equity_prices[sym]
+
+
 async def _enrich_with_quotes_and_breach(positions: list[dict], ibkr_provider) -> None:
     """Fetch current quotes for all underlyings and add breach status to positions.
 
     Uses a fast path (db_server batch query from QuestDB realtime_data) first,
     then falls back to the streaming cache / IBKR provider for any missing tickers.
 
+    Skips symbols that already have 'current_price' set (e.g. from portfolio prefill).
+
     Modifies positions in-place, adding 'current_price' and 'breach_status' fields.
     """
     import asyncio as _aio
 
-    underlyings = list({p.get("symbol", "") for p in positions if p.get("symbol")})
+    # Only fetch quotes for symbols that don't already have a current_price
+    underlyings = list({p.get("symbol", "") for p in positions
+                        if p.get("symbol") and not p.get("current_price")})
     if not underlyings:
         return
 
@@ -513,7 +552,9 @@ class LiveDataService:
         account_daily_pnl = 0.0
 
         if self._ibkr_healthy():
-            # Fetch balances, portfolio items, and daily P&L ALL concurrently
+            # Fetch balances and portfolio items concurrently (fast: ~0.2s)
+            # Skip per-contract daily P&L (reqPnLSingle × N positions is slow ~3-5s)
+            # — daily P&L is not shown in the portfolio view
             import asyncio as _aio
             balances_coro = (
                 self._ibkr.get_account_balances()
@@ -523,18 +564,12 @@ class LiveDataService:
                 self._ibkr.get_portfolio_items()
                 if hasattr(self._ibkr, "get_portfolio_items") else _aio.sleep(0)
             )
-            daily_pnl_coro = (
-                self._ibkr.get_daily_pnl_by_con_id()
-                if hasattr(self._ibkr, "get_daily_pnl_by_con_id") else _aio.sleep(0)
-            )
-            acct_daily_coro = (
-                self._ibkr.get_account_daily_pnl()
-                if hasattr(self._ibkr, "get_account_daily_pnl") else _aio.sleep(0)
-            )
-            balances_result, items_result, daily_result, acct_daily_result = await _aio.gather(
-                balances_coro, items_coro, daily_pnl_coro, acct_daily_coro,
+            balances_result, items_result = await _aio.gather(
+                balances_coro, items_coro,
                 return_exceptions=True,
             )
+            daily_result = {}
+            acct_daily_result = 0.0
 
             # Process balances
             if not isinstance(balances_result, BaseException) and hasattr(balances_result, "net_liquidation"):
@@ -615,6 +650,9 @@ class LiveDataService:
 
         # Optionally fetch quotes and compute breach status
         if include_quotes:
+            # Pre-populate current_price from IBKR portfolio items to avoid
+            # slow individual quote fetches for symbols we already have data for
+            _prefill_prices_from_portfolio(grouped, portfolio_items)
             await _enrich_with_quotes_and_breach(grouped, self._ibkr)
 
         result["positions"] = grouped

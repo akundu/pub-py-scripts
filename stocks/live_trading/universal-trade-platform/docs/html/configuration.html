@@ -277,6 +277,7 @@ dd {
     <a href="authentication.html">Authentication</a>
     <a href="testing.html">Testing</a>
     <a href="ibkr_setup_guide.html">IBKR Setup</a>
+    <a href="etrade_setup_guide.html">E*TRADE Setup</a>
     <a href="symbology.html">Symbology</a>
     <a href="websockets.html">WebSockets</a>
     </nav>
@@ -355,7 +356,7 @@ dd {
 </tr>
 </tbody>
 </table>
-<h3 id="etrade-credentials">E*TRADE Credentials</h3>
+<h3 id="etrade-settings">E*TRADE Settings</h3>
 <table>
 <thead>
 <tr>
@@ -368,7 +369,7 @@ dd {
 <tr>
 <td><code>ETRADE_CONSUMER_KEY</code></td>
 <td>(empty)</td>
-<td>OAuth1 consumer key</td>
+<td>OAuth1 consumer key (get at https://us.etrade.com/etx/ris/apikey)</td>
 </tr>
 <tr>
 <td><code>ETRADE_CONSUMER_SECRET</code></td>
@@ -378,12 +379,32 @@ dd {
 <tr>
 <td><code>ETRADE_OAUTH_TOKEN</code></td>
 <td>(empty)</td>
-<td>OAuth1 access token</td>
+<td>OAuth1 access token (set manually or via <code>etrade-auth</code>)</td>
 </tr>
 <tr>
 <td><code>ETRADE_OAUTH_SECRET</code></td>
 <td>(empty)</td>
 <td>OAuth1 access token secret</td>
+</tr>
+<tr>
+<td><code>ETRADE_SANDBOX</code></td>
+<td><code>true</code></td>
+<td><code>true</code> = sandbox (<code>apisb.etrade.com</code>), <code>false</code> = production (<code>api.etrade.com</code>)</td>
+</tr>
+<tr>
+<td><code>ETRADE_ACCOUNT_ID</code></td>
+<td>(empty)</td>
+<td>Account ID key from <code>/v1/accounts</code> response. <strong>Setting this + consumer key activates <code>EtradeLiveProvider</code></strong>; empty uses the stub.</td>
+</tr>
+<tr>
+<td><code>ETRADE_READONLY</code></td>
+<td><code>true</code></td>
+<td><strong>Safety</strong>: <code>true</code> rejects all order submissions. Set <code>false</code> only when ready for live trading.</td>
+</tr>
+<tr>
+<td><code>ETRADE_TOKEN_FILE</code></td>
+<td><code>data/utp/etrade_tokens.json</code></td>
+<td>Path to persisted OAuth tokens (auto-created by <code>etrade-auth</code>)</td>
 </tr>
 </tbody>
 </table>
@@ -575,6 +596,13 @@ dd {
 <span class="nv">ROBINHOOD_USERNAME</span><span class="o">=</span>myuser@example.com
 <span class="nv">ROBINHOOD_PASSWORD</span><span class="o">=</span>hunter2
 <span class="nv">ROBINHOOD_TOTP_SEED</span><span class="o">=</span>JBSWY3DPEHPK3PXP
+
+<span class="c1"># E*TRADE — real connectivity (remove ETRADE_ACCOUNT_ID for stub mode)</span>
+<span class="nv">ETRADE_CONSUMER_KEY</span><span class="o">=</span>your_consumer_key
+<span class="nv">ETRADE_CONSUMER_SECRET</span><span class="o">=</span>your_consumer_secret
+<span class="nv">ETRADE_ACCOUNT_ID</span><span class="o">=</span>your_account_id_key
+<span class="nv">ETRADE_SANDBOX</span><span class="o">=</span><span class="nb">false</span>
+<span class="nv">ETRADE_READONLY</span><span class="o">=</span><span class="nb">true</span>
 
 <span class="c1"># IBKR — real connectivity (remove IBKR_ACCOUNT_ID for stub mode)</span>
 <span class="nv">IBKR_HOST</span><span class="o">=</span><span class="m">127</span>.0.0.1

@@ -277,6 +277,7 @@ dd {
     <a href="authentication.html">Authentication</a>
     <a href="testing.html">Testing</a>
     <a href="ibkr_setup_guide.html">IBKR Setup</a>
+    <a href="etrade_setup_guide.html">E*TRADE Setup</a>
     <a href="symbology.html">Symbology</a>
     <a href="websockets.html">WebSockets</a>
     </nav>
@@ -334,6 +335,8 @@ dd {
 <p><strong>Stub Quote:</strong> bid=100.00, ask=100.05, last=100.02, volume=1M
 <strong>Stub Position:</strong> SPY 100 shares @ $450</p>
 <h3 id="etrade-appcoreprovidersetradepy">E*TRADE (<code>app/core/providers/etrade.py</code>)</h3>
+<p>The E*TRADE provider has <strong>two implementations</strong> in the same file:</p>
+<h4 id="etradeprovider-stub"><code>EtradeProvider</code> (Stub)</h4>
 <table>
 <thead>
 <tr>
@@ -360,12 +363,143 @@ dd {
 </tr>
 <tr>
 <td>Status</td>
-<td><strong>Stub</strong></td>
+<td><strong>Stub</strong> -- returns simulated responses</td>
+</tr>
+<tr>
+<td>When used</td>
+<td><code>ETRADE_ACCOUNT_ID</code> or <code>ETRADE_CONSUMER_KEY</code> is empty (default)</td>
 </tr>
 </tbody>
 </table>
 <p><strong>Stub Quote:</strong> bid=99.95, ask=100.10, last=100.00, volume=500K
 <strong>Stub Position:</strong> QQQ 50 shares @ $380</p>
+<h4 id="etradeliveprovider-real"><code>EtradeLiveProvider</code> (Real)</h4>
+<table>
+<thead>
+<tr>
+<th>Feature</th>
+<th>Implementation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Auth</td>
+<td>OAuth 1.0a via <code>pyetrade</code> library</td>
+</tr>
+<tr>
+<td>Token persistence</td>
+<td><code>data/utp/etrade_tokens.json</code> (configurable via <code>etrade_token_file</code>)</td>
+</tr>
+<tr>
+<td>Token renewal</td>
+<td>Background renewal every 90 minutes to prevent 2-hour inactivity timeout</td>
+</tr>
+<tr>
+<td>Token expiry</td>
+<td>Tokens expire at midnight ET daily; <code>_load_tokens()</code> rejects stale tokens</td>
+</tr>
+<tr>
+<td>Quotes</td>
+<td><code>/v1/market/quote/{SYMBOLS}</code> with 5-second cache</td>
+</tr>
+<tr>
+<td>Positions</td>
+<td><code>/v1/accounts/{id}/portfolio</code> -- returns equity + option positions with strikes/expiration</td>
+</tr>
+<tr>
+<td>Balances</td>
+<td>Account balance endpoint with real-time NAV</td>
+</tr>
+<tr>
+<td>Option chains</td>
+<td><code>/v1/market/optionchains</code> -- returns expirations + strikes</td>
+</tr>
+<tr>
+<td>Order execution</td>
+<td>2-step preview→place flow; preview returns previewId (valid 3 min), then place with that ID</td>
+</tr>
+<tr>
+<td>Multi-leg</td>
+<td>SPREADS with NET_CREDIT/NET_DEBIT price types. Action mapping: BUY_TO_OPEN→BUY_OPEN, SELL_TO_OPEN→SELL_OPEN, etc.</td>
+</tr>
+<tr>
+<td>Order status</td>
+<td>Maps E*TRADE statuses: OPEN→SUBMITTED, EXECUTED→FILLED, CANCELLED→CANCELLED, REJECTED→REJECTED, PARTIAL→PARTIAL_FILL, EXPIRED→CANCELLED</td>
+</tr>
+<tr>
+<td>Open orders</td>
+<td><code>/v1/accounts/{id}/orders?status=OPEN</code></td>
+</tr>
+<tr>
+<td>Cancel</td>
+<td><code>/v1/accounts/{id}/orders/cancel</code></td>
+</tr>
+<tr>
+<td>Margin check</td>
+<td>Uses preview endpoint (doesn't execute) to get estimated costs</td>
+</tr>
+<tr>
+<td>Portfolio items</td>
+<td><code>get_portfolio_items()</code> for per-position P&amp;L</td>
+</tr>
+<tr>
+<td>Safety</td>
+<td><code>ETRADE_READONLY=true</code> (default) blocks all order submissions</td>
+</tr>
+<tr>
+<td>When used</td>
+<td><code>ETRADE_ACCOUNT_ID</code> and <code>ETRADE_CONSUMER_KEY</code> are both set</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Token management:</strong>
+- <code>_load_tokens()</code> loads from disk and checks freshness (rejects if issued before midnight ET)
+- <code>_save_tokens()</code> persists tokens after successful auth
+- CLI: <code>python utp.py etrade-auth</code> for interactive OAuth flow</p>
+<p><strong>Configuration:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>etrade_account_id</code></td>
+<td>(empty)</td>
+<td>E*TRADE account ID</td>
+</tr>
+<tr>
+<td><code>etrade_consumer_key</code></td>
+<td>(empty)</td>
+<td>OAuth consumer key</td>
+</tr>
+<tr>
+<td><code>etrade_sandbox</code></td>
+<td><code>true</code></td>
+<td>Use sandbox API endpoints</td>
+</tr>
+<tr>
+<td><code>etrade_readonly</code></td>
+<td><code>true</code></td>
+<td>Block all order submissions</td>
+</tr>
+<tr>
+<td><code>etrade_token_file</code></td>
+<td><code>data/utp/etrade_tokens.json</code></td>
+<td>Token persistence path</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Selection logic in <code>app/main.py</code>:</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="k">if</span> <span class="n">settings</span><span class="o">.</span><span class="n">etrade_account_id</span> <span class="ow">and</span> <span class="n">settings</span><span class="o">.</span><span class="n">etrade_consumer_key</span><span class="p">:</span>
+    <span class="n">etrade_provider</span> <span class="o">=</span> <span class="n">EtradeLiveProvider</span><span class="p">()</span>  <span class="c1"># Real pyetrade</span>
+<span class="k">else</span><span class="p">:</span>
+    <span class="n">etrade_provider</span> <span class="o">=</span> <span class="n">EtradeProvider</span><span class="p">()</span>       <span class="c1"># Stub</span>
+</code></pre></div>
+
 <h3 id="ibkr-appcoreprovidersibkrpy">IBKR (<code>app/core/providers/ibkr.py</code>)</h3>
 <p>The IBKR provider has <strong>two implementations</strong> in the same file:</p>
 <h4 id="ibkrprovider-stub"><code>IBKRProvider</code> (Stub)</h4>
@@ -461,7 +595,14 @@ dd {
 - Index quotes use <code>reqMktData</code> with streaming + delayed data fallback
 - Streaming cache: if the streaming service has a fresh tick (&lt;15s), serves instantly</p>
 <p><strong>Selection logic in <code>app/main.py</code>:</strong></p>
-<div class="codehilite"><pre><span></span><code><span class="k">if</span> <span class="n">settings</span><span class="o">.</span><span class="n">ibkr_account_id</span><span class="p">:</span>
+<div class="codehilite"><pre><span></span><code><span class="c1"># E*TRADE: live or stub</span>
+<span class="k">if</span> <span class="n">settings</span><span class="o">.</span><span class="n">etrade_account_id</span> <span class="ow">and</span> <span class="n">settings</span><span class="o">.</span><span class="n">etrade_consumer_key</span><span class="p">:</span>
+    <span class="n">etrade_provider</span> <span class="o">=</span> <span class="n">EtradeLiveProvider</span><span class="p">()</span>
+<span class="k">else</span><span class="p">:</span>
+    <span class="n">etrade_provider</span> <span class="o">=</span> <span class="n">EtradeProvider</span><span class="p">()</span>
+
+<span class="c1"># IBKR: live or stub</span>
+<span class="k">if</span> <span class="n">settings</span><span class="o">.</span><span class="n">ibkr_account_id</span><span class="p">:</span>
     <span class="n">ibkr_provider</span> <span class="o">=</span> <span class="n">IBKRLiveProvider</span><span class="p">()</span>  <span class="c1"># Real ib_insync</span>
 <span class="k">else</span><span class="p">:</span>
     <span class="n">ibkr_provider</span> <span class="o">=</span> <span class="n">IBKRProvider</span><span class="p">()</span>       <span class="c1"># Stub</span>
@@ -554,8 +695,9 @@ dd {
 <p>Providers are registered and connected during the FastAPI lifespan startup:</p>
 <div class="codehilite"><pre><span></span><code><span class="nd">@asynccontextmanager</span>
 <span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">lifespan</span><span class="p">(</span><span class="n">app</span><span class="p">:</span> <span class="n">FastAPI</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">AsyncIterator</span><span class="p">[</span><span class="kc">None</span><span class="p">]:</span>
+    <span class="n">etrade_provider</span> <span class="o">=</span> <span class="n">EtradeLiveProvider</span><span class="p">()</span> <span class="k">if</span> <span class="p">(</span><span class="n">settings</span><span class="o">.</span><span class="n">etrade_account_id</span> <span class="ow">and</span> <span class="n">settings</span><span class="o">.</span><span class="n">etrade_consumer_key</span><span class="p">)</span> <span class="k">else</span> <span class="n">EtradeProvider</span><span class="p">()</span>
     <span class="n">ibkr_provider</span> <span class="o">=</span> <span class="n">IBKRLiveProvider</span><span class="p">()</span> <span class="k">if</span> <span class="n">settings</span><span class="o">.</span><span class="n">ibkr_account_id</span> <span class="k">else</span> <span class="n">IBKRProvider</span><span class="p">()</span>
-    <span class="n">providers</span> <span class="o">=</span> <span class="p">[</span><span class="n">RobinhoodProvider</span><span class="p">(),</span> <span class="n">EtradeProvider</span><span class="p">(),</span> <span class="n">ibkr_provider</span><span class="p">]</span>
+    <span class="n">providers</span> <span class="o">=</span> <span class="p">[</span><span class="n">RobinhoodProvider</span><span class="p">(),</span> <span class="n">etrade_provider</span><span class="p">,</span> <span class="n">ibkr_provider</span><span class="p">]</span>
     <span class="k">for</span> <span class="n">p</span> <span class="ow">in</span> <span class="n">providers</span><span class="p">:</span>
         <span class="n">ProviderRegistry</span><span class="o">.</span><span class="n">register</span><span class="p">(</span><span class="n">p</span><span class="p">)</span>
         <span class="k">await</span> <span class="n">p</span><span class="o">.</span><span class="n">connect</span><span class="p">()</span>
@@ -657,11 +799,11 @@ dd {
 </code></pre></div>
 
 <h2 id="moving-from-stubs-to-real-apis">Moving from Stubs to Real APIs</h2>
-<p>The current Robinhood and E*TRADE providers return simulated data. To connect to real broker APIs:</p>
+<p>The current Robinhood provider returns simulated data. To connect to real broker APIs:</p>
 <ol>
 <li><strong>Robinhood</strong> -- integrate <code>robin_stocks</code> library in <code>connect()</code> and route orders through <code>robin_stocks.robinhood.order_option_spread()</code></li>
-<li><strong>E*TRADE</strong> -- use the E*TRADE Python SDK with OAuth1 session management</li>
-<li><strong>IBKR</strong> -- already implemented via <code>IBKRLiveProvider</code> with <code>ib_insync</code>. Set <code>IBKR_ACCOUNT_ID</code> to activate.</li>
+<li><strong>E*TRADE</strong> -- implemented via <code>EtradeLiveProvider</code> with <code>pyetrade</code>. Set <code>ETRADE_ACCOUNT_ID</code> and run <code>python utp.py etrade-auth</code> to activate.</li>
+<li><strong>IBKR</strong> -- implemented via <code>IBKRLiveProvider</code> with <code>ib_insync</code>. Set <code>IBKR_ACCOUNT_ID</code> to activate.</li>
 </ol>
 <p>The provider interface remains identical -- only the internal implementation changes. The position sync loop, ledger, and dashboard all work transparently with both stub and real providers.</p>
     <div class="footer">

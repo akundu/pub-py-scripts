@@ -308,6 +308,7 @@ NAV_ITEMS = [
     ("authentication.html", "Authentication"),
     ("testing.html", "Testing"),
     ("ibkr_setup_guide.html", "IBKR Setup"),
+    ("etrade_setup_guide.html", "E*TRADE Setup"),
     ("symbology.html", "Symbology"),
     ("websockets.html", "WebSockets"),
 ]
@@ -410,11 +411,12 @@ def _build_index(md_files: list[Path]) -> None:
         "architecture": "System design, persistence model, background tasks, request flows, and extension patterns.",
         "authentication": "API key and OAuth2/JWT authentication flows, scopes, and security best practices.",
         "configuration": "All environment variables with defaults, .env template, and persistence directory layout.",
+        "etrade_setup_guide": "Step-by-step E*TRADE API setup: OAuth authorization, token management, sandbox testing, and production deployment.",
         "ibkr_setup_guide": "Step-by-step TWS/IB Gateway connection setup, troubleshooting, and market data configuration.",
         "playbook": "Trade playbook system: YAML instruction format, CLI usage, reconciliation (flush/hard-reset), status dashboard, readiness test.",
-        "providers": "BrokerProvider interface, stub and live implementations, ProviderRegistry, and how to add new brokers.",
+        "providers": "BrokerProvider interface, stub and live implementations (IBKR + E*TRADE), ProviderRegistry, and how to add new brokers.",
         "symbology": "Symbol mapping across brokers (UUID, conId, OSI format), OptionContract dataclass.",
-        "testing": "359 tests in a single file: fixtures, test class descriptions, testing patterns, and how to add new tests.",
+        "testing": "498 tests in a single file: fixtures, test class descriptions, testing patterns, and how to add new tests.",
         "usage_guide": "15 common workflows: quotes, option chains, credit spreads, iron condors, equity trades, daemon mode, playbooks, execution history, trade simulation, system reset, and more.",
         "websockets": "Real-time order status streaming via WebSocket, message format, and client examples.",
     }

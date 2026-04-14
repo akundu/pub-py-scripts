@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     etrade_consumer_secret: str = ""
     etrade_oauth_token: str = ""
     etrade_oauth_secret: str = ""
+    etrade_sandbox: bool = True  # true = apisb.etrade.com, false = api.etrade.com
+    etrade_account_id: str = ""  # accountIdKey from /v1/accounts
+    etrade_readonly: bool = True  # Safety: blocks order submission
+    etrade_token_file: str = "data/utp/etrade_tokens.json"  # Persisted OAuth tokens
 
     # IBKR
     ibkr_host: str = "127.0.0.1"

@@ -277,6 +277,7 @@ dd {
     <a href="authentication.html">Authentication</a>
     <a href="testing.html">Testing</a>
     <a href="ibkr_setup_guide.html">IBKR Setup</a>
+    <a href="etrade_setup_guide.html">E*TRADE Setup</a>
     <a href="symbology.html">Symbology</a>
     <a href="websockets.html">WebSockets</a>
     </nav>
@@ -390,7 +391,7 @@ python<span class="w"> </span>utp.py<span class="w"> </span>close<span class="w"
 
 <hr />
 <h2 id="workflow-2-start-daemon-and-trade-via-cli">Workflow 2: Start Daemon and Trade via CLI</h2>
-<p>The daemon holds a persistent IBKR connection. All CLI commands auto-detect it.</p>
+<p>The daemon holds a persistent IBKR connection. All CLI commands auto-detect it. When <code>ETRADE_ACCOUNT_ID</code> and <code>ETRADE_CONSUMER_KEY</code> are set, the E*TRADE live provider is also auto-selected and available alongside IBKR.</p>
 <h3 id="start-the-daemon">Start the daemon</h3>
 <div class="codehilite"><pre><span></span><code><span class="c1"># Paper trading</span>
 python<span class="w"> </span>utp.py<span class="w"> </span>daemon<span class="w"> </span>--paper
@@ -524,7 +525,27 @@ python<span class="w"> </span>utp.py<span class="w"> </span>readiness<span class
 </code></pre></div>
 
 <hr />
-<h2 id="workflow-10-order-management">Workflow 10: Order Management</h2>
+<h2 id="workflow-10-etrade-authorization">Workflow 10: E*TRADE Authorization</h2>
+<div class="codehilite"><pre><span></span><code><span class="c1"># 1. Set credentials</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">ETRADE_CONSUMER_KEY</span><span class="o">=</span><span class="s2">&quot;your_key&quot;</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">ETRADE_CONSUMER_SECRET</span><span class="o">=</span><span class="s2">&quot;your_secret&quot;</span>
+
+<span class="c1"># 2. Authorize (sandbox first)</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>etrade-auth<span class="w"> </span>--sandbox
+
+<span class="c1"># 3. List accounts to find your account ID</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>etrade-auth<span class="w"> </span>--sandbox<span class="w"> </span>--list-accounts
+
+<span class="c1"># 4. Set account ID</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">ETRADE_ACCOUNT_ID</span><span class="o">=</span><span class="s2">&quot;your_account_id_key&quot;</span>
+
+<span class="c1"># 5. Verify</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>quote<span class="w"> </span>SPY<span class="w"> </span>--broker<span class="w"> </span>etrade
+python<span class="w"> </span>utp.py<span class="w"> </span>portfolio<span class="w"> </span>--broker<span class="w"> </span>etrade
+</code></pre></div>
+
+<hr />
+<h2 id="workflow-11-order-management">Workflow 11: Order Management</h2>
 <div class="codehilite"><pre><span></span><code><span class="c1"># View open/working orders</span>
 python<span class="w"> </span>utp.py<span class="w"> </span>orders<span class="w"> </span>--live
 
@@ -536,7 +557,7 @@ python<span class="w"> </span>utp.py<span class="w"> </span>cancel<span class="w
 </code></pre></div>
 
 <hr />
-<h2 id="workflow-11-trade-history-performance">Workflow 11: Trade History &amp; Performance</h2>
+<h2 id="workflow-12-trade-history-performance">Workflow 12: Trade History &amp; Performance</h2>
 <div class="codehilite"><pre><span></span><code><span class="c1"># Today&#39;s trades</span>
 python<span class="w"> </span>utp.py<span class="w"> </span>trades<span class="w"> </span>--live
 
@@ -558,7 +579,7 @@ python<span class="w"> </span>utp.py<span class="w"> </span>journal<span class="
 </code></pre></div>
 
 <hr />
-<h2 id="workflow-12-real-time-market-data-streaming">Workflow 12: Real-Time Market Data Streaming</h2>
+<h2 id="workflow-13-real-time-market-data-streaming">Workflow 13: Real-Time Market Data Streaming</h2>
 <p>Stream real-time IBKR market data to Redis, QuestDB, and WebSocket clients. Uses the same message format as <code>polygon_realtime_streamer.py</code> for full compatibility.</p>
 <h3 id="start-daemon-with-streaming">Start daemon with streaming</h3>
 <div class="codehilite"><pre><span></span><code>python<span class="w"> </span>utp.py<span class="w"> </span>daemon<span class="w"> </span>--live<span class="w"> </span>--streaming-config<span class="w"> </span>configs/streaming_default.yaml
@@ -595,7 +616,7 @@ python<span class="w"> </span>utp.py<span class="w"> </span>journal<span class="
 <li>Publishes to Redis channels <code>realtime:quote:{SYMBOL}</code> and QuestDB <code>realtime_data</code> table</li>
 </ul>
 <hr />
-<h2 id="workflow-13-view-execution-history-grouped-trades">Workflow 13: View Execution History (Grouped Trades)</h2>
+<h2 id="workflow-14-view-execution-history-grouped-trades">Workflow 14: View Execution History (Grouped Trades)</h2>
 <div class="codehilite"><pre><span></span><code><span class="c1"># View IBKR executions grouped by permanent order ID (multi-leg trades shown together)</span>
 python<span class="w"> </span>utp.py<span class="w"> </span>executions<span class="w"> </span>--live
 
@@ -608,7 +629,7 @@ python<span class="w"> </span>utp.py<span class="w"> </span>executions<span clas
 
 <p>The execution store caches IBKR executions in <code>data/utp/live/executions.json</code> and groups them by <code>perm_id</code> (IBKR permanent order ID), making it easy to see which legs belong to the same multi-leg trade.</p>
 <hr />
-<h2 id="workflow-14-simulate-a-trade-margin-check-without-execution">Workflow 14: Simulate a Trade (Margin Check Without Execution)</h2>
+<h2 id="workflow-15-simulate-a-trade-margin-check-without-execution">Workflow 15: Simulate a Trade (Margin Check Without Execution)</h2>
 <div class="codehilite"><pre><span></span><code><span class="c1"># Qualifies contracts, checks margin, shows what would happen — but does NOT execute</span>
 python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"> </span>credit-spread<span class="w"> </span>--symbol<span class="w"> </span>RUT<span class="w"> </span>--short-strike<span class="w"> </span><span class="m">2460</span><span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--long-strike<span class="w"> </span><span class="m">2440</span><span class="w"> </span>--option-type<span class="w"> </span>PUT<span class="w"> </span>--expiration<span class="w"> </span><span class="m">2026</span>-03-18<span class="w"> </span><span class="se">\</span>
@@ -622,7 +643,7 @@ python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"
 
 <p>The <code>--simulate</code> flag uses the live IBKR connection to qualify contracts and check margin but never submits the order.</p>
 <hr />
-<h2 id="workflow-15-full-system-reset-and-rebuild">Workflow 15: Full System Reset and Rebuild</h2>
+<h2 id="workflow-16-full-system-reset-and-rebuild">Workflow 16: Full System Reset and Rebuild</h2>
 <div class="codehilite"><pre><span></span><code><span class="c1"># Hard reset: clears EVERYTHING (open + closed positions, ledger, executions)</span>
 python<span class="w"> </span>utp.py<span class="w"> </span>reconcile<span class="w"> </span>--hard-reset<span class="w"> </span>--live
 
@@ -634,7 +655,7 @@ python<span class="w"> </span>utp.py<span class="w"> </span>reconcile<span class
 </code></pre></div>
 
 <hr />
-<h2 id="workflow-16-close-a-position-by-id">Workflow 16: Close a Position by ID</h2>
+<h2 id="workflow-17-close-a-position-by-id">Workflow 17: Close a Position by ID</h2>
 <p>The <code>close</code> command submits a real IBKR closing order (not just local bookkeeping). It auto-derives the closing parameters from the position's legs.</p>
 <div class="codehilite"><pre><span></span><code><span class="c1"># Find position IDs from trades output</span>
 python<span class="w"> </span>utp.py<span class="w"> </span>trades<span class="w"> </span>--all<span class="w"> </span>--live
@@ -657,7 +678,7 @@ python<span class="w"> </span>utp.py<span class="w"> </span>close<span class="w"
 
 <p>The position ID can be a prefix — if it uniquely matches one open position, that position is closed. For credit spreads, submits a BUY_TO_CLOSE combo order. For debit spreads, submits SELL_TO_CLOSE.</p>
 <hr />
-<h2 id="workflow-17-flush-local-data">Workflow 17: Flush Local Data</h2>
+<h2 id="workflow-18-flush-local-data">Workflow 18: Flush Local Data</h2>
 <p>The <code>flush</code> command clears local persisted data. It is blocked when a daemon is running — use <code>reconcile --flush</code> instead.</p>
 <div class="codehilite"><pre><span></span><code><span class="c1"># Flush everything (positions + ledger)</span>
 python<span class="w"> </span>utp.py<span class="w"> </span>flush
@@ -671,7 +692,7 @@ python<span class="w"> </span>utp.py<span class="w"> </span>flush<span class="w"
 
 <p>Note: <code>flush</code> is a local-only operation and does NOT affect the broker. For broker-aware flush, use <code>reconcile --flush --live</code>.</p>
 <hr />
-<h2 id="workflow-18-validate-trade-types">Workflow 18: Validate Trade Types</h2>
+<h2 id="workflow-19-validate-trade-types">Workflow 19: Validate Trade Types</h2>
 <p>Test that all 5 trade types work without placing real orders:</p>
 <div class="codehilite"><pre><span></span><code><span class="c1"># Validate on paper account</span>
 python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"> </span>--validate-all<span class="w"> </span>--paper
@@ -786,6 +807,10 @@ python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"
 <td><code>exec</code></td>
 <td><code>executions</code></td>
 </tr>
+<tr>
+<td><code>ea</code></td>
+<td><code>etrade-auth</code></td>
+</tr>
 </tbody>
 </table>
 <h2 id="common-flags-all-subcommands-with-ibkr-connection">Common Flags (all subcommands with IBKR connection)</h2>
@@ -801,7 +826,7 @@ python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"
 <tr>
 <td><code>--broker</code></td>
 <td><code>ibkr</code></td>
-<td>Broker to use</td>
+<td>Broker to use (<code>ibkr</code>, <code>robinhood</code>, <code>etrade</code>)</td>
 </tr>
 <tr>
 <td><code>--host</code></td>

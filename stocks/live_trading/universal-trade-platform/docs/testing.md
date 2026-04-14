@@ -2,9 +2,9 @@
 
 ## Overview
 
-The test suite uses `pytest` with `pytest-asyncio` and `httpx` to test all REST endpoints, authentication flows, symbology mapping, WebSocket broadcasting, and the full persistence/dashboard/sync stack against mocked broker providers.
+The test suite uses `pytest` with `pytest-asyncio` and `httpx` to test all REST endpoints, authentication flows, symbology mapping, WebSocket broadcasting, IBKR and E\*TRADE provider logic, and the full persistence/dashboard/sync stack against mocked broker providers.
 
-**Total:** 454 tests in a single file (`tests/test_utp.py`), all passing
+**Total:** 498 tests in a single file (`tests/test_utp.py`), all passing
 
 ## Running Tests
 
@@ -111,6 +111,7 @@ All tests live in `tests/test_utp.py`, organized into classes by functional area
 | `TestInstructionTranslation` | 6 | Instruction → TradeRequest conversion |
 | `TestPlaybookExecution` | 7 | Playbook execution flow, hooks |
 | `TestFillTracking` | 8 | Order fill polling, callbacks, timeouts |
+| `TestEtradeProvider` | 18 | E\*TRADE stub, live provider init, readonly safety, equity preview/place, multi-leg payload, quote parsing, position parsing, status mapping, balances, token freshness, sandbox/prod URLs, connect, option chain, cancel, config |
 | `TestIBKRProvider` | 16 | IBKR stub + live + cache layer |
 | `TestOrdersCommand` | 3 | Orders/cancel CLI requires mode |
 | `TestStatusChangeDedup` | 2 | Ledger status change deduplication |
