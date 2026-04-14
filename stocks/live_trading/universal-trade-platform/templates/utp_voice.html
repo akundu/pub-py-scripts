@@ -3186,9 +3186,13 @@ function renderRecs() {
       html += '</tr>';
     }
     html += '</tbody></table></div>';
-    if (allTopSpreads.length > topN) {
-      html += `<div style="font-size:9px;color:var(--muted);text-align:right;padding:2px 4px">${allTopSpreads.length} total matches — showing top ${topN} (scroll or increase Top N)</div>`;
-    }
+    const putCount = allTopSpreads.filter(s => s.option_type === 'PUT').length;
+    const callCount = allTopSpreads.filter(s => s.option_type === 'CALL').length;
+    let summaryParts = [`${allTopSpreads.length} matches (${putCount}P/${callCount}C)`];
+    if (allTopSpreads.length > topN) summaryParts.push(`showing top ${topN}`);
+    if (putCount > 0 && callCount === 0) summaryParts.push('no calls pass filters — try lowering OTM% pc');
+    if (callCount > 0 && putCount === 0) summaryParts.push('no puts pass filters — try lowering OTM% pc');
+    html += `<div style="font-size:9px;color:var(--muted);text-align:right;padding:2px 4px">${summaryParts.join(' · ')}</div>`;
     html += '</div>';
   }
 

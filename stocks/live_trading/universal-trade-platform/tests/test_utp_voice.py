@@ -1111,20 +1111,20 @@ class TestCSVExpirations:
         """CSV expirations should exclude weekends and holidays."""
         csv_dir = tmp_path / "SPX"
         csv_dir.mkdir()
-        # 2026-04-11 = Saturday, 2026-04-12 = Sunday, 2026-04-13 = Monday
-        (csv_dir / "2026-04-11.csv").write_text("header\n")
-        (csv_dir / "2026-04-12.csv").write_text("header\n")
-        (csv_dir / "2026-04-13.csv").write_text("header\n")
-        (csv_dir / "2026-04-14.csv").write_text("header\n")
+        # 2027-04-10 = Saturday, 2027-04-11 = Sunday, 2027-04-12 = Monday
+        (csv_dir / "2027-04-10.csv").write_text("header\n")
+        (csv_dir / "2027-04-11.csv").write_text("header\n")
+        (csv_dir / "2027-04-12.csv").write_text("header\n")
+        (csv_dir / "2027-04-13.csv").write_text("header\n")
 
         original = utp_voice.CSV_EXPORTS_DIR
         utp_voice.CSV_EXPORTS_DIR = str(tmp_path)
         try:
             exps = utp_voice._get_csv_expirations("SPX")
-            assert "2026-04-11" not in exps  # Saturday
-            assert "2026-04-12" not in exps  # Sunday
-            assert "2026-04-13" in exps      # Monday
-            assert "2026-04-14" in exps      # Tuesday
+            assert "2027-04-10" not in exps  # Saturday
+            assert "2027-04-11" not in exps  # Sunday
+            assert "2027-04-12" in exps      # Monday
+            assert "2027-04-13" in exps      # Tuesday
         finally:
             utp_voice.CSV_EXPORTS_DIR = original
 
@@ -1240,12 +1240,12 @@ class TestMergeExpirations:
 
     def test_merge_filters_non_trading_days(self):
         """Weekends and holidays should be excluded from expirations."""
-        # 2026-04-11 is Saturday, 2026-04-12 is Sunday, 2026-04-13 is Monday
-        exps = ["2026-04-11", "2026-04-12", "2026-04-13"]
+        # 2027-04-10 is Saturday, 2027-04-11 is Sunday, 2027-04-12 is Monday
+        exps = ["2027-04-10", "2027-04-11", "2027-04-12"]
         result = utp_voice._merge_expirations(exps)
-        assert "2026-04-11" not in result  # Saturday
-        assert "2026-04-12" not in result  # Sunday
-        assert "2026-04-13" in result      # Monday (trading day)
+        assert "2027-04-10" not in result  # Saturday
+        assert "2027-04-11" not in result  # Sunday
+        assert "2027-04-12" in result      # Monday (trading day)
 
 
 class TestSpreadMetrics:
