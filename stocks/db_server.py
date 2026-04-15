@@ -5372,7 +5372,8 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
             // Check if New York is currently in EDT or EST
             const nowStr = new Date().toLocaleString('en-US', {{timeZone: 'America/New_York', timeZoneName: 'short'}});
             const etOffset = nowStr.indexOf('EDT') >= 0 ? 4 : 5;
-            const utcDate = new Date(Date.UTC(2026, 0, 15, h + etOffset, m));
+            const now = new Date();
+            const utcDate = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate(), h + etOffset, m));
             return utcDate.toLocaleTimeString('en-US', {{hour: 'numeric', minute: '2-digit', timeZoneName: 'short'}});
         }}
 

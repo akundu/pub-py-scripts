@@ -2092,8 +2092,9 @@ def format_hourly_moves_as_html(hourly_data: dict) -> str:
             var m = parseInt(el.dataset.etMin, 10);
             var n = el.dataset.n || '';
             var etLabel = el.dataset.etLabel || '';
-            // Convert ET time to UTC, then let browser show in local tz
-            var utcDate = new Date(Date.UTC(2026, 0, 15, h + etOffset, m, 0));
+            // Convert ET time to UTC using today's date (respects current DST)
+            var today = new Date();
+            var utcDate = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate(), h + etOffset, m, 0));
             var localStr = utcDate.toLocaleTimeString('en-US', {hour: 'numeric', minute: '2-digit', timeZoneName: 'short'});
             el.innerHTML = localStr + '<br><small style="font-weight:normal;font-size:11px;opacity:0.8">'
                 + etLabel + ' (n=' + n + ')</small>';
