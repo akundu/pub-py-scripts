@@ -1149,47 +1149,67 @@ function getIntradayBracket(sym, optionType, otmPct) {
   const hh = parseInt(parts[0] || '0');
   const mm = parseInt(parts[1] || '0');
   const etMinutes = hh * 60 + mm;
-
-  let slotDict, slot, slotKey;
   const marketClosed = etMinutes >= 960;
 
-  if (etMinutes >= 950 || marketClosed) {
-    slotDict = hData.slots_5min || {};
-    [slotKey, slot] = _findBestSlotDict(slotDict, etMinutes, marketClosed);
-    if (!slot) {
-      slotDict = hData.slots_15min || {};
-      [slotKey, slot] = _findBestSlotDict(slotDict, etMinutes, marketClosed);
-    }
-  } else if (etMinutes >= 900) {
-    slotDict = hData.slots_15min || {};
-    [slotKey, slot] = _findBestSlotDict(slotDict, etMinutes, false);
-    if (!slot) {
-      slotDict = hData.slots || {};
-      [slotKey, slot] = _findBestSlotDict(slotDict, etMinutes, false);
-    }
-  } else {
-    slotDict = hData.slots || {};
-    [slotKey, slot] = _findBestSlotDict(slotDict, etMinutes, false);
-    if (!slot) {
-      const sortedKeys = Object.keys(slotDict).sort();
-      if (sortedKeys.length) { slotKey = sortedKeys[0]; slot = slotDict[slotKey]; }
+  // Find current slot (for display) and collect all remaining slots for worst-case
+  let slotDict, slotKey;
+  [slotKey] = _findBestSlotDict(hData.slots || {}, etMinutes, marketClosed);
+  if (!slotKey) {
+    const sortedKeys = Object.keys(hData.slots || {}).sort();
+    if (sortedKeys.length) slotKey = sortedKeys[0]; else return null;
+  }
+
+  // Collect ALL slots from current time onward across all granularities
+  // to find worst-case percentile values for the rest of the day
+  const dir = optionType === 'PUT' ? 'when_down' : 'when_up';
+  const allRemainingPcts = [];
+  for (const dict of [hData.slots || {}, hData.slots_15min || {}, hData.slots_5min || {}]) {
+    for (const [k, s] of Object.entries(dict)) {
+      const match = k.match(/^(\d{1,2}):(\d{2})/);
+      if (!match) continue;
+      const slotMins = parseInt(match[1]) * 60 + parseInt(match[2]);
+      // Include current slot and all future slots (or all slots if market closed/pre-market)
+      if (slotMins >= etMinutes || marketClosed || etMinutes < 600) {
+        const pct = s[dir]?.pct;
+        if (pct) allRemainingPcts.push(pct);
+      }
     }
   }
-  if (!slot) return null;
+  // If pre-market, include all slots
+  if (!allRemainingPcts.length) {
+    for (const dict of [hData.slots || {}, hData.slots_15min || {}, hData.slots_5min || {}]) {
+      for (const s of Object.values(dict)) {
+        const pct = s[dir]?.pct;
+        if (pct) allRemainingPcts.push(pct);
+      }
+    }
+  }
+  if (!allRemainingPcts.length) return null;
 
-  const pctData = optionType === 'PUT' ? slot.when_down?.pct : slot.when_up?.pct;
-  if (!pctData) return null;
+  // For each percentile level, take the worst case across all remaining slots:
+  // Puts (down): worst case = largest absolute move (max abs value)
+  // Calls (up): worst case = largest absolute move (max abs value)
+  const pLevels = ['p100','p99','p98','p95','p90','p85','p80','p75'];
+  const worstCase = {};
+  for (const pl of pLevels) {
+    let worst = 0;
+    for (const pct of allRemainingPcts) {
+      const val = Math.abs(pct[pl] || 0);
+      if (val > worst) worst = val;
+    }
+    worstCase[pl] = worst;
+  }
 
   const absOtm = Math.abs(otmPct);
   const levels = [
-    {pctl: 100, val: Math.abs(pctData.p100 || 999)},
-    {pctl: 99, val: Math.abs(pctData.p99 || 999)},
-    {pctl: 98, val: Math.abs(pctData.p98 || 999)},
-    {pctl: 95, val: Math.abs(pctData.p95 || 999)},
-    {pctl: 90, val: Math.abs(pctData.p90 || 999)},
-    {pctl: 85, val: Math.abs(pctData.p85 || 999)},
-    {pctl: 80, val: Math.abs(pctData.p80 || 999)},
-    {pctl: 75, val: Math.abs(pctData.p75 || 999)},
+    {pctl: 100, val: worstCase.p100 || 999},
+    {pctl: 99, val: worstCase.p99 || 999},
+    {pctl: 98, val: worstCase.p98 || 999},
+    {pctl: 95, val: worstCase.p95 || 999},
+    {pctl: 90, val: worstCase.p90 || 999},
+    {pctl: 85, val: worstCase.p85 || 999},
+    {pctl: 80, val: worstCase.p80 || 999},
+    {pctl: 75, val: worstCase.p75 || 999},
   ];
   for (const lv of levels) {
     if (absOtm >= lv.val) {
@@ -2953,6 +2973,10 @@ async function executeConfirm(cid) {
   try {
     const r = await fetch('/api/confirm/'+cid, {method:'POST'});
     const d = await r.json();
+    if (!r.ok) {
+      res.innerHTML = `<div class="confirm-result failure" style="margin-top:8px">FAILED: ${d.detail || d.error || r.statusText}</div><button class="btn btn-muted btn-sm" style="margin-top:8px" onclick="closeTrade()">OK</button>`;
+      return;
+    }
     const result = d.result||{};
     const ok = !result.error && result.status!=='FAILED';
     res.innerHTML = `<div class="confirm-result ${ok?'success':'failure'}" style="margin-top:8px">${ok?'EXECUTED':'FAILED'}: ${result.message||result.status||JSON.stringify(d)}</div>`;
@@ -4069,6 +4093,10 @@ async function chatConfirm(cid, container) {
   try {
     const r = await fetch('/api/confirm/'+cid, {method:'POST'});
     const d = await r.json();
+    if (!r.ok) {
+      container.innerHTML = `<div class="confirm-result failure">FAILED: ${d.detail || d.error || r.statusText}</div>`;
+      return;
+    }
     const result = d.result||{};
     const ok = !result.error && result.status!=='FAILED';
     container.innerHTML = `<div class="confirm-result ${ok?'success':'failure'}">${ok?'EXECUTED':'FAILED'}: ${result.message||result.status||''}</div>`;
