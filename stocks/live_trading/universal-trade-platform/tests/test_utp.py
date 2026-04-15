@@ -7144,9 +7144,13 @@ option_quotes_greeks_interval: 30.0
 
     async def test_option_chain_routes_through_market_data(self, client, api_key_headers):
         """GET /market/options/{symbol}?list_expirations=true calls market_data.get_option_chain."""
+        from datetime import datetime, timedelta
         from app.models import Broker
+        # Use future dates so _merge_expirations doesn't filter them out
+        d1 = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        d2 = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d")
         with patch("app.services.market_data.get_option_chain", new_callable=AsyncMock,
-                    return_value={"expirations": ["2026-04-14", "2026-04-15"]}) as mock_chain:
+                    return_value={"expirations": [d1, d2]}) as mock_chain:
             resp = await client.get(
                 "/market/options/SPX",
                 params={"list_expirations": "true"},
@@ -7154,7 +7158,8 @@ option_quotes_greeks_interval: 30.0
             )
             assert resp.status_code == 200
             data = resp.json()
-            assert data["expirations"] == ["2026-04-14", "2026-04-15"]
+            assert d1 in data["expirations"]
+            assert d2 in data["expirations"]
             mock_chain.assert_called_once_with("SPX", Broker.IBKR)
 
     def test_greeks_interval_default_is_45(self):

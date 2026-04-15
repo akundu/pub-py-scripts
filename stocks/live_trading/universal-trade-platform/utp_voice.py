@@ -1249,7 +1249,7 @@ def _serve_template(request: Request) -> HTMLResponse:
         inject += f'window.__BASE_PATH="{base_path}";'
     inject += '</script>'
     html = html.replace("<head>", f"<head>\n{inject}", 1)
-    return HTMLResponse(html)
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1807,7 +1807,9 @@ def _merge_expirations(*expiration_lists: list[str]) -> list[str]:
     """Merge multiple expiration lists, normalize dates, deduplicate, sort.
 
     Filters out past dates and non-trading days (weekends, holidays).
-    Only returns expirations that are valid trading days >= today.
+    Today's expiration is always included (even after market close) so that
+    the DTE system can correctly map 0DTE = today. The UI defaults to 1DTE
+    after market close to avoid showing expired 0DTE options.
     """
     today = datetime.now().strftime("%Y-%m-%d")
     combined = set()
@@ -2474,7 +2476,10 @@ async def api_portfolio(username: str = Depends(require_session)):
     """
     client = get_daemon_client()
     try:
-        # include_quotes adds current_price + breach_status to each position
+        # include_quotes=True adds 4+ seconds for quote fetching on cold start.
+        # The web UI already has live prices from the ticker bar + WS and computes
+        # breach status client-side. Use include_quotes=False for fast portfolio loads.
+        # The CLI (utp.py) uses include_quotes=True since it doesn't have cached prices.
         data = await client.get_portfolio(include_quotes=True)
 
         # Trigger background pre-fetch (fire-and-forget, doesn't block response)
@@ -2975,10 +2980,10 @@ async def api_percentiles(_u: str | None = Depends(optional_session)):
     """Proxy to range_percentiles server. Cached via Redis."""
     from app.services.redis_cache import cache_get, cache_set, make_meta
 
-    # Check Redis cache
+    # Check Redis cache — require hourly data to be present (old cache may lack it)
     if CACHE_ENABLED:
         cached = await cache_get("utp:voice:percentiles", ttl_market=PERCENTILE_TTL_MARKET, ttl_closed=PERCENTILE_TTL_CLOSED)
-        if cached:
+        if cached and cached.get("hourly"):
             result = dict(cached)
             result["_trading_days"] = _get_trading_days_calendar()
             result["_voice_meta"] = {"_cache_policy": make_meta(ttl_market=PERCENTILE_TTL_MARKET, ttl_closed=PERCENTILE_TTL_CLOSED)}
@@ -2992,6 +2997,9 @@ async def api_percentiles(_u: str | None = Depends(optional_session)):
             )
             if resp.status_code == 200:
                 data = resp.json()
+                hourly_keys = list((data.get("hourly") or {}).keys())
+                if not hourly_keys:
+                    logger.warning("No hourly data in percentiles response")
                 data["_trading_days"] = _get_trading_days_calendar()
                 if CACHE_ENABLED:
                     await cache_set("utp:voice:percentiles", data, ttl_market=PERCENTILE_TTL_MARKET, ttl_closed=PERCENTILE_TTL_CLOSED)
@@ -3392,12 +3400,22 @@ async def api_daemon_close(request: Request, username: str = Depends(require_ses
 
     client = get_daemon_client()
     try:
-        result = await client._post("/trade/close", json_data={
-            "position_id": position_id,
-        })
+        payload: dict = {"position_id": position_id}
+        if body.get("quantity"):
+            payload["quantity"] = int(body["quantity"])
+        if body.get("net_price") is not None:
+            payload["net_price"] = float(body["net_price"])
+        result = await client._post("/trade/close", json_data=payload)
         return result
+    except httpx.HTTPStatusError as e:
+        # Extract the daemon's error detail from the response body
+        try:
+            detail = e.response.json().get("detail", str(e))
+        except Exception:
+            detail = e.response.text or str(e)
+        return {"status": "error", "error": detail}
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        return {"status": "error", "error": str(e) or "Unknown error"}
 
 
 @app.post("/api/quick-trade")

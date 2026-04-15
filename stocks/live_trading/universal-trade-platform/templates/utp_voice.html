@@ -90,6 +90,9 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
 .btn-sm { padding:6px 10px; min-height:32px; font-size:11px; }
 .select-styled { padding:8px 12px; background:var(--bg); border:1px solid var(--border); border-radius:6px; color:var(--text); font-family:var(--mono); font-size:13px; outline:none; min-height:36px; }
 .select-styled:focus { border-color:var(--blue); }
+.type-tab { padding:4px 10px; font-size:11px; font-family:var(--mono); border:1px solid var(--border); background:var(--bg); color:var(--muted); cursor:pointer; border-radius:4px; }
+.type-tab:hover { border-color:var(--blue); color:var(--text); }
+.type-tab.active { background:var(--blue); color:#fff; border-color:var(--blue); }
 .refresh-btn { cursor:pointer; color:var(--muted); font-size:14px; }
 .refresh-btn:hover { color:var(--blue); }
 .spinner { display:inline-block; width:14px; height:14px; border:2px solid var(--border); border-top-color:var(--blue); border-radius:50%; animation:spin 0.8s linear infinite; }
@@ -422,11 +425,17 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
     <!-- Recommendations Tab -->
     <div id="pane-recs" class="tab-pane">
       <div class="panel">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:4px">
           <span class="card-title" style="margin:0">Best Credit Spreads</span>
+          <div class="type-tabs" style="display:inline-flex;gap:2px;margin-left:8px">
+            <button class="type-tab active" data-type="ALL" onclick="switchTypeTab('ALL')">Both</button>
+            <button class="type-tab" data-type="PUT" onclick="switchTypeTab('PUT')">Puts</button>
+            <button class="type-tab" data-type="CALL" onclick="switchTypeTab('CALL')">Calls</button>
+          </div>
           <span id="recs-last-updated" style="font-size:11px;color:var(--yellow);font-weight:600"></span>
           <span id="recs-activity" style="font-size:10px;color:var(--blue);display:none"><span class="spinner" style="width:9px;height:9px;border-width:1px;vertical-align:middle;margin-right:3px"></span>Updating</span>
           <span class="refresh-btn" onclick="loadRecommendations()">&#x21bb;</span>
+          <button class="hbtn" style="font-size:9px;padding:2px 6px;color:var(--muted)" onclick="clearAllFilters()" title="Clear all filters — show everything sorted by D/ROI">Show All</button>
           <button class="hbtn" style="font-size:9px;padding:2px 6px;color:var(--muted)" onclick="resetRecFilters()" title="Reset filters to defaults">Reset</button>
         </div>
         <div class="grid-controls" style="margin-bottom:10px">
@@ -474,6 +483,17 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
             <option value="98">&gt;P98</option>
             <option value="99">&gt;P99</option>
           </select>
+          <label style="color:var(--muted);font-size:11px" title="Intraday move-to-close percentile (0DTE only)">Min Intra</label>
+          <select id="rec-min-intraday" class="select-styled" onchange="filterRecs()">
+            <option value="0" selected>All</option>
+            <option value="75">&gt;P75</option>
+            <option value="80">&gt;P80</option>
+            <option value="85">&gt;P85</option>
+            <option value="90">&gt;P90</option>
+            <option value="95">&gt;P95</option>
+            <option value="98">&gt;P98</option>
+            <option value="99">&gt;P99</option>
+          </select>
           <label style="color:var(--muted);font-size:11px;white-space:nowrap" title="Max absolute delta of short leg (lower = further OTM)">Max&nbsp;Delta</label>
           <input type="number" id="rec-max-delta" class="select-styled" style="width:80px" value="" min="0" max="0.30" step="0.01" placeholder="Any" onchange="filterRecs()">
           <label style="color:var(--muted);font-size:11px">Qty</label>
@@ -489,12 +509,6 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
             <option value="NDX">NDX</option>
             <option value="RUT">RUT</option>
           </select>
-          <label style="color:var(--muted);font-size:11px">Type</label>
-          <select id="rec-type-filter" class="select-styled" onchange="filterRecs()">
-            <option value="ALL">Both</option>
-            <option value="PUT">Puts</option>
-            <option value="CALL">Calls</option>
-          </select>
           <label style="color:var(--muted);font-size:11px">Show</label>
           <select id="rec-top-n" class="select-styled" onchange="filterRecs()">
             <option value="10">10</option>
@@ -502,6 +516,7 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
             <option value="50">50</option>
             <option value="100">100</option>
           </select>
+          <input type="hidden" id="rec-type-filter" value="ALL">
         </div>
         <div id="recs-content"></div>
       </div>
@@ -631,6 +646,17 @@ Examples:
 <div id="trade-modal" onclick="if(event.target===this)closeTrade()">
   <div id="trade-modal-content"></div>
 </div>
+
+<!-- Trade Cart floating badge -->
+<div id="trade-cart-badge" style="display:none;position:fixed;bottom:20px;right:20px;z-index:90;background:var(--blue);color:#fff;border-radius:20px;padding:6px 14px;cursor:pointer;align-items:center;gap:6px;font-size:12px;font-family:var(--mono);box-shadow:0 2px 8px rgba(0,0,0,0.4)" onclick="showCart()">
+  <span class="cart-count">0</span> in cart
+</div>
+
+<!-- Cart modal -->
+<div id="cart-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:95;align-items:flex-end;justify-content:center" onclick="if(event.target===this)this.classList.remove('show')">
+  <div id="cart-modal-content" style="background:var(--bg2);border:1px solid var(--border);border-radius:12px 12px 0 0;width:100%;max-width:500px;max-height:80vh;overflow-y:auto"></div>
+</div>
+<style>#cart-modal.show { display:flex !important; }</style>
 
 <script>
 // ── Base Path (set by server when behind a reverse proxy) ────────────────────
@@ -943,6 +969,7 @@ function stopChainRefresh() {
 let percentileData = null;  // Raw response from /api/percentiles
 let _pctlByTicker = {};     // Processed: {SPX: {lastDay, close, windows: {0: {up:{p75,p90,...}, down:{...}}, ...}}}
 let _pctlFetchedAt = null;  // ISO string: when percentile data was last fetched from server
+let _intradayByTicker = {};  // {SPX: {slots: [...], slots_10min: [...], slots_5min: [...]}}
 
 async function fetchPercentiles() {
   try {
@@ -970,6 +997,18 @@ async function fetchPercentiles() {
         };
       }
     }
+    // Store intraday move-to-close data (0DTE hourly slots)
+    // Structure: slots={time_key: {when_up, when_down, ...}}, slots_15min={...}, slots_5min={...}
+    // All are dicts keyed by time string (e.g., "10:00", "15:30"), NOT arrays
+    _intradayByTicker = {};
+    const hourlyKeys = Object.keys(d.hourly || {});
+    if (hourlyKeys.length) {
+      for (const [sym, hData] of Object.entries(d.hourly)) _intradayByTicker[sym] = hData;
+      const summary = hourlyKeys.map(s => `${s}(${Object.keys(d.hourly[s].slots||{}).length})`).join(' ');
+      console.log(`[Intra] Loaded: ${summary} slots`);
+    } else {
+      console.warn('[Intra] No hourly data in percentiles response');
+    }
     // Extract trading day calendar (holiday-aware, from server's exchange_calendars)
     if (d._trading_days?.length) {
       _tradingDaysCalendar = d._trading_days;
@@ -977,6 +1016,7 @@ async function fetchPercentiles() {
     }
     scheduleRenderRecs();
     idbSetWithTTL('pctlByTicker', _pctlByTicker, 150, 3960);
+    idbSetWithTTL('intradayByTicker', _intradayByTicker, 150, 3960);
   } catch(e) { /* silent */ }
 }
 
@@ -1094,7 +1134,89 @@ function getPercentileBracket(sym, expDate, optionType, otmPct) {
       return {pctl: lv.pctl, label: `>P${lv.pctl}`, dte, window: wk};
     }
   }
-  return {pctl: 0, label: '<P75', dte, window: wk};
+  return {pctl: 0, label: '&lt;P75', dte, window: wk};
+}
+
+// Get intraday move-to-close bracket for a 0DTE spread
+// Uses time-of-day slots from hourly percentile data
+// Returns: {pctl: 90, label: '>P90', slot: '15:30'} or null
+function getIntradayBracket(sym, optionType, otmPct) {
+  const hData = _intradayByTicker[sym];
+  if (!hData) return null;
+
+  const nowET = new Date().toLocaleString('en-US', {timeZone: 'America/New_York', hour12: false});
+  const parts = nowET.split(', ')[1]?.split(':') || [];
+  const hh = parseInt(parts[0] || '0');
+  const mm = parseInt(parts[1] || '0');
+  const etMinutes = hh * 60 + mm;
+
+  let slotDict, slot, slotKey;
+  const marketClosed = etMinutes >= 960;
+
+  if (etMinutes >= 950 || marketClosed) {
+    slotDict = hData.slots_5min || {};
+    [slotKey, slot] = _findBestSlotDict(slotDict, etMinutes, marketClosed);
+    if (!slot) {
+      slotDict = hData.slots_15min || {};
+      [slotKey, slot] = _findBestSlotDict(slotDict, etMinutes, marketClosed);
+    }
+  } else if (etMinutes >= 900) {
+    slotDict = hData.slots_15min || {};
+    [slotKey, slot] = _findBestSlotDict(slotDict, etMinutes, false);
+    if (!slot) {
+      slotDict = hData.slots || {};
+      [slotKey, slot] = _findBestSlotDict(slotDict, etMinutes, false);
+    }
+  } else {
+    slotDict = hData.slots || {};
+    [slotKey, slot] = _findBestSlotDict(slotDict, etMinutes, false);
+    if (!slot) {
+      const sortedKeys = Object.keys(slotDict).sort();
+      if (sortedKeys.length) { slotKey = sortedKeys[0]; slot = slotDict[slotKey]; }
+    }
+  }
+  if (!slot) return null;
+
+  const pctData = optionType === 'PUT' ? slot.when_down?.pct : slot.when_up?.pct;
+  if (!pctData) return null;
+
+  const absOtm = Math.abs(otmPct);
+  const levels = [
+    {pctl: 100, val: Math.abs(pctData.p100 || 999)},
+    {pctl: 99, val: Math.abs(pctData.p99 || 999)},
+    {pctl: 98, val: Math.abs(pctData.p98 || 999)},
+    {pctl: 95, val: Math.abs(pctData.p95 || 999)},
+    {pctl: 90, val: Math.abs(pctData.p90 || 999)},
+    {pctl: 85, val: Math.abs(pctData.p85 || 999)},
+    {pctl: 80, val: Math.abs(pctData.p80 || 999)},
+    {pctl: 75, val: Math.abs(pctData.p75 || 999)},
+  ];
+  for (const lv of levels) {
+    if (absOtm >= lv.val) {
+      return {pctl: lv.pctl, label: `>P${lv.pctl}`, slot: slotKey};
+    }
+  }
+  return {pctl: 0, label: '&lt;P75', slot: slotKey};
+}
+
+// Find the best (most recent, not-crossed) slot from a dict keyed by "HH:MM" time strings
+// Returns [key, slotData] or ['', null]
+function _findBestSlotDict(slotDict, etMinutes, useLastIfPast) {
+  const keys = Object.keys(slotDict).sort();
+  if (!keys.length) return ['', null];
+  let bestKey = '', bestSlot = null;
+  for (const k of keys) {
+    const match = k.match(/^(\d{1,2}):(\d{2})/);
+    if (!match) continue;
+    const slotMins = parseInt(match[1]) * 60 + parseInt(match[2]);
+    if (slotMins <= etMinutes) { bestKey = k; bestSlot = slotDict[k]; }
+  }
+  // If market closed and no slot found <= current time, use last slot
+  if (!bestSlot && useLastIfPast && keys.length) {
+    bestKey = keys[keys.length - 1];
+    bestSlot = slotDict[bestKey];
+  }
+  return [bestKey, bestSlot];
 }
 
 function pctlBadge(bracket) {
@@ -1108,6 +1230,11 @@ function pctlBadge(bracket) {
   else if (p >= 80) cls = 'badge-warning';
   else if (p >= 75) cls = 'badge-warning';
   return `<span class="badge ${cls}">${bracket.label}</span>`;
+}
+
+function intraBadge(bracket) {
+  if (!bracket) return '<span style="color:var(--muted);font-size:9px">--</span>';
+  return pctlBadge(bracket);  // Same styling as hist/pred badges
 }
 
 // ── Previous Close Prices (from QuestDB daily_prices) ────────────────────────
@@ -2835,7 +2962,8 @@ async function executeConfirm(cid) {
 
 function closeTrade() {
   document.getElementById('trade-modal').classList.remove('show');
-  clearGridSelection();
+  // Clear any selected grid highlights
+  document.querySelectorAll('.grid-selected').forEach(el => el.classList.remove('grid-selected'));
 }
 
 // ── Recommendations Tab ──────────────────────────────────────────────────────
@@ -2925,15 +3053,29 @@ async function loadRecommendations() {
   }
 }
 
+// After market close but before midnight: 0DTE is expired, default to 1DTE.
+// At midnight (start of next trading day) or later: 0DTE is today, default to 0DTE.
+function _isMarketClosedET() {
+  const nowET = new Date().toLocaleString('en-US', {timeZone: 'America/New_York', hour12: false});
+  const timeParts = (nowET.split(', ')[1] || '').split(':');
+  const h = parseInt(timeParts[0] || '0'), m = parseInt(timeParts[1] || '0');
+  // Only 4:15 PM - 11:59 PM ET: today's 0DTE expired, show 1DTE
+  return h > 16 || (h === 16 && m >= 15);
+}
+const _afterHoursDte = _isMarketClosedET() ? '1' : '0';
+
 // Filter IDs and their default values
 const REC_FILTER_DEFAULTS = {
-  'rec-dte': '0', 'rec-min-roi': '1.5', 'rec-min-credit': '0',
+  'rec-dte': _afterHoursDte, 'rec-min-roi': '1.5', 'rec-min-credit': '0',
   'rec-min-otm': '0', 'rec-min-otm-pc': '1.5', 'rec-width': '0',
-  'rec-type-filter': 'ALL', 'rec-min-pctl': '90', 'rec-min-pred': '90',
+  'rec-type-filter': 'ALL', 'rec-min-pctl': '90', 'rec-min-pred': '90', 'rec-min-intraday': '0',
   'rec-max-delta': '', 'rec-qty': '25', 'rec-min-total-credit': '500',
   'rec-max-total-loss': '100000', 'rec-ticker-filter': 'ALL', 'rec-top-n': '20', 'rec-max-dte': '5',
 };
 const REC_FILTERS_KEY = 'utp_rec_filters';
+let _activeTypeTab = 'ALL';
+// Per-tab filter storage: each tab can have different filter settings
+const _tabFiltersKey = tab => `utp_rec_filters_${tab}`;
 
 function _saveRecFilters() {
   const vals = {};
@@ -2941,14 +3083,18 @@ function _saveRecFilters() {
     const el = document.getElementById(id);
     if (el) vals[id] = el.value;
   }
+  // Save both legacy key and per-tab key
   try { localStorage.setItem(REC_FILTERS_KEY, JSON.stringify(vals)); } catch(e) {}
+  try { localStorage.setItem(_tabFiltersKey(_activeTypeTab), JSON.stringify(vals)); } catch(e) {}
 }
 
 function _restoreRecFilters() {
   try {
-    const raw = localStorage.getItem(REC_FILTERS_KEY);
-    if (!raw) return;
-    const vals = JSON.parse(raw);
+    // Try per-tab first, fall back to legacy, then defaults
+    const raw = localStorage.getItem(_tabFiltersKey(_activeTypeTab)) || localStorage.getItem(REC_FILTERS_KEY);
+    const vals = raw ? JSON.parse(raw) : {...REC_FILTER_DEFAULTS};
+    // After market close, bump saved 0DTE to 1DTE (today's options expired)
+    if (_isMarketClosedET() && vals['rec-dte'] === '0') vals['rec-dte'] = '1';
     for (const [id, val] of Object.entries(vals)) {
       const el = document.getElementById(id);
       if (el && val != null) el.value = val;
@@ -2961,7 +3107,45 @@ function resetRecFilters() {
     const el = document.getElementById(id);
     if (el) el.value = val;
   }
-  try { localStorage.removeItem(REC_FILTERS_KEY); } catch(e) {}
+  try {
+    localStorage.removeItem(REC_FILTERS_KEY);
+    localStorage.removeItem(_tabFiltersKey('ALL'));
+    localStorage.removeItem(_tabFiltersKey('PUT'));
+    localStorage.removeItem(_tabFiltersKey('CALL'));
+  } catch(e) {}
+  filterRecs();
+}
+
+function clearAllFilters() {
+  // Zero out all filters — just show everything sorted by D/ROI
+  const zeros = {
+    'rec-min-roi': '0', 'rec-min-credit': '0',
+    'rec-min-otm': '0', 'rec-min-otm-pc': '0', 'rec-width': '0',
+    'rec-min-pctl': '0', 'rec-min-pred': '0', 'rec-min-intraday': '0',
+    'rec-max-delta': '', 'rec-min-total-credit': '0',
+    'rec-max-total-loss': '100000', 'rec-ticker-filter': 'ALL', 'rec-top-n': '100',
+  };
+  for (const [id, val] of Object.entries(zeros)) {
+    const el = document.getElementById(id);
+    if (el) el.value = val;
+  }
+  // Keep DTE, type tab, qty, and max DTE as-is
+  filterRecs();
+}
+
+function switchTypeTab(type) {
+  // Save current tab's filters before switching
+  _saveRecFilters();
+  _activeTypeTab = type;
+  try { localStorage.setItem('utp_active_type_tab', type); } catch(e) {}
+  // Update tab button styling
+  document.querySelectorAll('.type-tab').forEach(btn => {
+    btn.classList.toggle('active', btn.dataset.type === type);
+  });
+  // Restore new tab's filter settings, then force type to match active tab
+  _restoreRecFilters();
+  const el = document.getElementById('rec-type-filter');
+  if (el) el.value = type;
   filterRecs();
 }
 
@@ -2973,16 +3157,14 @@ function filterRecs() {
   // Freshness threshold: 30s * DTE (DTE0=30s, DTE1=60s, DTE2=90s, DTE5=180s)
   if (selectedDte > 0) {
     const maxAge = 30000 * (selectedDte + 1);  // ms
-    let needFetch = false;
     for (const sym of CHAIN_TICKERS) {
       const exps = chainCache[sym]?._expirations || [];
-      const dteIdx = Math.min(selectedDte, exps.length - 1);
-      const exp = exps[Math.max(0, dteIdx)] || '';
-      if (!exp) { needFetch = true; continue; }
+      // Find expiration matching actual DTE, not array index
+      let exp = '';
+      for (const e of exps) { if (displayDTE(e) === selectedDte) { exp = e; break; } }
+      if (!exp) continue;
       const cached = chainCache[sym]?.[exp];
       if (!cached?.chain || (Date.now() - cached.ts.getTime()) > maxAge) {
-        needFetch = true;
-        // Priority fetch this ticker+exp now
         _priorityFetchChain(sym, exp, selectedDte);
       }
     }
@@ -3054,6 +3236,7 @@ function renderRecs() {
   }
 
   const minOtmPc = parseFloat(document.getElementById('rec-min-otm-pc')?.value) || 0;
+  const minIntraday = parseInt(document.getElementById('rec-min-intraday')?.value) || 0;
 
   // Shared filter function. dteIdx = DTE index (0,1,2,5). D/ROI = ROI / (dteIdx+1).
   function checkFilters(s, dteIdx) {
@@ -3067,6 +3250,7 @@ function renderRecs() {
     if (typeFilter !== 'ALL' && s.option_type !== typeFilter) fails.push('Type');
     if (minPctl > 0 && (!s._pctl || s._pctl.pctl < minPctl)) fails.push('Hist');
     if (minPred > 0 && (!s._pred || s._pred.pctl < minPred)) fails.push('Pred');
+    if (minIntraday > 0 && dte === 0 && (!s._intraday || s._intraday.pctl < minIntraday)) fails.push('Intra');
     if (minTotalCredit > 0 && (s.credit_per_contract * recQty) < minTotalCredit) fails.push('TotCr');
     if (maxTotalLoss < Infinity && (s.max_loss * recQty) > maxTotalLoss) fails.push('MaxL');
     if (maxDelta < Infinity && s.short_delta != null && Math.abs(s.short_delta) > maxDelta) fails.push('Delta');
@@ -3138,6 +3322,8 @@ function renderRecs() {
   const _filterFailCounts = {};  // track which filters block spreads, keyed by filter name
   const _unfilteredTypeCounts = { PUT: 0, CALL: 0 };  // pre-filter type counts
   let _totalCandidates = 0;
+  // Per-ticker badge & filter tracking for console summary
+  const _badgeStats = {};  // {sym: {total, h:{none,p75,p80,...}, p:{...}, i:{...}, filtered:{Hist,Pred,Intra,...}}}
   const now = new Date();
   for (const sym of filteredTickers) {
     const symCache = chainCache[sym];
@@ -3164,18 +3350,38 @@ function renderRecs() {
         _unfilteredTypeCounts[s.option_type] = (_unfilteredTypeCounts[s.option_type] || 0) + 1;
         const bracket = getPercentileBracket(sym, exp, s.option_type, s.otm_pct);
         const predicted = getPredictedBracket(sym, exp, s.option_type, s.otm_pct);
-        const enriched = {...s, _pctl: bracket, _pred: predicted, _sym: sym, _exp: exp, _dte: dteNum};
+        const intraday = dteNum === 0 ? getIntradayBracket(sym, s.option_type, s.otm_pct) : null;
+        // Track badge stats
+        if (!_badgeStats[sym]) _badgeStats[sym] = {total:0, h:{}, p:{}, i:{}, filtered:{}};
+        const bs = _badgeStats[sym]; bs.total++;
+        const hLbl = bracket ? bracket.label : 'none'; bs.h[hLbl] = (bs.h[hLbl]||0) + 1;
+        const pLbl = predicted ? predicted.label : 'none'; bs.p[pLbl] = (bs.p[pLbl]||0) + 1;
+        const iLbl = intraday ? intraday.label : (dteNum > 0 ? 'n/a' : 'none'); bs.i[iLbl] = (bs.i[iLbl]||0) + 1;
+        const enriched = {...s, _pctl: bracket, _pred: predicted, _intraday: intraday, _sym: sym, _exp: exp, _dte: dteNum};
         const fails = checkFilters(enriched);
         if (fails.length === 0) {
           enriched._dailyRoi = +(s.roi_pct / (dteNum + 1)).toFixed(2);
           allTopSpreads.push(enriched);
         } else {
-          for (const f of fails) _filterFailCounts[f] = (_filterFailCounts[f] || 0) + 1;
+          for (const f of fails) {
+            _filterFailCounts[f] = (_filterFailCounts[f] || 0) + 1;
+            bs.filtered[f] = (bs.filtered[f]||0) + 1;
+          }
         }
       }
     }
   }
   allTopSpreads.sort((a, b) => b._dailyRoi - a._dailyRoi);
+
+  // Console summary: per-ticker badge distribution + filter impact
+  const fmtObj = o => Object.entries(o).sort((a,b)=>b[1]-a[1]).map(([k,v])=>`${k}:${v}`).join(' ');
+  console.log(`[Picks] ${_totalCandidates} candidates → ${allTopSpreads.length} pass filters (${_unfilteredTypeCounts.PUT||0}P/${_unfilteredTypeCounts.CALL||0}C)`);
+  for (const [sym, bs] of Object.entries(_badgeStats)) {
+    console.log(`[Picks] ${sym} (${bs.total}): H=[${fmtObj(bs.h)}] P=[${fmtObj(bs.p)}] I=[${fmtObj(bs.i)}]${Object.keys(bs.filtered).length ? ' filtered=['+fmtObj(bs.filtered)+']' : ''}`);
+  }
+  if (Object.keys(_filterFailCounts).length) {
+    console.log(`[Picks] Filter blockers: ${fmtObj(_filterFailCounts)}`);
+  }
 
   // Always show Top Picks section (so Max DTE dropdown remains accessible)
   const topCollapsed = document.getElementById('top-picks-body')?.style.display === 'none';
@@ -3183,7 +3389,7 @@ function renderRecs() {
   html += `<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><div class="card-title" style="cursor:pointer;margin:0" onclick="const b=document.getElementById('top-picks-body');b.style.display=b.style.display==='none'?'':'none';this.querySelector('.caret').innerHTML=b.style.display==='none'?'&#9654;':'&#9660;'"><span class="caret">${caretChar}</span> Top Picks <span style="color:var(--muted);font-weight:normal;font-size:11px">sorted by D/ROI</span></div><div style="display:flex;align-items:center;gap:4px" onclick="event.stopPropagation()"><label style="color:var(--muted);font-size:10px">Max DTE</label><select id="rec-max-dte" class="select-styled" style="font-size:12px;padding:4px" onchange="filterRecs()">${[0,1,2,3,4,5,10,99].map(v => `<option value="${v}" ${v===maxDte?'selected':''}>${v===99?'All':v}</option>`).join('')}</select></div></div>`;
   html += `<div id="top-picks-body" style="max-height:400px;overflow-y:auto;overflow-x:auto;-webkit-overflow-scrolling:touch;${topCollapsed ? 'display:none' : ''}">`;
   if (allTopSpreads.length) {
-    html += `<table class="tbl"><thead><tr><th>Tkr</th><th>Type</th><th>Short</th><th>Long</th><th class="hide-sm">Exp</th><th class="num">DTE</th><th class="num">Credit</th><th class="num hide-sm">MaxLoss</th><th class="num">ROI%</th><th class="num" style="color:var(--yellow)">D/ROI</th><th class="num">OTM%</th><th class="num hide-sm" title="OTM% from prev close">pc%</th><th class="num hide-sm">&delta;</th><th class="hide-sm">H</th><th class="hide-sm">P</th><th></th></tr></thead><tbody>`;
+    html += `<table class="tbl"><thead><tr><th>Tkr</th><th>Type</th><th>Short</th><th>Long</th><th class="hide-sm">Exp</th><th class="num">DTE</th><th class="num">Credit</th><th class="num hide-sm">MaxLoss</th><th class="num">ROI%</th><th class="num" style="color:var(--yellow)">D/ROI</th><th class="num">OTM%</th><th class="num hide-sm" title="OTM% from prev close">pc%</th><th class="num hide-sm">&delta;</th><th class="hide-sm">H</th><th class="hide-sm">P</th><th class="hide-sm" title="Intraday move-to-close">I</th><th></th></tr></thead><tbody>`;
     for (const s of allTopSpreads.slice(0, topN)) {
       const totalCr = s.credit_per_contract * recQty;
       const totalML = s.max_loss * recQty;
@@ -3204,7 +3410,8 @@ function renderRecs() {
       html += `<td class="num hide-sm">${deltaStr}</td>`;
       html += `<td class="hide-sm">${pctlBadge(s._pctl)}</td>`;
       html += `<td class="hide-sm">${predBadge(s._pred)}</td>`;
-      html += `<td><button class="btn btn-green btn-sm" onclick="tradeRec('${s._sym}','${s.option_type}',${s.short_strike},${s.long_strike},'${s._exp}')">Trade</button></td>`;
+      html += `<td class="hide-sm">${intraBadge(s._intraday)}</td>`;
+      html += `<td><button class="btn btn-green btn-sm" onclick="tradeRec('${s._sym}','${s.option_type}',${s.short_strike},${s.long_strike},'${s._exp}')">Trade</button><button class="btn btn-muted btn-sm" style="margin-left:2px;padding:2px 5px;font-size:10px" onclick="addToCart('${s._sym}','${s.option_type}',${s.short_strike},${s.long_strike},'${s._exp}')" title="Add to cart for iron condor">+</button></td>`;
       html += '</tr>';
     }
     html += '</tbody></table>';
@@ -3216,7 +3423,7 @@ function renderRecs() {
       // Spreads exist but all filtered out — show top blockers
       const sorted = Object.entries(_filterFailCounts).sort((a,b) => b[1] - a[1]);
       const topBlockers = sorted.slice(0, 3).map(([f, n]) => {
-        const labels = {Hist:'Min Pctl (Hist)',Pred:'Min Pctl (Pred)','D/ROI':'Min D/ROI',OTM:'Min OTM%','OTM-pc':'Min OTM% pc',Credit:'Min Credit',TotCr:'Min Tot Credit',MaxL:'Max Loss',Delta:'Max Delta',Type:'Type'};
+        const labels = {Hist:'Min Pctl (Hist)',Pred:'Min Pctl (Pred)',Intra:'Min Intra','D/ROI':'Min D/ROI',OTM:'Min OTM%','OTM-pc':'Min OTM% pc',Credit:'Min Credit',TotCr:'Min Tot Credit',MaxL:'Max Loss',Delta:'Max Delta',Type:'Type'};
         return `${labels[f]||f} (${n})`;
       }).join(', ');
       html += `<div style="text-align:center;padding:16px;color:var(--yellow)">0 of ${_totalCandidates} spreads pass filters — top blockers: ${topBlockers}</div>`;
@@ -3233,7 +3440,7 @@ function renderRecs() {
         // There are candidates of this type but none pass — find top blocker
         // Re-check a sample to identify the filter(s)
         const filterHint = Object.entries(_filterFailCounts).sort((a,b) => b[1] - a[1])[0];
-        const hintLabels = {Hist:'Hist Pctl',Pred:'Pred Pctl','D/ROI':'D/ROI',OTM:'OTM%','OTM-pc':'OTM% pc',Credit:'Credit',TotCr:'Tot Credit'};
+        const hintLabels = {Hist:'Hist Pctl',Pred:'Pred Pctl',Intra:'Intra Pctl','D/ROI':'D/ROI',OTM:'OTM%','OTM-pc':'OTM% pc',Credit:'Credit',TotCr:'Tot Credit'};
         const hintName = filterHint ? (hintLabels[filterHint[0]] || filterHint[0]) : 'filters';
         summaryParts.push(`no ${label} pass — try lowering ${hintName}`);
       }
@@ -3245,8 +3452,22 @@ function renderRecs() {
   for (const sym of filteredTickers) {
     const symCache = chainCache[sym];
     const exps = symCache?._expirations || [];
-    const dteIdx = Math.min(selectedDte, exps.length - 1);
-    const exp = exps[Math.max(0, dteIdx)] || '';
+    // Find expiration matching the actual DTE (trading days from today), not array index
+    let exp = '';
+    for (const e of exps) {
+      const dte = displayDTE(e);
+      if (dte === selectedDte) { exp = e; break; }
+    }
+    // Fallback: if no exact DTE match, use closest available
+    if (!exp && exps.length) {
+      let bestExp = exps[0], bestDiff = Infinity;
+      for (const e of exps) {
+        const dte = displayDTE(e) ?? 999;
+        const diff = Math.abs(dte - selectedDte);
+        if (diff < bestDiff) { bestDiff = diff; bestExp = e; }
+      }
+      exp = bestExp;
+    }
     const cached = exp ? (symCache?.[exp] || getCachedChain(sym, exp)) : getCachedChain(sym);
     if (!cached?.chain) {
       const loading = exp ? `Loading ${sym} ${exp}...` : 'Waiting for option data...';
@@ -3256,17 +3477,22 @@ function renderRecs() {
     const cp = _realtimePrices[sym]?.price || cached.current_price || symCache?._current_price || _getPrevClosePrice(sym) || 0;
     const width = customWidth || DEFAULT_WIDTHS[sym] || 20;
     const allSpreads = computeSpreads(cached.chain, sym, cp, width);
+    // Compute actual DTE (trading days from today) for this expiration
+    const actualDteForTicker = displayDTE(exp) ?? selectedDte;
 
     const spreadsWithPctl = allSpreads.map(s => {
       const bracket = getPercentileBracket(sym, exp, s.option_type, s.otm_pct);
       const predicted = getPredictedBracket(sym, exp, s.option_type, s.otm_pct);
-      return {...s, _pctl: bracket, _pred: predicted};
+      const intraday = actualDteForTicker === 0 ? getIntradayBracket(sym, s.option_type, s.otm_pct) : null;
+      return {...s, _pctl: bracket, _pred: predicted, _intraday: intraday};
     });
 
     const spreads = [];
     const nearMisses = [];
     for (const s of spreadsWithPctl) {
-      const fails = checkFilters(s, selectedDte);
+      // Skip wrong type entirely when a type tab is active (don't even show as near-miss)
+      if (typeFilter !== 'ALL' && s.option_type !== typeFilter) continue;
+      const fails = checkFilters(s, actualDteForTicker);
       if (fails.length === 0) {
         spreads.push(s);
       } else {
@@ -3281,7 +3507,7 @@ function renderRecs() {
     const pctlMeta = _pctlByTicker[sym];
     const streakInfo = pctlMeta?.streak ? `${Math.abs(pctlMeta.streak)}d ${pctlMeta.streak>0?'up':'dn'}` : '';
 
-    html += `<div class="card"><div class="card-title">${sym} <span style="color:var(--text);font-weight:normal">${$fmt(cp)} | Exp: ${exp} | Width: ${width}${streakInfo ? ' | '+streakInfo : ''}</span></div>`;
+    html += `<div class="card"><div class="card-title">${sym} <span style="color:var(--text);font-weight:normal">${$fmt(cp)} | Exp: ${exp} (${actualDteForTicker}DTE) | Width: ${width}${streakInfo ? ' | '+streakInfo : ''}</span></div>`;
 
     const showMatches = spreads.slice(0, 10);
     const needNearMiss = showMatches.length < 10;
@@ -3292,7 +3518,7 @@ function renderRecs() {
       continue;
     }
 
-    html += `<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table class="tbl"><thead><tr><th>Type</th><th>Short</th><th>Long</th><th class="num">Credit</th><th class="num">MaxLoss</th><th class="num">ROI%</th><th class="num" style="color:var(--yellow)">D/ROI</th><th class="num">OTM%</th><th class="num hide-sm" title="OTM% from prev close">pc%</th><th class="num hide-sm">&delta;</th><th class="hide-sm">Hist</th><th class="hide-sm">Pred</th><th></th></tr></thead><tbody>`;
+    html += `<div style="overflow-x:auto;-webkit-overflow-scrolling:touch"><table class="tbl"><thead><tr><th>Type</th><th>Short</th><th>Long</th><th class="num">Credit</th><th class="num">MaxLoss</th><th class="num">ROI%</th><th class="num" style="color:var(--yellow)">D/ROI</th><th class="num">OTM%</th><th class="num hide-sm" title="OTM% from prev close">pc%</th><th class="num hide-sm">&delta;</th><th class="hide-sm">Hist</th><th class="hide-sm">Pred</th><th class="hide-sm" title="Intraday move-to-close">I</th><th></th></tr></thead><tbody>`;
 
     for (const s of showMatches) {
       const totalCr = s.credit_per_contract * recQty;
@@ -3303,7 +3529,7 @@ function renderRecs() {
       html += `<td>${s.short_strike}</td><td>${s.long_strike}</td>`;
       html += `<td class="num pos">${$fmt$(totalCr)}<div style="font-size:9px;color:var(--muted)">${recQty}x ${$fmt$(s.credit_per_contract)}/c</div></td>`;
       html += `<td class="num" style="color:var(--red-b)">${$fmt$(totalML)}<div style="font-size:9px;color:var(--muted)">${recQty}x ${$fmt$(s.max_loss)}/c</div></td>`;
-      const dRoi = +(s.roi_pct / (selectedDte + 1)).toFixed(2);
+      const dRoi = +(s.roi_pct / (actualDteForTicker + 1)).toFixed(2);
       html += `<td class="num rec-roi">${s.roi_pct}%</td>`;
       html += `<td class="num" style="color:var(--yellow);font-weight:bold">${dRoi}%</td>`;
       html += `<td class="num">${s.otm_pct}%</td>`;
@@ -3311,12 +3537,13 @@ function renderRecs() {
       html += `<td class="num hide-sm">${deltaStr}</td>`;
       html += `<td class="hide-sm">${pctlBadge(s._pctl)}</td>`;
       html += `<td class="hide-sm">${predBadge(s._pred)}</td>`;
-      html += `<td><button class="btn btn-green btn-sm" onclick="tradeRec('${sym}','${s.option_type}',${s.short_strike},${s.long_strike},'${exp}')">Trade</button></td>`;
+      html += `<td class="hide-sm">${intraBadge(s._intraday)}</td>`;
+      html += `<td><button class="btn btn-green btn-sm" onclick="tradeRec('${sym}','${s.option_type}',${s.short_strike},${s.long_strike},'${exp}')">Trade</button><button class="btn btn-muted btn-sm" style="margin-left:2px;padding:2px 5px;font-size:10px" onclick="addToCart('${sym}','${s.option_type}',${s.short_strike},${s.long_strike},'${exp}')" title="Add to cart for iron condor">+</button></td>`;
       html += '</tr>';
     }
 
     if (nearMissCount > 0) {
-      html += `<tr><td colspan="13" style="padding:4px 8px;font-size:10px;color:var(--muted);background:var(--bg);border-top:2px dashed var(--border)">Filtered out — closest to matching (${nearMisses.length} total)</td></tr>`;
+      html += `<tr><td colspan="14" style="padding:4px 8px;font-size:10px;color:var(--muted);background:var(--bg);border-top:2px dashed var(--border)">Filtered out — closest to matching (${nearMisses.length} total)</td></tr>`;
       for (const s of nearMisses.slice(0, nearMissCount)) {
         const totalCr = s.credit_per_contract * recQty;
         const totalML = s.max_loss * recQty;
@@ -3327,7 +3554,7 @@ function renderRecs() {
         html += `<td>${s.short_strike}</td><td>${s.long_strike}</td>`;
         html += `<td class="num">${$fmt$(totalCr)}<div style="font-size:9px">${recQty}x ${$fmt$(s.credit_per_contract)}/c</div></td>`;
         html += `<td class="num">${$fmt$(totalML)}<div style="font-size:9px">${recQty}x ${$fmt$(s.max_loss)}/c</div></td>`;
-        const nmDRoi = +(s.roi_pct / (selectedDte + 1)).toFixed(2);
+        const nmDRoi = +(s.roi_pct / (actualDteForTicker + 1)).toFixed(2);
         html += `<td class="num">${$fmt(s.roi_pct)}%</td>`;
         html += `<td class="num" style="color:var(--yellow)">${nmDRoi}%</td>`;
         html += `<td class="num">${s.otm_pct}%</td>`;
@@ -3335,6 +3562,7 @@ function renderRecs() {
         html += `<td class="num hide-sm">${deltaStr}</td>`;
         html += `<td class="hide-sm">${pctlBadge(s._pctl)}</td>`;
         html += `<td class="hide-sm">${predBadge(s._pred)}</td>`;
+        html += `<td class="hide-sm">${intraBadge(s._intraday)}</td>`;
         html += `<td><button class="btn btn-muted btn-sm" style="opacity:0.7;font-size:10px" onclick="tradeRec('${sym}','${s.option_type}',${s.short_strike},${s.long_strike},'${exp}')">Trade</button> ${failTags}</td>`;
         html += '</tr>';
       }
@@ -3356,6 +3584,101 @@ function renderRecs() {
   el.innerHTML = html || '<div class="empty-msg">No data</div>';
   _recsLastUpdatedAt = Date.now();
   _refreshLastUpdatedLabels();
+}
+
+// ── Trade Cart (combines puts + calls into iron condors) ─────────────────────
+let _tradeCart = [];  // [{sym, type, short_s, long_s, exp}, ...]
+
+function addToCart(sym, type, short_s, long_s, exp) {
+  // Check for duplicate
+  const exists = _tradeCart.some(t => t.sym === sym && t.type === type && t.short_s === short_s && t.long_s === long_s && t.exp === exp);
+  if (exists) { alert('Already in cart'); return; }
+  _tradeCart.push({sym, type, short_s, long_s, exp});
+  _updateCartBadge();
+}
+
+function removeFromCart(idx) {
+  _tradeCart.splice(idx, 1);
+  _updateCartBadge();
+  if (document.getElementById('cart-modal')?.classList.contains('show')) showCart();
+}
+
+function clearCart() {
+  _tradeCart = [];
+  _updateCartBadge();
+  document.getElementById('cart-modal')?.classList.remove('show');
+}
+
+function _updateCartBadge() {
+  const badge = document.getElementById('trade-cart-badge');
+  if (badge) {
+    badge.style.display = _tradeCart.length ? 'flex' : 'none';
+    badge.querySelector('.cart-count').textContent = _tradeCart.length;
+  }
+}
+
+function showCart() {
+  const modal = document.getElementById('cart-modal');
+  const content = document.getElementById('cart-modal-content');
+  if (!modal || !content) return;
+  let html = '<div style="padding:12px"><div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><b>Trade Cart</b><button class="btn btn-muted btn-sm" onclick="clearCart()">Clear All</button></div>';
+
+  if (!_tradeCart.length) {
+    html += '<div style="color:var(--muted);padding:8px">Cart is empty. Click "+" on spreads to add.</div>';
+  } else {
+    // Group by sym+exp to find iron condor candidates
+    const groups = {};
+    _tradeCart.forEach((t, i) => {
+      const key = `${t.sym}_${t.exp}`;
+      if (!groups[key]) groups[key] = [];
+      groups[key].push({...t, _idx: i});
+    });
+
+    for (const [key, items] of Object.entries(groups)) {
+      const puts = items.filter(t => t.type === 'PUT');
+      const calls = items.filter(t => t.type === 'CALL');
+      const canIronCondor = puts.length === 1 && calls.length === 1;
+
+      html += `<div style="margin-bottom:8px;padding:8px;background:var(--bg);border-radius:6px">`;
+      html += `<div style="font-weight:bold;margin-bottom:4px">${items[0].sym} ${items[0].exp}</div>`;
+      for (const t of items) {
+        html += `<div style="display:flex;justify-content:space-between;align-items:center;padding:2px 0">`;
+        html += `<span><span class="badge ${t.type==='PUT'?'badge-safe':'badge-watch'}">${t.type[0]}</span> ${t.short_s}/${t.long_s}</span>`;
+        html += `<button class="btn btn-muted btn-sm" style="font-size:9px" onclick="removeFromCart(${t._idx})">✕</button></div>`;
+      }
+      if (canIronCondor) {
+        const p = puts[0], c = calls[0];
+        html += `<button class="btn btn-green btn-sm" style="margin-top:4px;width:100%" onclick="tradeIronCondor('${p.sym}',${p.short_s},${p.long_s},${c.short_s},${c.long_s},'${p.exp}')">Execute as Iron Condor</button>`;
+      }
+      for (const t of items) {
+        html += `<button class="btn btn-green btn-sm" style="margin-top:2px;width:100%;opacity:0.8" onclick="tradeRec('${t.sym}','${t.type}',${t.short_s},${t.long_s},'${t.exp}')">Trade ${t.type[0]} ${t.short_s}/${t.long_s}</button>`;
+      }
+      html += '</div>';
+    }
+  }
+  html += '</div>';
+  content.innerHTML = html;
+  modal.classList.add('show');
+}
+
+async function tradeIronCondor(sym, putShort, putLong, callShort, callLong, exp) {
+  const qty = prompt('Quantity (contracts):', '25');
+  if (!qty) return;
+  try {
+    const r = await fetch('/api/quick-trade', {method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({trade_type:'iron-condor', symbol:sym, put_short:putShort, put_long:putLong, call_short:callShort, call_long:callLong, quantity:parseInt(qty), expiration:exp})});
+    const d = await r.json();
+    // Show confirmation modal
+    const desc = `IRON CONDOR: ${sym} P${putShort}/${putLong} C${callShort}/${callLong} x${qty} exp ${exp}`;
+    document.getElementById('trade-confirm-details').innerHTML = `<div style="font-weight:bold;margin-bottom:8px">${desc}</div><pre style="font-size:10px;max-height:200px;overflow:auto">${JSON.stringify(d, null, 2)}</pre>`;
+    document.getElementById('trade-modal').classList.add('show');
+    if (d.confirmation_id) {
+      document.getElementById('trade-confirm-id').value = d.confirmation_id;
+    }
+    // Remove from cart on success
+    _tradeCart = _tradeCart.filter(t => !(t.sym === sym && t.exp === exp));
+    _updateCartBadge();
+  } catch(e) { alert('Error: '+e.message); }
 }
 
 async function tradeRec(sym, type, short_s, long_s, exp) {
@@ -3934,6 +4257,8 @@ async function init() {
     const cachedMeta = await idbGetFresh('prevClosesMeta', 150, 3960);
     if (cachedMeta) _prevClosesMeta = cachedMeta;
     if (cachedPctl) _pctlByTicker = cachedPctl;
+    const cachedIntraday = await idbGetFresh('intradayByTicker', 150, 3960);
+    if (cachedIntraday) _intradayByTicker = cachedIntraday;
     const cachedTradingDays = await idbGetFresh('tradingDaysCalendar', 3960, 3960);
     if (cachedTradingDays) _tradingDaysCalendar = cachedTradingDays;
     if (cachedPred) predictionsData = cachedPred;
@@ -3956,8 +4281,22 @@ async function init() {
     }
   } catch(e) { console.log('IDB hydration skipped:', e); }
 
-  // Restore saved filter settings from localStorage
+  // Restore saved filter settings and active tab from localStorage
+  try {
+    const savedTab = localStorage.getItem('utp_active_type_tab');
+    if (savedTab && ['ALL','PUT','CALL'].includes(savedTab)) {
+      _activeTypeTab = savedTab;
+      const el = document.getElementById('rec-type-filter');
+      if (el) el.value = savedTab;
+      document.querySelectorAll('.type-tab').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.type === savedTab);
+      });
+    }
+  } catch(e) {}
   _restoreRecFilters();
+  // Force type filter to match active tab (restore may have overwritten it)
+  const _typeEl = document.getElementById('rec-type-filter');
+  if (_typeEl) _typeEl.value = _activeTypeTab;
 
   // Start loading data immediately — don't wait for auth check
   loadAll();
