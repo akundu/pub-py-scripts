@@ -419,7 +419,6 @@ def format_as_html(results: list[dict], params: dict = None) -> str:
             font-size: 16px;
             border: none;
             border-radius: 10px;
-            overflow: hidden;
             box-shadow: 0 4px 12px var(--shadow);
         }
         th {
@@ -1425,7 +1424,6 @@ def format_multi_window_as_html(result: dict | list[dict], params: dict = None, 
             font-size: 15px;
             border: none;
             border-radius: 10px;
-            overflow: hidden;
             box-shadow: 0 4px 12px var(--shadow);
         }
         th {
@@ -1975,7 +1973,6 @@ _HOURLY_SECTION_STYLE = """
             font-size: 15px;
             border: none;
             border-radius: 10px;
-            overflow: hidden;
             box-shadow: 0 4px 12px var(--shadow, rgba(0,0,0,0.1));
         }
         .hourly-section th {
