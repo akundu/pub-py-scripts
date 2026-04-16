@@ -446,6 +446,12 @@ def format_as_html(results: list[dict], params: dict = None) -> str:
         th:last-child {
             border-right: none;
         }
+        th:first-child {
+            position: sticky;
+            left: 0;
+            z-index: 3;
+            background: linear-gradient(180deg, #3d5a80 0%, #2c4259 100%);
+        }
         td {
             padding: 14px 16px;
             text-align: center;
@@ -457,6 +463,16 @@ def format_as_html(results: list[dict], params: dict = None) -> str:
         }
         tr:last-child td {
             border-bottom: none;
+        }
+        td:first-child {
+            position: sticky;
+            left: 0;
+            z-index: 2;
+            background: var(--bg-secondary);
+            box-shadow: 2px 0 4px var(--shadow);
+        }
+        tr:hover td:first-child {
+            background: var(--table-hover);
         }
         tr:hover td {
             background: var(--table-hover);
@@ -1418,13 +1434,11 @@ def format_multi_window_as_html(result: dict | list[dict], params: dict = None, 
             padding: 14px 12px;
             text-align: center;
             font-weight: 700;
-            position: sticky;
-            top: 0;
+            position: relative;
             font-size: 15px;
             border-right: 1px solid rgba(255,255,255,0.15);
             text-transform: uppercase;
             letter-spacing: 0.5px;
-            position: relative;
         }
         th::after {
             content: '';
@@ -1441,6 +1455,10 @@ def format_multi_window_as_html(result: dict | list[dict], params: dict = None, 
         th:first-child {
             text-align: left;
             padding-left: 15px;
+            position: sticky;
+            left: 0;
+            z-index: 3;
+            background: linear-gradient(180deg, #3d5a80 0%, #2c4259 100%);
         }
         td {
             padding: 12px 10px;
@@ -1461,6 +1479,14 @@ def format_multi_window_as_html(result: dict | list[dict], params: dict = None, 
             color: var(--text-tertiary);
             padding-left: 15px;
             font-size: 15px;
+            position: sticky;
+            left: 0;
+            z-index: 2;
+            background: var(--bg-secondary);
+            box-shadow: 2px 0 4px var(--shadow);
+        }
+        tr:hover td:first-child {
+            background: var(--table-hover);
         }
         tr:hover td {
             background: var(--table-hover);
@@ -1964,7 +1990,14 @@ _HOURLY_SECTION_STYLE = """
             letter-spacing: 0.5px;
         }
         .hourly-section th:last-child { border-right: none; }
-        .hourly-section th:first-child { text-align: left; padding-left: 15px; }
+        .hourly-section th:first-child {
+            text-align: left;
+            padding-left: 15px;
+            position: sticky;
+            left: 0;
+            z-index: 3;
+            background: linear-gradient(180deg, #3d5a80 0%, #2c4259 100%);
+        }
         .hourly-section td {
             padding: 12px 10px;
             text-align: center;
@@ -1979,7 +2012,13 @@ _HOURLY_SECTION_STYLE = """
             font-weight: 700;
             color: var(--text-tertiary, #7f8c8d);
             padding-left: 15px;
+            position: sticky;
+            left: 0;
+            z-index: 2;
+            background: var(--bg-secondary, white);
+            box-shadow: 2px 0 4px var(--shadow, rgba(0,0,0,0.1));
         }
+        .hourly-section tr:hover td:first-child { background: var(--table-hover, #f8f9fa); }
         .hourly-section tr:hover td { background: var(--table-hover, #f8f9fa); }
         .hourly-section .insuf { color: var(--text-secondary, #666); font-style: italic; font-size: 14px; }
     </style>
