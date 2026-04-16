@@ -633,7 +633,7 @@ The `live_trading/universal-trade-platform/` directory contains a unified multi-
 
 ### Quick Start — Unified CLI (`utp.py`)
 
-Everything is in two files: `utp.py` (CLI + server) and `tests/test_utp.py` (all 454 tests).
+Everything is in two files: `utp.py` (CLI + server) and `tests/test_utp.py` (all 532 tests).
 
 ```bash
 cd live_trading/universal-trade-platform
@@ -645,6 +645,7 @@ python utp.py margin credit-spread --symbol SPX --short-strike 5500 \
   --long-strike 5475 --option-type PUT --expiration 2026-03-20
 python utp.py trade equity --symbol SPY --side BUY --quantity 1
 python utp.py trade --validate-all               # Test all 5 trade types
+python utp.py trade replay <pos-id> --live       # Replay a trade (local or portfolio spread ID)
 python utp.py trades --live                      # Today's trades (IBKR real-time P&L)
 python utp.py trades --all --live                # All trades (open + closed)
 python utp.py close <pos-id> --live              # Close position by ID (MARKET order default)
@@ -659,7 +660,7 @@ python utp.py daemon --paper                             # Start always-on daemo
 python utp.py daemon --live --advisor-profile tiered_v2  # With advisor signals
 python utp.py repl                                       # Interactive REPL
 python utp.py server                             # Start API server
-python -m pytest tests/ -v                       # Run all 454 tests
+python -m pytest tests/ -v                       # Run all 532 tests
 ```
 
 ### Core Capabilities
@@ -711,7 +712,7 @@ app/
 
 ### Testing
 
-325 tests in `tests/test_utp.py`. Tests use `tmp_path` for isolated persistence. Run from `live_trading/universal-trade-platform/`:
+532 tests in `tests/test_utp.py`. Tests use `tmp_path` for isolated persistence. Run from `live_trading/universal-trade-platform/`:
 
 ```bash
 python -m pytest tests/ -v

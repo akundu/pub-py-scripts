@@ -794,21 +794,29 @@ class PendingAction:
 
 _pending_confirmations: dict[str, PendingAction] = {}
 CONFIRMATION_EXPIRY_SECONDS = 300  # 5 minutes
+_REDIS_CONFIRM_PREFIX = "utp:voice:confirm:"
 
 
 def store_pending(action: PendingAction) -> str:
     _cleanup_expired()
     _pending_confirmations[action.confirmation_id] = action
+    # Also persist to Redis so confirmations survive server restarts
+    _redis_store_pending(action)
     return action.confirmation_id
 
 
 def get_pending(confirmation_id: str) -> PendingAction | None:
     _cleanup_expired()
-    return _pending_confirmations.get(confirmation_id)
+    action = _pending_confirmations.get(confirmation_id)
+    if action:
+        return action
+    # Fallback: check Redis (survives server restart)
+    return _redis_get_pending(confirmation_id)
 
 
 def remove_pending(confirmation_id: str) -> None:
     _pending_confirmations.pop(confirmation_id, None)
+    _redis_remove_pending(confirmation_id)
 
 
 def _cleanup_expired() -> None:
@@ -819,6 +827,58 @@ def _cleanup_expired() -> None:
     ]
     for k in expired:
         del _pending_confirmations[k]
+
+
+def _redis_store_pending(action: PendingAction) -> None:
+    """Persist pending action to Redis with TTL."""
+    try:
+        import redis
+        r = redis.Redis(host="localhost", port=6379, decode_responses=True)
+        key = f"{_REDIS_CONFIRM_PREFIX}{action.confirmation_id}"
+        data = json.dumps({
+            "tool_name": action.tool_name,
+            "tool_input": action.tool_input,
+            "description": action.description,
+            "confirmation_id": action.confirmation_id,
+            "created_at": action.created_at,
+        })
+        r.setex(key, CONFIRMATION_EXPIRY_SECONDS, data)
+    except Exception:
+        pass  # Redis unavailable — in-memory only
+
+
+def _redis_get_pending(confirmation_id: str) -> PendingAction | None:
+    """Retrieve pending action from Redis."""
+    try:
+        import redis
+        r = redis.Redis(host="localhost", port=6379, decode_responses=True)
+        key = f"{_REDIS_CONFIRM_PREFIX}{confirmation_id}"
+        raw = r.get(key)
+        if raw:
+            d = json.loads(raw)
+            action = PendingAction(
+                tool_name=d["tool_name"],
+                tool_input=d["tool_input"],
+                description=d["description"],
+                confirmation_id=d["confirmation_id"],
+                created_at=d["created_at"],
+            )
+            # Re-populate in-memory cache
+            _pending_confirmations[confirmation_id] = action
+            return action
+    except Exception:
+        pass
+    return None
+
+
+def _redis_remove_pending(confirmation_id: str) -> None:
+    """Remove pending action from Redis."""
+    try:
+        import redis
+        r = redis.Redis(host="localhost", port=6379, decode_responses=True)
+        r.delete(f"{_REDIS_CONFIRM_PREFIX}{confirmation_id}")
+    except Exception:
+        pass
 
 
 # ── Claude Agent — Execution Engine ───────────────────────────────────────────
@@ -952,11 +1012,15 @@ async def execute_write_tool(tool_name: str, tool_input: dict) -> dict:
         else:
             return {"error": f"Unknown write tool: {tool_name}"}
     except httpx.HTTPStatusError as e:
-        return {"error": f"Daemon returned {e.response.status_code}: {e.response.text[:500]}"}
+        body = e.response.text[:500]
+        logger.error("Trade execution HTTP error %d: %s", e.response.status_code, body)
+        return {"error": f"Daemon returned {e.response.status_code}: {body}"}
     except httpx.ConnectError:
         return {"error": "Cannot connect to UTP daemon. Is it running?"}
     except Exception as e:
-        return {"error": str(e)}
+        err_msg = str(e) or f"{type(e).__name__} (no message)"
+        logger.error("Trade execution failed: %s", err_msg, exc_info=True)
+        return {"error": err_msg}
 
 
 async def run_agent(

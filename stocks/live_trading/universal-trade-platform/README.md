@@ -42,6 +42,7 @@ A high-reliability Python library and REST API for unified multi-broker trading.
 - **IBKR-Primary Data** -- Live positions, balances, and P&L sourced from IBKR when connected, with automatic local fallback
 - **Execution Store** -- IBKR execution cache with `perm_id` grouping for multi-leg trade identification
 - **Trade Simulation** -- `--simulate` flag qualifies contracts and checks margin without executing
+- **Trade Replay** -- `trade replay <id>` re-opens a previous trade by position ID, including portfolio spread-grouped positions
 - **conId Deduplication** -- Position sync uses IBKR `conId` for unique matching, preventing duplicates
 - **0DTE Fix** -- Same-day options stay live until after market close (`exp_date < today` strict check)
 
@@ -76,6 +77,7 @@ python utp.py portfolio                    # Positions & P&L
 python utp.py quote SPX NDX SPY            # Real-time quotes
 python utp.py options SPX --live           # Option chain
 python utp.py trade credit-spread ...      # Execute trades (MARKET default)
+python utp.py trade replay 7180a7 --live   # Replay a trade from portfolio
 python utp.py close 2d9a                   # Close position (MARKET default)
 python utp.py repl                         # Interactive REPL
 ```
@@ -225,6 +227,23 @@ curl -X POST http://localhost:8000/trade/execute \
 ```
 
 Add `X-Dry-Run: true` to simulate without submitting to the broker. Dry-run trades are tracked as paper positions with full P&L computation. For multi-leg orders, omitting `net_price` submits a MARKET order; including `net_price` submits a LIMIT order.
+
+### Trade Replay Example
+
+Re-open a previously traded position by its ID prefix. Works with positions from the local store **and** spread-grouped positions from the portfolio view (synthetic MD5 IDs):
+
+```bash
+# Replay a position from the local store
+python utp.py trade replay 2d9a --live
+
+# Replay a spread-grouped position from the portfolio view
+python utp.py trade replay 7180a7 --live
+
+# Override quantity and expiration
+python utp.py trade replay 7180a7 --quantity 20 --expiration 2026-04-16 --live
+```
+
+Position lookup order: local store first, then daemon's `/dashboard/portfolio`. Supports `credit_spread`, `debit_spread`, `iron_condor`, and `multi_leg` (portfolio-grouped spreads with `SELL`/`BUY` action names).
 
 ### Dashboard Example
 

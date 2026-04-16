@@ -262,13 +262,21 @@ class IBKRRestProvider(BrokerProvider):
                 continue
 
             if isinstance(data, list):
+                available_exps = set()
                 for item in data:
                     item_exp = str(item.get("maturityDate", "")).replace("-", "")
+                    available_exps.add(item_exp)
                     if item_exp == exp_clean and item.get("conid"):
                         con_id = int(item["conid"])
                         self._option_conid_cache[key] = con_id
                         return con_id
-                # Do NOT fall back to first result — wrong expiration = wrong conID
+                # Log available expirations for debugging
+                if available_exps:
+                    logger.warning(
+                        "conId miss: %s %s %s%s exch=%s — CPG returned %d results, exps: %s (wanted %s)",
+                        symbol, expiration, strike, right, exch, len(data),
+                        sorted(available_exps)[:10], exp_clean,
+                    )
 
         # Do NOT cache negative results — transient CPG failures should not
         # block future resolution attempts

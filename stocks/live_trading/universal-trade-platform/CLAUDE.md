@@ -11,7 +11,7 @@ A unified multi-broker trading API (FastAPI) supporting Robinhood, E\*TRADE, and
 | File | Purpose |
 |------|---------|
 | `utp.py` | ALL CLI operations + API server |
-| `tests/test_utp.py` | ALL tests (454 tests) |
+| `tests/test_utp.py` | ALL tests (532 tests) |
 
 There are no standalone scripts. Do not create new top-level scripts unless explicitly asked.
 
@@ -219,6 +219,15 @@ python utp.py executions --flush --live          # Clear cache and re-fetch
 python utp.py trade credit-spread --symbol RUT --short-strike 2460 \
   --long-strike 2440 --option-type PUT --expiration 2026-03-18 \
   --quantity 1 --live --simulate                 # Qualify + margin check, no execution
+
+# ── Trade Replay (re-open a previous trade) ─────────────────────
+python utp.py trade replay 2d9a --live                  # Replay by position ID prefix
+python utp.py trade replay 2d9a --quantity 10 --live    # Replay with different quantity
+python utp.py trade replay 2d9a --expiration 2026-04-16 --live  # Replay with new expiration
+python utp.py trade replay 7180a7 --live                # Replay a portfolio spread (synthetic ID)
+# Works with: local positions (open/closed) AND portfolio spread-grouped positions.
+# Supports: credit_spread, debit_spread, iron_condor, multi_leg (2-leg or 4-leg spreads).
+# When the position ID isn't found locally, falls back to the daemon's /dashboard/portfolio.
 
 # ── Close by Position ID (submits real IBKR closing order) ──────
 python utp.py close <pos-id-prefix>              # Dry-run close (auto-derives params)
@@ -429,6 +438,23 @@ python utp.py reconcile --hard-reset --live
 python utp.py reconcile --show --live
 ```
 
+### Workflow 8: Replay a trade from portfolio
+
+```bash
+# 1. View portfolio to find the spread you want to replay
+python utp.py portfolio --live
+#    7180a7 SPX P6595/P6615  10x  ...
+
+# 2. Replay it (uses the short ID from portfolio, looks up via daemon)
+python utp.py trade replay 7180a7 --live
+
+# 3. Replay with overrides
+python utp.py trade replay 7180a7 --quantity 20 --expiration 2026-04-16 --live
+
+# Works with any spread type: credit spreads, debit spreads, iron condors.
+# Accepts both local position IDs and synthetic portfolio-grouped IDs.
+```
+
 ## Architecture at a Glance
 
 ```
@@ -569,7 +595,7 @@ All from env vars / `.env`:
 
 ## Testing
 
-**454 tests in `tests/test_utp.py`, all passing.** Tests use `tmp_path` for isolated persistence. The autouse `_setup_providers` fixture in `conftest.py` initializes and tears down ledger + position store per test.
+**532 tests in `tests/test_utp.py`, all passing.** Tests use `tmp_path` for isolated persistence. The autouse `_setup_providers` fixture in `conftest.py` initializes and tears down ledger + position store per test.
 
 ```bash
 python -m pytest tests/ -v                              # All 359 tests
@@ -636,6 +662,7 @@ python -m pytest tests/test_utp.py -k "TestIBKR" -v     # IBKR tests only
 | `TestIBKRRestProvider` | 10 | CPG REST provider: connect, auth, quote, positions, orders, chains, margin |
 | `TestOptionQuoteStreaming` | 25 | Option quote cache, Redis persistence, streaming lifecycle, market hours TTL |
 | `TestMarketDataStreaming` | 24 | CPG polling/WS modes, snapshot parsing, tick ingestion, close-band gate |
+| `TestTradeReplay` | 11 | Trade replay from local store, multi_leg/short actions, portfolio fallback |
 
 ## IBKR Live Provider
 

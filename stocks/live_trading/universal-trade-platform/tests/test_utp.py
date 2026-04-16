@@ -7596,3 +7596,534 @@ class TestEtradeProvider:
         assert s.etrade_account_id == ""
         assert s.etrade_readonly is True
         assert s.etrade_token_file == "data/utp/etrade_tokens.json"
+
+
+# ── Percentage-based strike resolution ─────────────────────────────────────
+
+
+class TestPctStrikeResolution:
+    """Tests for --otm-pct percentage-based strike selection."""
+
+    def test_resolve_put_spx(self):
+        """PUT credit spread: short below price, long further below."""
+        from utp import _resolve_pct_strikes
+        result = _resolve_pct_strikes("SPX", "PUT", 3.0, 20, 6950.0)
+        assert result["short_strike"] == 6740.0  # 6950 * 0.97 = 6741.5 → round to 6740
+        assert result["long_strike"] == 6720.0   # 6740 - 20 = 6720
+
+    def test_resolve_call_spx(self):
+        """CALL credit spread: short above price, long further above."""
+        from utp import _resolve_pct_strikes
+        result = _resolve_pct_strikes("SPX", "CALL", 3.0, 20, 6950.0)
+        assert result["short_strike"] == 7160.0  # 6950 * 1.03 = 7158.5 → round to 7160
+        assert result["long_strike"] == 7180.0   # 7160 + 20 = 7180
+
+    def test_resolve_put_ndx(self):
+        """NDX uses 50-point increments."""
+        from utp import _resolve_pct_strikes
+        result = _resolve_pct_strikes("NDX", "PUT", 2.0, 100, 20000.0)
+        assert result["short_strike"] == 19600.0  # 20000 * 0.98 = 19600 → exact
+        assert result["long_strike"] == 19500.0   # 19600 - 100 = 19500
+
+    def test_resolve_put_rut(self):
+        """RUT uses 5-point increments."""
+        from utp import _resolve_pct_strikes
+        result = _resolve_pct_strikes("RUT", "PUT", 3.0, 20, 2100.0)
+        assert result["short_strike"] == 2035.0  # 2100 * 0.97 = 2037 → round to 2035
+        assert result["long_strike"] == 2015.0   # 2035 - 20 = 2015
+
+    def test_resolve_equity(self):
+        """Equities use 1-point increments."""
+        from utp import _resolve_pct_strikes
+        result = _resolve_pct_strikes("SPY", "PUT", 2.0, 5, 550.0)
+        assert result["short_strike"] == 539.0  # 550 * 0.98 = 539 → exact
+        assert result["long_strike"] == 534.0   # 539 - 5 = 534
+
+    def test_resolve_iron_condor(self):
+        """Iron condor: both wings resolved symmetrically."""
+        from utp import _resolve_pct_strikes
+        result = _resolve_pct_strikes("SPX", None, 3.0, 20, 6950.0, is_iron_condor=True)
+        assert result["put_short"] == 6740.0
+        assert result["put_long"] == 6720.0
+        assert result["call_short"] == 7160.0
+        assert result["call_long"] == 7180.0
+
+    def test_default_width_spx(self):
+        """Default width for SPX is 20."""
+        from utp import _resolve_pct_strikes
+        result = _resolve_pct_strikes("SPX", "PUT", 3.0, None, 6950.0)
+        assert result["short_strike"] == 6740.0
+        assert result["long_strike"] == 6720.0  # 6740 - 20 = 6720
+
+    def test_default_width_ndx(self):
+        """Default width for NDX is 50."""
+        from utp import _resolve_pct_strikes
+        result = _resolve_pct_strikes("NDX", "PUT", 2.0, None, 20000.0)
+        assert result["short_strike"] == 19600.0
+        assert result["long_strike"] == 19550.0  # 19600 - 50 = 19550
+
+    def test_default_width_equity(self):
+        """Default width for equities is 5."""
+        from utp import _resolve_pct_strikes
+        result = _resolve_pct_strikes("QQQ", "CALL", 2.0, None, 500.0)
+        assert result["short_strike"] == 510.0
+        assert result["long_strike"] == 515.0  # 510 + 5 = 515
+
+    def test_round_strike(self):
+        """Test strike rounding helper."""
+        from utp import _round_strike
+        assert _round_strike(6741.5, 5) == 6740.0
+        assert _round_strike(6743.0, 5) == 6745.0
+        assert _round_strike(19623.0, 50) == 19600.0  # 19623/50 = 392.46 → 392 → 19600
+        assert _round_strike(19626.0, 50) == 19650.0  # 19626/50 = 392.52 → 393 → 19650
+        assert _round_strike(539.4, 1) == 539.0
+        assert _round_strike(539.6, 1) == 540.0
+
+    def test_invalid_option_type(self):
+        """Raises for invalid option type (non-iron-condor)."""
+        from utp import _resolve_pct_strikes
+        with pytest.raises(ValueError, match="PUT or CALL"):
+            _resolve_pct_strikes("SPX", "STRADDLE", 3.0, 20, 6950.0)
+
+    def test_validate_otm_pct_with_explicit_strikes_cs(self):
+        """Cannot combine --otm-pct with explicit strikes for credit-spread."""
+        from utp import _validate_strike_args
+        args = argparse.Namespace(otm_pct=3.0, short_strike=6740.0, long_strike=None, width=None)
+        err = _validate_strike_args("credit-spread", args)
+        assert err is not None
+        assert "Cannot use --otm-pct" in err
+
+    def test_validate_otm_pct_with_explicit_strikes_ic(self):
+        """Cannot combine --otm-pct with explicit strikes for iron-condor."""
+        from utp import _validate_strike_args
+        args = argparse.Namespace(otm_pct=3.0, put_short=6740.0, put_long=None,
+                                  call_short=None, call_long=None, width=None)
+        err = _validate_strike_args("iron-condor", args)
+        assert err is not None
+        assert "Cannot use --otm-pct" in err
+
+    def test_validate_missing_strikes_no_otm(self):
+        """Error when neither --otm-pct nor explicit strikes provided."""
+        from utp import _validate_strike_args
+        args = argparse.Namespace(otm_pct=None, short_strike=None, long_strike=None, width=None)
+        err = _validate_strike_args("credit-spread", args)
+        assert err is not None
+        assert "required" in err
+
+    def test_validate_ok_with_otm_pct(self):
+        """No error when --otm-pct is set without explicit strikes."""
+        from utp import _validate_strike_args
+        args = argparse.Namespace(otm_pct=3.0, short_strike=None, long_strike=None, width=None)
+        err = _validate_strike_args("credit-spread", args)
+        assert err is None
+
+    def test_validate_ok_with_explicit_strikes(self):
+        """No error when explicit strikes are set without --otm-pct."""
+        from utp import _validate_strike_args
+        args = argparse.Namespace(otm_pct=None, short_strike=6740.0, long_strike=6720.0, width=None)
+        err = _validate_strike_args("credit-spread", args)
+        assert err is None
+
+    def test_validate_ic_missing_strikes_no_otm(self):
+        """Iron condor: error when strikes partially missing and no --otm-pct."""
+        from utp import _validate_strike_args
+        args = argparse.Namespace(otm_pct=None, put_short=6740.0, put_long=6720.0,
+                                  call_short=None, call_long=None, width=None)
+        err = _validate_strike_args("iron-condor", args)
+        assert err is not None
+        assert "required" in err
+
+    def test_iron_condor_default_width(self):
+        """Iron condor uses symbol default width."""
+        from utp import _resolve_pct_strikes
+        result = _resolve_pct_strikes("RUT", None, 3.0, None, 2100.0, is_iron_condor=True)
+        # RUT default width is 20
+        assert result["put_long"] == result["put_short"] - 20
+        assert result["call_long"] == result["call_short"] + 20
+
+    def test_snap_to_chain_nearest(self):
+        """Snap to nearest available strike."""
+        from utp import _snap_to_chain
+        chain = [6780, 6790, 6800, 6810, 6820, 6825, 6830]
+        assert _snap_to_chain(6812, chain) == 6810
+        assert _snap_to_chain(6813, chain) == 6810
+        assert _snap_to_chain(6817, chain) == 6820
+
+    def test_snap_to_chain_otm_put(self):
+        """For put short, snap to nearest strike <= target (further OTM)."""
+        from utp import _snap_to_chain
+        chain = [6780, 6790, 6800, 6810, 6820, 6825, 6830]
+        assert _snap_to_chain(6812, chain, "otm_put") == 6810
+        assert _snap_to_chain(6810, chain, "otm_put") == 6810
+        assert _snap_to_chain(6799, chain, "otm_put") == 6790
+
+    def test_snap_to_chain_otm_call(self):
+        """For call short, snap to nearest strike >= target (further OTM)."""
+        from utp import _snap_to_chain
+        chain = [7100, 7120, 7130, 7140, 7150, 7175, 7200]
+        assert _snap_to_chain(7160, chain, "otm_call") == 7175
+        assert _snap_to_chain(7150, chain, "otm_call") == 7150
+        assert _snap_to_chain(7141, chain, "otm_call") == 7150
+
+    def test_snap_to_chain_gap(self):
+        """Snap across a gap in the chain (e.g., 7130 → 7150, no 7135/7140/7145)."""
+        from utp import _snap_to_chain
+        chain = [7100, 7110, 7120, 7130, 7150, 7175, 7200]
+        # 7160 doesn't exist, nearest >= is 7175
+        assert _snap_to_chain(7160, chain, "otm_call") == 7175
+        # 7140 doesn't exist, nearest >= is 7150
+        assert _snap_to_chain(7140, chain, "otm_call") == 7150
+
+    def test_snap_to_chain_empty(self):
+        """Empty chain returns target unchanged."""
+        from utp import _snap_to_chain
+        assert _snap_to_chain(7160, [], "otm_call") == 7160
+
+
+class TestTradeReplay:
+    """Tests for trade replay subcommand."""
+
+    def _make_position(self, **overrides):
+        """Create a minimal position dict for testing."""
+        base = {
+            "position_id": "abc12345-6789-0000-0000-000000000000",
+            "status": "closed",
+            "order_type": "credit_spread",
+            "symbol": "SPX",
+            "quantity": 5,
+            "entry_price": -2.50,
+            "expiration": "2026-04-15",
+            "legs": [
+                {"action": "SELL_TO_OPEN", "strike": 6800, "option_type": "PUT", "expiration": "2026-04-15"},
+                {"action": "BUY_TO_OPEN", "strike": 6780, "option_type": "PUT", "expiration": "2026-04-15"},
+            ],
+        }
+        base.update(overrides)
+        return base
+
+    def test_resolve_replay_credit_spread(self, tmp_path):
+        """Replay resolves credit spread parameters from position."""
+        from utp import _resolve_replay
+        import json
+
+        pos = self._make_position()
+        pos_file = tmp_path / "live" / "positions.json"
+        pos_file.parent.mkdir(parents=True)
+        pos_file.write_text(json.dumps({pos["position_id"]: pos}))
+
+        args = argparse.Namespace(
+            position_id="abc123",
+            quantity=None,
+            expiration=None,
+            net_price=None,
+            auto_price=False,
+            mid=False,
+            nocheck=False,
+            confirm=False,
+            data_dir=str(tmp_path),
+            # mode flags
+            dry_run=False, paper=False, live=True,
+        )
+        subcmd, result_args = _resolve_replay(args, data_dir=str(tmp_path))
+        assert subcmd == "credit-spread"
+        assert result_args.symbol == "SPX"
+        assert result_args.short_strike == 6800
+        assert result_args.long_strike == 6780
+        assert result_args.option_type == "PUT"
+        assert result_args.quantity == 5
+        assert result_args.expiration == "2026-04-15"
+
+    def test_resolve_replay_iron_condor(self, tmp_path):
+        """Replay resolves iron condor parameters from position."""
+        from utp import _resolve_replay
+        import json
+
+        pos = self._make_position(
+            order_type="iron_condor",
+            legs=[
+                {"action": "SELL_TO_OPEN", "strike": 6800, "option_type": "PUT", "expiration": "2026-04-15"},
+                {"action": "BUY_TO_OPEN", "strike": 6780, "option_type": "PUT", "expiration": "2026-04-15"},
+                {"action": "SELL_TO_OPEN", "strike": 7100, "option_type": "CALL", "expiration": "2026-04-15"},
+                {"action": "BUY_TO_OPEN", "strike": 7120, "option_type": "CALL", "expiration": "2026-04-15"},
+            ],
+        )
+        pos_file = tmp_path / "live" / "positions.json"
+        pos_file.parent.mkdir(parents=True)
+        pos_file.write_text(json.dumps({pos["position_id"]: pos}))
+
+        args = argparse.Namespace(
+            position_id="abc123", quantity=None, expiration=None,
+            net_price=None, auto_price=False, mid=False, nocheck=False,
+            confirm=False, data_dir=str(tmp_path),
+            dry_run=False, paper=False, live=True,
+        )
+        subcmd, result_args = _resolve_replay(args, data_dir=str(tmp_path))
+        assert subcmd == "iron-condor"
+        assert result_args.put_short == 6800
+        assert result_args.put_long == 6780
+        assert result_args.call_short == 7100
+        assert result_args.call_long == 7120
+
+    def test_resolve_replay_override_quantity(self, tmp_path):
+        """Replay respects --quantity override."""
+        from utp import _resolve_replay
+        import json
+
+        pos = self._make_position()
+        pos_file = tmp_path / "live" / "positions.json"
+        pos_file.parent.mkdir(parents=True)
+        pos_file.write_text(json.dumps({pos["position_id"]: pos}))
+
+        args = argparse.Namespace(
+            position_id="abc123", quantity=10, expiration=None,
+            net_price=None, auto_price=False, mid=False, nocheck=False,
+            confirm=False, data_dir=str(tmp_path),
+            dry_run=False, paper=False, live=True,
+        )
+        subcmd, result_args = _resolve_replay(args, data_dir=str(tmp_path))
+        assert subcmd == "credit-spread"
+        assert result_args.quantity == 10  # overridden, not original 5
+
+    def test_resolve_replay_override_expiration(self, tmp_path):
+        """Replay respects --expiration override."""
+        from utp import _resolve_replay
+        import json
+
+        pos = self._make_position()
+        pos_file = tmp_path / "live" / "positions.json"
+        pos_file.parent.mkdir(parents=True)
+        pos_file.write_text(json.dumps({pos["position_id"]: pos}))
+
+        args = argparse.Namespace(
+            position_id="abc123", quantity=None, expiration="2026-04-16",
+            net_price=None, auto_price=False, mid=False, nocheck=False,
+            confirm=False, data_dir=str(tmp_path),
+            dry_run=False, paper=False, live=True,
+        )
+        subcmd, result_args = _resolve_replay(args, data_dir=str(tmp_path))
+        assert result_args.expiration == "2026-04-16"
+
+    def test_resolve_replay_not_found(self, tmp_path):
+        """Replay returns None when position not found."""
+        from utp import _resolve_replay
+        import json
+
+        pos_file = tmp_path / "live" / "positions.json"
+        pos_file.parent.mkdir(parents=True)
+        pos_file.write_text(json.dumps({}))
+
+        args = argparse.Namespace(
+            position_id="nonexistent", quantity=None, expiration=None,
+            net_price=None, auto_price=False, mid=False, nocheck=False,
+            confirm=False, data_dir=str(tmp_path),
+            dry_run=False, paper=False, live=True,
+        )
+        subcmd, result_args = _resolve_replay(args, data_dir=str(tmp_path))
+        assert subcmd is None
+        assert result_args is None
+
+    def test_resolve_replay_debit_spread(self, tmp_path):
+        """Replay resolves debit spread parameters."""
+        from utp import _resolve_replay
+        import json
+
+        pos = self._make_position(
+            order_type="debit_spread",
+            legs=[
+                {"action": "BUY_TO_OPEN", "strike": 480, "option_type": "CALL", "expiration": "2026-04-15"},
+                {"action": "SELL_TO_OPEN", "strike": 490, "option_type": "CALL", "expiration": "2026-04-15"},
+            ],
+        )
+        pos_file = tmp_path / "live" / "positions.json"
+        pos_file.parent.mkdir(parents=True)
+        pos_file.write_text(json.dumps({pos["position_id"]: pos}))
+
+        args = argparse.Namespace(
+            position_id="abc123", quantity=None, expiration=None,
+            net_price=None, auto_price=False, mid=False, nocheck=False,
+            confirm=False, data_dir=str(tmp_path),
+            dry_run=False, paper=False, live=True,
+        )
+        subcmd, result_args = _resolve_replay(args, data_dir=str(tmp_path))
+        assert subcmd == "debit-spread"
+        assert result_args.long_strike == 480
+        assert result_args.short_strike == 490
+        assert result_args.option_type == "CALL"
+
+    def test_resolve_replay_multi_leg_credit_spread(self, tmp_path):
+        """Replay resolves multi_leg with 2 legs (SELL/BUY) as credit spread."""
+        from utp import _resolve_replay
+        import json
+
+        pos = self._make_position(
+            order_type="multi_leg",
+            legs=[
+                {"action": "SELL", "strike": 6595, "option_type": "PUT", "expiration": "2026-04-15"},
+                {"action": "BUY", "strike": 6575, "option_type": "PUT", "expiration": "2026-04-15"},
+            ],
+        )
+        pos_file = tmp_path / "live" / "positions.json"
+        pos_file.parent.mkdir(parents=True)
+        pos_file.write_text(json.dumps({pos["position_id"]: pos}))
+
+        args = argparse.Namespace(
+            position_id="abc123", quantity=None, expiration=None,
+            net_price=None, auto_price=False, mid=False, nocheck=False,
+            confirm=False, data_dir=str(tmp_path),
+            dry_run=False, paper=False, live=True,
+        )
+        subcmd, result_args = _resolve_replay(args, data_dir=str(tmp_path))
+        assert subcmd == "credit-spread"
+        assert result_args.symbol == "SPX"
+        assert result_args.short_strike == 6595
+        assert result_args.long_strike == 6575
+        assert result_args.option_type == "PUT"
+
+    def test_resolve_replay_multi_leg_iron_condor(self, tmp_path):
+        """Replay resolves multi_leg with 4 legs as iron condor."""
+        from utp import _resolve_replay
+        import json
+
+        pos = self._make_position(
+            order_type="multi_leg",
+            legs=[
+                {"action": "SELL", "strike": 6800, "option_type": "PUT", "expiration": "2026-04-15"},
+                {"action": "BUY", "strike": 6780, "option_type": "PUT", "expiration": "2026-04-15"},
+                {"action": "SELL", "strike": 7100, "option_type": "CALL", "expiration": "2026-04-15"},
+                {"action": "BUY", "strike": 7120, "option_type": "CALL", "expiration": "2026-04-15"},
+            ],
+        )
+        pos_file = tmp_path / "live" / "positions.json"
+        pos_file.parent.mkdir(parents=True)
+        pos_file.write_text(json.dumps({pos["position_id"]: pos}))
+
+        args = argparse.Namespace(
+            position_id="abc123", quantity=None, expiration=None,
+            net_price=None, auto_price=False, mid=False, nocheck=False,
+            confirm=False, data_dir=str(tmp_path),
+            dry_run=False, paper=False, live=True,
+        )
+        subcmd, result_args = _resolve_replay(args, data_dir=str(tmp_path))
+        assert subcmd == "iron-condor"
+        assert result_args.put_short == 6800
+        assert result_args.put_long == 6780
+        assert result_args.call_short == 7100
+        assert result_args.call_long == 7120
+
+    def test_resolve_replay_short_action_names(self, tmp_path):
+        """Replay accepts short action names (SELL/BUY) from portfolio grouping."""
+        from utp import _resolve_replay
+        import json
+
+        # Use credit_spread order_type but with short action names (SELL/BUY)
+        pos = self._make_position(
+            order_type="credit_spread",
+            legs=[
+                {"action": "SELL", "strike": 6600, "option_type": "CALL", "expiration": "2026-04-15"},
+                {"action": "BUY", "strike": 6620, "option_type": "CALL", "expiration": "2026-04-15"},
+            ],
+        )
+        pos_file = tmp_path / "live" / "positions.json"
+        pos_file.parent.mkdir(parents=True)
+        pos_file.write_text(json.dumps({pos["position_id"]: pos}))
+
+        args = argparse.Namespace(
+            position_id="abc123", quantity=None, expiration=None,
+            net_price=None, auto_price=False, mid=False, nocheck=False,
+            confirm=False, data_dir=str(tmp_path),
+            dry_run=False, paper=False, live=True,
+        )
+        subcmd, result_args = _resolve_replay(args, data_dir=str(tmp_path))
+        assert subcmd == "credit-spread"
+        assert result_args.short_strike == 6600
+        assert result_args.long_strike == 6620
+        assert result_args.option_type == "CALL"
+
+    def test_resolve_replay_portfolio_fallback(self, tmp_path):
+        """Replay falls back to daemon portfolio when local store has no match."""
+        from utp import _resolve_replay
+        from unittest.mock import patch
+        import json
+
+        # Empty local store
+        pos_file = tmp_path / "live" / "positions.json"
+        pos_file.parent.mkdir(parents=True)
+        pos_file.write_text(json.dumps({}))
+
+        # Mock the HTTP call to return a portfolio with a grouped position
+        portfolio_response = {
+            "positions": [
+                {
+                    "position_id": "7180a7deadbeef",
+                    "symbol": "SPX",
+                    "order_type": "multi_leg",
+                    "quantity": 10,
+                    "expiration": "2026-04-15",
+                    "entry_price": -1.80,
+                    "status": "open",
+                    "legs": [
+                        {"action": "SELL", "strike": 6595, "option_type": "PUT"},
+                        {"action": "BUY", "strike": 6575, "option_type": "PUT"},
+                    ],
+                }
+            ]
+        }
+
+        class FakeResponse:
+            status = 200
+            def read(self):
+                return json.dumps(portfolio_response).encode()
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                pass
+
+        args = argparse.Namespace(
+            position_id="7180a7", quantity=None, expiration=None,
+            net_price=None, auto_price=False, mid=False, nocheck=False,
+            confirm=False, data_dir=str(tmp_path),
+            dry_run=False, paper=False, live=True,
+        )
+        with patch("urllib.request.urlopen", return_value=FakeResponse()):
+            subcmd, result_args = _resolve_replay(
+                args, data_dir=str(tmp_path), server="http://localhost:8000"
+            )
+        assert subcmd == "credit-spread"
+        assert result_args.symbol == "SPX"
+        assert result_args.short_strike == 6595
+        assert result_args.long_strike == 6575
+        assert result_args.quantity == 10
+
+    def test_resolve_replay_portfolio_fallback_not_found(self, tmp_path):
+        """Replay returns None when position not in local store or portfolio."""
+        from utp import _resolve_replay
+        from unittest.mock import patch
+        import json
+
+        pos_file = tmp_path / "live" / "positions.json"
+        pos_file.parent.mkdir(parents=True)
+        pos_file.write_text(json.dumps({}))
+
+        portfolio_response = {"positions": []}
+
+        class FakeResponse:
+            status = 200
+            def read(self):
+                return json.dumps(portfolio_response).encode()
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                pass
+
+        args = argparse.Namespace(
+            position_id="nonexistent", quantity=None, expiration=None,
+            net_price=None, auto_price=False, mid=False, nocheck=False,
+            confirm=False, data_dir=str(tmp_path),
+            dry_run=False, paper=False, live=True,
+        )
+        with patch("urllib.request.urlopen", return_value=FakeResponse()):
+            subcmd, result_args = _resolve_replay(
+                args, data_dir=str(tmp_path), server="http://localhost:8000"
+            )
+        assert subcmd is None
+        assert result_args is None

@@ -2978,9 +2978,13 @@ async function executeConfirm(cid) {
       return;
     }
     const result = d.result||{};
-    const ok = !result.error && result.status!=='FAILED';
-    res.innerHTML = `<div class="confirm-result ${ok?'success':'failure'}" style="margin-top:8px">${ok?'EXECUTED':'FAILED'}: ${result.message||result.status||JSON.stringify(d)}</div>`;
+    const hasError = result.error != null && result.error !== '';
+    const hasGoodStatus = ['FILLED','SUBMITTED','PENDING'].includes(result.status);
+    const ok = !hasError && (hasGoodStatus || result.status === 'executed');
+    const statusMsg = result.error || result.message || result.status || JSON.stringify(d);
+    res.innerHTML = `<div class="confirm-result ${ok?'success':'failure'}" style="margin-top:8px">${ok?'EXECUTED':'FAILED'}: ${statusMsg}</div>`;
     if (ok) { res.innerHTML += `<button class="btn btn-muted btn-sm" style="margin-top:8px" onclick="closeTrade();loadPortfolio()">OK</button>`; }
+    if (!ok) { res.innerHTML += `<button class="btn btn-muted btn-sm" style="margin-top:8px" onclick="closeTrade()">OK</button>`; }
   } catch(e) { res.innerHTML = `<div class="confirm-result failure" style="margin-top:8px">${e.message}</div><button class="btn btn-muted btn-sm" style="margin-top:8px" onclick="closeTrade()">OK</button>`; }
 }
 

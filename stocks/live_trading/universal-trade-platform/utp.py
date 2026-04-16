@@ -906,6 +906,541 @@ def _get_symbol_from_instruction(instr: dict) -> str:
     return params.get("symbol", "") or instr.get("symbol", "")
 
 
+def _resolve_replay(args, data_dir: str | None = None, server: str | None = None) -> tuple[str, object] | tuple[None, None]:
+    """Resolve 'trade replay <pos-id>' into (subcommand, modified_args).
+
+    Looks up the position by ID prefix, extracts trade params, sets them
+    on args as if the user typed the original trade command.
+    Returns (subcommand, args) on success, or (None, None) on failure.
+
+    Falls back to the daemon's /dashboard/portfolio endpoint when the
+    position is not found in the local store (e.g. synthetic spread-grouped
+    positions with MD5 IDs).
+    """
+    from pathlib import Path as _Path
+    from app.services.position_store import PlatformPositionStore
+
+    pid_prefix = args.position_id
+    mode = _get_mode(args)
+    store_dir = data_dir or getattr(args, "data_dir", "data/utp")
+    store_path = _Path(store_dir) / mode / "positions.json"
+
+    store = PlatformPositionStore(store_path)
+    match = None
+    for pos in list(store.get_open_positions()) + list(store.get_closed_positions()):
+        pid = pos.get("position_id", "")
+        if pid.startswith(pid_prefix):
+            match = pos
+            break
+
+    # Fallback: fetch grouped positions from daemon portfolio
+    if not match and server:
+        try:
+            import urllib.request, json as _json
+            url = f"{server}/dashboard/portfolio?include_quotes=true"
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                if resp.status == 200:
+                    data = _json.loads(resp.read())
+                    for pos in data.get("positions", []):
+                        pid = pos.get("position_id", "")
+                        if pid.startswith(pid_prefix):
+                            match = pos
+                            break
+        except Exception:
+            pass  # Daemon unavailable — already printed local miss below
+
+    if not match:
+        print(f"  Error: no position found matching '{pid_prefix}'")
+        return None, None
+
+    legs = match.get("legs", [])
+    order_type = match.get("order_type", "")
+    symbol = match.get("symbol", "?")
+    orig_qty = int(match.get("quantity", 1))
+    orig_exp = match.get("expiration")
+
+    # Normalize multi_leg → concrete type based on leg count
+    if order_type == "multi_leg":
+        if len(legs) == 2:
+            # Detect credit vs debit: if one leg is SELL, it's a credit spread
+            has_sell = any("SELL" in leg.get("action", "") for leg in legs)
+            order_type = "credit_spread" if has_sell else "debit_spread"
+        elif len(legs) == 4:
+            order_type = "iron_condor"
+
+    # Determine the subcommand and extract strikes from legs
+    if order_type == "credit_spread" and len(legs) == 2:
+        subcommand = "credit-spread"
+        short_strike = long_strike = None
+        option_type = legs[0].get("option_type", "PUT")
+        for leg in legs:
+            if "SELL" in leg.get("action", ""):
+                short_strike = leg.get("strike")
+            else:
+                long_strike = leg.get("strike")
+        if short_strike is None or long_strike is None:
+            print(f"  Error: could not determine strikes from position legs")
+            return None, None
+        args.symbol = symbol
+        args.short_strike = short_strike
+        args.long_strike = long_strike
+        args.option_type = option_type
+        args.close = False
+        if not hasattr(args, "otm_pct"):
+            args.otm_pct = None
+        if not hasattr(args, "width"):
+            args.width = None
+
+    elif order_type == "iron_condor" and len(legs) == 4:
+        subcommand = "iron-condor"
+        put_short = put_long = call_short = call_long = None
+        for leg in legs:
+            strike = leg.get("strike")
+            ot = leg.get("option_type", "")
+            action = leg.get("action", "")
+            if ot == "PUT" and "SELL" in action:
+                put_short = strike
+            elif ot == "PUT" and "BUY" in action:
+                put_long = strike
+            elif ot == "CALL" and "SELL" in action:
+                call_short = strike
+            elif ot == "CALL" and "BUY" in action:
+                call_long = strike
+        if None in (put_short, put_long, call_short, call_long):
+            print(f"  Error: could not determine all 4 strikes from iron condor legs")
+            return None, None
+        args.symbol = symbol
+        args.put_short = put_short
+        args.put_long = put_long
+        args.call_short = call_short
+        args.call_long = call_long
+        args.close = False
+        if not hasattr(args, "otm_pct"):
+            args.otm_pct = None
+        if not hasattr(args, "width"):
+            args.width = None
+
+    elif order_type == "debit_spread" and len(legs) == 2:
+        subcommand = "debit-spread"
+        short_strike = long_strike = None
+        option_type = legs[0].get("option_type", "CALL")
+        for leg in legs:
+            if "SELL" in leg.get("action", ""):
+                short_strike = leg.get("strike")
+            else:
+                long_strike = leg.get("strike")
+        if short_strike is None or long_strike is None:
+            print(f"  Error: could not determine strikes from position legs")
+            return None, None
+        args.symbol = symbol
+        args.short_strike = short_strike
+        args.long_strike = long_strike
+        args.option_type = option_type
+        args.close = False
+
+    else:
+        print(f"  Error: replay only supports credit_spread, debit_spread, iron_condor, and multi_leg spreads")
+        print(f"  Position type: {order_type}, legs: {len(legs)}")
+        return None, None
+
+    # Apply overrides
+    args.quantity = args.quantity if args.quantity is not None else orig_qty
+    args.expiration = args.expiration if args.expiration is not None else orig_exp
+    if not args.expiration:
+        print(f"  Error: position has no expiration — use --expiration to set one")
+        return None, None
+
+    # Display what we're replaying
+    status = match.get("status", "?")
+    pid = match.get("position_id", "?")
+    entry_price = match.get("entry_price", 0)
+    _print_header("Replay Trade")
+    print(f"  Source:     {pid[:12]}... ({status})")
+    print(f"  Original:   {symbol} {order_type} x{orig_qty} @ ${abs(entry_price):.2f}")
+    if args.quantity != orig_qty:
+        print(f"  Override:   quantity {orig_qty} → {args.quantity}")
+    if args.expiration != orig_exp:
+        print(f"  Override:   expiration {orig_exp} → {args.expiration}")
+    print()
+
+    return subcommand, args
+
+
+# ── Percentage-based strike resolution ────────────────────────────────────
+
+# Strike increments per symbol (round short strike to nearest increment)
+_STRIKE_INCREMENTS: dict[str, float] = {
+    "SPX": 5, "NDX": 50, "RUT": 5, "DJX": 5,
+}
+_DEFAULT_STRIKE_INCREMENT = 1.0  # equities
+
+# Default spread widths per symbol (when --width not specified)
+_DEFAULT_WIDTHS: dict[str, float] = {
+    "SPX": 20, "NDX": 50, "RUT": 20, "DJX": 5,
+}
+_DEFAULT_WIDTH = 5.0  # equities
+
+
+def _round_strike(value: float, increment: float) -> float:
+    """Round a strike price to the nearest valid increment."""
+    return round(round(value / increment) * increment, 2)
+
+
+def _resolve_pct_strikes(
+    symbol: str,
+    option_type: str | None,
+    otm_pct: float,
+    width: float | None,
+    current_price: float,
+    is_iron_condor: bool = False,
+) -> dict[str, float]:
+    """Resolve percentage-based OTM strikes to absolute strike prices.
+
+    Returns dict with short_strike/long_strike for credit spreads,
+    or put_short/put_long/call_short/call_long for iron condors.
+    """
+    inc = _STRIKE_INCREMENTS.get(symbol.upper(), _DEFAULT_STRIKE_INCREMENT)
+    w = width if width is not None else _DEFAULT_WIDTHS.get(symbol.upper(), _DEFAULT_WIDTH)
+
+    if is_iron_condor:
+        put_short = _round_strike(current_price * (1 - otm_pct / 100), inc)
+        put_long = _round_strike(put_short - w, inc)
+        call_short = _round_strike(current_price * (1 + otm_pct / 100), inc)
+        call_long = _round_strike(call_short + w, inc)
+        return {
+            "put_short": put_short, "put_long": put_long,
+            "call_short": call_short, "call_long": call_long,
+        }
+
+    otype = (option_type or "").upper()
+    if otype == "PUT":
+        short_strike = _round_strike(current_price * (1 - otm_pct / 100), inc)
+        long_strike = _round_strike(short_strike - w, inc)
+    elif otype == "CALL":
+        short_strike = _round_strike(current_price * (1 + otm_pct / 100), inc)
+        long_strike = _round_strike(short_strike + w, inc)
+    else:
+        raise ValueError(f"--option-type must be PUT or CALL, got: {option_type}")
+    return {"short_strike": short_strike, "long_strike": long_strike}
+
+
+def _snap_to_chain(target: float, available: list[float], direction: str = "nearest") -> float:
+    """Snap a target strike to the nearest available strike from the chain.
+
+    direction:
+      "nearest" — closest strike
+      "otm_put" — nearest strike <= target (further OTM for puts)
+      "otm_call" — nearest strike >= target (further OTM for calls)
+    """
+    if not available:
+        return target
+    if direction == "otm_put":
+        # For put short: want strike <= target (further OTM)
+        candidates = [s for s in available if s <= target]
+        if candidates:
+            return max(candidates)  # closest one that's still <= target
+    elif direction == "otm_call":
+        # For call short: want strike >= target (further OTM)
+        candidates = [s for s in available if s >= target]
+        if candidates:
+            return min(candidates)  # closest one that's still >= target
+    # Fallback: nearest
+    return min(available, key=lambda s: abs(s - target))
+
+
+async def _snap_strikes_to_chain_http(
+    client, symbol: str, expiration: str, strikes: dict[str, float],
+    option_type: str | None, is_iron_condor: bool,
+) -> dict[str, float]:
+    """Fetch option chain via HTTP and snap computed strikes to real strikes."""
+    available: dict[str, list[float]] = {}  # "PUT" -> [strikes], "CALL" -> [strikes]
+
+    types_needed = ["PUT", "CALL"] if is_iron_condor else [option_type.upper()]
+    for ot in types_needed:
+        try:
+            # Fetch a wide range around our target strikes
+            if is_iron_condor:
+                all_targets = [strikes["put_short"], strikes["put_long"],
+                               strikes["call_short"], strikes["call_long"]]
+            else:
+                all_targets = [strikes["short_strike"], strikes["long_strike"]]
+            smin = min(all_targets) - 100
+            smax = max(all_targets) + 100
+            params = {"expiration": expiration, "option_type": ot,
+                      "strike_min": smin, "strike_max": smax}
+            resp = await client.get(f"/market/options/{symbol}", params=params)
+            if resp.status_code == 200:
+                data = resp.json()
+                quotes = data.get("quotes", {}).get(ot.lower(), [])
+                if isinstance(quotes, list):
+                    available[ot] = sorted(set(q["strike"] for q in quotes if q.get("strike")))
+        except Exception:
+            pass
+
+    if not any(available.values()):
+        return strikes  # Can't snap, return as-is
+
+    if is_iron_condor:
+        put_strikes = available.get("PUT", [])
+        call_strikes = available.get("CALL", [])
+        if put_strikes:
+            strikes["put_short"] = _snap_to_chain(strikes["put_short"], put_strikes, "otm_put")
+            strikes["put_long"] = _snap_to_chain(strikes["put_long"], put_strikes, "otm_put")
+            # Ensure long is below short for puts
+            if strikes["put_long"] >= strikes["put_short"]:
+                below = [s for s in put_strikes if s < strikes["put_short"]]
+                if below:
+                    strikes["put_long"] = max(below)
+        if call_strikes:
+            strikes["call_short"] = _snap_to_chain(strikes["call_short"], call_strikes, "otm_call")
+            strikes["call_long"] = _snap_to_chain(strikes["call_long"], call_strikes, "otm_call")
+            # Ensure long is above short for calls
+            if strikes["call_long"] <= strikes["call_short"]:
+                above = [s for s in call_strikes if s > strikes["call_short"]]
+                if above:
+                    strikes["call_long"] = min(above)
+    else:
+        ot = option_type.upper()
+        chain = available.get(ot, [])
+        if chain:
+            if ot == "PUT":
+                strikes["short_strike"] = _snap_to_chain(strikes["short_strike"], chain, "otm_put")
+                strikes["long_strike"] = _snap_to_chain(strikes["long_strike"], chain, "otm_put")
+                if strikes["long_strike"] >= strikes["short_strike"]:
+                    below = [s for s in chain if s < strikes["short_strike"]]
+                    if below:
+                        strikes["long_strike"] = max(below)
+            else:
+                strikes["short_strike"] = _snap_to_chain(strikes["short_strike"], chain, "otm_call")
+                strikes["long_strike"] = _snap_to_chain(strikes["long_strike"], chain, "otm_call")
+                if strikes["long_strike"] <= strikes["short_strike"]:
+                    above = [s for s in chain if s > strikes["short_strike"]]
+                    if above:
+                        strikes["long_strike"] = min(above)
+
+    return strikes
+
+
+async def _snap_strikes_to_chain_direct(
+    symbol: str, expiration: str, strikes: dict[str, float],
+    option_type: str | None, is_iron_condor: bool,
+) -> dict[str, float]:
+    """Fetch option chain via direct IBKR and snap computed strikes to real strikes."""
+    available: dict[str, list[float]] = {}
+
+    types_needed = ["PUT", "CALL"] if is_iron_condor else [option_type.upper()]
+    for ot in types_needed:
+        try:
+            from app.services.market_data import get_option_quotes
+            if is_iron_condor:
+                all_targets = [strikes["put_short"], strikes["put_long"],
+                               strikes["call_short"], strikes["call_long"]]
+            else:
+                all_targets = [strikes["short_strike"], strikes["long_strike"]]
+            smin = min(all_targets) - 100
+            smax = max(all_targets) + 100
+            quotes = await get_option_quotes(
+                symbol, expiration=expiration, option_type=ot,
+                strike_min=smin, strike_max=smax)
+            if quotes:
+                q_list = quotes.get(ot.lower(), [])
+                if isinstance(q_list, list):
+                    available[ot] = sorted(set(q["strike"] for q in q_list if q.get("strike")))
+        except Exception:
+            pass
+
+    if not any(available.values()):
+        return strikes
+
+    # Reuse the same snapping logic (identical to HTTP version)
+    if is_iron_condor:
+        put_strikes = available.get("PUT", [])
+        call_strikes = available.get("CALL", [])
+        if put_strikes:
+            strikes["put_short"] = _snap_to_chain(strikes["put_short"], put_strikes, "otm_put")
+            strikes["put_long"] = _snap_to_chain(strikes["put_long"], put_strikes, "otm_put")
+            if strikes["put_long"] >= strikes["put_short"]:
+                below = [s for s in put_strikes if s < strikes["put_short"]]
+                if below:
+                    strikes["put_long"] = max(below)
+        if call_strikes:
+            strikes["call_short"] = _snap_to_chain(strikes["call_short"], call_strikes, "otm_call")
+            strikes["call_long"] = _snap_to_chain(strikes["call_long"], call_strikes, "otm_call")
+            if strikes["call_long"] <= strikes["call_short"]:
+                above = [s for s in call_strikes if s > strikes["call_short"]]
+                if above:
+                    strikes["call_long"] = min(above)
+    else:
+        ot = option_type.upper()
+        chain = available.get(ot, [])
+        if chain:
+            if ot == "PUT":
+                strikes["short_strike"] = _snap_to_chain(strikes["short_strike"], chain, "otm_put")
+                strikes["long_strike"] = _snap_to_chain(strikes["long_strike"], chain, "otm_put")
+                if strikes["long_strike"] >= strikes["short_strike"]:
+                    below = [s for s in chain if s < strikes["short_strike"]]
+                    if below:
+                        strikes["long_strike"] = max(below)
+            else:
+                strikes["short_strike"] = _snap_to_chain(strikes["short_strike"], chain, "otm_call")
+                strikes["long_strike"] = _snap_to_chain(strikes["long_strike"], chain, "otm_call")
+                if strikes["long_strike"] <= strikes["short_strike"]:
+                    above = [s for s in chain if s > strikes["short_strike"]]
+                    if above:
+                        strikes["long_strike"] = min(above)
+
+    return strikes
+
+
+def _validate_strike_args(subcommand: str, args) -> str | None:
+    """Validate strike arguments for credit-spread/iron-condor.
+
+    Returns an error message string if invalid, or None if OK.
+    """
+    otm_pct = getattr(args, "otm_pct", None)
+
+    if subcommand == "credit-spread":
+        has_explicit = args.short_strike is not None or args.long_strike is not None
+        if otm_pct is not None and has_explicit:
+            return "Cannot use --otm-pct with explicit --short-strike/--long-strike"
+        if otm_pct is None and (args.short_strike is None or args.long_strike is None):
+            return "--short-strike and --long-strike are required (or use --otm-pct)"
+
+    elif subcommand == "iron-condor":
+        has_explicit = any(getattr(args, a, None) is not None
+                          for a in ("put_short", "put_long", "call_short", "call_long"))
+        if otm_pct is not None and has_explicit:
+            return "Cannot use --otm-pct with explicit strike arguments"
+        if otm_pct is None and any(getattr(args, a, None) is None
+                                    for a in ("put_short", "put_long", "call_short", "call_long")):
+            return "--put-short/--put-long/--call-short/--call-long are required (or use --otm-pct)"
+
+    return None
+
+
+async def _resolve_otm_strikes_http(args, subcommand: str, client) -> int | None:
+    """If --otm-pct is set, fetch quote via HTTP and resolve strikes onto args.
+
+    Returns an error exit code, or None on success.
+    """
+    otm_pct = getattr(args, "otm_pct", None)
+    if otm_pct is None:
+        return None
+
+    sym = args.symbol
+    try:
+        qr = await client.get(f"/market/quote/{sym}")
+        if qr.status_code != 200:
+            print(f"  Error: failed to fetch quote for {sym} (HTTP {qr.status_code})")
+            return 1
+        qd = qr.json()
+        price = qd.get("last") or qd.get("bid") or qd.get("ask")
+        if not price or price <= 0:
+            print(f"  Error: no valid price for {sym} — cannot resolve --otm-pct")
+            return 1
+    except Exception as e:
+        print(f"  Error: could not fetch quote for {sym}: {e}")
+        return 1
+
+    is_ic = subcommand == "iron-condor"
+    option_type = getattr(args, "option_type", None)
+    width = getattr(args, "width", None)
+    strikes = _resolve_pct_strikes(sym, option_type, otm_pct, width, price, is_iron_condor=is_ic)
+
+    # Snap to actual chain strikes if expiration is available
+    expiration = getattr(args, "expiration", None)
+    if expiration:
+        raw = dict(strikes)  # save pre-snap for display
+        strikes = await _snap_strikes_to_chain_http(
+            client, sym, expiration, strikes, option_type, is_ic)
+        snapped = strikes != raw
+    else:
+        snapped = False
+
+    # Set resolved strikes onto args
+    for k, v in strikes.items():
+        setattr(args, k, v)
+
+    # Print resolved strikes
+    w = width if width is not None else _DEFAULT_WIDTHS.get(sym.upper(), _DEFAULT_WIDTH)
+    snap_note = " (snapped to chain)" if snapped else ""
+    if is_ic:
+        print(f"  Strikes: put {strikes['put_short']}/{strikes['put_long']} | "
+              f"call {strikes['call_short']}/{strikes['call_long']} "
+              f"({otm_pct}% OTM, {w:.0f}pt width) "
+              f"— resolved from ${price:,.2f}{snap_note}")
+    else:
+        print(f"  Strikes: {strikes['short_strike']}/{strikes['long_strike']} "
+              f"({otm_pct}% OTM {option_type}, {w:.0f}pt width) "
+              f"— resolved from ${price:,.2f}{snap_note}")
+
+    return None
+
+
+async def _resolve_otm_strikes_direct(args, subcommand: str) -> int | None:
+    """If --otm-pct is set, fetch quote via direct IBKR and resolve strikes onto args.
+
+    Returns an error exit code, or None on success.
+    """
+    otm_pct = getattr(args, "otm_pct", None)
+    if otm_pct is None:
+        return None
+
+    sym = args.symbol
+    mode = _get_mode(args)
+    if mode == "dry-run":
+        print("  Error: --otm-pct requires --live or --paper (need a price quote)")
+        return 1
+
+    try:
+        live_provider = await _init_services(args)
+        from app.services.market_data import get_quote
+        qd = await get_quote(sym)
+        if not qd:
+            print(f"  Error: no quote for {sym} — cannot resolve --otm-pct")
+            return 1
+        price = qd.get("last") or qd.get("bid") or qd.get("ask")
+        if not price or price <= 0:
+            print(f"  Error: no valid price for {sym} — cannot resolve --otm-pct")
+            return 1
+    except Exception as e:
+        print(f"  Error: could not fetch quote for {sym}: {e}")
+        return 1
+
+    is_ic = subcommand == "iron-condor"
+    option_type = getattr(args, "option_type", None)
+    width = getattr(args, "width", None)
+    strikes = _resolve_pct_strikes(sym, option_type, otm_pct, width, price, is_iron_condor=is_ic)
+
+    # Snap to actual chain strikes if expiration is available
+    expiration = getattr(args, "expiration", None)
+    if expiration:
+        raw = dict(strikes)
+        strikes = await _snap_strikes_to_chain_direct(
+            sym, expiration, strikes, option_type, is_ic)
+        snapped = strikes != raw
+    else:
+        snapped = False
+
+    for k, v in strikes.items():
+        setattr(args, k, v)
+
+    w = width if width is not None else _DEFAULT_WIDTHS.get(sym.upper(), _DEFAULT_WIDTH)
+    snap_note = " (snapped to chain)" if snapped else ""
+    if is_ic:
+        print(f"  Strikes: put {strikes['put_short']}/{strikes['put_long']} | "
+              f"call {strikes['call_short']}/{strikes['call_long']} "
+              f"({otm_pct}% OTM, {w:.0f}pt width) "
+              f"— resolved from ${price:,.2f}{snap_note}")
+    else:
+        print(f"  Strikes: {strikes['short_strike']}/{strikes['long_strike']} "
+              f"({otm_pct}% OTM {option_type}, {w:.0f}pt width) "
+              f"— resolved from ${price:,.2f}{snap_note}")
+
+    return None
+
+
 async def _execute_single_order(
     instruction_dict: dict,
     broker_str: str,
@@ -2365,12 +2900,30 @@ async def _cmd_close_http(args, server: str) -> int:
                         pnl_c = "92" if realized_pnl >= 0 else "91"
                         print(f"  Est. P&L:   {_color(f'~${realized_pnl:+,.2f}', pnl_c)} (credit received ~${derived_credit:,.2f})")
 
+                    # Try to get underlying price for OTM% display
+                    _cl_ul = match.get("current_price", 0)
+                    if not _cl_ul:
+                        try:
+                            _cl_q = await client.get(f"/market/quote/{match.get('symbol','SPX')}")
+                            if _cl_q.status_code == 200:
+                                _cl_ul = _cl_q.json().get("last", 0) or _cl_q.json().get("bid", 0) or 0
+                        except Exception:
+                            pass
+
                     print(f"  Legs:")
                     for ld in est_legs:
                         side_label = f"→ {'sell@bid' if ld['side'] == 'sell' else 'buy@ask'} ${ld['price_used']:.2f}"
                         crossed = " ⚠ crossed" if ld.get("crossed") else ""
+                        otm_str = ""
+                        if _cl_ul and _cl_ul > 0:
+                            strike = ld['strike']
+                            ot = ld.get('option_type', '')
+                            dist_pct = (((_cl_ul - strike) / _cl_ul) if ot == 'PUT' else ((strike - _cl_ul) / _cl_ul)) * 100
+                            dist_pts = abs(strike - _cl_ul)
+                            otm_c = "92" if dist_pct > 0 else "91"
+                            otm_str = f" {_color(f'{dist_pct:+.2f}% ({dist_pts:,.0f}pts)', otm_c)}"
                         print(f"    {ld['action']:>18} {ld['option_type']} strike={ld['strike']:<10}"
-                              f" bid=${ld['bid']:<9.2f} ask=${ld['ask']:<9.2f} {side_label}{crossed}")
+                              f" bid=${ld['bid']:<9.2f} ask=${ld['ask']:<9.2f} {side_label}{crossed}{otm_str}")
                 else:
                     # Fallback: mark-based display (per-leg quotes not in cache range)
                     print(f"  Closing legs:")
@@ -2471,6 +3024,15 @@ async def _cmd_close_http(args, server: str) -> int:
 
             # Fetch per-leg bid/ask for the closing order
             if legs and otype == "multi_leg":
+                # Get underlying price for OTM% display on legs
+                _cl_ul = match.get("current_price", 0)
+                if not _cl_ul:
+                    try:
+                        _cl_q = await client.get(f"/market/quote/{sym}")
+                        if _cl_q.status_code == 200:
+                            _cl_ul = _cl_q.json().get("last", 0) or _cl_q.json().get("bid", 0) or 0
+                    except Exception:
+                        _cl_ul = 0
                 from app.models import MultiLegOrder, OptionLeg, OrderType as _OT, OptionType as _OpT, OptionAction as _OA
                 close_legs = []
                 for leg in legs:
@@ -2516,8 +3078,16 @@ async def _cmd_close_http(args, server: str) -> int:
                             for ld in est_legs:
                                 side_label = f"→ {'sell@bid' if ld['side'] == 'sell' else 'buy@ask'} ${ld['price_used']:.2f}"
                                 crossed = " ⚠ crossed" if ld.get("crossed") else ""
+                                otm_str = ""
+                                if _cl_ul and _cl_ul > 0:
+                                    strike = ld['strike']
+                                    ot = ld.get('option_type', '')
+                                    dist_pct = (((_cl_ul - strike) / _cl_ul) if ot == 'PUT' else ((strike - _cl_ul) / _cl_ul)) * 100
+                                    dist_pts = abs(strike - _cl_ul)
+                                    otm_c = "92" if dist_pct > 0 else "91"
+                                    otm_str = f" {_color(f'{dist_pct:+.2f}% ({dist_pts:,.0f}pts)', otm_c)}"
                                 print(f"    {ld['action']:>18} {ld['option_type']} strike={ld['strike']:<10}"
-                                      f" bid=${ld['bid']:<9.2f} ask=${ld['ask']:<9.2f} {side_label}{crossed}")
+                                      f" bid=${ld['bid']:<9.2f} ask=${ld['ask']:<9.2f} {side_label}{crossed}{otm_str}")
                     else:
                         # Fallback: mark-based estimate (per-leg quotes not in cache range)
                         mark = match.get("market_price", 0)
@@ -3118,6 +3688,27 @@ async def _cmd_trade_http(args, server: str) -> int:
         print("  Error: specify a trade type")
         return 1
 
+    # Handle replay: resolve position → subcommand + args
+    if subcommand == "replay":
+        subcommand, args = _resolve_replay(args, server=server)
+        if subcommand is None:
+            return 1
+
+    # Validate strike arguments
+    if subcommand in ("credit-spread", "iron-condor"):
+        err = _validate_strike_args(subcommand, args)
+        if err:
+            print(f"  Error: {err}")
+            return 1
+
+    # Resolve --otm-pct strikes via daemon quote
+    if subcommand in ("credit-spread", "iron-condor") and getattr(args, "otm_pct", None) is not None:
+        import httpx
+        async with httpx.AsyncClient(base_url=server, timeout=30.0) as quote_client:
+            rc = await _resolve_otm_strikes_http(args, subcommand, quote_client)
+            if rc is not None:
+                return rc
+
     instr = _build_instruction_from_args(subcommand, args)
 
     from app.models import PlaybookInstruction
@@ -3278,15 +3869,27 @@ async def _cmd_trade_http(args, server: str) -> int:
                     print(f"  Max risk:   ~${max_loss_total:,.2f} (${max_loss_per:.2f}/spread)")
                     print(f"  ROI:        {roi:.1f}%")
 
-            # Show legs with bid/ask pricing and greeks when available
+            # Show legs with bid/ask pricing, OTM%, and greeks when available
             print(f"  Legs:")
             if est_legs:
                 for ld in est_legs:
                     flag = f" {_color('⚠ crossed', '93')}" if ld.get("warning") == "crossed" else ""
+                    # OTM distance from underlying
+                    otm_str = ""
+                    if ul_price and ul_price > 0:
+                        strike = ld['strike']
+                        ot = ld.get('option_type', '')
+                        if ot == 'PUT':
+                            dist_pct = (ul_price - strike) / ul_price * 100
+                        else:
+                            dist_pct = (strike - ul_price) / ul_price * 100
+                        dist_pts = abs(strike - ul_price)
+                        otm_color = "92" if dist_pct > 0 else "91"
+                        otm_str = f" {_color(f'{dist_pct:+.2f}% ({dist_pts:,.0f}pts)', otm_color)}"
                     print(f"    {ld['action']:>15} {ld['option_type']:>4} "
                           f"strike={ld['strike']:<10} "
                           f"bid=${ld['bid']:<8.2f} ask=${ld['ask']:<8.2f} "
-                          f"→ {ld['side']} ${ld['price_used']:.2f}{flag}")
+                          f"→ {ld['side']} ${ld['price_used']:.2f}{flag}{otm_str}")
                     # Show greeks if available
                     g = ld.get("greeks")
                     if g:
@@ -3306,8 +3909,15 @@ async def _cmd_trade_http(args, server: str) -> int:
             else:
                 for leg in (order.legs or []):
                     leg_qty = leg.quantity * order.quantity
+                    otm_str = ""
+                    if ul_price and ul_price > 0:
+                        ot = leg.option_type.value
+                        dist_pct = (((ul_price - leg.strike) / ul_price) if ot == 'PUT' else ((leg.strike - ul_price) / ul_price)) * 100
+                        dist_pts = abs(leg.strike - ul_price)
+                        otm_c = "92" if dist_pct > 0 else "91"
+                        otm_str = f" {_color(f'{dist_pct:+.2f}% ({dist_pts:,.0f}pts)', otm_c)}"
                     print(f"    {leg.action.value:>15} {leg.option_type.value:>4} "
-                          f"strike={leg.strike} exp={leg.expiration} qty={leg_qty}")
+                          f"strike={leg.strike} exp={leg.expiration} qty={leg_qty}{otm_str}")
 
         if not confirm and mode != "dry-run":
             # Auto-validate with IBKR margin check when --live (catches rejections early)
@@ -4218,8 +4828,27 @@ async def _cmd_trade(args) -> int:
     subcommand = getattr(args, "subcommand", None)
     if not subcommand:
         print("  Error: specify a trade type subcommand or --validate-all")
-        print("  Trade types: equity, option, credit-spread, debit-spread, iron-condor")
+        print("  Trade types: equity, option, credit-spread, debit-spread, iron-condor, replay")
         return 1
+
+    # Handle replay: resolve position → subcommand + args
+    if subcommand == "replay":
+        subcommand, args = _resolve_replay(args, server=server)
+        if subcommand is None:
+            return 1
+
+    # Validate strike arguments
+    if subcommand in ("credit-spread", "iron-condor"):
+        err = _validate_strike_args(subcommand, args)
+        if err:
+            print(f"  Error: {err}")
+            return 1
+
+    # Resolve --otm-pct strikes via direct IBKR quote
+    if subcommand in ("credit-spread", "iron-condor") and getattr(args, "otm_pct", None) is not None:
+        rc = await _resolve_otm_strikes_direct(args, subcommand)
+        if rc is not None:
+            return rc
 
     instr = _build_instruction_from_args(subcommand, args)
 
@@ -6323,6 +6952,12 @@ def _show_trade_detail(store, detail_id: str) -> int:
                   f"--option-type {opt_type} --expiration {exp} "
                   f"--quantity {int(qty)} --net-price 0.05 --close --live")
 
+    # Show replay command for closed positions with legs
+    if match.get("status") == "closed" and legs:
+        pid = match.get("position_id", "")[:8]
+        print(f"\n  To replay (re-open same trade):")
+        print(f"    python utp.py trade replay {pid} --live")
+
     print()
     return 0
 
@@ -7015,13 +7650,25 @@ Examples:
   %(prog)s --symbol SPX --short-strike 5500 --long-strike 5475 \\
     --option-type PUT --expiration 2026-03-20 --close --net-price 0.10 --live
 
+  Percentage-based (resolves strikes from current price):
+  %(prog)s --symbol SPX --otm-pct 3 --option-type PUT \\
+    --expiration 2026-03-20 --quantity 25 --live
+  %(prog)s --symbol NDX --otm-pct 2 --width 100 --option-type CALL \\
+    --expiration 2026-03-20 --quantity 10 --live
+
 P&L: credit_received - cost_to_close (max profit = full credit, max loss = width - credit)
                                 ''',
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     t_cs.add_argument("--symbol", required=True, help="Underlying symbol")
     t_cs.add_argument("--expiration", required=True, help="Expiration date YYYY-MM-DD")
-    t_cs.add_argument("--short-strike", type=float, required=True)
-    t_cs.add_argument("--long-strike", type=float, required=True)
+    t_cs.add_argument("--short-strike", type=float, default=None,
+                      help="Short leg strike (or use --otm-pct)")
+    t_cs.add_argument("--long-strike", type=float, default=None,
+                      help="Long leg strike (or use --otm-pct + --width)")
+    t_cs.add_argument("--otm-pct", type=float, default=None,
+                      help="Place short strike this %% OTM from current price (alternative to explicit strikes)")
+    t_cs.add_argument("--width", type=float, default=None,
+                      help="Spread width in points (default: SPX=20, NDX=50, RUT=20, equities=5)")
     t_cs.add_argument("--option-type", required=True, choices=["CALL", "PUT"])
     t_cs.add_argument("--quantity", type=int, default=1)
     t_cs.add_argument("--net-price", type=float, default=None,
@@ -7078,15 +7725,27 @@ Examples:
     --call-short 5700 --call-long 5725 --expiration 2026-03-20 \\
     --quantity 1 --net-price 3.50 --paper
 
+  Percentage-based (resolves strikes from current price):
+  %(prog)s --symbol SPX --otm-pct 3 --width 20 \\
+    --expiration 2026-03-20 --quantity 25 --live
+
 P&L: combined credit - cost_to_close (max profit = total credit, max loss = wider wing width - credit)
                                 ''',
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     t_ic.add_argument("--symbol", required=True, help="Underlying symbol")
     t_ic.add_argument("--expiration", required=True, help="Expiration date YYYY-MM-DD")
-    t_ic.add_argument("--put-short", type=float, required=True)
-    t_ic.add_argument("--put-long", type=float, required=True)
-    t_ic.add_argument("--call-short", type=float, required=True)
-    t_ic.add_argument("--call-long", type=float, required=True)
+    t_ic.add_argument("--put-short", type=float, default=None,
+                      help="Short put strike (or use --otm-pct)")
+    t_ic.add_argument("--put-long", type=float, default=None,
+                      help="Long put strike (or use --otm-pct + --width)")
+    t_ic.add_argument("--call-short", type=float, default=None,
+                      help="Short call strike (or use --otm-pct)")
+    t_ic.add_argument("--call-long", type=float, default=None,
+                      help="Long call strike (or use --otm-pct + --width)")
+    t_ic.add_argument("--otm-pct", type=float, default=None,
+                      help="Place short strikes this %% OTM from current price (alternative to explicit strikes)")
+    t_ic.add_argument("--width", type=float, default=None,
+                      help="Wing width in points (default: SPX=20, NDX=50, RUT=20, equities=5)")
     t_ic.add_argument("--quantity", type=int, default=1)
     t_ic.add_argument("--net-price", type=float, default=None,
                       help="Net credit per contract (LIMIT order). If omitted, tries auto-price then MARKET")
@@ -7101,6 +7760,48 @@ P&L: combined credit - cost_to_close (max profit = total credit, max loss = wide
     t_ic.add_argument("--confirm", action="store_true",
                       help="Confirm and execute (without this, shows order summary only)")
     _add_connection_args(t_ic)
+
+    # trade replay
+    t_rp = trade_sub.add_parser("replay", help="Re-open a previous trade by position ID",
+                                description="Look up a closed (or open) position and re-submit the same trade.\n"
+                                            "Works with local positions AND portfolio spread-grouped positions\n"
+                                            "(synthetic IDs from the daemon's portfolio view).",
+                                epilog='''
+Examples:
+  %(prog)s 2d9a --live                  # Replay position starting with 2d9a
+  %(prog)s 2d9a --quantity 10 --live    # Replay with different quantity
+  %(prog)s 2d9a --expiration 2026-04-16 --live  # Replay with new expiration
+  %(prog)s 7180a7 --live                # Replay a spread from portfolio view
+
+The original trade parameters (symbol, strikes, option type) are extracted from the
+position's legs. You can override --quantity and --expiration.
+
+Position lookup order:
+  1. Local position store (open + closed positions)
+  2. Daemon portfolio (spread-grouped positions with synthetic IDs)
+
+Supported position types:
+  - credit_spread / multi_leg (2 legs with a SELL) → credit-spread
+  - debit_spread → debit-spread
+  - iron_condor / multi_leg (4 legs) → iron-condor
+                                ''',
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    t_rp.add_argument("position_id", help="Position ID prefix to replay")
+    t_rp.add_argument("--quantity", type=int, default=None,
+                      help="Override quantity (default: same as original)")
+    t_rp.add_argument("--expiration", default=None,
+                      help="Override expiration date (default: same as original)")
+    t_rp.add_argument("--net-price", type=float, default=None,
+                      help="Net price per contract (LIMIT order). If omitted, MARKET order")
+    t_rp.add_argument("--auto-price", action="store_true",
+                      help="Fetch live quotes and set price")
+    t_rp.add_argument("--mid", action="store_true",
+                      help="Use mid-point pricing")
+    t_rp.add_argument("--nocheck", action="store_true",
+                      help="Skip IBKR margin validation")
+    t_rp.add_argument("--confirm", action="store_true",
+                      help="Confirm and execute (without this, shows order summary only)")
+    _add_connection_args(t_rp)
 
     # ── playbook ──
     p_pb = subparsers.add_parser("playbook",
