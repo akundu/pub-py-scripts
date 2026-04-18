@@ -14720,6 +14720,8 @@ async def handle_range_percentiles_api(request: web.Request) -> web.Response:
         ?percentiles=75,90,95,98,99,100 (comma-separated, default: 75,90,95,98,99,100)
         ?min_days=30 (minimum days required, default: 30)
         ?min_direction_days=5 (minimum days per direction, default: 5)
+        ?start_date=2026-01-01 (YYYY-MM-DD, overrides lookback)
+        ?end_date=2026-03-31 (YYYY-MM-DD, overrides lookback)
 
     Returns JSON with percentile data.
     """
@@ -14796,6 +14798,10 @@ async def handle_range_percentiles_api(request: web.Request) -> web.Response:
             status=400
         )
 
+    # Parse optional date range (overrides lookback)
+    start_date = request.query.get('start_date', None)
+    end_date = request.query.get('end_date', None)
+
     # Get DB config
     db_instance = request.app.get('db_instance')
     if not db_instance or not hasattr(db_instance, 'db_config'):
@@ -14818,6 +14824,8 @@ async def handle_range_percentiles_api(request: web.Request) -> web.Response:
             ensure_tables=False,
             log_level="WARNING",
             window=window,
+            start_date=start_date,
+            end_date=end_date,
         )
 
         return web.json_response(results if len(results) != 1 else results[0])
@@ -15096,6 +15104,10 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
 
         db_config = db_instance.db_config
 
+        # Parse optional date range (overrides lookback)
+        start_date = request.query.get('start_date', None)
+        end_date = request.query.get('end_date', None)
+
         # Parse optional momentum filter parameters
         momentum_filter = None
         consec_min_str = request.query.get('consecutive_days_min', '')
@@ -15126,6 +15138,8 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                 ensure_tables=False,
                 log_level="WARNING",
                 momentum_filter=momentum_filter,
+                start_date=start_date,
+                end_date=end_date,
             )
 
             # Intraday hourly computation scans many 5-min CSV files and can be expensive.
@@ -15145,6 +15159,8 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                             enable_cache=True,
                             ensure_tables=False,
                             log_level="WARNING",
+                            start_date=start_date,
+                            end_date=end_date,
                         )
                         display_t = ticker_name.replace("I:", "") if ticker_name.startswith("I:") else ticker_name
                         hourly[display_t] = hourly_data
@@ -15283,6 +15299,10 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
         min_days = MIN_DAYS_DEFAULT
         min_direction_days = MIN_DIRECTION_DAYS_DEFAULT
 
+    # Parse optional date range (overrides lookback) — single-window path
+    start_date = request.query.get('start_date', None)
+    end_date = request.query.get('end_date', None)
+
     # Get DB config
     db_instance = request.app.get('db_instance')
     if not db_instance or not hasattr(db_instance, 'db_config'):
@@ -15306,6 +15326,8 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
             ensure_tables=False,
             log_level="WARNING",
             window=window,
+            start_date=start_date,
+            end_date=end_date,
         )
 
         data_list = results if isinstance(results, list) else [results]
@@ -15323,6 +15345,8 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                         enable_cache=True,
                         ensure_tables=False,
                         log_level="WARNING",
+                        start_date=start_date,
+                        end_date=end_date,
                     )
                     display_t = ticker_name.replace("I:", "") if ticker_name.startswith("I:") else ticker_name
                     hourly[display_t] = hourly_data

@@ -134,6 +134,8 @@ async def compute_range_percentiles(
     log_level: str = "WARNING",
     window: int = DEFAULT_WINDOW,
     override_close: float | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> dict:
     """
     Compute range percentiles for a single ticker.
@@ -176,21 +178,23 @@ async def compute_range_percentiles(
     )
 
     try:
-        end_date = datetime.now(timezone.utc).date()
-        # During market hours, exclude today from the data — today's close is
-        # not final (may be ingested early by the daily cron). The reference
-        # "last trading day" should be yesterday's official close.
-        try:
-            from common.market_hours import is_trading_day, is_market_hours
-            if is_trading_day(end_date) and is_market_hours():
-                end_date = end_date - timedelta(days=1)
-        except Exception:
-            pass
-        # Convert trading days to calendar days (factor of 7/5 + buffer for holidays)
-        calendar_days = int(lookback * 7 / 5) + 10
-        start_date = end_date - timedelta(days=calendar_days)
-        start_str = start_date.isoformat()
-        end_str = end_date.isoformat()
+        if start_date and end_date:
+            # Explicit date range provided
+            start_str = start_date
+            end_str = end_date
+        else:
+            # Default: lookback trading days from now
+            _end = datetime.now(timezone.utc).date()
+            try:
+                from common.market_hours import is_trading_day, is_market_hours
+                if is_trading_day(_end) and is_market_hours():
+                    _end = _end - timedelta(days=1)
+            except Exception:
+                pass
+            calendar_days = int(lookback * 7 / 5) + 10
+            _start = _end - timedelta(days=calendar_days)
+            start_str = _start.isoformat()
+            end_str = _end.isoformat()
 
         df = await db.get_stock_data(
             ticker=db_symbol,
@@ -316,6 +320,8 @@ async def compute_range_percentiles_multi(
     ensure_tables: bool = False,
     log_level: str = "WARNING",
     window: int = DEFAULT_WINDOW,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> list[dict]:
     """
     Compute range percentiles for multiple tickers.
@@ -344,6 +350,8 @@ async def compute_range_percentiles_multi(
             log_level=log_level,
             window=window,
             override_close=override_close,
+            start_date=start_date,
+            end_date=end_date,
         )
         results.append(out)
     return results
@@ -422,6 +430,8 @@ async def compute_hourly_moves_to_close(
     ensure_tables: bool = False,
     log_level: str = "WARNING",
     override_close: float | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> dict:
     """
     Compute intraday moves to close for 0DTE analysis using 5-min CSV data.
@@ -459,11 +469,17 @@ async def compute_hourly_moves_to_close(
             f"Intraday move-to-close analysis not available for this ticker."
         )
 
-    # --- Load CSV files within lookback window ---
-    end_date = datetime.now(timezone.utc).date()
-    # Convert trading days to calendar days (factor of 7/5 + buffer for holidays)
-    calendar_days = int(lookback * 7 / 5) + 10
-    start_date = end_date - timedelta(days=calendar_days)
+    # --- Load CSV files within date range ---
+    if start_date and end_date:
+        _start = datetime.strptime(start_date, "%Y-%m-%d").date() if isinstance(start_date, str) else start_date
+        _end = datetime.strptime(end_date, "%Y-%m-%d").date() if isinstance(end_date, str) else end_date
+    else:
+        _end = datetime.now(timezone.utc).date()
+        calendar_days = int(lookback * 7 / 5) + 10
+        _start = _end - timedelta(days=calendar_days)
+    # Use local vars to avoid shadowing the function params
+    start_date_d = _start
+    end_date_d = _end
 
     pattern = str(csv_dir / f"{polygon_symbol}_equities_*.csv")
     csv_files = sorted(_glob.glob(pattern))
@@ -486,7 +502,7 @@ async def compute_hourly_moves_to_close(
             file_date = datetime.strptime(date_part, "%Y-%m-%d").date()
         except ValueError:
             continue
-        if file_date < start_date or file_date > end_date:
+        if file_date < start_date_d or file_date > end_date_d:
             continue
 
         try:
@@ -777,6 +793,8 @@ async def compute_range_percentiles_multi_window(
     log_level: str = "WARNING",
     override_close: float | None = None,
     momentum_filter: dict | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> dict:
     """
     Compute range percentiles for multiple window sizes (single ticker).
@@ -839,19 +857,21 @@ async def compute_range_percentiles_multi_window(
     )
 
     try:
-        end_date = datetime.now(timezone.utc).date()
-        # During market hours, exclude today — same logic as single-window
-        try:
-            from common.market_hours import is_trading_day, is_market_hours
-            if is_trading_day(end_date) and is_market_hours():
-                end_date = end_date - timedelta(days=1)
-        except Exception:
-            pass
-        # Convert trading days to calendar days (factor of 7/5 + buffer for holidays)
-        calendar_days = int(lookback * 7 / 5) + 10
-        start_date = end_date - timedelta(days=calendar_days)
-        start_str = start_date.isoformat()
-        end_str = end_date.isoformat()
+        if start_date and end_date:
+            start_str = start_date
+            end_str = end_date
+        else:
+            _end = datetime.now(timezone.utc).date()
+            try:
+                from common.market_hours import is_trading_day, is_market_hours
+                if is_trading_day(_end) and is_market_hours():
+                    _end = _end - timedelta(days=1)
+            except Exception:
+                pass
+            calendar_days = int(lookback * 7 / 5) + 10
+            _start = _end - timedelta(days=calendar_days)
+            start_str = _start.isoformat()
+            end_str = _end.isoformat()
 
         # Fetch data once for all windows
         df = await db.get_stock_data(
@@ -1080,6 +1100,8 @@ async def compute_range_percentiles_multi_window_batch(
     ensure_tables: bool = False,
     log_level: str = "WARNING",
     momentum_filter: dict | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
 ) -> list[dict]:
     """
     Compute multi-window percentiles for multiple tickers.
@@ -1111,6 +1133,8 @@ async def compute_range_percentiles_multi_window_batch(
             log_level=log_level,
             override_close=override_close,
             momentum_filter=momentum_filter,
+            start_date=start_date,
+            end_date=end_date,
         )
         results.append(out)
     return results
