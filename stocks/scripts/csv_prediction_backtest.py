@@ -660,15 +660,15 @@ async def append_today_from_questdb(
     dt = datetime.strptime(today_date, "%Y-%m-%d")
     day_of_week = dt.weekday()
 
-    # Build training rows at 15-minute intervals
+    # Build training rows at 5-minute intervals (matches historical CSV density)
     records = []
     for _, row in df.iterrows():
         ts_et = row['timestamp_et'].to_pydatetime()
         hour_et = ts_et.hour
         minute = ts_et.minute
 
-        # Only use market hours at 15-min boundaries
-        if 9 <= hour_et <= 15 and minute in [0, 15, 30, 45]:
+        # Only use market hours at 5-min boundaries
+        if 9 <= hour_et <= 15 and minute % 5 == 0:
             # Get intraday high/low up to this point
             before = df[df['timestamp'] <= row['timestamp']]
             current_high = before['high'].max()
