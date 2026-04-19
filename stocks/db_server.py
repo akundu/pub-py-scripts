@@ -14755,40 +14755,82 @@ def _range_percentiles_methodology_html(exclude_outliers: bool = True) -> str:
     typically clips 2–5% of the most extreme days.</li>
   </ul>
 
-  <h4 style="font-size:13px;color:var(--text-primary,#c9d1d9);margin:18px 0 6px;">Credit Spread Guidance</h4>
-  <p>Place short strikes <em>outside</em> the band boundary of your target percentile. The table below
-  shows which band to use for each ticker, based on 60-day backtests that test whether the actual
-  closing price fell within the predicted band:</p>
+  <h4 style="font-size:13px;color:var(--text-primary,#c9d1d9);margin:18px 0 6px;">Credit Spread Strike Selection</h4>
+
+  <p><strong>Close-to-Close (0DTE):</strong> Place short strikes outside the band boundary for your ticker.
+  Puts need wider bands than calls because down moves are faster and gappier.</p>
   <table style="font-size:12px;border-collapse:collapse;margin:8px 0;">
     <tr style="border-bottom:1px solid var(--border-color,#30363d);">
       <th style="text-align:left;padding:4px 12px 4px 0;">Ticker</th>
-      <th style="padding:4px 12px;">Suggested Band</th>
-      <th style="padding:4px 12px;">Hit Rate</th>
-      <th style="padding:4px 12px;">Avg Width</th>
-      <th style="padding:4px 12px;">What it means</th>
+      <th style="padding:4px 10px;">Put (Short)</th>
+      <th style="padding:4px 10px;">Typical Range</th>
+      <th style="padding:4px 10px;">Call (Short)</th>
+      <th style="padding:4px 10px;">Typical Range</th>
+      <th style="padding:4px 10px;">Why Asymmetric</th>
     </tr>
-    <tr><td style="padding:3px 12px 3px 0;">SPX</td><td style="padding:3px 12px;">P98</td>
-        <td style="padding:3px 12px;">93%</td><td style="padding:3px 12px;">~2.7%</td>
-        <td style="padding:3px 12px;font-size:11px;">On 93% of days, the close fell within &plusmn;1.35% of current price</td></tr>
-    <tr><td style="padding:3px 12px 3px 0;">NDX</td><td style="padding:3px 12px;">P99</td>
-        <td style="padding:3px 12px;">95%</td><td style="padding:3px 12px;">~3.6%</td>
-        <td style="padding:3px 12px;font-size:11px;">On 95% of days, the close fell within &plusmn;1.8% of current price</td></tr>
-    <tr><td style="padding:3px 12px 3px 0;">RUT</td><td style="padding:3px 12px;">P100</td>
-        <td style="padding:3px 12px;">98%</td><td style="padding:3px 12px;">~4.8%</td>
-        <td style="padding:3px 12px;font-size:11px;">On 98% of days, the close fell within &plusmn;2.4% of current price</td></tr>
+    <tr><td style="padding:3px 12px 3px 0;">SPX</td>
+        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~1.7% OTM</td>
+        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~1.6% OTM</td>
+        <td style="padding:3px 10px;font-size:11px;">Most liquid, symmetric moves</td></tr>
+    <tr><td style="padding:3px 12px 3px 0;">NDX</td>
+        <td style="padding:3px 10px;color:#d29922;">P98</td><td style="padding:3px 10px;">~2.4% OTM</td>
+        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~2.2% OTM</td>
+        <td style="padding:3px 10px;font-size:11px;">Down gaps harder than rallies</td></tr>
+    <tr><td style="padding:3px 12px 3px 0;">RUT</td>
+        <td style="padding:3px 10px;color:#d29922;">P98</td><td style="padding:3px 10px;">~2.3% OTM</td>
+        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~2.7% OTM</td>
+        <td style="padding:3px 10px;font-size:11px;">Spiky on both sides, puts gap</td></tr>
   </table>
-  <ul style="margin:4px 0 8px 20px;font-size:11px;">
-    <li><strong>Hit Rate</strong> = % of backtest days where the actual close landed inside the band.
-    Computed by running <code>backtest_band_accuracy.py</code> over 60 trading days, training the model
-    fresh each day on prior data (no lookahead).</li>
-    <li><strong>Avg Width</strong> = average distance between the low and high band boundaries, as a
-    percentage of the current price. Wider = safer but less premium collected.</li>
-    <li><strong>Suggested Band</strong> = the tightest percentile that still achieves a useful hit rate.
-    SPX can use P98 (tighter) because the model is more accurate for it. RUT needs P100 because its
-    model misses more often at tighter bands (P95 only hits 82%).</li>
-    <li><strong>What gets pruned:</strong> Using P98 instead of P100 prunes ~1% from each edge of the
-    distribution. For NDX, this tightens the band from ~4.3% to ~3.6% width — the short strike moves
-    ~0.35% closer to current price on each side, collecting more premium but with 2–5% more breach risk.</li>
+
+  <p style="margin-top:12px;"><strong>Intraday (Point-to-Close):</strong> The intraday section shows how
+  much price can move from a given time to the 4 PM close. Because the remaining time is shorter and
+  you have more information (today's open, current momentum), you can be more aggressive:</p>
+  <table style="font-size:12px;border-collapse:collapse;margin:8px 0;">
+    <tr style="border-bottom:1px solid var(--border-color,#30363d);">
+      <th style="text-align:left;padding:4px 12px 4px 0;">Ticker</th>
+      <th style="padding:4px 10px;">Put Strike</th>
+      <th style="padding:4px 10px;">Call Strike</th>
+      <th style="padding:4px 10px;">Note</th>
+    </tr>
+    <tr><td style="padding:3px 12px 3px 0;">SPX</td>
+        <td style="padding:3px 10px;">P90</td><td style="padding:3px 10px;">P90</td>
+        <td style="padding:3px 10px;font-size:11px;">Most predictable intraday</td></tr>
+    <tr><td style="padding:3px 12px 3px 0;">NDX</td>
+        <td style="padding:3px 10px;">P95</td><td style="padding:3px 10px;">P90</td>
+        <td style="padding:3px 10px;font-size:11px;">Down protection wider; rallies orderly</td></tr>
+    <tr><td style="padding:3px 12px 3px 0;">RUT</td>
+        <td style="padding:3px 10px;">P95</td><td style="padding:3px 10px;">P90</td>
+        <td style="padding:3px 10px;font-size:11px;">Spikiest intraday; needs wider puts</td></tr>
+  </table>
+
+  <p style="margin-top:12px;"><strong>Multi-Day (1&ndash;5 DTE):</strong> For longer-dated spreads,
+  use P95 across the board for both puts and calls. The multi-day distribution is wider and more
+  symmetric, so put/call asymmetry matters less. At 5 DTE, typical ranges (P95):</p>
+  <table style="font-size:12px;border-collapse:collapse;margin:8px 0;">
+    <tr style="border-bottom:1px solid var(--border-color,#30363d);">
+      <th style="text-align:left;padding:4px 12px 4px 0;">Ticker</th>
+      <th style="padding:4px 10px;">5-Day DOWN P95</th>
+      <th style="padding:4px 10px;">5-Day UP P95</th>
+    </tr>
+    <tr><td style="padding:3px 12px 3px 0;">SPX</td><td style="padding:3px 10px;">~3.4%</td><td style="padding:3px 10px;">~4.4%</td></tr>
+    <tr><td style="padding:3px 12px 3px 0;">NDX</td><td style="padding:3px 10px;">~4.5%</td><td style="padding:3px 10px;">~6.5%</td></tr>
+    <tr><td style="padding:3px 12px 3px 0;">RUT</td><td style="padding:3px 10px;">~4.9%</td><td style="padding:3px 10px;">~6.5%</td></tr>
+  </table>
+
+  <ul style="margin:8px 0 8px 20px;font-size:11px;">
+    <li><strong>Hit Rate</strong> = % of backtest days where actual close landed inside the band
+    (60-day backtest, no lookahead). SPX P95 hits 90%, NDX P95 hits 83%, RUT P95 hits 82%.</li>
+    <li><strong>Avg Width</strong> = band_high &minus; band_low as % of price. Half-width &asymp; distance from
+    current price to each strike.</li>
+    <li><strong>Why puts need wider bands:</strong> Down moves are faster (panic selling) and gappier
+    (overnight gaps). A &minus;2.5% crash happens in minutes; a +2.5% rally takes hours. The "surprise
+    factor" is higher on the downside.</li>
+    <li><strong>Intraday is tighter than close-to-close:</strong> At 1 PM ET, only 3 hours remain.
+    SPX P90 at that point is ~&plusmn;0.56% vs ~&plusmn;1.7% for the full 0DTE close-to-close band.
+    Bands narrow as you approach close &mdash; use this to enter later in the day for tighter strikes.</li>
+    <li><strong>Model limitation:</strong> These predict the <em>closing</em> price, not the intraday max
+    excursion. Price may temporarily breach your strike before reverting. Use a stop-loss or roll
+    strategy for intraday spikes.</li>
   </ul>
 
   <p><strong>Time Slots:</strong> 10-min intervals for 9:30–11:00 AM ET and 3:30–3:50 PM ET (higher volatility
@@ -14879,37 +14921,39 @@ def _predictions_methodology_html() -> str:
         <td style="padding:3px 8px;">0.88%</td><td style="padding:3px 8px;">2.90%</td></tr>
   </table>
 
-  <h4 style="font-size:13px;color:var(--text-primary,#c9d1d9);margin:18px 0 6px;">Credit Spread Guidance</h4>
-  <p>Place short strikes <em>outside</em> the Combined band boundary. The suggested band is the tightest
-  percentile with a useful hit rate for each ticker:</p>
+  <h4 style="font-size:13px;color:var(--text-primary,#c9d1d9);margin:18px 0 6px;">Credit Spread Strike Selection (0DTE)</h4>
+  <p>Place short strikes outside the Combined band boundary. Puts need wider bands than calls because
+  down moves are faster and gappier.</p>
   <table style="font-size:12px;border-collapse:collapse;margin:8px 0;">
     <tr style="border-bottom:1px solid var(--border-color,#30363d);">
       <th style="text-align:left;padding:4px 12px 4px 0;">Ticker</th>
-      <th style="padding:4px 12px;">Band</th>
-      <th style="padding:4px 12px;">Hit Rate</th>
-      <th style="padding:4px 12px;">Avg Width</th>
-      <th style="padding:4px 12px;">What it means</th>
+      <th style="padding:4px 10px;">Put (Short)</th>
+      <th style="padding:4px 10px;">Typical OTM</th>
+      <th style="padding:4px 10px;">Call (Short)</th>
+      <th style="padding:4px 10px;">Typical OTM</th>
     </tr>
-    <tr><td style="padding:3px 12px 3px 0;">SPX</td><td style="padding:3px 12px;">P98</td>
-        <td style="padding:3px 12px;">93%</td><td style="padding:3px 12px;">~2.7%</td>
-        <td style="padding:3px 12px;font-size:11px;">93% of days, close within &plusmn;1.35% of current price</td></tr>
-    <tr><td style="padding:3px 12px 3px 0;">NDX</td><td style="padding:3px 12px;">P99</td>
-        <td style="padding:3px 12px;">95%</td><td style="padding:3px 12px;">~3.6%</td>
-        <td style="padding:3px 12px;font-size:11px;">95% of days, close within &plusmn;1.8% of current price</td></tr>
-    <tr><td style="padding:3px 12px 3px 0;">RUT</td><td style="padding:3px 12px;">P100</td>
-        <td style="padding:3px 12px;">98%</td><td style="padding:3px 12px;">~4.8%</td>
-        <td style="padding:3px 12px;font-size:11px;">98% of days, close within &plusmn;2.4% of current price</td></tr>
+    <tr><td style="padding:3px 12px 3px 0;">SPX</td>
+        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~1.7%</td>
+        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~1.6%</td></tr>
+    <tr><td style="padding:3px 12px 3px 0;">NDX</td>
+        <td style="padding:3px 10px;color:#d29922;">P98</td><td style="padding:3px 10px;">~2.4%</td>
+        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~2.2%</td></tr>
+    <tr><td style="padding:3px 12px 3px 0;">RUT</td>
+        <td style="padding:3px 10px;color:#d29922;">P98</td><td style="padding:3px 10px;">~2.3%</td>
+        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~2.7%</td></tr>
   </table>
   <ul style="margin:4px 0 8px 20px;font-size:11px;">
-    <li><strong>Hit Rate</strong> = % of days the actual close landed inside the band (backtest, no lookahead).</li>
-    <li><strong>Avg Width</strong> = band_high &minus; band_low as % of price. Half-width = distance from
-    current price to each edge.</li>
-    <li><strong>Edge pruning:</strong> Using P98 vs P100 prunes ~1% from each tail. For NDX, this tightens
-    bands from ~4.3% to ~3.6% — short strike moves ~0.35% closer on each side, collecting more premium
-    but with 2–5% more breach risk.</li>
-    <li><strong>Model limitation:</strong> Predicts <em>close</em> price, not intraday max excursion. Price
-    may temporarily breach your short strike before reverting to close within the band. Use the
-    /range_percentiles intraday section for max-move analysis.</li>
+    <li><strong>Why asymmetric:</strong> Down moves are faster (panic selling, overnight gaps) — a &minus;2.5%
+    crash happens in minutes; a +2.5% rally takes hours. Puts need more room.</li>
+    <li><strong>Hit Rate</strong> = % of days the actual close landed inside the Combined band (60-day
+    backtest, no lookahead, model trained fresh each day).</li>
+    <li><strong>Edge pruning:</strong> Using P95 vs P100 prunes ~2.5% from each tail. For NDX, this
+    tightens bands from ~4.3% to ~2.8% — short strike moves ~0.7% closer, collecting more premium
+    but with ~15% more breach risk.</li>
+    <li><strong>Model limitation:</strong> Predicts <em>close</em> price, not intraday max excursion.
+    Price may temporarily breach your strike before reverting. Use <code>/range_percentiles</code>
+    intraday section for point-to-close analysis, which allows tighter strikes (P90) because the
+    remaining time window is shorter.</li>
   </ul>
 
   <p><strong>Parameters:</strong> <code>?lookback=N</code> (training days, default 150, range 30–1260),
