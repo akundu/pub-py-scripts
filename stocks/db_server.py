@@ -9818,6 +9818,7 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
             }});
         }}
     </script>
+{_predictions_methodology_html()}
 </body>
 </html>"""
 
@@ -14708,6 +14709,137 @@ async def handle_ai_query(request: web.Request) -> web.Response:
             "error": f"Failed to execute AI query: {str(e)}"
         }, status=500)
 
+def _range_percentiles_methodology_html(exclude_outliers: bool = True) -> str:
+    """Generate methodology documentation HTML for range_percentiles page."""
+    outlier_status = "Enabled (default)" if exclude_outliers else "Disabled (?outliers=1)"
+    return f"""
+<div style="max-width:1200px;margin:40px auto 20px;padding:25px 30px;font-size:12px;color:var(--text-secondary,#8b949e);
+    line-height:1.7;border-top:1px solid var(--border-color,#30363d);">
+  <h3 style="font-size:14px;color:var(--text-primary,#c9d1d9);margin:0 0 12px;">Methodology</h3>
+  <p><strong>Data Source:</strong> 5-minute OHLCV bars from Polygon.io, stored in <code>equities_output/</code>.
+  Daily close-to-close returns computed from QuestDB <code>daily_prices</code> table.</p>
+
+  <p><strong>Percentile Computation:</strong> Returns are split by direction (up days vs down days).
+  Each percentile (P75–P100) is computed independently from the relevant direction's distribution.
+  For example, DOWN P95 = 95th percentile of all negative-return days (i.e., 95% of down days had a move smaller than this).</p>
+
+  <p><strong>Intraday Move-to-Close:</strong> For each 5-min bar during market hours, computes
+  <code>(day_close - bar_price) / bar_price</code>. Aggregated by time slot (10-min early/late, 15-min midday),
+  one record per day per slot (first bar in the slot). Shows how much room remains for price to move from
+  that point in the day to the 4:00 PM ET close.</p>
+
+  <p><strong>Outlier Handling ({outlier_status}):</strong> IQR-based winsorization (Tukey fence) caps extreme
+  values at Q1 &minus; 1.5&times;IQR and Q3 + 1.5&times;IQR. No data points are removed — all trading days
+  are included in sample counts, but extreme returns are capped to the fence value. This prevents a single
+  Black Swan day from dominating the P95–P100 bands. Pass <code>?outliers=1</code> to see raw unfiltered data.
+  The cap values are computed dynamically from each ticker's own return distribution, so more volatile
+  tickers (e.g., RUT) have wider fences than less volatile ones (e.g., SPX).</p>
+
+  <p><strong>Time Slots:</strong> 10-min intervals for 9:30–11:00 AM ET and 3:30–3:50 PM ET (higher volatility
+  periods). 15-min intervals for 11:00 AM – 3:15 PM ET. 5-min intervals for the last 10 minutes (3:50–3:55 PM ET).
+  All times shown in your browser's local timezone with ET reference below.</p>
+
+  <p><strong>Credit Spread Guidance:</strong> Place short strikes outside the band boundary of your target
+  percentile. Recommended levels by ticker (based on 60-day backtests):</p>
+  <table style="font-size:12px;border-collapse:collapse;margin:8px 0;">
+    <tr style="border-bottom:1px solid var(--border-color,#30363d);">
+      <th style="text-align:left;padding:4px 12px 4px 0;">Ticker</th>
+      <th style="padding:4px 12px;">Suggested Band</th>
+      <th style="padding:4px 12px;">Hit Rate</th>
+      <th style="padding:4px 12px;">Avg Width</th>
+    </tr>
+    <tr><td style="padding:3px 12px 3px 0;">SPX</td><td style="padding:3px 12px;">P98</td>
+        <td style="padding:3px 12px;">93%</td><td style="padding:3px 12px;">~2.7%</td></tr>
+    <tr><td style="padding:3px 12px 3px 0;">NDX</td><td style="padding:3px 12px;">P99</td>
+        <td style="padding:3px 12px;">95%</td><td style="padding:3px 12px;">~3.6%</td></tr>
+    <tr><td style="padding:3px 12px 3px 0;">RUT</td><td style="padding:3px 12px;">P100</td>
+        <td style="padding:3px 12px;">98%</td><td style="padding:3px 12px;">~4.8%</td></tr>
+  </table>
+
+  <p><strong>Parameters:</strong> <code>?lookback=N</code> (trading days, default 120),
+  <code>?start_date=YYYY-MM-DD&amp;end_date=YYYY-MM-DD</code> (overrides lookback),
+  <code>?outliers=1</code> (show raw data), <code>?format=json</code> (JSON output),
+  <code>?min_days=N</code> (minimum sample count, default 30).</p>
+</div>
+"""
+
+
+def _predictions_methodology_html() -> str:
+    """Generate methodology documentation HTML for predictions page."""
+    return """
+<div style="max-width:1200px;margin:40px auto 20px;padding:25px 30px;font-size:12px;color:var(--text-secondary,#8b949e);
+    line-height:1.7;border-top:1px solid var(--border-color,#30363d);">
+  <h3 style="font-size:14px;color:var(--text-primary,#c9d1d9);margin:0 0 12px;">Methodology</h3>
+
+  <p><strong>Prediction Target:</strong> Percentage move from <em>current intraday price</em> to end-of-day
+  close: <code>(day_close - current_price) / current_price</code>. Not close-to-close — the prediction
+  adapts throughout the day as the current price and time-to-close change.</p>
+
+  <p><strong>Models (0DTE):</strong></p>
+  <ul style="margin:4px 0 8px 20px;">
+    <li><strong>LightGBM (Statistical):</strong> 7 quantile regression models (P5–P95) trained on 150 days
+    of 5-min bar data (~9,000 samples). Uses 27 features including time-to-close, VIX1D, intraday move,
+    MA deviations, realized volatility, gap fill, and bar momentum. Training target clipped at 5 std devs.</li>
+    <li><strong>Percentile (Historical):</strong> Direction-split distribution of close-to-close returns.
+    Static throughout the day. IQR-winsorized (1.5&times; Tukey fence) to cap extreme outliers.</li>
+    <li><strong>Combined (Recommended):</strong> Takes the <em>wider</em> of LightGBM and Percentile bands
+    at each level. Most conservative — best for risk management.</li>
+  </ul>
+
+  <p><strong>Models (Multi-Day, DTE 1+):</strong></p>
+  <ul style="margin:4px 0 8px 20px;">
+    <li><strong>Conditional (Recommended):</strong> Feature-weighted historical distribution filtered by
+    VIX regime, similarity to current market context, and volatility scaling. 37% tighter bands than
+    baseline with 97–99% hit rate.</li>
+    <li><strong>Ensemble LightGBM:</strong> Pre-trained per-DTE models with Monte Carlo distribution.
+    100% hit rate but 24–58% wider bands.</li>
+    <li><strong>Ensemble Combined:</strong> Wider of Conditional + Ensemble. Conservative fallback.</li>
+  </ul>
+
+  <p><strong>27 LightGBM Features (0DTE):</strong>
+  <span style="font-family:monospace;font-size:11px;">
+  hour_from_open, time_to_close, vix1d, overnight_gap_pct, intraday_move_pct, price_vs_prev_close,
+  day_of_week, prior_day_move_pct, intraday_range_pct, vix_change_pct, prior_close_position,
+  momentum_5day_pct, first_hour_range_pct, is_opex_week, opening_drive_pct, range_position,
+  ma5/10/20/50_deviation, ma_trend_slope, realized_vol_5d, realized_vol_20d, gap_fill_pct,
+  bar_momentum_3, cumulative_intraday_range, time_to_close_squared
+  </span></p>
+
+  <p><strong>Outlier Handling:</strong> LightGBM training clips targets at 5 std devs. Time-aware
+  percentile filters at 3 std devs (with 80% fallback). Static and empirical percentile models use
+  IQR winsorization (1.5&times; Tukey fence). No data points are removed — extreme values are capped.</p>
+
+  <p><strong>Backtest Results (60-day NDX):</strong></p>
+  <table style="font-size:12px;border-collapse:collapse;margin:8px 0;">
+    <tr style="border-bottom:1px solid var(--border-color,#30363d);">
+      <th style="text-align:left;padding:4px 12px 4px 0;">Ticker</th>
+      <th style="padding:4px 8px;">P95</th><th style="padding:4px 8px;">P98</th>
+      <th style="padding:4px 8px;">P99</th><th style="padding:4px 8px;">P100</th>
+      <th style="padding:4px 8px;">Mid Err</th>
+    </tr>
+    <tr><td style="padding:3px 12px 3px 0;">NDX</td>
+        <td style="padding:3px 8px;">83%</td><td style="padding:3px 8px;">88%</td>
+        <td style="padding:3px 8px;">95%</td><td style="padding:3px 8px;">97%</td>
+        <td style="padding:3px 8px;">0.82%</td></tr>
+    <tr><td style="padding:3px 12px 3px 0;">SPX</td>
+        <td style="padding:3px 8px;">90%</td><td style="padding:3px 8px;">93%</td>
+        <td style="padding:3px 8px;">95%</td><td style="padding:3px 8px;">95%</td>
+        <td style="padding:3px 8px;">0.57%</td></tr>
+    <tr><td style="padding:3px 12px 3px 0;">RUT</td>
+        <td style="padding:3px 8px;">82%</td><td style="padding:3px 8px;">85%</td>
+        <td style="padding:3px 8px;">88%</td><td style="padding:3px 8px;">98%</td>
+        <td style="padding:3px 8px;">0.88%</td></tr>
+  </table>
+
+  <p><strong>Parameters:</strong> <code>?lookback=N</code> (training days, default 150, range 30–1260),
+  <code>?cache=false</code> (force refresh).</p>
+
+  <p><strong>Consecutive-Day Streaks:</strong> Tested for 0DTE but showed no predictive value (42–50%
+  directional accuracy). Active only for multi-day (DTE 1+) predictions where momentum carries over.</p>
+</div>
+"""
+
+
 async def handle_range_percentiles_api(request: web.Request) -> web.Response:
     """
     Handle API request for range percentiles analysis.
@@ -15226,6 +15358,9 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
             # Inject WebSocket live-price script
             html = _inject_range_percentiles_ws_script(html, tickers)
 
+            # Inject methodology documentation
+            html = html.replace("</body>", _range_percentiles_methodology_html(exclude_outliers) + "\n</body>", 1)
+
             return web.Response(text=html, content_type="text/html")
 
         except Exception as e:
@@ -15399,6 +15534,9 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
 
         # Inject WebSocket live-price script
         html = _inject_range_percentiles_ws_script(html, tickers)
+
+        # Inject methodology documentation
+        html = html.replace("</body>", _range_percentiles_methodology_html(exclude_outliers) + "\n</body>", 1)
 
         return web.Response(text=html, content_type="text/html")
 
