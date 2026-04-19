@@ -1264,11 +1264,21 @@ async def compute_range_percentiles_multi_window(
         if momentum_filter:
             metadata["momentum_filter"] = momentum_filter
 
+        # Recommended percentiles for credit spread strike selection
+        t_upper = display_ticker.upper()
+        recommended = {
+            "close_to_close": {
+                "put": {"NDX": 98, "SPX": 95, "RUT": 98}.get(t_upper, 95),
+                "call": {"NDX": 95, "SPX": 95, "RUT": 95}.get(t_upper, 95),
+            },
+        }
+
         result = {
             "ticker": display_ticker,
             "db_ticker": db_symbol,
             "metadata": metadata,
             "windows": windows_data,
+            "recommended": recommended,
         }
 
         return result

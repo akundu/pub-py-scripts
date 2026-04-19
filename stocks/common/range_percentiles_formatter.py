@@ -765,6 +765,10 @@ def _generate_ticker_content_html(result: dict, ticker_id: str) -> tuple[str, di
     today_str = today.strftime('%Y-%m-%d')
 
     ticker = result["ticker"]
+    ticker_upper = ticker.upper()
+    # Recommended close-to-close percentiles for highlighting
+    rec_put_c2c = {"NDX": 98, "SPX": 95, "RUT": 98}.get(ticker_upper, 95)
+    rec_call_c2c = {"NDX": 95, "SPX": 95, "RUT": 95}.get(ticker_upper, 95)
     metadata = result["metadata"]
     last_date = metadata["last_trading_day"]
     prev_close = metadata["previous_close"]
@@ -839,8 +843,11 @@ def _generate_ticker_content_html(result: dict, ticker_id: str) -> tuple[str, di
 """)
 
     for p in percentiles:
-        html_parts.append(f'                        <tr>\n')
-        html_parts.append(f'                            <td>p{p}</td>\n')
+        row_style = ""
+        if p == rec_put_c2c:
+            row_style = ' style="background:rgba(35,134,54,0.15);font-weight:bold;"'
+        html_parts.append(f'                        <tr{row_style}>\n')
+        html_parts.append(f'                            <td>p{p}{"  ★" if p == rec_put_c2c else ""}</td>\n')
 
         for window in window_list:
             win_data = windows_data.get(str(window))
@@ -904,8 +911,11 @@ def _generate_ticker_content_html(result: dict, ticker_id: str) -> tuple[str, di
 """)
 
     for p in percentiles:
-        html_parts.append(f'                        <tr>\n')
-        html_parts.append(f'                            <td>p{p}</td>\n')
+        row_style = ""
+        if p == rec_call_c2c:
+            row_style = ' style="background:rgba(35,134,54,0.15);font-weight:bold;"'
+        html_parts.append(f'                        <tr{row_style}>\n')
+        html_parts.append(f'                            <td>p{p}{"  ★" if p == rec_call_c2c else ""}</td>\n')
 
         for window in window_list:
             win_data = windows_data.get(str(window))
@@ -1028,9 +1038,14 @@ def _generate_ticker_content_html(result: dict, ticker_id: str) -> tuple[str, di
                     </thead>
                     <tbody>
 """)
+        # Use put recommendation for momentum-conditional (these are directional)
+        rec_momentum = rec_put_c2c
         for p in percentiles:
-            html_parts.append(f'                        <tr>\n')
-            html_parts.append(f'                            <td>p{p}</td>\n')
+            row_style = ""
+            if p == rec_momentum:
+                row_style = ' style="background:rgba(35,134,54,0.15);font-weight:bold;"'
+            html_parts.append(f'                        <tr{row_style}>\n')
+            html_parts.append(f'                            <td>p{p}{"  ★" if p == rec_momentum else ""}</td>\n')
             for window in window_list:
                 mc = windows_data.get(str(window), {}).get("momentum_conditional")
                 if mc and mc.get("when_continued"):
@@ -1082,8 +1097,11 @@ def _generate_ticker_content_html(result: dict, ticker_id: str) -> tuple[str, di
                     <tbody>
 """)
         for p in percentiles:
-            html_parts.append(f'                        <tr>\n')
-            html_parts.append(f'                            <td>p{p}</td>\n')
+            row_style = ""
+            if p == rec_momentum:
+                row_style = ' style="background:rgba(35,134,54,0.15);font-weight:bold;"'
+            html_parts.append(f'                        <tr{row_style}>\n')
+            html_parts.append(f'                            <td>p{p}{"  ★" if p == rec_momentum else ""}</td>\n')
             for window in window_list:
                 mc = windows_data.get(str(window), {}).get("momentum_conditional")
                 if mc and mc.get("when_reversed"):

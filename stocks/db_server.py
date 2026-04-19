@@ -14828,9 +14828,11 @@ def _range_percentiles_methodology_html(exclude_outliers: bool = True) -> str:
     <li><strong>Intraday is tighter than close-to-close:</strong> At 1 PM ET, only 3 hours remain.
     SPX P90 at that point is ~&plusmn;0.56% vs ~&plusmn;1.7% for the full 0DTE close-to-close band.
     Bands narrow as you approach close &mdash; use this to enter later in the day for tighter strikes.</li>
-    <li><strong>Model limitation:</strong> These predict the <em>closing</em> price, not the intraday max
-    excursion. Price may temporarily breach your strike before reverting. Use a stop-loss or roll
-    strategy for intraday spikes.</li>
+    <li><strong>European settlement:</strong> SPX, NDX, and RUT options are European-style &mdash; they
+    settle at expiration only, not intraday. A temporary intraday breach does <em>not</em> cause
+    assignment. For 0DTE, what matters is the settlement price (typically AM settlement for monthly,
+    PM for weeklies/dailies). The max-move tables show worst-case intraday excursion for risk
+    monitoring, but the close-to-close tables are what determines P&amp;L at expiration.</li>
   </ul>
 
   <p><strong>Time Slots:</strong> 10-min intervals for 9:30–11:00 AM ET and 3:30–3:50 PM ET (higher volatility
@@ -14950,10 +14952,10 @@ def _predictions_methodology_html() -> str:
     <li><strong>Edge pruning:</strong> Using P95 vs P100 prunes ~2.5% from each tail. For NDX, this
     tightens bands from ~4.3% to ~2.8% — short strike moves ~0.7% closer, collecting more premium
     but with ~15% more breach risk.</li>
-    <li><strong>Model limitation:</strong> Predicts <em>close</em> price, not intraday max excursion.
-    Price may temporarily breach your strike before reverting. Use <code>/range_percentiles</code>
-    intraday section for point-to-close analysis, which allows tighter strikes (P90) because the
-    remaining time window is shorter.</li>
+    <li><strong>European settlement:</strong> SPX, NDX, RUT are European-style &mdash; settle at
+    expiration only. Intraday breach does <em>not</em> cause assignment. The close-to-close
+    prediction determines P&amp;L. Max-move data (in <code>/range_percentiles</code>) is useful for
+    risk monitoring and stop-loss decisions, but the settlement price is what counts.</li>
   </ul>
 
   <p><strong>Parameters:</strong> <code>?lookback=N</code> (training days, default 150, range 30–1260),
