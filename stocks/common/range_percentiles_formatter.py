@@ -766,9 +766,13 @@ def _generate_ticker_content_html(result: dict, ticker_id: str) -> tuple[str, di
 
     ticker = result["ticker"]
     # Recommended close-to-close percentiles for highlighting (from calibration)
-    rec_data = result.get("recommended", {}).get("close_to_close", {})
-    rec_put_c2c = rec_data.get("put", 95)
-    rec_call_c2c = rec_data.get("call", 95)
+    c2c_rec = result.get("recommended", {}).get("close_to_close", {})
+    def _c2c_tiers(side):
+        return {t: c2c_rec.get(t, {}).get(side, 0) for t in ("aggressive", "moderate", "conservative")}
+    c2c_put_tiers = _c2c_tiers("put")
+    c2c_call_tiers = _c2c_tiers("call")
+    # For momentum tables, use put tiers
+    momentum_tiers = c2c_put_tiers
     metadata = result["metadata"]
     last_date = metadata["last_trading_day"]
     prev_close = metadata["previous_close"]
@@ -842,12 +846,22 @@ def _generate_ticker_content_html(result: dict, ticker_id: str) -> tuple[str, di
                     <tbody>
 """)
 
+    _TIER_STYLES_C2C = {
+        "aggressive":   ("rgba(218,54,51,0.12)", "🔴"),
+        "moderate":     ("rgba(210,153,34,0.12)", "🟡"),
+        "conservative": ("rgba(35,134,54,0.15)", "🟢"),
+    }
+
     for p in percentiles:
+        tier = {v: k for k, v in c2c_put_tiers.items()}.get(p)
         row_style = ""
-        if p == rec_put_c2c:
-            row_style = ' style="background:rgba(35,134,54,0.15);font-weight:bold;"'
+        label_suffix = ""
+        if tier:
+            bg, dot = _TIER_STYLES_C2C.get(tier, ("", ""))
+            row_style = f' style="background:{bg};font-weight:bold;"'
+            label_suffix = f"  {dot}"
         html_parts.append(f'                        <tr{row_style}>\n')
-        html_parts.append(f'                            <td>p{p}{"  ★" if p == rec_put_c2c else ""}</td>\n')
+        html_parts.append(f'                            <td>p{p}{label_suffix}</td>\n')
 
         for window in window_list:
             win_data = windows_data.get(str(window))
@@ -911,11 +925,15 @@ def _generate_ticker_content_html(result: dict, ticker_id: str) -> tuple[str, di
 """)
 
     for p in percentiles:
+        tier = {v: k for k, v in c2c_call_tiers.items()}.get(p)
         row_style = ""
-        if p == rec_call_c2c:
-            row_style = ' style="background:rgba(35,134,54,0.15);font-weight:bold;"'
+        label_suffix = ""
+        if tier:
+            bg, dot = _TIER_STYLES_C2C.get(tier, ("", ""))
+            row_style = f' style="background:{bg};font-weight:bold;"'
+            label_suffix = f"  {dot}"
         html_parts.append(f'                        <tr{row_style}>\n')
-        html_parts.append(f'                            <td>p{p}{"  ★" if p == rec_call_c2c else ""}</td>\n')
+        html_parts.append(f'                            <td>p{p}{label_suffix}</td>\n')
 
         for window in window_list:
             win_data = windows_data.get(str(window))
@@ -1038,14 +1056,16 @@ def _generate_ticker_content_html(result: dict, ticker_id: str) -> tuple[str, di
                     </thead>
                     <tbody>
 """)
-        # Use put recommendation for momentum-conditional (these are directional)
-        rec_momentum = rec_put_c2c
         for p in percentiles:
+            tier = {v: k for k, v in momentum_tiers.items()}.get(p)
             row_style = ""
-            if p == rec_momentum:
-                row_style = ' style="background:rgba(35,134,54,0.15);font-weight:bold;"'
+            label_suffix = ""
+            if tier:
+                bg, dot = _TIER_STYLES_C2C.get(tier, ("", ""))
+                row_style = f' style="background:{bg};font-weight:bold;"'
+                label_suffix = f"  {dot}"
             html_parts.append(f'                        <tr{row_style}>\n')
-            html_parts.append(f'                            <td>p{p}{"  ★" if p == rec_momentum else ""}</td>\n')
+            html_parts.append(f'                            <td>p{p}{label_suffix}</td>\n')
             for window in window_list:
                 mc = windows_data.get(str(window), {}).get("momentum_conditional")
                 if mc and mc.get("when_continued"):
@@ -1097,11 +1117,15 @@ def _generate_ticker_content_html(result: dict, ticker_id: str) -> tuple[str, di
                     <tbody>
 """)
         for p in percentiles:
+            tier = {v: k for k, v in momentum_tiers.items()}.get(p)
             row_style = ""
-            if p == rec_momentum:
-                row_style = ' style="background:rgba(35,134,54,0.15);font-weight:bold;"'
+            label_suffix = ""
+            if tier:
+                bg, dot = _TIER_STYLES_C2C.get(tier, ("", ""))
+                row_style = f' style="background:{bg};font-weight:bold;"'
+                label_suffix = f"  {dot}"
             html_parts.append(f'                        <tr{row_style}>\n')
-            html_parts.append(f'                            <td>p{p}{"  ★" if p == rec_momentum else ""}</td>\n')
+            html_parts.append(f'                            <td>p{p}{label_suffix}</td>\n')
             for window in window_list:
                 mc = windows_data.get(str(window), {}).get("momentum_conditional")
                 if mc and mc.get("when_reversed"):
@@ -1922,13 +1946,23 @@ def _direction_badge(direction: str) -> str:
 
 def _render_slot_table(slots: dict, sorted_keys: list[str], percentiles: list[int],
                        direction: str, title: str, ticker: str = "",
-                       highlight_p: int = 0) -> str:
+                       highlight_p: int = 0, highlight_tiers: dict = None) -> str:
     """Render a single DOWN or UP table for a set of slots.
 
     Args:
-        highlight_p: Percentile row to highlight as recommended (e.g., 95).
-                     0 = no highlighting.
+        highlight_p: (deprecated) Single percentile to highlight. Use highlight_tiers instead.
+        highlight_tiers: Dict with keys 'aggressive', 'moderate', 'conservative',
+                         each mapping to an int percentile. Shows three colored indicators.
     """
+    # Build tier lookup: percentile -> tier name
+    tier_map = {}
+    if highlight_tiers:
+        for tier_name, pval in highlight_tiers.items():
+            if pval and pval > 0:
+                tier_map[pval] = tier_name
+    elif highlight_p:
+        tier_map[highlight_p] = "conservative"
+
     parts = []
     dir_key = "when_down" if direction == "down" else "when_up"
     count_key = "when_down_day_count" if direction == "down" else "when_up_day_count"
@@ -1951,11 +1985,21 @@ def _render_slot_table(slots: dict, sorted_keys: list[str], percentiles: list[in
         parts.append('                        <th>%</th>\n                        <th>$</th>\n')
     parts.append('                    </tr>\n                </thead>\n                <tbody>\n')
 
+    _TIER_STYLES = {
+        "aggressive":   ("rgba(218,54,51,0.12)", "🔴"),   # red tint
+        "moderate":     ("rgba(210,153,34,0.12)", "🟡"),   # yellow tint
+        "conservative": ("rgba(35,134,54,0.15)", "🟢"),    # green tint
+    }
+
     for p in percentiles:
+        tier = tier_map.get(p)
         row_style = ""
-        if p == highlight_p:
-            row_style = ' style="background:rgba(35,134,54,0.15);font-weight:bold;"'
-        parts.append(f'                    <tr{row_style}>\n                        <td>p{p}{"  ★" if p == highlight_p else ""}</td>\n')
+        label_suffix = ""
+        if tier:
+            bg, dot = _TIER_STYLES.get(tier, ("", ""))
+            row_style = f' style="background:{bg};font-weight:bold;"'
+            label_suffix = f"  {dot}"
+        parts.append(f'                    <tr{row_style}>\n                        <td>p{p}{label_suffix}</td>\n')
         for s in sorted_keys:
             block = slots[s].get(dir_key)
             if block:
@@ -1973,8 +2017,16 @@ def _render_slot_table(slots: dict, sorted_keys: list[str], percentiles: list[in
 
 def _render_max_move_table(slots: dict, sorted_keys: list[str], percentiles: list[int],
                            direction: str, title: str, ticker: str = "",
-                           highlight_p: int = 0) -> str:
+                           highlight_p: int = 0, highlight_tiers: dict = None) -> str:
     """Render a max-move (intraday excursion) table for a set of slots."""
+    tier_map = {}
+    if highlight_tiers:
+        for tier_name, pval in highlight_tiers.items():
+            if pval and pval > 0:
+                tier_map[pval] = tier_name
+    elif highlight_p:
+        tier_map[highlight_p] = "conservative"
+
     parts = []
     move_key = "max_down_pct" if direction == "down" else "max_up_pct"
     price_key = "max_down_price" if direction == "down" else "max_up_price"
@@ -1998,11 +2050,21 @@ def _render_max_move_table(slots: dict, sorted_keys: list[str], percentiles: lis
         parts.append('                        <th>%</th>\n                        <th>$</th>\n')
     parts.append('                    </tr>\n                </thead>\n                <tbody>\n')
 
+    _TIER_STYLES_MM = {
+        "aggressive":   ("rgba(218,54,51,0.12)", "🔴"),
+        "moderate":     ("rgba(210,153,34,0.12)", "🟡"),
+        "conservative": ("rgba(35,134,54,0.15)", "🟢"),
+    }
+
     for p in percentiles:
+        tier = tier_map.get(p)
         row_style = ""
-        if p == highlight_p:
-            row_style = ' style="background:rgba(35,134,54,0.15);font-weight:bold;"'
-        parts.append(f'                    <tr{row_style}>\n                        <td>p{p}{"  ★" if p == highlight_p else ""}</td>\n')
+        label_suffix = ""
+        if tier:
+            bg, dot = _TIER_STYLES_MM.get(tier, ("", ""))
+            row_style = f' style="background:{bg};font-weight:bold;"'
+            label_suffix = f"  {dot}"
+        parts.append(f'                    <tr{row_style}>\n                        <td>p{p}{label_suffix}</td>\n')
         for s in sorted_keys:
             mm = slots[s].get("max_move")
             if mm:
@@ -2126,10 +2188,16 @@ def format_hourly_moves_as_html(hourly_data: dict) -> str:
     recommended = hourly_data.get("recommended", {})
     intraday_rec = recommended.get("intraday", {})
     max_move_rec = recommended.get("max_move", {})
-    rec_put_intraday = intraday_rec.get("put", 0)
-    rec_call_intraday = intraday_rec.get("call", 0)
-    rec_put_maxmove = max_move_rec.get("put", 0)
-    rec_call_maxmove = max_move_rec.get("call", 0)
+
+    # Build three-tier highlight dicts for put (down) and call (up)
+    def _tier_vals(ctx_rec, side):
+        """Extract {aggressive: pN, moderate: pN, conservative: pN} for a side."""
+        return {t: ctx_rec.get(t, {}).get(side, 0) for t in ("aggressive", "moderate", "conservative")}
+
+    intra_put_tiers = _tier_vals(intraday_rec, "put")
+    intra_call_tiers = _tier_vals(intraday_rec, "call")
+    mm_put_tiers = _tier_vals(max_move_rec, "put")
+    mm_call_tiers = _tier_vals(max_move_rec, "call")
 
     try:
         prev_close_fmt = f"${float(prev_close):,.2f}"
@@ -2161,19 +2229,19 @@ def format_hourly_moves_as_html(hourly_data: dict) -> str:
     if sorted_primary:
         html_parts.append(_render_slot_table(slots_primary, sorted_primary, percentiles, "down",
                                               "DOWN MOVES TO CLOSE", ticker=ticker,
-                                              highlight_p=rec_put_intraday))
+                                              highlight_tiers=intra_put_tiers))
         html_parts.append('        <div style="margin-top:30px"></div>\n')
         html_parts.append(_render_slot_table(slots_primary, sorted_primary, percentiles, "up",
                                               "UP MOVES TO CLOSE", ticker=ticker,
-                                              highlight_p=rec_call_intraday))
+                                              highlight_tiers=intra_call_tiers))
     else:
         html_parts.append(_render_slot_table(slots, sorted_slots, percentiles, "down",
                                               "DOWN MOVES TO CLOSE (per half-hour)", ticker=ticker,
-                                              highlight_p=rec_put_intraday))
+                                              highlight_tiers=intra_put_tiers))
         html_parts.append('        <div style="margin-top:30px"></div>\n')
         html_parts.append(_render_slot_table(slots, sorted_slots, percentiles, "up",
                                               "UP MOVES TO CLOSE (per half-hour)", ticker=ticker,
-                                              highlight_p=rec_call_intraday))
+                                              highlight_tiers=intra_call_tiers))
 
     # --- Max-Move (Intraday Excursion) tables ---
     if sorted_primary and any(slots_primary[s].get("max_move") for s in sorted_primary):
@@ -2184,11 +2252,11 @@ def format_hourly_moves_as_html(hourly_data: dict) -> str:
                           'the worst-case intraday spike — the price your short strike could be tested at.</div>\n')
         html_parts.append(_render_max_move_table(slots_primary, sorted_primary, percentiles, "down",
                                                   "MAX DOWN EXCURSION (worst intraday low)", ticker=ticker,
-                                                  highlight_p=rec_put_maxmove))
+                                                  highlight_tiers=mm_put_tiers))
         html_parts.append('        <div style="margin-top:30px"></div>\n')
         html_parts.append(_render_max_move_table(slots_primary, sorted_primary, percentiles, "up",
                                                   "MAX UP EXCURSION (highest intraday high)", ticker=ticker,
-                                                  highlight_p=rec_call_maxmove))
+                                                  highlight_tiers=mm_call_tiers))
 
     # --- Tier 2: 10-min tables (last 30 min) ---
     sorted_10 = sorted(slots_10min.keys(), key=_time_sort_key)

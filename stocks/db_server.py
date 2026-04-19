@@ -14900,22 +14900,38 @@ A &minus;3.5% day becomes &minus;2.55%. The day still counts in sample size.</pr
     <tr><td style="padding:3px 12px 3px 0;">RUT</td><td style="padding:3px 10px;">~4.9%</td><td style="padding:3px 10px;">~6.5%</td></tr>
   </table>
 
-  <ul style="margin:8px 0 8px 20px;font-size:11px;">
-    <li><strong>Hit Rate</strong> = % of backtest days where actual close landed inside the band
-    (60-day backtest, no lookahead). SPX P95 hits 90%, NDX P95 hits 83%, RUT P95 hits 82%.</li>
-    <li><strong>Avg Width</strong> = band_high &minus; band_low as % of price. Half-width &asymp; distance from
-    current price to each strike.</li>
-    <li><strong>Why puts need wider bands:</strong> Down moves are faster (panic selling) and gappier
-    (overnight gaps). A &minus;2.5% crash happens in minutes; a +2.5% rally takes hours. The "surprise
-    factor" is higher on the downside.</li>
-    <li><strong>Intraday is tighter than close-to-close:</strong> At 1 PM ET, only 3 hours remain.
-    SPX P90 at that point is ~&plusmn;0.56% vs ~&plusmn;1.7% for the full 0DTE close-to-close band.
-    Bands narrow as you approach close &mdash; use this to enter later in the day for tighter strikes.</li>
-    <li><strong>European settlement:</strong> SPX, NDX, and RUT options are European-style &mdash; they
-    settle at expiration only, not intraday. A temporary intraday breach does <em>not</em> cause
-    assignment. For 0DTE, what matters is the settlement price (typically AM settlement for monthly,
-    PM for weeklies/dailies). The max-move tables show worst-case intraday excursion for risk
-    monitoring, but the close-to-close tables are what determines P&amp;L at expiration.</li>
+  <h4 style="font-size:13px;color:var(--text-primary,#c9d1d9);margin:18px 0 6px;">Three Risk Tiers</h4>
+  <p>Each table highlights three rows with colored indicators. Choose based on your risk appetite:</p>
+  <table style="font-size:11px;border-collapse:collapse;margin:8px 0;">
+    <tr style="border-bottom:1px solid var(--border-color,#30363d);">
+      <th style="text-align:left;padding:3px 10px 3px 0;">Tier</th>
+      <th style="padding:3px 10px;">Indicator</th>
+      <th style="padding:3px 10px;">Target Hit Rate</th>
+      <th style="padding:3px 10px;">Strikes</th>
+      <th style="padding:3px 10px;">Premium</th>
+      <th style="padding:3px 10px;">Best For</th>
+    </tr>
+    <tr style="background:rgba(218,54,51,0.08);"><td style="padding:2px 10px 2px 0;">Aggressive</td>
+        <td style="padding:2px 10px;">&#128308;</td><td style="padding:2px 10px;">~90%</td>
+        <td style="padding:2px 10px;">Tightest</td><td style="padding:2px 10px;">Most</td>
+        <td style="padding:2px 10px;">High-conviction, small size, stop-loss in place</td></tr>
+    <tr style="background:rgba(210,153,34,0.08);"><td style="padding:2px 10px 2px 0;">Moderate</td>
+        <td style="padding:2px 10px;">&#128993;</td><td style="padding:2px 10px;">~93%</td>
+        <td style="padding:2px 10px;">Balanced</td><td style="padding:2px 10px;">Good</td>
+        <td style="padding:2px 10px;">Default choice, balanced risk/reward</td></tr>
+    <tr style="background:rgba(35,134,54,0.08);"><td style="padding:2px 10px 2px 0;">Conservative</td>
+        <td style="padding:2px 10px;">&#128994;</td><td style="padding:2px 10px;">~95%</td>
+        <td style="padding:2px 10px;">Widest</td><td style="padding:2px 10px;">Least</td>
+        <td style="padding:2px 10px;">Larger positions, no stop-loss, capital preservation</td></tr>
+  </table>
+  <ul style="margin:4px 0 8px 20px;font-size:11px;">
+    <li>Tiers are auto-calibrated nightly from a 90-day rolling backtest (target hit rates above are approximate).</li>
+    <li><strong>Asymmetry:</strong> Call (up) side uses wider bands than put (down) side because empirical
+    data shows UP days have 15&ndash;30% wider tails than DOWN days.</li>
+    <li><strong>European settlement:</strong> SPX/NDX/RUT are European-style &mdash; settle at expiration
+    only. Intraday breach does not cause assignment. Close-to-close tables determine P&amp;L.</li>
+    <li><strong>Intraday is tighter:</strong> Less time remaining = less room to move. Bands narrow as
+    you approach close. Use the intraday tables for entries later in the day.</li>
   </ul>
 
   <p><strong>Time Slots:</strong> 10-min intervals for 9:30–11:00 AM ET and 3:30–3:50 PM ET (higher volatility

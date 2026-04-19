@@ -35,32 +35,51 @@ DEFAULT_WINDOW = 0  # window=0 represents today (0DTE)
 _CALIBRATION_CACHE = {}  # module-level cache for recommended percentiles
 _CALIBRATION_FILE = SCRIPT_DIR.parent / "results" / "calibration" / "recommended_percentiles.json"
 
-# Hardcoded fallback defaults (used when calibration file is missing or stale).
-# Based on 95% target hit rate with directional asymmetry (UP tails wider than DOWN).
+# Three risk tiers for percentile recommendations.
+# Each tier has put/call values per context (close_to_close, intraday, max_move).
+# aggressive (~90% hit): tighter strikes, more premium, more breach risk
+# moderate (~93% hit): balanced
+# conservative (~95% hit): wider strikes, less premium, fewer breaches
+#
+# Based on 60-day backtest hit rates with directional asymmetry (UP tails wider).
+# Fallback defaults when calibration file is missing or stale.
 _DEFAULT_RECOMMENDED = {
-    "NDX": {"close_to_close": {"put": 99, "call": 100}, "intraday": {"put": 98, "call": 99}, "max_move": {"put": 97, "call": 98}},
-    "SPX": {"close_to_close": {"put": 99, "call": 100}, "intraday": {"put": 98, "call": 99}, "max_move": {"put": 97, "call": 98}},
-    "RUT": {"close_to_close": {"put": 100, "call": 100}, "intraday": {"put": 99, "call": 99}, "max_move": {"put": 98, "call": 98}},
+    "NDX": {
+        "close_to_close": {"aggressive": {"put": 95, "call": 97}, "moderate": {"put": 98, "call": 99}, "conservative": {"put": 99, "call": 100}},
+        "intraday":       {"aggressive": {"put": 90, "call": 95}, "moderate": {"put": 95, "call": 98}, "conservative": {"put": 98, "call": 99}},
+        "max_move":       {"aggressive": {"put": 90, "call": 90}, "moderate": {"put": 95, "call": 95}, "conservative": {"put": 97, "call": 98}},
+    },
+    "SPX": {
+        "close_to_close": {"aggressive": {"put": 95, "call": 97}, "moderate": {"put": 97, "call": 98}, "conservative": {"put": 99, "call": 100}},
+        "intraday":       {"aggressive": {"put": 90, "call": 95}, "moderate": {"put": 95, "call": 97}, "conservative": {"put": 98, "call": 99}},
+        "max_move":       {"aggressive": {"put": 90, "call": 90}, "moderate": {"put": 95, "call": 95}, "conservative": {"put": 97, "call": 98}},
+    },
+    "RUT": {
+        "close_to_close": {"aggressive": {"put": 95, "call": 98}, "moderate": {"put": 99, "call": 99}, "conservative": {"put": 100, "call": 100}},
+        "intraday":       {"aggressive": {"put": 90, "call": 95}, "moderate": {"put": 95, "call": 98}, "conservative": {"put": 99, "call": 99}},
+        "max_move":       {"aggressive": {"put": 90, "call": 90}, "moderate": {"put": 95, "call": 95}, "conservative": {"put": 98, "call": 98}},
+    },
 }
 
 
 def _load_recommended(ticker: str) -> dict:
     """Load recommended percentiles from calibration JSON, with fallback to defaults.
 
-    Caches the file read at module level. Returns dict with keys:
-    close_to_close, intraday, max_move — each with put/call int values.
+    Returns dict with keys: close_to_close, intraday, max_move.
+    Each has three tiers: aggressive, moderate, conservative.
+    Each tier has put/call int values.
     """
     import json as _json
     ticker_upper = ticker.upper()
 
-    # Check cache first
     if ticker_upper in _CALIBRATION_CACHE:
         return _CALIBRATION_CACHE[ticker_upper]
 
-    # Try to load from calibration file
+    default = _DEFAULT_RECOMMENDED.get(ticker_upper, _DEFAULT_RECOMMENDED.get("SPX"))
+
+    # Try calibration file
     try:
         if _CALIBRATION_FILE.exists():
-            # Check staleness (>7 days = stale, fall back to defaults)
             import os
             mtime = os.path.getmtime(_CALIBRATION_FILE)
             age_days = (datetime.now(timezone.utc).timestamp() - mtime) / 86400
@@ -70,39 +89,51 @@ def _load_recommended(ticker: str) -> dict:
                 tickers_data = cal.get("tickers", {})
                 if ticker_upper in tickers_data:
                     rec = tickers_data[ticker_upper]
-                    result = {
-                        "close_to_close": rec.get("close_to_close", _DEFAULT_RECOMMENDED.get(ticker_upper, {}).get("close_to_close", {"put": 95, "call": 95})),
-                        "intraday": rec.get("intraday", _DEFAULT_RECOMMENDED.get(ticker_upper, {}).get("intraday", {"put": 90, "call": 90})),
-                        "max_move": rec.get("max_move", _DEFAULT_RECOMMENDED.get(ticker_upper, {}).get("max_move", {"put": 90, "call": 90})),
-                    }
+                    # Calibration file may have old single-tier format or new three-tier
+                    result = {}
+                    for ctx in ("close_to_close", "intraday", "max_move"):
+                        ctx_data = rec.get(ctx, default.get(ctx, {}))
+                        if "aggressive" in ctx_data:
+                            result[ctx] = ctx_data  # already three-tier
+                        else:
+                            # Old format: single put/call — use as conservative, derive others
+                            p, c = ctx_data.get("put", 95), ctx_data.get("call", 95)
+                            all_levels = [75, 80, 85, 90, 95, 97, 98, 99, 100]
+                            tighter_p = [x for x in all_levels if x < p]
+                            tighter_c = [x for x in all_levels if x < c]
+                            mid_p = tighter_p[-1] if tighter_p else p
+                            mid_c = tighter_c[-1] if tighter_c else c
+                            agg_p = tighter_p[-2] if len(tighter_p) >= 2 else mid_p
+                            agg_c = tighter_c[-2] if len(tighter_c) >= 2 else mid_c
+                            result[ctx] = {
+                                "aggressive": {"put": agg_p, "call": agg_c},
+                                "moderate": {"put": mid_p, "call": mid_c},
+                                "conservative": {"put": p, "call": c},
+                            }
                     _CALIBRATION_CACHE[ticker_upper] = result
                     return result
     except Exception:
         pass
 
-    # Fallback to hardcoded defaults
-    result = _DEFAULT_RECOMMENDED.get(ticker_upper, {
-        "close_to_close": {"put": 95, "call": 95},
-        "intraday": {"put": 90, "call": 90},
-        "max_move": {"put": 90, "call": 90},
-    })
-    _CALIBRATION_CACHE[ticker_upper] = result
-    return result
+    _CALIBRATION_CACHE[ticker_upper] = default
+    return default
 
 
 def _ensure_recommended_in_percentiles(percentiles: list[int], ticker: str) -> list[int]:
     """Ensure all recommended percentile values are in the percentiles list.
 
-    If the auto-calibrator recommends P97 but it's not in the default list,
-    this adds it so the ★ row is visible in the table.
+    Walks the three-tier recommendation structure and collects all put/call
+    values across aggressive/moderate/conservative tiers.
     """
     rec = _load_recommended(ticker)
     needed = set()
-    for context in rec.values():
+    for context in rec.values():  # close_to_close, intraday, max_move
         if isinstance(context, dict):
-            for v in context.values():
-                if isinstance(v, int) and 0 < v <= 100:
-                    needed.add(v)
+            for tier in context.values():  # aggressive, moderate, conservative
+                if isinstance(tier, dict):
+                    for v in tier.values():  # put, call
+                        if isinstance(v, int) and 0 < v <= 100:
+                            needed.add(v)
     added = needed - set(percentiles)
     if added:
         return sorted(set(percentiles) | added)
