@@ -2045,6 +2045,7 @@ def format_hourly_moves_as_html(hourly_data: dict) -> str:
     percentiles = hourly_data["percentiles"]
     slots = hourly_data["slots"]
     slots_15min = hourly_data.get("slots_15min", {})
+    slots_5min_early = hourly_data.get("slots_5min_early", {})
     slots_10min = hourly_data.get("slots_10min", {})
     slots_5min = hourly_data.get("slots_5min", {})
     has_fine = hourly_data.get("has_fine_data", False)
@@ -2085,6 +2086,16 @@ def format_hourly_moves_as_html(hourly_data: dict) -> str:
         html_parts.append('        <div style="margin-top:30px"></div>\n')
         html_parts.append(_render_slot_table(slots, sorted_slots, percentiles, "up",
                                               "UP MOVES TO CLOSE (per half-hour)", ticker=ticker))
+
+    # --- Tier 1b: 5-min early tables (first 15 min: 9:30-9:45 AM ET) ---
+    sorted_5_early = sorted(slots_5min_early.keys())
+    if sorted_5_early:
+        html_parts.append('\n        <h3>First 15 Minutes (5-min detail)</h3>\n')
+        html_parts.append(_render_slot_table(slots_5min_early, sorted_5_early, percentiles, "down",
+                                              "DOWN MOVES TO CLOSE (first 15-min, 5-min detail)", ticker=ticker))
+        html_parts.append('        <div style="margin-top:30px"></div>\n')
+        html_parts.append(_render_slot_table(slots_5min_early, sorted_5_early, percentiles, "up",
+                                              "UP MOVES TO CLOSE (first 15-min, 5-min detail)", ticker=ticker))
 
     # --- Tier 2: 10-min tables (last 30 min) ---
     sorted_10 = sorted(slots_10min.keys())

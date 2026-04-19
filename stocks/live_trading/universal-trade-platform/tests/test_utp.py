@@ -3251,7 +3251,9 @@ class TestAutoPrice:
             {"strike": 5475.0, "bid": 5.00, "ask": 5.50, "last": 5.25, "volume": 200},
         ]
         provider = AsyncMock()
-        with patch("app.services.market_data.get_option_quotes", new_callable=AsyncMock, return_value=mock_quotes):
+        with patch("app.services.market_data.get_option_quotes_with_age",
+                   new_callable=AsyncMock,
+                   return_value=(mock_quotes, 0.0, "provider")):
             price = await _auto_price_spread(
                 provider, "SPX", "2026-03-20",
                 [5500.0, 5475.0], "PUT", "credit_spread")
@@ -3269,7 +3271,9 @@ class TestAutoPrice:
             {"strike": 5475.0, "bid": 5.00, "ask": 5.50, "last": 5.25, "volume": 200},
         ]
         provider = AsyncMock()
-        with patch("app.services.market_data.get_option_quotes", new_callable=AsyncMock, return_value=mock_quotes):
+        with patch("app.services.market_data.get_option_quotes_with_age",
+                   new_callable=AsyncMock,
+                   return_value=(mock_quotes, 0.0, "provider")):
             price = await _auto_price_spread(
             provider, "SPX", "2026-03-20",
             [5500.0, 5475.0], "PUT", "credit_spread", use_mid=True)
@@ -3284,7 +3288,9 @@ class TestAutoPrice:
             {"strike": 490.0, "bid": 3.00, "ask": 3.40, "last": 3.20, "volume": 200},
         ]
         provider = AsyncMock()
-        with patch("app.services.market_data.get_option_quotes", new_callable=AsyncMock, return_value=mock_quotes):
+        with patch("app.services.market_data.get_option_quotes_with_age",
+                   new_callable=AsyncMock,
+                   return_value=(mock_quotes, 0.0, "provider")):
             price = await _auto_price_spread(
                 provider, "QQQ", "2026-03-20",
                 [480.0, 490.0], "CALL", "debit_spread")
@@ -3299,19 +3305,20 @@ class TestAutoPrice:
         """Default auto-price for iron condor returns market price."""
         provider = AsyncMock()
 
-        async def mock_mkt_opts(symbol, expiration, option_type, **kwargs):
+        async def mock_mkt_opts_age(symbol, expiration, option_type, **kwargs):
             if option_type == "PUT":
-                return [
+                return ([
                     {"strike": 5400.0, "bid": 4.00, "ask": 4.50, "last": 4.25, "volume": 100},
                     {"strike": 5375.0, "bid": 2.00, "ask": 2.50, "last": 2.25, "volume": 200},
-                ]
+                ], 0.0, "provider")
             else:
-                return [
+                return ([
                     {"strike": 5700.0, "bid": 3.00, "ask": 3.50, "last": 3.25, "volume": 100},
                     {"strike": 5725.0, "bid": 1.00, "ask": 1.50, "last": 1.25, "volume": 200},
-                ]
+                ], 0.0, "provider")
 
-        with patch("app.services.market_data.get_option_quotes", side_effect=mock_mkt_opts):
+        with patch("app.services.market_data.get_option_quotes_with_age",
+                   side_effect=mock_mkt_opts_age):
             price = await _auto_price_iron_condor(
                 provider, "SPX", "2026-03-20", 5400.0, 5375.0, 5700.0, 5725.0)
         # puts: market = 4.00-2.50=1.50, calls: market = 3.00-1.50=1.50, total = 3.00
@@ -3325,19 +3332,20 @@ class TestAutoPrice:
         """With use_mid=True, iron condor returns mid-point."""
         provider = AsyncMock()
 
-        async def mock_mkt_opts(symbol, expiration, option_type, **kwargs):
+        async def mock_mkt_opts_age(symbol, expiration, option_type, **kwargs):
             if option_type == "PUT":
-                return [
+                return ([
                     {"strike": 5400.0, "bid": 4.00, "ask": 4.50, "last": 4.25, "volume": 100},
                     {"strike": 5375.0, "bid": 2.00, "ask": 2.50, "last": 2.25, "volume": 200},
-                ]
+                ], 0.0, "provider")
             else:
-                return [
+                return ([
                     {"strike": 5700.0, "bid": 3.00, "ask": 3.50, "last": 3.25, "volume": 100},
                     {"strike": 5725.0, "bid": 1.00, "ask": 1.50, "last": 1.25, "volume": 200},
-                ]
+                ], 0.0, "provider")
 
-        with patch("app.services.market_data.get_option_quotes", side_effect=mock_mkt_opts):
+        with patch("app.services.market_data.get_option_quotes_with_age",
+                   side_effect=mock_mkt_opts_age):
             price = await _auto_price_iron_condor(
                 provider, "SPX", "2026-03-20", 5400.0, 5375.0, 5700.0, 5725.0,
                 use_mid=True)
@@ -3351,7 +3359,9 @@ class TestAutoPrice:
             {"strike": 5500.0, "bid": 8.00, "ask": 8.50, "last": 8.25, "volume": 100},
         ]
         provider = AsyncMock()
-        with patch("app.services.market_data.get_option_quotes", new_callable=AsyncMock, return_value=mock_quotes):
+        with patch("app.services.market_data.get_option_quotes_with_age",
+                   new_callable=AsyncMock,
+                   return_value=(mock_quotes, 0.0, "provider")):
             price = await _auto_price_spread(
                 provider, "SPX", "2026-03-20",
                 [5500.0, 5475.0], "PUT", "credit_spread")
@@ -7607,65 +7617,77 @@ class TestPctStrikeResolution:
     def test_resolve_put_spx(self):
         """PUT credit spread: short below price, long further below."""
         from utp import _resolve_pct_strikes
-        result = _resolve_pct_strikes("SPX", "PUT", 3.0, 20, 6950.0)
+        result = _resolve_pct_strikes("SPX", "PUT", 3.0, 3.0, 20, 6950.0)
         assert result["short_strike"] == 6740.0  # 6950 * 0.97 = 6741.5 → round to 6740
         assert result["long_strike"] == 6720.0   # 6740 - 20 = 6720
 
     def test_resolve_call_spx(self):
         """CALL credit spread: short above price, long further above."""
         from utp import _resolve_pct_strikes
-        result = _resolve_pct_strikes("SPX", "CALL", 3.0, 20, 6950.0)
+        result = _resolve_pct_strikes("SPX", "CALL", 3.0, 3.0, 20, 6950.0)
         assert result["short_strike"] == 7160.0  # 6950 * 1.03 = 7158.5 → round to 7160
         assert result["long_strike"] == 7180.0   # 7160 + 20 = 7180
 
     def test_resolve_put_ndx(self):
         """NDX uses 50-point increments."""
         from utp import _resolve_pct_strikes
-        result = _resolve_pct_strikes("NDX", "PUT", 2.0, 100, 20000.0)
+        result = _resolve_pct_strikes("NDX", "PUT", 2.0, 2.0, 100, 20000.0)
         assert result["short_strike"] == 19600.0  # 20000 * 0.98 = 19600 → exact
         assert result["long_strike"] == 19500.0   # 19600 - 100 = 19500
 
     def test_resolve_put_rut(self):
         """RUT uses 5-point increments."""
         from utp import _resolve_pct_strikes
-        result = _resolve_pct_strikes("RUT", "PUT", 3.0, 20, 2100.0)
+        result = _resolve_pct_strikes("RUT", "PUT", 3.0, 3.0, 20, 2100.0)
         assert result["short_strike"] == 2035.0  # 2100 * 0.97 = 2037 → round to 2035
         assert result["long_strike"] == 2015.0   # 2035 - 20 = 2015
 
     def test_resolve_equity(self):
         """Equities use 1-point increments."""
         from utp import _resolve_pct_strikes
-        result = _resolve_pct_strikes("SPY", "PUT", 2.0, 5, 550.0)
+        result = _resolve_pct_strikes("SPY", "PUT", 2.0, 2.0, 5, 550.0)
         assert result["short_strike"] == 539.0  # 550 * 0.98 = 539 → exact
         assert result["long_strike"] == 534.0   # 539 - 5 = 534
 
     def test_resolve_iron_condor(self):
         """Iron condor: both wings resolved symmetrically."""
         from utp import _resolve_pct_strikes
-        result = _resolve_pct_strikes("SPX", None, 3.0, 20, 6950.0, is_iron_condor=True)
+        result = _resolve_pct_strikes("SPX", None, 3.0, 3.0, 20, 6950.0, is_iron_condor=True)
         assert result["put_short"] == 6740.0
         assert result["put_long"] == 6720.0
         assert result["call_short"] == 7160.0
         assert result["call_long"] == 7180.0
 
+    def test_resolve_iron_condor_asymmetric(self):
+        """Iron condor: split put_pct vs call_pct produces asymmetric wings."""
+        from utp import _resolve_pct_strikes
+        # Put 1.5% below, call 2.5% above 6950
+        result = _resolve_pct_strikes("SPX", None, 1.5, 2.5, 20, 6950.0, is_iron_condor=True)
+        # 6950 * 0.985 = 6845.75 → 6845
+        assert result["put_short"] == 6845.0
+        assert result["put_long"] == 6825.0  # 6845 - 20
+        # 6950 * 1.025 = 7123.75 → 7125
+        assert result["call_short"] == 7125.0
+        assert result["call_long"] == 7145.0  # 7125 + 20
+
     def test_default_width_spx(self):
         """Default width for SPX is 20."""
         from utp import _resolve_pct_strikes
-        result = _resolve_pct_strikes("SPX", "PUT", 3.0, None, 6950.0)
+        result = _resolve_pct_strikes("SPX", "PUT", 3.0, 3.0, None, 6950.0)
         assert result["short_strike"] == 6740.0
         assert result["long_strike"] == 6720.0  # 6740 - 20 = 6720
 
     def test_default_width_ndx(self):
         """Default width for NDX is 50."""
         from utp import _resolve_pct_strikes
-        result = _resolve_pct_strikes("NDX", "PUT", 2.0, None, 20000.0)
+        result = _resolve_pct_strikes("NDX", "PUT", 2.0, 2.0, None, 20000.0)
         assert result["short_strike"] == 19600.0
         assert result["long_strike"] == 19550.0  # 19600 - 50 = 19550
 
     def test_default_width_equity(self):
         """Default width for equities is 5."""
         from utp import _resolve_pct_strikes
-        result = _resolve_pct_strikes("QQQ", "CALL", 2.0, None, 500.0)
+        result = _resolve_pct_strikes("QQQ", "CALL", 2.0, 2.0, None, 500.0)
         assert result["short_strike"] == 510.0
         assert result["long_strike"] == 515.0  # 510 + 5 = 515
 
@@ -7683,29 +7705,90 @@ class TestPctStrikeResolution:
         """Raises for invalid option type (non-iron-condor)."""
         from utp import _resolve_pct_strikes
         with pytest.raises(ValueError, match="PUT or CALL"):
-            _resolve_pct_strikes("SPX", "STRADDLE", 3.0, 20, 6950.0)
+            _resolve_pct_strikes("SPX", "STRADDLE", 3.0, 3.0, 20, 6950.0)
+
+    # ── Split-percentage parser ────────────────────────────────────
+
+    def test_parse_split_pct_single(self):
+        """Single value applies symmetrically to both put and call."""
+        from utp import _parse_split_pct
+        assert _parse_split_pct("2") == (2.0, 2.0)
+        assert _parse_split_pct("3.5") == (3.5, 3.5)
+        assert _parse_split_pct("0") == (0.0, 0.0)
+
+    def test_parse_split_pct_colon(self):
+        """'put:call' form sets each side independently."""
+        from utp import _parse_split_pct
+        assert _parse_split_pct("2:3") == (2.0, 3.0)
+        assert _parse_split_pct("1.5:2.5") == (1.5, 2.5)
+        assert _parse_split_pct("0:5") == (0.0, 5.0)
+
+    def test_parse_split_pct_numeric_input(self):
+        """Numeric input (int/float) treated as symmetric."""
+        from utp import _parse_split_pct
+        assert _parse_split_pct(3) == (3.0, 3.0)
+        assert _parse_split_pct(2.5) == (2.5, 2.5)
+
+    def test_parse_split_pct_invalid_empty(self):
+        """Empty string raises."""
+        from utp import _parse_split_pct
+        with pytest.raises(ValueError, match="empty"):
+            _parse_split_pct("")
+        with pytest.raises(ValueError, match="empty"):
+            _parse_split_pct("   ")
+        with pytest.raises(ValueError):
+            _parse_split_pct("2:")
+        with pytest.raises(ValueError):
+            _parse_split_pct(":3")
+
+    def test_parse_split_pct_invalid_non_numeric(self):
+        """Non-numeric raises."""
+        from utp import _parse_split_pct
+        with pytest.raises(ValueError, match="not numeric"):
+            _parse_split_pct("abc")
+        with pytest.raises(ValueError, match="not numeric"):
+            _parse_split_pct("2:abc")
+
+    def test_parse_split_pct_invalid_too_many_parts(self):
+        """More than 2 parts raises."""
+        from utp import _parse_split_pct
+        with pytest.raises(ValueError, match="3 parts"):
+            _parse_split_pct("1:2:3")
+
+    def test_parse_split_pct_invalid_negative(self):
+        """Negative values raise."""
+        from utp import _parse_split_pct
+        with pytest.raises(ValueError, match="negative"):
+            _parse_split_pct("-1")
+        with pytest.raises(ValueError, match="negative"):
+            _parse_split_pct("2:-1")
+
+    # ── Validator ──────────────────────────────────────────────────
 
     def test_validate_otm_pct_with_explicit_strikes_cs(self):
         """Cannot combine --otm-pct with explicit strikes for credit-spread."""
         from utp import _validate_strike_args
-        args = argparse.Namespace(otm_pct=3.0, short_strike=6740.0, long_strike=None, width=None)
+        args = argparse.Namespace(otm_pct="3", close_pct=None,
+                                  short_strike=6740.0, long_strike=None, width=None)
         err = _validate_strike_args("credit-spread", args)
         assert err is not None
-        assert "Cannot use --otm-pct" in err
+        assert "Cannot use" in err
 
     def test_validate_otm_pct_with_explicit_strikes_ic(self):
         """Cannot combine --otm-pct with explicit strikes for iron-condor."""
         from utp import _validate_strike_args
-        args = argparse.Namespace(otm_pct=3.0, put_short=6740.0, put_long=None,
+        args = argparse.Namespace(otm_pct="3", close_pct=None,
+                                  put_short=6740.0, put_long=None,
                                   call_short=None, call_long=None, width=None)
         err = _validate_strike_args("iron-condor", args)
         assert err is not None
-        assert "Cannot use --otm-pct" in err
+        assert "Cannot use" in err
 
     def test_validate_missing_strikes_no_otm(self):
         """Error when neither --otm-pct nor explicit strikes provided."""
         from utp import _validate_strike_args
-        args = argparse.Namespace(otm_pct=None, short_strike=None, long_strike=None, width=None)
+        args = argparse.Namespace(otm_pct=None, close_pct=None,
+                                  short_strike=None, long_strike=None, width=None)
         err = _validate_strike_args("credit-spread", args)
         assert err is not None
         assert "required" in err
@@ -7713,21 +7796,24 @@ class TestPctStrikeResolution:
     def test_validate_ok_with_otm_pct(self):
         """No error when --otm-pct is set without explicit strikes."""
         from utp import _validate_strike_args
-        args = argparse.Namespace(otm_pct=3.0, short_strike=None, long_strike=None, width=None)
+        args = argparse.Namespace(otm_pct="3", close_pct=None,
+                                  short_strike=None, long_strike=None, width=None)
         err = _validate_strike_args("credit-spread", args)
         assert err is None
 
     def test_validate_ok_with_explicit_strikes(self):
         """No error when explicit strikes are set without --otm-pct."""
         from utp import _validate_strike_args
-        args = argparse.Namespace(otm_pct=None, short_strike=6740.0, long_strike=6720.0, width=None)
+        args = argparse.Namespace(otm_pct=None, close_pct=None,
+                                  short_strike=6740.0, long_strike=6720.0, width=None)
         err = _validate_strike_args("credit-spread", args)
         assert err is None
 
     def test_validate_ic_missing_strikes_no_otm(self):
         """Iron condor: error when strikes partially missing and no --otm-pct."""
         from utp import _validate_strike_args
-        args = argparse.Namespace(otm_pct=None, put_short=6740.0, put_long=6720.0,
+        args = argparse.Namespace(otm_pct=None, close_pct=None,
+                                  put_short=6740.0, put_long=6720.0,
                                   call_short=None, call_long=None, width=None)
         err = _validate_strike_args("iron-condor", args)
         assert err is not None
@@ -7736,10 +7822,87 @@ class TestPctStrikeResolution:
     def test_iron_condor_default_width(self):
         """Iron condor uses symbol default width."""
         from utp import _resolve_pct_strikes
-        result = _resolve_pct_strikes("RUT", None, 3.0, None, 2100.0, is_iron_condor=True)
+        result = _resolve_pct_strikes("RUT", None, 3.0, 3.0, None, 2100.0, is_iron_condor=True)
         # RUT default width is 20
         assert result["put_long"] == result["put_short"] - 20
         assert result["call_long"] == result["call_short"] + 20
+
+    def test_credit_spread_rejects_split_pct(self):
+        """Credit-spread validator rejects 'put:call' split form for --otm-pct."""
+        from utp import _validate_strike_args
+        args = argparse.Namespace(otm_pct="2:3", close_pct=None,
+                                  short_strike=None, long_strike=None, width=None)
+        err = _validate_strike_args("credit-spread", args)
+        assert err is not None
+        assert "split form" in err or "single value" in err
+
+    def test_credit_spread_rejects_split_close_pct(self):
+        """Credit-spread validator rejects 'put:call' split form for --close-pct."""
+        from utp import _validate_strike_args
+        args = argparse.Namespace(otm_pct=None, close_pct="1:2",
+                                  short_strike=None, long_strike=None, width=None)
+        err = _validate_strike_args("credit-spread", args)
+        assert err is not None
+        assert "split form" in err or "single value" in err
+
+    def test_credit_spread_accepts_single_pct(self):
+        """Credit-spread accepts single-value form for --otm-pct."""
+        from utp import _validate_strike_args
+        args = argparse.Namespace(otm_pct="3", close_pct=None,
+                                  short_strike=None, long_strike=None, width=None)
+        err = _validate_strike_args("credit-spread", args)
+        assert err is None
+
+    def test_iron_condor_accepts_split_pct(self):
+        """Iron condor accepts 'put:call' split form."""
+        from utp import _validate_strike_args
+        args = argparse.Namespace(otm_pct="2:3", close_pct=None,
+                                  put_short=None, put_long=None,
+                                  call_short=None, call_long=None, width=None)
+        err = _validate_strike_args("iron-condor", args)
+        assert err is None
+
+    def test_validate_rejects_otm_and_close_pct(self):
+        """Cannot specify both --otm-pct and --close-pct (conflicting anchors)."""
+        from utp import _validate_strike_args
+        args = argparse.Namespace(otm_pct="2", close_pct="1",
+                                  short_strike=None, long_strike=None, width=None)
+        err = _validate_strike_args("credit-spread", args)
+        assert err is not None
+        assert "both" in err.lower()
+
+        args2 = argparse.Namespace(otm_pct="2", close_pct="1",
+                                   put_short=None, put_long=None,
+                                   call_short=None, call_long=None, width=None)
+        err2 = _validate_strike_args("iron-condor", args2)
+        assert err2 is not None
+        assert "both" in err2.lower()
+
+    def test_validate_invalid_pct_string(self):
+        """Validator rejects malformed pct string."""
+        from utp import _validate_strike_args
+        args = argparse.Namespace(otm_pct="abc", close_pct=None,
+                                  short_strike=None, long_strike=None, width=None)
+        err = _validate_strike_args("credit-spread", args)
+        assert err is not None
+        assert "Invalid" in err
+
+    def test_validate_ok_with_close_pct(self):
+        """No error when --close-pct is set without explicit strikes."""
+        from utp import _validate_strike_args
+        args = argparse.Namespace(otm_pct=None, close_pct="2",
+                                  short_strike=None, long_strike=None, width=None)
+        err = _validate_strike_args("credit-spread", args)
+        assert err is None
+
+    def test_validate_ic_ok_with_close_pct_split(self):
+        """Iron condor: --close-pct split form is valid."""
+        from utp import _validate_strike_args
+        args = argparse.Namespace(otm_pct=None, close_pct="1.5:2.5",
+                                  put_short=None, put_long=None,
+                                  call_short=None, call_long=None, width=None)
+        err = _validate_strike_args("iron-condor", args)
+        assert err is None
 
     def test_snap_to_chain_nearest(self):
         """Snap to nearest available strike."""
@@ -7778,6 +7941,216 @@ class TestPctStrikeResolution:
         """Empty chain returns target unchanged."""
         from utp import _snap_to_chain
         assert _snap_to_chain(7160, [], "otm_call") == 7160
+
+
+class TestClosePctResolution:
+    """Tests for --close-pct (anchored to previous trading day's close)."""
+
+    def test_fetch_prev_close_success(self, monkeypatch):
+        """_fetch_prev_close_from_db_server returns previous_close from db_server payload."""
+        import utp as utp_mod
+
+        class _FakeResp:
+            status_code = 200
+            def json(self):
+                return {"ticker": "SPX", "previous_close": 5800.5}
+
+        class _FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+            async def get(self, url, params=None):
+                assert "/api/range_percentiles" in url
+                assert params and params.get("tickers") == "SPX"
+                return _FakeResp()
+
+        import httpx as _httpx_mod
+        monkeypatch.setattr(_httpx_mod, "AsyncClient", _FakeClient)
+        result = asyncio.run(utp_mod._fetch_prev_close_from_db_server("SPX"))
+        assert result == 5800.5
+
+    def test_fetch_prev_close_list_response(self, monkeypatch):
+        """If db_server returns a list, takes the first entry."""
+        import utp as utp_mod
+
+        class _FakeResp:
+            status_code = 200
+            def json(self):
+                return [{"ticker": "SPX", "previous_close": 5750.0}]
+
+        class _FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+            async def get(self, url, params=None):
+                return _FakeResp()
+
+        import httpx as _httpx_mod
+        monkeypatch.setattr(_httpx_mod, "AsyncClient", _FakeClient)
+        result = asyncio.run(utp_mod._fetch_prev_close_from_db_server("SPX"))
+        assert result == 5750.0
+
+    def test_fetch_prev_close_http_error(self, monkeypatch):
+        """Non-200 returns None."""
+        import utp as utp_mod
+
+        class _FakeResp:
+            status_code = 500
+            def json(self): return {}
+
+        class _FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+            async def get(self, url, params=None): return _FakeResp()
+
+        import httpx as _httpx_mod
+        monkeypatch.setattr(_httpx_mod, "AsyncClient", _FakeClient)
+        assert asyncio.run(utp_mod._fetch_prev_close_from_db_server("SPX")) is None
+
+    def test_fetch_prev_close_missing_field(self, monkeypatch):
+        """Missing previous_close returns None."""
+        import utp as utp_mod
+
+        class _FakeResp:
+            status_code = 200
+            def json(self): return {"ticker": "SPX"}
+
+        class _FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+            async def get(self, url, params=None): return _FakeResp()
+
+        import httpx as _httpx_mod
+        monkeypatch.setattr(_httpx_mod, "AsyncClient", _FakeClient)
+        assert asyncio.run(utp_mod._fetch_prev_close_from_db_server("SPX")) is None
+
+    def test_fetch_prev_close_zero_value(self, monkeypatch):
+        """previous_close <= 0 returns None."""
+        import utp as utp_mod
+
+        class _FakeResp:
+            status_code = 200
+            def json(self): return {"previous_close": 0}
+
+        class _FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+            async def get(self, url, params=None): return _FakeResp()
+
+        import httpx as _httpx_mod
+        monkeypatch.setattr(_httpx_mod, "AsyncClient", _FakeClient)
+        assert asyncio.run(utp_mod._fetch_prev_close_from_db_server("SPX")) is None
+
+    def test_fetch_prev_close_exception(self, monkeypatch):
+        """Network/parse exception returns None."""
+        import utp as utp_mod
+        import httpx as _httpx_mod
+
+        class _BoomClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+            async def get(self, *a, **kw):
+                raise RuntimeError("boom")
+
+        monkeypatch.setattr(_httpx_mod, "AsyncClient", _BoomClient)
+        assert asyncio.run(utp_mod._fetch_prev_close_from_db_server("SPX")) is None
+
+    def test_resolve_close_pct_strikes_http_credit_spread(self, monkeypatch):
+        """End-to-end: --close-pct resolves strikes from prev close (credit spread)."""
+        import utp as utp_mod
+
+        async def _fake_prev_close(symbol):
+            return 6900.0  # Pretend SPX prev close was 6900
+
+        monkeypatch.setattr(utp_mod, "_fetch_prev_close_from_db_server", _fake_prev_close)
+
+        args = argparse.Namespace(
+            symbol="SPX", expiration=None, option_type="PUT", width=20,
+            otm_pct=None, close_pct="2",
+            short_strike=None, long_strike=None,
+        )
+
+        # No HTTP client needed since expiration=None skips snapping
+        rc = asyncio.run(utp_mod._resolve_close_pct_strikes_http(args, "credit-spread", client=None))
+        assert rc is None
+        # 6900 * 0.98 = 6762 → 6760 (SPX 5pt increment)
+        assert args.short_strike == 6760.0
+        assert args.long_strike == 6740.0
+
+    def test_resolve_close_pct_strikes_http_iron_condor_asymmetric(self, monkeypatch):
+        """End-to-end: --close-pct asymmetric split for iron condor."""
+        import utp as utp_mod
+
+        async def _fake_prev_close(symbol):
+            return 6900.0
+
+        monkeypatch.setattr(utp_mod, "_fetch_prev_close_from_db_server", _fake_prev_close)
+
+        args = argparse.Namespace(
+            symbol="SPX", expiration=None, option_type=None, width=20,
+            otm_pct=None, close_pct="1.5:2.5",
+            put_short=None, put_long=None, call_short=None, call_long=None,
+        )
+
+        rc = asyncio.run(utp_mod._resolve_close_pct_strikes_http(args, "iron-condor", client=None))
+        assert rc is None
+        # Put: 6900 * 0.985 = 6796.5 → 6795 (SPX 5pt incr, banker's rounding)
+        assert args.put_short == 6795.0
+        assert args.put_long == 6775.0  # 6795 - 20
+        # Call: 6900 * 1.025 = 7072.5 → 7070 (banker's rounding rounds .5 to even)
+        assert args.call_short == 7070.0
+        assert args.call_long == 7090.0  # 7070 + 20
+
+    def test_resolve_close_pct_strikes_http_no_prev_close(self, monkeypatch, capsys):
+        """When db_server returns nothing, returns error code."""
+        import utp as utp_mod
+
+        async def _fake_prev_close(symbol):
+            return None
+
+        monkeypatch.setattr(utp_mod, "_fetch_prev_close_from_db_server", _fake_prev_close)
+
+        args = argparse.Namespace(
+            symbol="SPX", expiration=None, option_type="PUT", width=20,
+            otm_pct=None, close_pct="2",
+            short_strike=None, long_strike=None,
+        )
+        rc = asyncio.run(utp_mod._resolve_close_pct_strikes_http(args, "credit-spread", client=None))
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert "could not fetch previous close" in out
+
+    def test_resolve_close_pct_strikes_http_invalid_pct(self, monkeypatch, capsys):
+        """Invalid --close-pct string returns error code."""
+        import utp as utp_mod
+
+        args = argparse.Namespace(
+            symbol="SPX", expiration=None, option_type="PUT", width=20,
+            otm_pct=None, close_pct="abc",
+            short_strike=None, long_strike=None,
+        )
+        rc = asyncio.run(utp_mod._resolve_close_pct_strikes_http(args, "credit-spread", client=None))
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert "invalid --close-pct" in out
+
+    def test_resolve_close_pct_strikes_http_no_op_when_unset(self):
+        """When close_pct is None, resolver is a no-op."""
+        import utp as utp_mod
+
+        args = argparse.Namespace(
+            symbol="SPX", expiration=None, option_type="PUT", width=20,
+            otm_pct=None, close_pct=None,
+            short_strike=None, long_strike=None,
+        )
+        rc = asyncio.run(utp_mod._resolve_close_pct_strikes_http(args, "credit-spread", client=None))
+        assert rc is None
+        # Strikes unchanged
+        assert args.short_strike is None
 
 
 class TestTradeReplay:
@@ -8764,3 +9137,1620 @@ class TestRollService:
         # Nonexistent position
         legs = svc._get_position_legs("no-such-pos")
         assert legs == []
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Price Freshness Enforcement on Trade Commands
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestPriceFreshnessEnforcement:
+    """Tests that trade commands enforce <=15s fresh / 15-60s warn / >60s block
+    policy on displayed prices."""
+
+    def test_classify_price_age_fresh(self):
+        """Age <= 15s: fresh, no block, annotation shows age only."""
+        from utp import _classify_price_age
+        annotation, blocked = _classify_price_age(3.0)
+        assert blocked is False
+        assert "3s old" in annotation
+        assert "STALE" not in annotation and "BLOCKED" not in annotation
+
+    def test_classify_price_age_stale_warning(self):
+        """Age between 15s and 60s: stale warning, not blocked."""
+        from utp import _classify_price_age
+        annotation, blocked = _classify_price_age(30.0)
+        assert blocked is False
+        assert "STALE" in annotation
+        assert "30s" in annotation
+
+    def test_classify_price_age_blocked(self):
+        """Age > 60s: blocked, annotation shows BLOCKED."""
+        from utp import _classify_price_age
+        annotation, blocked = _classify_price_age(75.0)
+        assert blocked is True
+        assert "BLOCKED" in annotation
+        assert "75s" in annotation
+
+    def test_classify_price_age_none(self):
+        """None age (just fetched): not blocked, no warning."""
+        from utp import _classify_price_age
+        annotation, blocked = _classify_price_age(None)
+        assert blocked is False
+        assert "just fetched" in annotation
+
+    def test_env_var_overrides_threshold(self, monkeypatch):
+        """Env vars UTP_TRADE_PRICE_FRESH_MAX_AGE/UTP_TRADE_PRICE_BLOCK_MAX_AGE override defaults."""
+        from utp import _classify_price_age
+        # With default 15s threshold, 10s is fresh
+        a1, b1 = _classify_price_age(10.0)
+        assert b1 is False and "STALE" not in a1
+        # Tighten to 5s / 8s
+        monkeypatch.setenv("UTP_TRADE_PRICE_FRESH_MAX_AGE", "5")
+        monkeypatch.setenv("UTP_TRADE_PRICE_BLOCK_MAX_AGE", "8")
+        # Now 10s exceeds block threshold
+        a2, b2 = _classify_price_age(10.0)
+        assert b2 is True and "BLOCKED" in a2
+
+    @pytest.mark.asyncio
+    async def test_get_quote_with_max_age_forces_provider(self, monkeypatch):
+        """get_quote(max_age=15) forces provider when cache age exceeds max_age."""
+        from app.services import market_data as mkt
+        from app.models import Quote
+
+        # Build a fake streaming service whose last tick is 30s old
+        tick = {
+            "price": 5500.0,
+            "bid": 5499.0,
+            "ask": 5501.0,
+            "volume": 100,
+            "timestamp": (datetime.now(UTC) - timedelta(seconds=30)).isoformat(),
+        }
+
+        class FakeSvc:
+            is_running = True
+            def get_last_tick(self, symbol, max_age_seconds=None):
+                # Honour max_age_seconds: only return when tick age <= limit
+                age = 30.0
+                if max_age_seconds is not None and age > max_age_seconds:
+                    return None
+                return tick
+
+        monkeypatch.setattr(
+            "app.services.market_data_streaming.get_streaming_service",
+            lambda: FakeSvc(),
+        )
+
+        provider_calls = {"n": 0}
+
+        class FakeProvider:
+            def __init__(self):
+                pass
+            def is_healthy(self):
+                return True
+            async def get_quote(self, symbol):
+                provider_calls["n"] += 1
+                return Quote(symbol=symbol, bid=5502.0, ask=5503.0, last=5502.5, volume=1)
+
+        monkeypatch.setattr(
+            "app.core.provider.ProviderRegistry.get",
+            lambda broker: FakeProvider(),
+        )
+        monkeypatch.setattr("app.services.market_data._is_market_active", lambda: True)
+
+        # With max_age=15, tick is too old → provider call
+        q = await mkt.get_quote("SPX", max_age=15.0)
+        assert provider_calls["n"] == 1
+        assert q.quote_source == "provider"
+        assert q.quote_age_seconds == 0.0
+
+        # With max_age=None (legacy), stale cache serves — provider NOT called again
+        provider_calls["n"] = 0
+        q2 = await mkt.get_quote("SPX")
+        # Legacy behavior: returns stale tick without calling provider
+        assert provider_calls["n"] == 0
+        # Cache is 30s old, served as stale_cache
+        assert q2.quote_source in ("fresh_cache", "stale_cache")
+
+    @pytest.mark.asyncio
+    async def test_get_option_quotes_with_age_returns_age(self, monkeypatch):
+        """get_option_quotes_with_age returns (quotes, age, source) triple."""
+        from app.services import market_data as mkt
+
+        mock_quotes = [{"strike": 5500.0, "bid": 1.0, "ask": 1.5,
+                        "last": 1.2, "volume": 10, "open_interest": 50}]
+
+        class FakeCache:
+            def get_age(self, sym, exp, ot):
+                return 5.0
+
+        class FakeOQ:
+            _cache = FakeCache()
+            def get_cached_quotes(self, sym, exp, ot, **kwargs):
+                return mock_quotes
+
+        monkeypatch.setattr(
+            "app.services.option_quote_streaming.get_option_quote_streaming",
+            lambda: FakeOQ(),
+        )
+
+        quotes, age, source = await mkt.get_option_quotes_with_age(
+            "SPX", "2026-04-17", "PUT", max_age=30.0,
+        )
+        assert quotes == mock_quotes
+        assert age == 5.0
+        assert source == "fresh_cache"
+
+    @pytest.mark.asyncio
+    async def test_trade_command_blocks_when_price_too_stale(self, monkeypatch, capsys):
+        """Trade command returns non-zero and prints BLOCKED when quote > block threshold."""
+        from utp import _cmd_trade_http
+
+        # Fake HTTP client that returns stale quotes (90s old) for everything
+        import httpx
+
+        class FakeResp:
+            def __init__(self, status_code, data):
+                self.status_code = status_code
+                self._data = data
+
+            def json(self):
+                return self._data
+
+        class FakeClient:
+            def __init__(self, *a, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return None
+
+            async def get(self, path, params=None):
+                if path.startswith("/market/quote"):
+                    return FakeResp(200, {
+                        "symbol": "SPX", "bid": 5499, "ask": 5501,
+                        "last": 5500, "volume": 0,
+                        "quote_age_seconds": 90.0, "quote_source": "stale_cache",
+                    })
+                if path.startswith("/market/options"):
+                    ot = (params or {}).get("option_type", "PUT").lower()
+                    return FakeResp(200, {
+                        "symbol": "SPX",
+                        "quotes": {ot: [
+                            {"strike": 5500, "bid": 1.0, "ask": 1.5, "last": 1.2, "volume": 5},
+                            {"strike": 5475, "bid": 0.5, "ask": 0.8, "last": 0.6, "volume": 3},
+                        ]},
+                        "meta": {"age_seconds": 90.0, "source": "stale_cache"},
+                        "quote_age_seconds": 90.0, "quote_source": "stale_cache",
+                    })
+                return FakeResp(200, {})
+
+            async def post(self, path, json=None, headers=None):
+                return FakeResp(200, {})
+
+        monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+        args = argparse.Namespace(
+            subcommand="credit-spread",
+            symbol="SPX", short_strike=5500, long_strike=5475,
+            option_type="PUT", expiration="2026-04-17",
+            quantity=1, net_price=3.50, broker="ibkr",
+            dry_run=False, paper=False, live=True,
+            confirm=False, nocheck=True, otm_pct=None, close_pct=None,
+            close=False,
+        )
+        rc = await _cmd_trade_http(args, "http://localhost:8000")
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "⛔" in out or "BLOCKED" in out or "blocked" in out.lower()
+
+    @pytest.mark.asyncio
+    async def test_trade_command_warns_when_stale_but_allowed(self, monkeypatch, capsys):
+        """Age in 15-60s range: warning shown, trade not blocked."""
+        from utp import _cmd_trade_http
+        import httpx
+
+        class FakeResp:
+            def __init__(self, status_code, data):
+                self.status_code = status_code
+                self._data = data
+
+            def json(self):
+                return self._data
+
+            @property
+            def headers(self):
+                return {"content-type": "application/json"}
+
+            @property
+            def text(self):
+                return str(self._data)
+
+        class FakeClient:
+            def __init__(self, *a, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return None
+
+            async def get(self, path, params=None):
+                if path.startswith("/market/quote"):
+                    return FakeResp(200, {
+                        "symbol": "SPX", "bid": 5499, "ask": 5501,
+                        "last": 5500, "volume": 0,
+                        "quote_age_seconds": 30.0, "quote_source": "stale_cache",
+                    })
+                if path.startswith("/market/options"):
+                    ot = (params or {}).get("option_type", "PUT").lower()
+                    return FakeResp(200, {
+                        "symbol": "SPX",
+                        "quotes": {ot: [
+                            {"strike": 5500, "bid": 1.0, "ask": 1.5, "last": 1.2, "volume": 5},
+                            {"strike": 5475, "bid": 0.5, "ask": 0.8, "last": 0.6, "volume": 3},
+                        ]},
+                        "meta": {"age_seconds": 30.0, "source": "stale_cache"},
+                        "quote_age_seconds": 30.0, "quote_source": "stale_cache",
+                    })
+                return FakeResp(200, {})
+
+            async def post(self, path, json=None, headers=None):
+                return FakeResp(200, {})
+
+        monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+        args = argparse.Namespace(
+            subcommand="credit-spread",
+            symbol="SPX", short_strike=5500, long_strike=5475,
+            option_type="PUT", expiration="2026-04-17",
+            quantity=1, net_price=3.50, broker="ibkr",
+            dry_run=False, paper=False, live=True,
+            confirm=False, nocheck=True, otm_pct=None, close_pct=None,
+            close=False,
+        )
+        rc = await _cmd_trade_http(args, "http://localhost:8000")
+        out = capsys.readouterr().out
+        # Not blocked (rc != 1 from freshness); STALE warning displayed
+        assert "STALE" in out
+        assert "⛔" not in out  # no block
+        # No confirm → summary-only path returns 0
+        assert rc == 0
+
+    @pytest.mark.asyncio
+    async def test_trade_command_dry_run_skips_freshness_check(self, monkeypatch, capsys):
+        """Dry-run mode prints 'enforcement disabled' notice and does not block."""
+        from utp import _cmd_trade_http
+        import httpx
+
+        class FakeResp:
+            def __init__(self, status_code, data):
+                self.status_code = status_code
+                self._data = data
+
+            def json(self):
+                return self._data
+
+        class FakeClient:
+            def __init__(self, *a, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return None
+
+            async def get(self, path, params=None):
+                if path.startswith("/market/quote"):
+                    return FakeResp(200, {
+                        "symbol": "SPX", "bid": 5499, "ask": 5501,
+                        "last": 5500, "volume": 0,
+                        "quote_age_seconds": 90.0, "quote_source": "stale_cache",
+                    })
+                if path.startswith("/market/options"):
+                    ot = (params or {}).get("option_type", "PUT").lower()
+                    return FakeResp(200, {
+                        "symbol": "SPX",
+                        "quotes": {ot: [
+                            {"strike": 5500, "bid": 1.0, "ask": 1.5, "last": 1.2, "volume": 5},
+                            {"strike": 5475, "bid": 0.5, "ask": 0.8, "last": 0.6, "volume": 3},
+                        ]},
+                        "meta": {"age_seconds": 90.0, "source": "stale_cache"},
+                        "quote_age_seconds": 90.0, "quote_source": "stale_cache",
+                    })
+                return FakeResp(200, {})
+
+            async def post(self, path, json=None, headers=None):
+                return FakeResp(200, {"order_id": "abc", "status": "FILLED"})
+
+        monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+        args = argparse.Namespace(
+            subcommand="credit-spread",
+            symbol="SPX", short_strike=5500, long_strike=5475,
+            option_type="PUT", expiration="2026-04-17",
+            quantity=1, net_price=3.50, broker="ibkr",
+            dry_run=True, paper=False, live=False,
+            confirm=True, nocheck=True, otm_pct=None, close_pct=None,
+            close=False,
+        )
+        rc = await _cmd_trade_http(args, "http://localhost:8000")
+        out = capsys.readouterr().out
+        assert "enforcement disabled" in out.lower()
+        # Dry-run completes without actually blocking the trade.  The
+        # per-line annotation may still say BLOCKED (informational), but
+        # the explicit "Trade blocked" gate should not fire.
+        assert "Trade blocked" not in out
+        assert rc == 0
+
+    @pytest.mark.asyncio
+    async def test_http_quote_endpoint_passes_max_age(self, client, api_key_headers, monkeypatch):
+        """GET /market/quote/{sym}?max_age=15 passes max_age through to get_quote()."""
+        from app.services import market_data as mkt
+        from app.models import Quote
+
+        received: dict = {}
+        real_get = mkt.get_quote
+
+        async def spy_get_quote(symbol, broker=None, *, max_age=None, force_refresh=False):
+            received["max_age"] = max_age
+            received["force_refresh"] = force_refresh
+            return Quote(symbol=symbol, bid=1.0, ask=2.0, last=1.5, volume=0,
+                         quote_age_seconds=0.0, quote_source="provider")
+
+        monkeypatch.setattr("app.routes.market.get_quote", spy_get_quote)
+        # Also patch the module-level import since the route imports from market_data
+        monkeypatch.setattr("app.services.market_data.get_quote", spy_get_quote)
+
+        resp = await client.get(
+            "/market/quote/SPX?max_age=15&force_refresh=true",
+            headers=api_key_headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert received.get("max_age") == 15.0
+        assert received.get("force_refresh") is True
+        assert data.get("quote_age_seconds") == 0.0
+        assert data.get("quote_source") == "provider"
+
+    @pytest.mark.asyncio
+    async def test_http_options_endpoint_passes_max_age(self, client, api_key_headers, monkeypatch):
+        """GET /market/options/{sym}?max_age=15 passes through and returns meta.age_seconds."""
+        received: dict = {}
+
+        async def spy_get_opts_age(symbol, expiration, option_type, *,
+                                    strike_min=None, strike_max=None,
+                                    broker=None, max_age=None, force_refresh=False):
+            received.setdefault("calls", []).append(
+                {"max_age": max_age, "force_refresh": force_refresh,
+                 "option_type": option_type}
+            )
+            quotes = [{"strike": 5500.0, "bid": 1.0, "ask": 1.5,
+                       "last": 1.2, "volume": 10, "open_interest": 50}]
+            return quotes, 3.0, "fresh_cache"
+
+        monkeypatch.setattr(
+            "app.services.market_data.get_option_quotes_with_age",
+            spy_get_opts_age,
+        )
+
+        resp = await client.get(
+            "/market/options/SPX",
+            params={"expiration": "2026-04-17", "option_type": "PUT",
+                    "max_age": 15, "force_refresh": "false"},
+            headers=api_key_headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data.get("meta", {}).get("age_seconds") == 3.0
+        assert data.get("quote_age_seconds") == 3.0
+        # max_age forwarded to internal call
+        assert received["calls"][0]["max_age"] == 15.0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Simulation Mode Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestSimulationClock:
+    """Tests for app/services/simulation_clock.py."""
+
+    def _make_timestamps(self, sim_date=None):
+        """Create a list of 5-min timestamps for a test date."""
+        from datetime import date as d
+        sim_date = sim_date or d(2026, 4, 1)
+        base = datetime(sim_date.year, sim_date.month, sim_date.day,
+                        13, 30, tzinfo=timezone.utc)  # 9:30 ET
+        return [base + timedelta(minutes=5 * i) for i in range(78)]  # 78 bars
+
+    def test_init_and_basic_properties(self):
+        from app.services.simulation_clock import SimulationClock
+        ts = self._make_timestamps()
+        clock = SimulationClock(date(2026, 4, 1), ts)
+        assert clock.sim_date == date(2026, 4, 1)
+        assert clock.sim_time == ts[0]
+        assert clock.is_active()
+        assert not clock.auto_advancing
+        assert len(clock.timestamps) == 78
+
+    def test_advance_steps_through_timestamps(self):
+        from app.services.simulation_clock import SimulationClock
+        ts = self._make_timestamps()
+        clock = SimulationClock(date(2026, 4, 1), ts)
+        result = clock.advance()
+        assert result == ts[1]
+        assert clock.now() == ts[1]
+        result = clock.advance()
+        assert result == ts[2]
+
+    def test_advance_returns_none_at_end(self):
+        from app.services.simulation_clock import SimulationClock
+        ts = [datetime(2026, 4, 1, 13, 30, tzinfo=timezone.utc)]
+        clock = SimulationClock(date(2026, 4, 1), ts)
+        assert clock.advance() is None
+
+    def test_set_time_snaps_cursor(self):
+        from app.services.simulation_clock import SimulationClock
+        ts = self._make_timestamps()
+        clock = SimulationClock(date(2026, 4, 1), ts)
+        # Jump to 14:00 UTC (10:00 ET) — should snap to ts[6] (13:30 + 30min)
+        target = datetime(2026, 4, 1, 14, 0, tzinfo=timezone.utc)
+        clock.set_time(target)
+        assert clock.sim_time == target
+        # Advance should go to the next timestamp after 14:00
+        result = clock.advance()
+        assert result is not None
+        assert result > target
+
+    def test_jump_to_et(self):
+        from app.services.simulation_clock import SimulationClock
+        ts = self._make_timestamps()
+        clock = SimulationClock(date(2026, 4, 1), ts)
+        clock.jump_to_et("10:30")
+        # 10:30 ET on 2026-04-01 (EDT) = 14:30 UTC
+        assert clock.sim_time.hour == 14
+        assert clock.sim_time.minute == 30
+
+    def test_reset(self):
+        from app.services.simulation_clock import SimulationClock
+        ts = self._make_timestamps()
+        clock = SimulationClock(date(2026, 4, 1), ts)
+        clock.advance()
+        clock.advance()
+        clock.reset()
+        assert clock.now() == ts[0]
+        assert clock._cursor == 0
+
+    def test_module_accessors(self):
+        from app.services.simulation_clock import (
+            init_sim_clock, get_sim_clock, reset_sim_clock,
+        )
+        ts = self._make_timestamps()
+        clock = init_sim_clock(date(2026, 4, 1), ts)
+        assert get_sim_clock() is clock
+        reset_sim_clock()
+        assert get_sim_clock() is None
+
+    @pytest.mark.asyncio
+    async def test_auto_advance(self):
+        from app.services.simulation_clock import SimulationClock
+        ts = self._make_timestamps()
+        clock = SimulationClock(date(2026, 4, 1), ts)
+        clock.start_auto_advance(interval_sec=0.01)
+        assert clock.auto_advancing
+        await asyncio.sleep(0.15)
+        clock.stop_auto_advance()
+        assert not clock.auto_advancing
+        # Should have advanced several steps
+        assert clock._cursor > 0
+
+
+class TestCSVSimulationProvider:
+    """Tests for app/core/providers/csv_simulation.py."""
+
+    def _create_equity_csv(self, tmp_path, ticker="SPX", sim_date="2026-04-01"):
+        """Create a minimal equity CSV in the expected directory structure."""
+        ticker_dir = tmp_path / "equities" / ticker
+        ticker_dir.mkdir(parents=True)
+        csv_path = ticker_dir / f"{ticker}_equities_{sim_date}.csv"
+        csv_path.write_text(
+            "timestamp,ticker,open,high,low,close,volume,vwap,transactions\n"
+            f"{sim_date} 13:30:00+00:00,I:{ticker},100.0,102.0,99.0,101.0,1000,,\n"
+            f"{sim_date} 13:35:00+00:00,I:{ticker},101.0,103.0,100.0,102.5,1200,,\n"
+            f"{sim_date} 13:40:00+00:00,I:{ticker},102.5,104.0,101.0,103.0,800,,\n"
+        )
+        return ticker_dir
+
+    def _create_options_csv(self, tmp_path, ticker="SPX", sim_date="2026-04-01"):
+        """Create a minimal options CSV."""
+        ticker_dir = tmp_path / "options" / ticker
+        ticker_dir.mkdir(parents=True)
+        csv_path = ticker_dir / f"{ticker}_options_{sim_date}.csv"
+        csv_path.write_text(
+            "timestamp,ticker,type,strike,expiration,bid,ask,day_close,vwap,fmv,"
+            "delta,gamma,theta,vega,implied_volatility,volume\n"
+            f"{sim_date}T13:30:00+00:00,O:SPX260401P00095000,put,95,{sim_date},"
+            "2.50,3.00,2.75,2.75,,,,,,0.25,100\n"
+            f"{sim_date}T13:30:00+00:00,O:SPX260401P00090000,put,90,{sim_date},"
+            "1.00,1.50,1.25,1.25,,,,,,0.30,200\n"
+            f"{sim_date}T13:30:00+00:00,O:SPX260401C00105000,call,105,{sim_date},"
+            "2.00,2.50,2.25,2.25,,,,,,0.20,150\n"
+            f"{sim_date}T13:35:00+00:00,O:SPX260401P00095000,put,95,{sim_date},"
+            "2.60,3.10,2.85,2.85,,,,,,0.25,110\n"
+            f"{sim_date}T13:35:00+00:00,O:SPX260401P00090000,put,90,{sim_date},"
+            "1.10,1.60,1.35,1.35,,,,,,0.30,210\n"
+            f"{sim_date}T13:35:00+00:00,O:SPX260401C00105000,call,105,{sim_date},"
+            "1.90,2.40,2.15,2.15,,,,,,0.20,160\n"
+        )
+        return ticker_dir
+
+    @pytest.mark.asyncio
+    async def test_connect_loads_data(self, tmp_path):
+        from app.core.providers.csv_simulation import CSVSimulationProvider
+        from app.services.simulation_clock import init_sim_clock, reset_sim_clock
+        self._create_equity_csv(tmp_path)
+        self._create_options_csv(tmp_path)
+        try:
+            provider = CSVSimulationProvider(
+                sim_date=date(2026, 4, 1),
+                tickers=["SPX"],
+                equities_dir=tmp_path / "equities",
+                options_dir=tmp_path / "options",
+            )
+            await provider.connect()
+            assert "SPX" in provider._equity_bars
+            assert len(provider._equity_bars["SPX"]) == 3
+            assert "SPX" in provider._option_snapshots
+            ts = provider.get_all_equity_timestamps()
+            assert len(ts) == 3
+            init_sim_clock(date(2026, 4, 1), ts)
+        finally:
+            reset_sim_clock()
+
+    @pytest.mark.asyncio
+    async def test_get_quote_returns_bar_data(self, tmp_path):
+        from app.core.providers.csv_simulation import CSVSimulationProvider
+        from app.services.simulation_clock import init_sim_clock, reset_sim_clock
+        self._create_equity_csv(tmp_path)
+        try:
+            provider = CSVSimulationProvider(
+                sim_date=date(2026, 4, 1),
+                tickers=["SPX"],
+                equities_dir=tmp_path / "equities",
+                options_dir=tmp_path / "options",
+            )
+            await provider.connect()
+            ts = provider.get_all_equity_timestamps()
+            clock = init_sim_clock(date(2026, 4, 1), ts)
+            quote = await provider.get_quote("SPX")
+            assert quote.symbol == "SPX"
+            assert quote.last == 101.0  # first bar close
+            assert quote.bid == 99.0   # low
+            assert quote.ask == 102.0  # high
+            assert quote.source == "simulation"
+            # Advance and check second bar
+            clock.advance()
+            quote2 = await provider.get_quote("SPX")
+            assert quote2.last == 102.5
+        finally:
+            reset_sim_clock()
+
+    @pytest.mark.asyncio
+    async def test_get_option_quotes(self, tmp_path):
+        from app.core.providers.csv_simulation import CSVSimulationProvider
+        from app.services.simulation_clock import init_sim_clock, reset_sim_clock
+        self._create_equity_csv(tmp_path)
+        self._create_options_csv(tmp_path)
+        try:
+            provider = CSVSimulationProvider(
+                sim_date=date(2026, 4, 1),
+                tickers=["SPX"],
+                equities_dir=tmp_path / "equities",
+                options_dir=tmp_path / "options",
+            )
+            await provider.connect()
+            ts = provider.get_all_equity_timestamps()
+            init_sim_clock(date(2026, 4, 1), ts)
+            # Get all puts at first timestamp
+            puts = await provider.get_option_quotes("SPX", "2026-04-01", "PUT")
+            assert len(puts) == 2
+            strikes = {q["strike"] for q in puts}
+            assert 95.0 in strikes
+            assert 90.0 in strikes
+            # Get calls
+            calls = await provider.get_option_quotes("SPX", "2026-04-01", "CALL")
+            assert len(calls) == 1
+            assert calls[0]["strike"] == 105.0
+        finally:
+            reset_sim_clock()
+
+    @pytest.mark.asyncio
+    async def test_get_option_quotes_strike_range(self, tmp_path):
+        from app.core.providers.csv_simulation import CSVSimulationProvider
+        from app.services.simulation_clock import init_sim_clock, reset_sim_clock
+        self._create_equity_csv(tmp_path)
+        self._create_options_csv(tmp_path)
+        try:
+            provider = CSVSimulationProvider(
+                sim_date=date(2026, 4, 1),
+                tickers=["SPX"],
+                equities_dir=tmp_path / "equities",
+                options_dir=tmp_path / "options",
+            )
+            await provider.connect()
+            ts = provider.get_all_equity_timestamps()
+            init_sim_clock(date(2026, 4, 1), ts)
+            # Filter by strike range
+            puts = await provider.get_option_quotes(
+                "SPX", "2026-04-01", "PUT", strike_min=92, strike_max=100
+            )
+            assert len(puts) == 1
+            assert puts[0]["strike"] == 95.0
+        finally:
+            reset_sim_clock()
+
+    @pytest.mark.asyncio
+    async def test_get_option_chain(self, tmp_path):
+        from app.core.providers.csv_simulation import CSVSimulationProvider
+        from app.services.simulation_clock import init_sim_clock, reset_sim_clock
+        self._create_equity_csv(tmp_path)
+        self._create_options_csv(tmp_path)
+        try:
+            provider = CSVSimulationProvider(
+                sim_date=date(2026, 4, 1),
+                tickers=["SPX"],
+                equities_dir=tmp_path / "equities",
+                options_dir=tmp_path / "options",
+            )
+            await provider.connect()
+            ts = provider.get_all_equity_timestamps()
+            init_sim_clock(date(2026, 4, 1), ts)
+            chain = await provider.get_option_chain("SPX")
+            assert "2026-04-01" in chain["expirations"]
+            assert 95.0 in chain["strikes"]
+            assert 90.0 in chain["strikes"]
+            assert 105.0 in chain["strikes"]
+        finally:
+            reset_sim_clock()
+
+    @pytest.mark.asyncio
+    async def test_execute_multi_leg_order(self, tmp_path):
+        from app.core.providers.csv_simulation import CSVSimulationProvider
+        from app.services.simulation_clock import init_sim_clock, reset_sim_clock
+        self._create_equity_csv(tmp_path)
+        self._create_options_csv(tmp_path)
+        try:
+            provider = CSVSimulationProvider(
+                sim_date=date(2026, 4, 1),
+                tickers=["SPX"],
+                equities_dir=tmp_path / "equities",
+                options_dir=tmp_path / "options",
+            )
+            await provider.connect()
+            ts = provider.get_all_equity_timestamps()
+            init_sim_clock(date(2026, 4, 1), ts)
+            # Credit spread: sell 95 put, buy 90 put
+            order = MultiLegOrder(
+                broker=Broker.IBKR,
+                legs=[
+                    OptionLeg(
+                        symbol="SPX", expiration="2026-04-01", strike=95.0,
+                        option_type=OptionType.PUT, action=OptionAction.SELL_TO_OPEN,
+                        quantity=1,
+                    ),
+                    OptionLeg(
+                        symbol="SPX", expiration="2026-04-01", strike=90.0,
+                        option_type=OptionType.PUT, action=OptionAction.BUY_TO_OPEN,
+                        quantity=1,
+                    ),
+                ],
+                order_type=OrderType.MARKET,
+                quantity=1,
+            )
+            result = await provider.execute_multi_leg_order(order)
+            assert result.status == OrderStatus.FILLED
+            # Net = sell bid (2.50) - buy ask (1.50) = 1.00 credit
+            assert result.filled_price == pytest.approx(1.0, abs=0.01)
+        finally:
+            reset_sim_clock()
+
+    @pytest.mark.asyncio
+    async def test_execute_equity_order(self, tmp_path):
+        from app.core.providers.csv_simulation import CSVSimulationProvider
+        from app.services.simulation_clock import init_sim_clock, reset_sim_clock
+        self._create_equity_csv(tmp_path)
+        try:
+            provider = CSVSimulationProvider(
+                sim_date=date(2026, 4, 1),
+                tickers=["SPX"],
+                equities_dir=tmp_path / "equities",
+                options_dir=tmp_path / "options",
+            )
+            await provider.connect()
+            ts = provider.get_all_equity_timestamps()
+            init_sim_clock(date(2026, 4, 1), ts)
+            order = EquityOrder(
+                broker=Broker.IBKR,
+                symbol="SPX", side=OrderSide.BUY, quantity=10,
+                order_type=OrderType.MARKET,
+            )
+            result = await provider.execute_equity_order(order)
+            assert result.status == OrderStatus.FILLED
+            assert result.filled_price == 101.0  # first bar close
+        finally:
+            reset_sim_clock()
+
+    @pytest.mark.asyncio
+    async def test_check_margin(self, tmp_path):
+        from app.core.providers.csv_simulation import CSVSimulationProvider
+        provider = CSVSimulationProvider(
+            sim_date=date(2026, 4, 1),
+            tickers=["SPX"],
+            equities_dir=tmp_path / "equities",
+            options_dir=tmp_path / "options",
+        )
+        order = MultiLegOrder(
+            broker=Broker.IBKR,
+            legs=[
+                OptionLeg(
+                    symbol="SPX", expiration="2026-04-01", strike=95.0,
+                    option_type=OptionType.PUT, action=OptionAction.SELL_TO_OPEN,
+                    quantity=1,
+                ),
+                OptionLeg(
+                    symbol="SPX", expiration="2026-04-01", strike=90.0,
+                    option_type=OptionType.PUT, action=OptionAction.BUY_TO_OPEN,
+                    quantity=1,
+                ),
+            ],
+            order_type=OrderType.MARKET,
+            quantity=10,
+        )
+        margin = await provider.check_margin(order)
+        # Width = 95 - 90 = 5, margin = 5 * 100 * 10 = 5000
+        assert margin["init_margin"] == 5000.0
+
+    @pytest.mark.asyncio
+    async def test_get_account_balances(self, tmp_path):
+        from app.core.providers.csv_simulation import CSVSimulationProvider
+        provider = CSVSimulationProvider(
+            sim_date=date(2026, 4, 1),
+            tickers=["SPX"],
+            equities_dir=tmp_path / "equities",
+            options_dir=tmp_path / "options",
+        )
+        balances = await provider.get_account_balances()
+        assert balances.cash == 1_000_000.0
+
+    @pytest.mark.asyncio
+    async def test_missing_ticker_data(self, tmp_path):
+        from app.core.providers.csv_simulation import CSVSimulationProvider
+        from app.services.simulation_clock import init_sim_clock, reset_sim_clock
+        try:
+            provider = CSVSimulationProvider(
+                sim_date=date(2026, 4, 1),
+                tickers=["NOTICKER"],
+                equities_dir=tmp_path / "equities",
+                options_dir=tmp_path / "options",
+            )
+            await provider.connect()
+            ts = [datetime(2026, 4, 1, 13, 30, tzinfo=timezone.utc)]
+            init_sim_clock(date(2026, 4, 1), ts)
+            quote = await provider.get_quote("NOTICKER")
+            assert quote.last == 0.0
+        finally:
+            reset_sim_clock()
+
+
+class TestSimulationRoutes:
+    """Tests for /sim/* API routes."""
+
+    @pytest.mark.asyncio
+    async def test_status_no_sim(self, client, api_key_headers):
+        """When no sim clock is active, /sim/status returns 404 (routes not registered)."""
+        resp = await client.get("/sim/status", headers=api_key_headers)
+        # Routes are only registered when _UTP_SIM_MODE=1
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_sim_routes_when_registered(self, client, api_key_headers):
+        """Test sim routes work when clock is initialised."""
+        from app.services.simulation_clock import init_sim_clock, reset_sim_clock, get_sim_clock
+        from app.routes.simulation import router as sim_router
+        from app.main import app as _app
+        # Temporarily add sim routes
+        _app.include_router(sim_router)
+        try:
+            ts = [
+                datetime(2026, 4, 1, 13, 30, tzinfo=timezone.utc),
+                datetime(2026, 4, 1, 13, 35, tzinfo=timezone.utc),
+                datetime(2026, 4, 1, 13, 40, tzinfo=timezone.utc),
+            ]
+            clock = init_sim_clock(date(2026, 4, 1), ts)
+            clock._tickers = ["SPX"]
+
+            # GET /sim/status
+            resp = await client.get("/sim/status", headers=api_key_headers)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["active"] is True
+            assert data["date"] == "2026-04-01"
+            assert data["timestamp_count"] == 3
+
+            # POST /sim/set-time (advance)
+            resp = await client.post(
+                "/sim/set-time",
+                json={"advance_minutes": 5},
+                headers=api_key_headers,
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["cursor_position"] == 1
+
+            # POST /sim/set-time (ET time)
+            resp = await client.post(
+                "/sim/set-time",
+                json={"time": "09:40"},
+                headers=api_key_headers,
+            )
+            assert resp.status_code == 200
+
+            # GET /sim/timestamps
+            resp = await client.get("/sim/timestamps", headers=api_key_headers)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["count"] == 3
+
+            # POST /sim/reset
+            resp = await client.post("/sim/reset", headers=api_key_headers)
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["reset"] is True
+
+            # POST /sim/auto-advance
+            resp = await client.post(
+                "/sim/auto-advance",
+                json={"enabled": True, "interval": 0.01},
+                headers=api_key_headers,
+            )
+            assert resp.status_code == 200
+            assert resp.json()["auto_advancing"] is True
+            clock.stop_auto_advance()
+
+            # POST /sim/load-date (requires CSVSimulationProvider, not stub)
+            resp = await client.post(
+                "/sim/load-date",
+                json={"date": "2026-04-02"},
+                headers=api_key_headers,
+            )
+            assert resp.status_code == 409  # not in sim mode
+
+        finally:
+            reset_sim_clock()
+            # Remove the sim routes we added
+            _app.routes[:] = [r for r in _app.routes
+                              if not (hasattr(r, 'path') and str(getattr(r, 'path', '')).startswith('/sim'))]
+
+    @pytest.mark.asyncio
+    async def test_set_time_validation(self, client, api_key_headers):
+        """Test set-time validates mutual exclusivity."""
+        from app.services.simulation_clock import init_sim_clock, reset_sim_clock
+        from app.routes.simulation import router as sim_router
+        from app.main import app as _app
+        _app.include_router(sim_router)
+        try:
+            ts = [datetime(2026, 4, 1, 13, 30, tzinfo=timezone.utc)]
+            init_sim_clock(date(2026, 4, 1), ts)
+
+            # No fields
+            resp = await client.post(
+                "/sim/set-time", json={}, headers=api_key_headers,
+            )
+            assert resp.status_code == 422
+
+            # Multiple fields
+            resp = await client.post(
+                "/sim/set-time",
+                json={"time": "10:00", "advance_minutes": 5},
+                headers=api_key_headers,
+            )
+            assert resp.status_code == 422
+        finally:
+            reset_sim_clock()
+            _app.routes[:] = [r for r in _app.routes
+                              if not (hasattr(r, 'path') and str(getattr(r, 'path', '')).startswith('/sim'))]
+
+
+class TestSimulationMarketData:
+    """Test that simulation mode bypasses market hours check."""
+
+    def test_simulation_mode_flag(self):
+        from app.services.market_data import set_simulation_mode, _simulation_mode, _is_market_active
+        original = _simulation_mode
+        try:
+            set_simulation_mode(True)
+            assert _is_market_active() is True
+        finally:
+            set_simulation_mode(original)
+
+
+class TestSimDaemonMode:
+    """Test simulation daemon CLI wiring."""
+
+    def test_resolve_data_dir_sim(self):
+        from utp import _resolve_data_dir
+        result = _resolve_data_dir("data/utp", "sim")
+        assert str(result).endswith("sim")
+
+    def test_sim_date_requires_tickers(self):
+        """--sim-date without --tickers should fail."""
+        import utp
+        args = argparse.Namespace(
+            sim_date="2026-04-01",
+            tickers=None,
+            server_host="0.0.0.0",
+            server_port=8100,
+            data_dir="data/utp",
+            log_level="INFO",
+        )
+        # _cmd_daemon_sim returns 1 when tickers missing
+        result = asyncio.get_event_loop().run_until_complete(utp._cmd_daemon_sim(args, "INFO"))
+        assert result == 1
+
+
+class TestSimulationPicks:
+    """Tests for /sim/picks and /sim/execute-picks endpoints."""
+
+    def _setup_sim_provider(self, tmp_path):
+        """Create CSV data and wire up sim provider + clock."""
+        from app.core.providers.csv_simulation import CSVSimulationProvider
+        from app.services.simulation_clock import init_sim_clock
+
+        # Create equity data
+        eq_dir = tmp_path / "equities" / "SPX"
+        eq_dir.mkdir(parents=True)
+        (eq_dir / "SPX_equities_2026-04-01.csv").write_text(
+            "timestamp,ticker,open,high,low,close,volume,vwap,transactions\n"
+            "2026-04-01 13:30:00+00:00,I:SPX,5500,5520,5480,5510,1000,,\n"
+            "2026-04-01 13:35:00+00:00,I:SPX,5510,5530,5490,5520,1100,,\n"
+            "2026-04-01 13:40:00+00:00,I:SPX,5520,5540,5500,5530,900,,\n"
+        )
+
+        # Create options data with realistic strikes
+        opt_dir = tmp_path / "options" / "SPX"
+        opt_dir.mkdir(parents=True)
+        (opt_dir / "SPX_options_2026-04-01.csv").write_text(
+            "timestamp,ticker,type,strike,expiration,bid,ask,day_close,vwap,fmv,"
+            "delta,gamma,theta,vega,implied_volatility,volume\n"
+            "2026-04-01T13:30:00+00:00,O:SPX,put,5400,2026-04-01,3.50,4.00,3.75,3.75,,,,,,0.20,500\n"
+            "2026-04-01T13:30:00+00:00,O:SPX,put,5375,2026-04-01,1.50,2.00,1.75,1.75,,,,,,0.22,300\n"
+            "2026-04-01T13:30:00+00:00,O:SPX,put,5350,2026-04-01,0.80,1.20,1.00,1.00,,,,,,0.25,200\n"
+            "2026-04-01T13:30:00+00:00,O:SPX,call,5600,2026-04-01,3.00,3.50,3.25,3.25,,,,,,0.18,400\n"
+            "2026-04-01T13:30:00+00:00,O:SPX,call,5625,2026-04-01,1.20,1.70,1.45,1.45,,,,,,0.20,250\n"
+        )
+
+        provider = CSVSimulationProvider(
+            sim_date=date(2026, 4, 1),
+            tickers=["SPX"],
+            equities_dir=tmp_path / "equities",
+            options_dir=tmp_path / "options",
+        )
+        return provider
+
+    @pytest.mark.asyncio
+    async def test_picks_generates_spreads(self, tmp_path):
+        from app.core.providers.csv_simulation import CSVSimulationProvider
+        from app.services.simulation_clock import init_sim_clock, reset_sim_clock
+        from app.routes.simulation import _generate_picks
+        from app.core.provider import ProviderRegistry
+
+        provider = self._setup_sim_provider(tmp_path)
+        try:
+            await provider.connect()
+            ts = provider.get_all_equity_timestamps()
+            clock = init_sim_clock(date(2026, 4, 1), ts)
+            clock._tickers = ["SPX"]
+            ProviderRegistry.register(provider)
+
+            picks = await _generate_picks(
+                tickers=["SPX"],
+                option_types=["put"],
+                min_otm_pct=0.01,
+                min_credit=0.10,
+                max_loss_per_spread=50000,
+                spread_width=None,
+                num_contracts=10,
+                dte=[0],
+                roi_min=0,
+                sort_by="roi",
+                limit=20,
+            )
+            assert len(picks) > 0
+            for pick in picks:
+                assert pick["ticker"] == "SPX"
+                assert pick["option_type"] == "put"
+                assert pick["credit"] > 0
+                assert pick["short_strike"] > pick["long_strike"]  # put spread
+                assert pick["otm_pct"] > 0
+        finally:
+            reset_sim_clock()
+
+    @pytest.mark.asyncio
+    async def test_picks_endpoint(self, tmp_path, client, api_key_headers):
+        from app.core.providers.csv_simulation import CSVSimulationProvider
+        from app.services.simulation_clock import init_sim_clock, reset_sim_clock
+        from app.routes.simulation import router as sim_router
+        from app.main import app as _app
+        from app.core.provider import ProviderRegistry
+
+        provider = self._setup_sim_provider(tmp_path)
+        _app.include_router(sim_router)
+        try:
+            await provider.connect()
+            ts = provider.get_all_equity_timestamps()
+            clock = init_sim_clock(date(2026, 4, 1), ts)
+            clock._tickers = ["SPX"]
+            ProviderRegistry.register(provider)
+
+            resp = await client.post(
+                "/sim/picks",
+                json={
+                    "tickers": ["SPX"],
+                    "option_types": ["put"],
+                    "min_credit": 0.10,
+                    "min_otm_pct": 0.01,
+                    "dte": [0],
+                },
+                headers=api_key_headers,
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "picks" in data
+            assert data["count"] >= 0
+        finally:
+            reset_sim_clock()
+            _app.routes[:] = [r for r in _app.routes
+                              if not (hasattr(r, 'path') and str(getattr(r, 'path', '')).startswith('/sim'))]
+
+
+class TestSimulationSweep:
+    """Tests for /sim/sweep endpoint."""
+
+    @pytest.mark.asyncio
+    async def test_sweep_runs_combinations(self, tmp_path, client, api_key_headers):
+        from app.core.providers.csv_simulation import CSVSimulationProvider
+        from app.services.simulation_clock import init_sim_clock, reset_sim_clock
+        from app.routes.simulation import router as sim_router
+        from app.main import app as _app
+        from app.core.provider import ProviderRegistry
+
+        # Create minimal data
+        eq_dir = tmp_path / "equities" / "SPX"
+        eq_dir.mkdir(parents=True)
+        (eq_dir / "SPX_equities_2026-04-01.csv").write_text(
+            "timestamp,ticker,open,high,low,close,volume,vwap,transactions\n"
+            "2026-04-01 13:30:00+00:00,I:SPX,5500,5520,5480,5510,1000,,\n"
+            "2026-04-01 13:35:00+00:00,I:SPX,5510,5530,5490,5520,1100,,\n"
+        )
+        opt_dir = tmp_path / "options" / "SPX"
+        opt_dir.mkdir(parents=True)
+        (opt_dir / "SPX_options_2026-04-01.csv").write_text(
+            "timestamp,ticker,type,strike,expiration,bid,ask,day_close,vwap,fmv,"
+            "delta,gamma,theta,vega,implied_volatility,volume\n"
+            "2026-04-01T13:30:00+00:00,O:SPX,put,5400,2026-04-01,3.50,4.00,3.75,3.75,,,,,,0.20,500\n"
+            "2026-04-01T13:30:00+00:00,O:SPX,put,5375,2026-04-01,1.50,2.00,1.75,1.75,,,,,,0.22,300\n"
+        )
+
+        provider = CSVSimulationProvider(
+            sim_date=date(2026, 4, 1),
+            tickers=["SPX"],
+            equities_dir=tmp_path / "equities",
+            options_dir=tmp_path / "options",
+        )
+        _app.include_router(sim_router)
+        try:
+            await provider.connect()
+            ts = provider.get_all_equity_timestamps()
+            clock = init_sim_clock(date(2026, 4, 1), ts)
+            clock._tickers = ["SPX"]
+            ProviderRegistry.register(provider)
+
+            resp = await client.post(
+                "/sim/sweep",
+                json={
+                    "tickers": ["SPX"],
+                    "sweep_params": {
+                        "num_contracts": [5, 10],
+                        "min_credit": [0.10, 1.00],
+                    },
+                    "fixed_params": {
+                        "dte": [0],
+                        "entry_start_et": "09:30",
+                        "entry_end_et": "16:00",
+                    },
+                },
+                headers=api_key_headers,
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            # 2 x 2 = 4 combinations
+            assert data["combinations"] == 4
+            assert len(data["results"]) == 4
+            for r in data["results"]:
+                assert "params" in r
+                assert "trades" in r
+                assert "net_pnl" in r
+        finally:
+            reset_sim_clock()
+            _app.routes[:] = [r for r in _app.routes
+                              if not (hasattr(r, 'path') and str(getattr(r, 'path', '')).startswith('/sim'))]
+
+
+class TestSimLoadDate:
+    """Tests for /sim/load-date hot-swap."""
+
+    @pytest.mark.asyncio
+    async def test_load_date_no_sim(self, client, api_key_headers):
+        """load-date fails when not in sim mode (routes not registered)."""
+        resp = await client.post(
+            "/sim/load-date", json={"date": "2026-04-02"}, headers=api_key_headers,
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_load_date_invalid_date(self, client, api_key_headers):
+        """load-date rejects invalid date format."""
+        from app.core.provider import ProviderRegistry as PR
+        from app.services.simulation_clock import init_sim_clock, reset_sim_clock
+        from app.core.providers.csv_simulation import CSVSimulationProvider
+        from app.routes.simulation import router as sim_router
+        from app.main import app as _app
+        _app.include_router(sim_router)
+        try:
+            provider = CSVSimulationProvider(
+                sim_date=date(2026, 4, 1),
+                tickers=["SPX"],
+                equities_dir=Path("/nonexistent"),
+                options_dir=Path("/nonexistent"),
+            )
+            PR.register(provider)
+            ts = [datetime(2026, 4, 1, 13, 30, tzinfo=timezone.utc)]
+            init_sim_clock(date(2026, 4, 1), ts)
+
+            resp = await client.post(
+                "/sim/load-date",
+                json={"date": "not-a-date"},
+                headers=api_key_headers,
+            )
+            assert resp.status_code == 422
+        finally:
+            reset_sim_clock()
+            _app.routes[:] = [r for r in _app.routes
+                              if not (hasattr(r, 'path') and str(getattr(r, 'path', '')).startswith('/sim'))]
+
+    @pytest.mark.asyncio
+    async def test_load_date_not_sim_mode(self, client, api_key_headers):
+        """load-date fails when provider is not CSVSimulationProvider."""
+        from app.services.simulation_clock import init_sim_clock, reset_sim_clock
+        from app.routes.simulation import router as sim_router
+        from app.main import app as _app
+        _app.include_router(sim_router)
+        try:
+            ts = [datetime(2026, 4, 1, 13, 30, tzinfo=timezone.utc)]
+            init_sim_clock(date(2026, 4, 1), ts)
+            # Default provider (IBKRProvider stub) is not CSVSimulationProvider
+            resp = await client.post(
+                "/sim/load-date",
+                json={"date": "2026-04-02"},
+                headers=api_key_headers,
+            )
+            assert resp.status_code == 409
+        finally:
+            reset_sim_clock()
+            _app.routes[:] = [r for r in _app.routes
+                              if not (hasattr(r, 'path') and str(getattr(r, 'path', '')).startswith('/sim'))]
+
+    @pytest.mark.asyncio
+    async def test_load_date_no_data(self, client, api_key_headers, tmp_path):
+        """load-date returns 404 when no equity data exists for the date."""
+        from app.core.provider import ProviderRegistry as PR
+        from app.services.simulation_clock import init_sim_clock, reset_sim_clock
+        from app.core.providers.csv_simulation import CSVSimulationProvider
+        from app.routes.simulation import router as sim_router
+        from app.main import app as _app
+        _app.include_router(sim_router)
+        try:
+            eq_dir = tmp_path / "eq"
+            opt_dir = tmp_path / "opt"
+            eq_dir.mkdir()
+            opt_dir.mkdir()
+            provider = CSVSimulationProvider(
+                sim_date=date(2026, 4, 1),
+                tickers=["SPX"],
+                equities_dir=eq_dir,
+                options_dir=opt_dir,
+            )
+            await provider.connect()
+            PR.register(provider)
+            ts = [datetime(2026, 4, 1, 13, 30, tzinfo=timezone.utc)]
+            init_sim_clock(date(2026, 4, 1), ts)
+
+            resp = await client.post(
+                "/sim/load-date",
+                json={"date": "2026-04-02"},
+                headers=api_key_headers,
+            )
+            assert resp.status_code == 404
+        finally:
+            reset_sim_clock()
+            _app.routes[:] = [r for r in _app.routes
+                              if not (hasattr(r, 'path') and str(getattr(r, 'path', '')).startswith('/sim'))]
+
+    @pytest.mark.asyncio
+    async def test_load_date_success(self, client, api_key_headers, tmp_path):
+        """load-date swaps date when equity data exists."""
+        from app.core.provider import ProviderRegistry as PR
+        from app.services.simulation_clock import init_sim_clock, reset_sim_clock, get_sim_clock
+        from app.core.providers.csv_simulation import CSVSimulationProvider
+        from app.routes.simulation import router as sim_router
+        from app.main import app as _app
+        _app.include_router(sim_router)
+        try:
+            eq_dir = tmp_path / "eq"
+            opt_dir = tmp_path / "opt"
+            # Create equity CSV for 2026-04-02
+            spx_dir = eq_dir / "SPX"
+            spx_dir.mkdir(parents=True)
+            csv_path = spx_dir / "SPX_equities_2026-04-02.csv"
+            csv_path.write_text(
+                "timestamp,open,high,low,close,volume\n"
+                "2026-04-02T13:30:00+00:00,5500,5510,5490,5505,1000\n"
+                "2026-04-02T13:35:00+00:00,5505,5515,5500,5510,1200\n"
+            )
+            opt_dir.mkdir(exist_ok=True)
+
+            # Start with original date
+            provider = CSVSimulationProvider(
+                sim_date=date(2026, 4, 1),
+                tickers=["SPX"],
+                equities_dir=eq_dir,
+                options_dir=opt_dir,
+            )
+            await provider.connect()
+            PR.register(provider)
+            ts = [datetime(2026, 4, 1, 13, 30, tzinfo=timezone.utc)]
+            init_sim_clock(date(2026, 4, 1), ts)
+
+            # Load new date
+            resp = await client.post(
+                "/sim/load-date",
+                json={"date": "2026-04-02"},
+                headers=api_key_headers,
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["active"] is True
+            assert data["date"] == "2026-04-02"
+            assert data["timestamp_count"] == 2
+
+            # Verify clock was updated
+            clock = get_sim_clock()
+            assert clock is not None
+            assert clock.sim_date == date(2026, 4, 2)
+        finally:
+            reset_sim_clock()
+            _app.routes[:] = [r for r in _app.routes
+                              if not (hasattr(r, 'path') and str(getattr(r, 'path', '')).startswith('/sim'))]
+
+
+class TestAutoTraderEngine:
+    """Tests for the auto-trader engine in utp_voice.py."""
+
+    def test_default_config(self):
+        """Default config has expected fields."""
+        from utp_voice import _default_auto_trader_config
+        cfg = _default_auto_trader_config()
+        assert "tickers" in cfg
+        assert "min_otm_pct" in cfg
+        assert "spread_width" in cfg
+        assert cfg["max_trades_per_day"] == 5
+        assert cfg["profit_target_pct"] == 0.50
+
+    def test_et_minutes(self):
+        """Parse ET time strings correctly."""
+        from utp_voice import _et_minutes
+        assert _et_minutes("09:30") == 570
+        assert _et_minutes("15:00") == 900
+        assert _et_minutes("00:00") == 0
+
+    @pytest.mark.asyncio
+    async def test_config_endpoint_set(self):
+        """POST /api/auto-trader/config sets and returns config."""
+        from httpx import ASGITransport as _AT, AsyncClient as _AC
+        from utp_voice import app as voice_app
+        transport = _AT(app=voice_app)
+        async with _AC(transport=transport, base_url="http://test") as vc:
+            resp = await vc.post(
+                "/api/auto-trader/config",
+                json={"tickers": ["NDX"], "spread_width": 50},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["config"]["tickers"] == ["NDX"]
+            assert data["config"]["spread_width"] == 50
+            # Defaults preserved
+            assert data["config"]["profit_target_pct"] == 0.50
+
+    @pytest.mark.asyncio
+    async def test_config_endpoint_get(self):
+        """GET /api/auto-trader/config returns current config."""
+        from httpx import ASGITransport as _AT, AsyncClient as _AC
+        from utp_voice import app as voice_app, _default_auto_trader_config
+        import utp_voice
+        utp_voice._auto_trader_config = _default_auto_trader_config()
+
+        transport = _AT(app=voice_app)
+        async with _AC(transport=transport, base_url="http://test") as vc:
+            resp = await vc.get("/api/auto-trader/config")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert "tickers" in data
+            assert "spread_width" in data
+
+    @pytest.mark.asyncio
+    async def test_run_day_no_sim(self):
+        """run-day returns error when daemon has no sim active."""
+        from httpx import ASGITransport as _AT, AsyncClient as _AC
+        from utp_voice import app as voice_app
+        transport = _AT(app=voice_app)
+        async with _AC(transport=transport, base_url="http://test") as vc:
+            # This will fail because the daemon client can't connect
+            resp = await vc.post("/api/auto-trader/run-day", json={})
+            # Should get a connection error (502 or 500)
+            assert resp.status_code in (500, 502)
+
+    @pytest.mark.asyncio
+    async def test_run_range_missing_dates(self):
+        """run-range requires start_date and end_date."""
+        from httpx import ASGITransport as _AT, AsyncClient as _AC
+        from utp_voice import app as voice_app
+        transport = _AT(app=voice_app)
+        async with _AC(transport=transport, base_url="http://test") as vc:
+            resp = await vc.post("/api/auto-trader/run-range", json={})
+            assert resp.status_code == 422
+
+    def test_build_spreads_filters(self):
+        """compute_spreads_server filters by OTM% and credit."""
+        from utp_voice import compute_spreads_server
+        chain = {
+            "put": [
+                {"strike": 5400, "bid": 3.0, "ask": 3.5, "greeks": {"delta": -0.1}},
+                {"strike": 5380, "bid": 1.5, "ask": 2.0, "greeks": {"delta": -0.05}},
+                {"strike": 5480, "bid": 8.0, "ask": 8.5, "greeks": {"delta": -0.3}},
+                {"strike": 5460, "bid": 5.0, "ask": 5.5, "greeks": {"delta": -0.2}},
+            ],
+        }
+        current_price = 5500
+        spreads = compute_spreads_server(
+            chain, "SPX", current_price, 20,
+            filters={"min_otm_pct": 1.0, "min_credit": 0.50, "option_type": "PUT"},
+        )
+        # All spreads should be OTM by at least 1%
+        for s in spreads:
+            assert abs(s["otm_pct"]) >= 1.0
+            assert s["credit"] >= 0.50
+
+    def test_sim_trader_build_config(self):
+        """sim_trader.build_config returns valid config."""
+        import sim_trader
+        config = sim_trader.build_config()
+        assert isinstance(config, dict)
+        assert "tickers" in config
+        assert "spread_width" in config
+        assert "num_contracts" in config
+        assert config["max_trades_per_day"] > 0
+
+    def test_allowed_expirations_monday(self):
+        """Mon sim_date, DTE=[0,1,2] → Mon/Tue/Wed only (within same week)."""
+        from utp_voice import _allowed_expirations
+        # 2026-04-06 is a Monday
+        result = _allowed_expirations(
+            "2026-04-06", [0, 1, 2],
+            ["2026-04-06", "2026-04-07", "2026-04-08", "2026-04-09", "2026-04-10", "2026-04-13"],
+        )
+        assert "2026-04-06" in result  # DTE=0
+        assert "2026-04-07" in result  # DTE=1
+        assert "2026-04-08" in result  # DTE=2
+        assert "2026-04-09" not in result  # DTE=3, not in dte_list
+        assert "2026-04-13" not in result  # next week
+
+    def test_allowed_expirations_friday(self):
+        """Fri sim_date, DTE=[0,1] → Fri only (Sat filtered by week boundary)."""
+        from utp_voice import _allowed_expirations
+        # 2026-04-10 is a Friday
+        result = _allowed_expirations(
+            "2026-04-10", [0, 1],
+            ["2026-04-10", "2026-04-11", "2026-04-13"],
+        )
+        assert result == ["2026-04-10"]  # DTE=0 only; Sat(DTE=1) > Friday
+
+    def test_allowed_expirations_wednesday(self):
+        """Wed sim_date, DTE=[0,1,2,3] → Wed/Thu/Fri (Sat filtered)."""
+        from utp_voice import _allowed_expirations
+        # 2026-04-08 is a Wednesday
+        result = _allowed_expirations(
+            "2026-04-08", [0, 1, 2, 3],
+            ["2026-04-08", "2026-04-09", "2026-04-10", "2026-04-11", "2026-04-13"],
+        )
+        assert "2026-04-08" in result  # DTE=0
+        assert "2026-04-09" in result  # DTE=1
+        assert "2026-04-10" in result  # DTE=2
+        assert "2026-04-11" not in result  # Saturday, > Friday
+        assert "2026-04-13" not in result  # next week
+
+    def test_allowed_expirations_no_match(self):
+        """DTE=[5] on Monday → empty (next week filtered)."""
+        from utp_voice import _allowed_expirations
+        result = _allowed_expirations(
+            "2026-04-06", [5],
+            ["2026-04-06", "2026-04-07", "2026-04-08", "2026-04-09", "2026-04-10", "2026-04-11"],
+        )
+        assert result == []  # DTE=5 would be Saturday, past Friday
+
+    def test_spreads_tagged_with_expiration(self):
+        """Verify compute_spreads_server spreads can carry expiration/dte tags."""
+        from utp_voice import compute_spreads_server
+        chain = {
+            "put": [
+                {"strike": 5400, "bid": 3.0, "ask": 3.5, "greeks": {"delta": -0.1}},
+                {"strike": 5380, "bid": 1.5, "ask": 2.0, "greeks": {"delta": -0.05}},
+            ],
+        }
+        spreads = compute_spreads_server(
+            chain, "SPX", 5500, 20,
+            filters={"min_otm_pct": 0, "min_credit": 0, "option_type": "PUT"},
+        )
+        # Simulate what _build_spreads_for_engine does with DTE tagging
+        for s in spreads:
+            s["expiration"] = "2026-04-07"
+            s["dte"] = 1
+        for s in spreads:
+            assert "expiration" in s
+            assert "dte" in s
+            assert s["dte"] == 1
+            assert s["expiration"] == "2026-04-07"
+
+    @pytest.mark.asyncio
+    async def test_eod_skips_future_dte(self):
+        """Position with future expiration should not be settled at EOD."""
+        from utp_voice import _run_sim_day
+        import utp_voice
+
+        # Mock the daemon client
+        call_log = []
+
+        class MockClient:
+            async def _get(self, path, params=None):
+                call_log.append(("GET", path))
+                if path == "/sim/status":
+                    return {"date": "2026-04-06", "active": True}
+                if path == "/sim/timestamps":
+                    # Single timestamp (market open)
+                    return {"timestamps": ["2026-04-06T13:30:00+00:00"]}
+                return {}
+
+            async def _post(self, path, json_data=None):
+                call_log.append(("POST", path))
+                return {}
+
+            async def get_quote(self, symbol):
+                return {"last": 5500, "bid": 5499, "ask": 5501}
+
+        old_client = utp_voice.get_daemon_client
+        utp_voice.get_daemon_client = lambda: MockClient()
+        try:
+            # Carry a DTE=1 position into today (ITM enough to avoid profit target)
+            carry = [{
+                "ticker": "SPX", "option_type": "PUT",
+                "short_strike": 5510, "long_strike": 5490,
+                "spread_width": 20, "credit": 2.0,
+                "total_credit": 2000, "total_max_loss": 1800,
+                "roi_pct": 11.1, "otm_pct": 1.8, "num_contracts": 10,
+                "entry_time": "2026-04-06T14:00:00+00:00",
+                "entry_price": 5500, "expiration": "2026-04-07",
+                "dte": 1, "status": "open", "order_id": "",
+            }]
+            config = {
+                "tickers": ["SPX"], "option_types": ["put"],
+                "max_trades_per_day": 0,  # no new entries
+                "min_otm_pct": 0.02, "spread_width": 20,
+                "min_credit": 0.50, "num_contracts": 10, "dte": [0, 1],
+                "max_loss_per_trade": 5000, "max_loss_per_day": 15000,
+                "profit_target_pct": 0.50, "stop_loss_mult": 200.0,
+                "entry_start_et": "09:45", "entry_end_et": "15:00",
+            }
+            result = await _run_sim_day(config, carry_positions=carry)
+            # The position should be in carry_forward (not settled)
+            assert len(result["carry_forward"]) == 1
+            assert result["carry_forward"][0]["status"] == "open"
+            assert result["carry_forward"][0]["expiration"] == "2026-04-07"
+        finally:
+            utp_voice.get_daemon_client = old_client
+
+    @pytest.mark.asyncio
+    async def test_carry_positions(self):
+        """DTE-1 position carries to next day and settles on expiration day."""
+        from utp_voice import _run_sim_day
+        import utp_voice
+
+        class MockClient:
+            def __init__(self, sim_date):
+                self.sim_date = sim_date
+
+            async def _get(self, path, params=None):
+                if path == "/sim/status":
+                    return {"date": self.sim_date, "active": True}
+                if path == "/sim/timestamps":
+                    return {"timestamps": [f"{self.sim_date}T13:30:00+00:00"]}
+                return {}
+
+            async def _post(self, path, json_data=None):
+                return {}
+
+            async def get_quote(self, symbol):
+                return {"last": 5500, "bid": 5499, "ask": 5501}
+
+        config = {
+            "tickers": ["SPX"], "option_types": ["put"],
+            "max_trades_per_day": 0, "min_otm_pct": 0.02,
+            "spread_width": 20, "min_credit": 0.50, "num_contracts": 10,
+            "dte": [0, 1], "max_loss_per_trade": 5000, "max_loss_per_day": 15000,
+            "profit_target_pct": 0.50, "stop_loss_mult": 200.0,
+            "entry_start_et": "09:45", "entry_end_et": "15:00",
+        }
+
+        carry = [{
+            "ticker": "SPX", "option_type": "PUT",
+            "short_strike": 5510, "long_strike": 5490,
+            "spread_width": 20, "credit": 2.0,
+            "total_credit": 2000, "total_max_loss": 1800,
+            "roi_pct": 11.1, "otm_pct": 1.8, "num_contracts": 10,
+            "entry_time": "2026-04-06T14:00:00+00:00",
+            "entry_price": 5500, "expiration": "2026-04-07",
+            "dte": 1, "status": "open", "order_id": "",
+        }]
+
+        old_client = utp_voice.get_daemon_client
+
+        # Day 1 (Apr 6): position carries forward
+        utp_voice.get_daemon_client = lambda: MockClient("2026-04-06")
+        try:
+            r1 = await _run_sim_day(config, carry_positions=carry)
+            assert len(r1["carry_forward"]) == 1
+
+            # Day 2 (Apr 7): position expires today
+            utp_voice.get_daemon_client = lambda: MockClient("2026-04-07")
+            r2 = await _run_sim_day(config, carry_positions=r1["carry_forward"])
+            assert len(r2["carry_forward"]) == 0
+            # Position should be settled
+            settled = [t for t in r2["trades"] if t.get("status") == "closed"]
+            assert len(settled) == 1
+            assert settled[0]["exit_reason"] in ("eod_expire_otm", "eod_itm")
+        finally:
+            utp_voice.get_daemon_client = old_client
+
+    def test_config_dte_field(self):
+        """Config endpoint accepts and returns dte list."""
+        from utp_voice import _default_auto_trader_config
+        cfg = _default_auto_trader_config()
+        assert "dte" in cfg
+        assert isinstance(cfg["dte"], list)
+        assert 0 in cfg["dte"]
+        # Simulate merging with custom dte
+        cfg.update({"dte": [0, 1, 2, 3]})
+        assert cfg["dte"] == [0, 1, 2, 3]

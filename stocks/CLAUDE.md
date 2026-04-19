@@ -644,6 +644,12 @@ python utp.py options SPX --list-expirations     # List available expirations
 python utp.py margin credit-spread --symbol SPX --short-strike 5500 \
   --long-strike 5475 --option-type PUT --expiration 2026-03-20
 python utp.py trade equity --symbol SPY --side BUY --quantity 1
+python utp.py trade credit-spread --symbol SPX --otm-pct 2 --option-type PUT \
+  --expiration 2026-03-20 --quantity 5 --live          # Strikes from current spot
+python utp.py trade iron-condor --symbol SPX --otm-pct 2:3 --width 20 \
+  --expiration 2026-03-20 --quantity 5 --live          # Asymmetric: 2% put / 3% call
+python utp.py trade iron-condor --symbol SPX --close-pct 1.5:2.5 --width 20 \
+  --expiration 2026-03-20 --quantity 5 --live          # Anchored to YESTERDAY'S close
 python utp.py trade --validate-all               # Test all 5 trade types
 python utp.py trade replay <pos-id> --live       # Replay a trade (local or portfolio spread ID)
 python utp.py trades --live                      # Today's trades (IBKR real-time P&L)
@@ -679,6 +685,7 @@ python -m pytest tests/ -v                       # Run all 532 tests
 - **Option chains**: View available expirations, strikes, and live bid/ask/volume for any underlying
 - **Status dashboard**: Unified view of active positions, pending orders, recent trades, cache stats
 - **Always-on daemon**: Server-first architecture with persistent IBKR connection, LAN trust, REPL, Python client library
+- **Trade price freshness**: `trade` subcommands annotate every quote with its cache age; ages 15-60s show a warning, >60s block the trade. Market data endpoints accept `?max_age=N&force_refresh=true`. Env overrides: `UTP_TRADE_PRICE_FRESH_MAX_AGE`, `UTP_TRADE_PRICE_BLOCK_MAX_AGE`.
 
 ### Key Endpoints
 

@@ -330,6 +330,11 @@ app.include_router(import_routes.router)
 app.include_router(playbook_routes.router)
 app.include_router(roll_routes.router)
 
+# Register simulation routes when in sim mode (set by daemon --sim-date)
+if os.environ.get("_UTP_SIM_MODE") == "1":
+    from app.routes.simulation import router as sim_router
+    app.include_router(sim_router)
+
 
 @app.get("/health")
 async def health() -> dict:

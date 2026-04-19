@@ -43,8 +43,11 @@ A high-reliability Python library and REST API for unified multi-broker trading.
 - **Execution Store** -- IBKR execution cache with `perm_id` grouping for multi-leg trade identification
 - **Trade Simulation** -- `--simulate` flag qualifies contracts and checks margin without executing
 - **Trade Replay** -- `trade replay <id>` re-opens a previous trade by position ID, including portfolio spread-grouped positions
+- **Percentage-based Strikes** -- `--otm-pct N` (anchored to current spot) and `--close-pct N` (anchored to previous trading day's close) place strikes at a chosen distance. Iron condors accept asymmetric `put:call` split (e.g. `--otm-pct 2:3` or `--close-pct 1.5:2.5`).
 - **conId Deduplication** -- Position sync uses IBKR `conId` for unique matching, preventing duplicates
 - **0DTE Fix** -- Same-day options stay live until after market close (`exp_date < today` strict check)
+- **Trade Price Freshness** -- Trade commands annotate every price with cache age and block when any quote is >60s old; env vars `UTP_TRADE_PRICE_FRESH_MAX_AGE` (default 15s) and `UTP_TRADE_PRICE_BLOCK_MAX_AGE` (default 60s) tune thresholds. Market data endpoints accept `?max_age=N&force_refresh=true` query params.
+- **Historical Simulation** -- `daemon --sim-date 2026-04-01 --tickers SPX,RUT` replays CSV data through the full UTP infrastructure. Same web UI, CLI, trade commands, portfolio/P&L tracking — but no broker connection. Includes `/sim/*` API endpoints for clock control, pick generation, and parameter sweeps.
 
 ## Quick Start
 

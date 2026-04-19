@@ -144,6 +144,13 @@ class Quote(BaseModel):
     volume: int
     timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     source: str = ""  # e.g. "ibkr", "streaming_cache", "delayed"
+    # Price-freshness fields for trade-path enforcement (≤15s fresh, ≤60s warn, >60s block).
+    # quote_age_seconds: age of the quote relative to "now" at return time.
+    #   None → unknown (e.g., freshly fetched from provider or empty response).
+    # quote_source: finer-grained source label for the caller to display/classify.
+    #   e.g., "fresh_cache", "stale_cache", "provider", "market_closed", "empty".
+    quote_age_seconds: Optional[float] = None
+    quote_source: Optional[str] = None
 
 
 class Position(BaseModel):

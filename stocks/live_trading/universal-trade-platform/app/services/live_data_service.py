@@ -156,22 +156,27 @@ def _group_options_into_spreads(positions: list[dict]) -> list[dict]:
             s_strike = float(short.get("strike", 0) or 0)
             s_right = short.get("right", "") or ""
             s_qty = abs(int(short.get("quantity", 0) or 0))
-            # Find matching long with same right and available qty
-            best_long = None
-            for i, long in enumerate(longs):
-                if long_remaining.get(i, 0) <= 0:
-                    continue
-                if (long.get("right", "") or "") == s_right:
-                    best_long = (i, long)
-                    break
-            if best_long:
+            s_total = s_qty  # original qty for proration
+            short_remaining = s_qty
+
+            # Keep pairing this short with successive longs until fully consumed
+            while short_remaining > 0:
+                # Find next matching long with same right and available qty
+                best_long = None
+                for i, long in enumerate(longs):
+                    if long_remaining.get(i, 0) <= 0:
+                        continue
+                    if (long.get("right", "") or "") == s_right:
+                        best_long = (i, long)
+                        break
+                if not best_long:
+                    break  # No more longs available
+
                 idx, long_leg = best_long
-                # Use min of short qty and remaining long qty
-                pair_qty = min(s_qty, long_remaining[idx])
+                pair_qty = min(short_remaining, long_remaining[idx])
                 long_remaining[idx] -= pair_qty
+                short_remaining -= pair_qty
                 l_strike = float(long_leg.get("strike", 0) or 0)
-                # Prorate values by pair_qty / original_qty
-                s_total = abs(int(short.get("quantity", 0) or 0))
                 l_total = abs(int(long_leg.get("quantity", 0) or 0))
                 s_frac = pair_qty / s_total if s_total else 1
                 l_frac = pair_qty / l_total if l_total else 1
@@ -189,7 +194,6 @@ def _group_options_into_spreads(positions: list[dict]) -> list[dict]:
                                    (long_leg.get("market_price", 0) or 0))
 
                 right_label = "P" if s_right == "P" else "C"
-                # Generate a stable synthetic ID from the conIds
                 import hashlib
                 syn_id = hashlib.md5(f"{short.get('con_id')}_{long_leg.get('con_id')}_{pair_qty}".encode()).hexdigest()
                 spread = {
@@ -214,29 +218,23 @@ def _group_options_into_spreads(positions: list[dict]) -> list[dict]:
                          "strike": l_strike, "quantity": pair_qty, "con_id": long_leg.get("con_id")},
                     ],
                     "con_ids": [short.get("con_id"), long_leg.get("con_id")],
-                    "_synthetic": True,  # Flag for close handler
-                    # Track source position IDs for local store updates after close
+                    "_synthetic": True,
                     "_source_position_ids": [
                         pid for pid in [short.get("position_id"), long_leg.get("position_id")] if pid
                     ],
                 }
                 paired.append(spread)
 
-                # If short had more qty than paired, re-add remainder as unpaired
-                if s_qty > pair_qty:
-                    remainder = dict(short)
-                    remainder["quantity"] = -(s_qty - pair_qty)
-                    remainder["order_type"] = "option"
-                    # Prorate values
-                    rem_frac = (s_qty - pair_qty) / s_total if s_total else 0
-                    for key in ("market_value", "broker_unrealized_pnl", "daily_pnl", "avg_cost"):
-                        if remainder.get(key):
-                            remainder[key] = remainder[key] * rem_frac
-                    paired.append(remainder)
-            else:
-                # Unmatched short — show as individual
-                short["order_type"] = "option"
-                paired.append(short)
+            # If short still has remaining qty after all longs consumed, show as unpaired
+            if short_remaining > 0:
+                remainder = dict(short)
+                remainder["quantity"] = -short_remaining
+                remainder["order_type"] = "option"
+                rem_frac = short_remaining / s_total if s_total else 0
+                for key in ("market_value", "broker_unrealized_pnl", "daily_pnl", "avg_cost"):
+                    if remainder.get(key):
+                        remainder[key] = remainder[key] * rem_frac
+                paired.append(remainder)
 
         # Add unmatched longs (remaining qty)
         for i, long in enumerate(longs):

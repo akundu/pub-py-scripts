@@ -1482,6 +1482,31 @@ async def api_health():
         return {"status": "degraded", "daemon": {"error": str(e)}}
 
 
+# ── Simulation Proxy ──────────────────────────────────────────────────────────
+# Generic proxy for /sim/* endpoints — forwards to UTP daemon so the web UI
+# can control the simulation clock without hitting the daemon directly.
+
+@app.get("/api/sim/{path:path}")
+@app.post("/api/sim/{path:path}")
+async def sim_proxy(path: str, request: Request):
+    """Proxy /api/sim/* → UTP daemon /sim/*."""
+    client = get_daemon_client()
+    http = await client._get_client()
+    target = f"/sim/{path}"
+    try:
+        if request.method == "GET":
+            resp = await http.get(target)
+        else:
+            body = await request.json() if await request.body() else None
+            resp = await http.post(target, json=body)
+        return JSONResponse(content=resp.json(), status_code=resp.status_code)
+    except Exception as e:
+        return JSONResponse(
+            content={"error": str(e), "detail": "Simulation not active or daemon unreachable"},
+            status_code=502,
+        )
+
+
 # ── Pre-Built View API Endpoints ──────────────────────────────────────────────
 
 DEFAULT_TICKERS = ["SPX", "NDX", "RUT"]
@@ -1993,6 +2018,683 @@ def compute_spreads_server(
 
     spreads.sort(key=lambda s: s["roi_pct"], reverse=True)
     return spreads
+
+
+# ── Auto-Trader Engine (sim + live) ──────────────────────────────────────────
+# Server-side engine that can replay a full sim day or date range and return
+# structured results.  Also used in live mode for autonomous trading.
+
+_auto_trader_config: dict = {}
+
+
+def _default_auto_trader_config() -> dict:
+    """Return a fresh default config dict.
+
+    Optimized from auto-research sweep (162 combos, Mar-Apr 2026):
+    #1 val_score=4.38: SPX+RUT PUT DTE[0,1,2] 1.5% OTM W15, early entry.
+    """
+    return {
+        "tickers": ["SPX", "RUT"],
+        "option_types": ["put"],
+        "max_trades_per_day": 5,
+        "min_otm_pct": 0.015,
+        "spread_width": 15,
+        "min_credit": 0.25,
+        "num_contracts": 10,
+        "dte": [0, 1, 2],
+        "max_loss_per_trade": 15000,
+        "max_loss_per_day": 75000,
+        "profit_target_pct": 0.50,
+        "stop_loss_mult": 2.0,
+        "entry_start_et": "09:30",  # 6:30 PT — best premiums at open
+        "entry_end_et": "10:30",   # 7:30 PT — cutoff for new entries
+    }
+
+
+def _get_auto_trader_config() -> dict:
+    global _auto_trader_config
+    if not _auto_trader_config:
+        _auto_trader_config = _default_auto_trader_config()
+    return _auto_trader_config
+
+
+def _et_minutes(tstr: str) -> int:
+    """Parse 'HH:MM' → minutes from midnight."""
+    h, m = tstr.split(":")
+    return int(h) * 60 + int(m)
+
+
+def _allowed_expirations(
+    sim_date_str: str,
+    dte_list: list[int],
+    available_exps: list[str],
+) -> list[str]:
+    """Filter available expirations by DTE list and calendar-week boundary.
+
+    Only keeps expirations where:
+    - DTE (exp_date - sim_date).days is in dte_list
+    - exp_date <= Friday of sim_date's week (no crossing into next week)
+    """
+    from datetime import date as _date_cls
+
+    sim_date = _date_cls.fromisoformat(sim_date_str)
+    # Friday of sim_date's week: weekday() is 0=Mon..4=Fri
+    days_to_friday = 4 - sim_date.weekday()
+    if days_to_friday < 0:
+        days_to_friday = 0  # Saturday/Sunday: cap at Friday (already past)
+    friday = sim_date + timedelta(days=days_to_friday)
+
+    result = []
+    for exp_str in available_exps:
+        try:
+            exp_date = _date_cls.fromisoformat(exp_str)
+        except (ValueError, TypeError):
+            continue
+        dte = (exp_date - sim_date).days
+        if dte in dte_list and exp_date <= friday:
+            result.append(exp_str)
+    return result
+
+
+async def _build_spreads_for_engine(
+    client: UTPDaemonClient,
+    ticker: str,
+    option_type: str,
+    config: dict,
+    sim_date: str = "",
+) -> list[dict]:
+    """Build credit spread candidates via the daemon, filtered by config.
+
+    When sim_date is provided, discovers available expirations and filters
+    by the config's dte list + calendar-week boundary. Each valid expiration
+    is fetched separately and spreads are tagged with expiration/dte.
+    """
+    quote = await client.get_quote(ticker)
+    current_price = quote.get("last") or quote.get("bid") or 0
+    if current_price <= 0:
+        return []
+
+    width = config.get("spread_width", 25)
+    min_otm_pct = config.get("min_otm_pct", 0.02)
+    min_credit = config.get("min_credit", 0.50)
+    max_loss_per_trade = config.get("max_loss_per_trade", 5000)
+    num_contracts = config.get("num_contracts", 10)
+    dte_list = config.get("dte", [0])
+
+    # Compute strike range to fetch
+    range_pct = max(min_otm_pct * 100 + 5, 8)  # generous range
+
+    # Discover available expirations and filter by DTE + week boundary
+    target_expirations: list[str] = []
+    if sim_date:
+        try:
+            exp_data = await client.get_options(ticker, list_expirations=True)
+            all_exps = exp_data.get("expirations", [])
+            target_expirations = _allowed_expirations(sim_date, dte_list, all_exps)
+        except Exception:
+            target_expirations = []
+
+    # If no DTE filtering or no expirations found, fall back to single fetch
+    if not target_expirations:
+        opts_data = await client.get_options(
+            ticker,
+            option_type=option_type.upper(),
+            strike_range_pct=range_pct,
+        )
+        quotes_raw = opts_data.get("quotes", {})
+        if isinstance(quotes_raw, dict):
+            quotes = quotes_raw.get(option_type.lower(), [])
+        elif isinstance(quotes_raw, list):
+            quotes = [q for q in quotes_raw if q.get("type", "").lower() == option_type.lower()]
+        else:
+            quotes = []
+
+        if not quotes:
+            return []
+
+        chain = {option_type.lower(): quotes}
+        all_spreads = compute_spreads_server(
+            chain, ticker, current_price, width,
+            filters={
+                "min_roi_pct": 0,
+                "min_otm_pct": min_otm_pct * 100,
+                "min_credit": min_credit,
+                "option_type": option_type.upper(),
+            },
+        )
+        result = []
+        for s in all_spreads:
+            total_max_loss = s["max_loss"] * num_contracts
+            if total_max_loss <= max_loss_per_trade:
+                s["num_contracts"] = num_contracts
+                s["total_credit"] = round(s["credit"] * 100 * num_contracts, 2)
+                s["total_max_loss"] = round(total_max_loss, 2)
+                s["current_price"] = current_price
+                s["ticker"] = ticker
+                result.append(s)
+        return result
+
+    # Fetch options per valid expiration and build spreads
+    from datetime import date as _date_cls
+    sim_d = _date_cls.fromisoformat(sim_date)
+    result = []
+    for exp_str in target_expirations:
+        try:
+            opts_data = await client.get_options(
+                ticker,
+                option_type=option_type.upper(),
+                expiration=exp_str,
+                strike_range_pct=range_pct,
+            )
+        except Exception:
+            continue
+
+        quotes_raw = opts_data.get("quotes", {})
+        if isinstance(quotes_raw, dict):
+            quotes = quotes_raw.get(option_type.lower(), [])
+        elif isinstance(quotes_raw, list):
+            quotes = [q for q in quotes_raw if q.get("type", "").lower() == option_type.lower()]
+        else:
+            quotes = []
+
+        if not quotes:
+            continue
+
+        chain = {option_type.lower(): quotes}
+        all_spreads = compute_spreads_server(
+            chain, ticker, current_price, width,
+            filters={
+                "min_roi_pct": 0,
+                "min_otm_pct": min_otm_pct * 100,
+                "min_credit": min_credit,
+                "option_type": option_type.upper(),
+            },
+        )
+
+        exp_date = _date_cls.fromisoformat(exp_str)
+        dte_val = (exp_date - sim_d).days
+
+        for s in all_spreads:
+            total_max_loss = s["max_loss"] * num_contracts
+            if total_max_loss <= max_loss_per_trade:
+                s["num_contracts"] = num_contracts
+                s["total_credit"] = round(s["credit"] * 100 * num_contracts, 2)
+                s["total_max_loss"] = round(total_max_loss, 2)
+                s["current_price"] = current_price
+                s["ticker"] = ticker
+                s["expiration"] = exp_str
+                s["dte"] = dte_val
+                result.append(s)
+
+    # Sort by ROI descending
+    result.sort(key=lambda s: s.get("roi_pct", 0), reverse=True)
+    return result
+
+
+async def _run_sim_day(config: dict, carry_positions: list[dict] | None = None) -> dict:
+    """Run the auto-trader strategy for one simulated day.
+
+    Steps through all timestamps on the sim daemon, makes entry/exit decisions,
+    and returns a structured DayResult. Multi-DTE positions with future expirations
+    remain open and can be carried to the next day via carry_positions.
+
+    Args:
+        config: Strategy configuration dict.
+        carry_positions: Open positions carried from previous days (not counted
+            against trades_remaining or daily_risk budget).
+
+    Returns:
+        Dict with day result including 'carry_forward' list of positions still open.
+    """
+    from zoneinfo import ZoneInfo
+    _ET = ZoneInfo("America/New_York")
+
+    client = get_daemon_client()
+
+    # Start with carried positions (they don't consume today's budget)
+    positions: list[dict] = list(carry_positions) if carry_positions else []
+    new_positions: list[dict] = []  # track only today's new entries
+    trades_remaining = config.get("max_trades_per_day", 5)
+    daily_max_loss = config.get("max_loss_per_day", 15000)
+    daily_risk = 0.0
+    daily_realized_pnl = 0.0
+    num_contracts = config.get("num_contracts", 10)
+    profit_target_pct = config.get("profit_target_pct", 0.50)
+    stop_loss_mult = config.get("stop_loss_mult", 2.0)
+
+    entry_start = _et_minutes(config.get("entry_start_et", "09:45"))
+    entry_end = _et_minutes(config.get("entry_end_et", "15:00"))
+
+    # Get simulation status
+    sim_status = await client._get("/sim/status")
+    sim_date = sim_status.get("date", "")
+
+    # Get all timestamps
+    ts_data = await client._get("/sim/timestamps")
+    timestamps = ts_data.get("timestamps", [])
+    if not timestamps:
+        return {
+            "date": sim_date, "trades": [], "net_pnl": 0, "error": "no timestamps",
+            "carry_forward": list(carry_positions) if carry_positions else [],
+        }
+
+    final_spot: dict[str, float] = {}
+
+    for ts_iso in timestamps:
+        # Advance sim clock
+        await client._post("/sim/set-time", {"timestamp": ts_iso})
+
+        # Parse ET time
+        ts_dt = datetime.fromisoformat(ts_iso)
+        et_time = ts_dt.astimezone(_ET)
+        et_min = et_time.hour * 60 + et_time.minute
+
+        # Track final spot for EOD settlement
+        for ticker in config.get("tickers", []):
+            try:
+                q = await client.get_quote(ticker)
+                spot = q.get("last") or q.get("bid") or 0
+                if spot > 0:
+                    final_spot[ticker] = spot
+            except Exception:
+                pass
+
+        # ── Exit checks ──
+        all_open = [p for p in positions if p["status"] == "open"]
+        all_open += [p for p in new_positions if p["status"] == "open"]
+        for pos in all_open:
+            try:
+                ticker = pos["ticker"]
+                spot = final_spot.get(ticker, 0)
+                if spot <= 0:
+                    continue
+
+                # For credit spreads: compute intrinsic value to estimate close cost
+                opt_type = pos["option_type"].upper()
+                short_strike = pos["short_strike"]
+                if opt_type == "PUT":
+                    intrinsic = max(short_strike - spot, 0)
+                else:
+                    intrinsic = max(spot - short_strike, 0)
+
+                credit = pos["credit"]
+                # Profit target: intrinsic low enough that we keep target % of credit
+                if intrinsic <= credit * (1 - profit_target_pct):
+                    pnl = (credit - intrinsic) * 100 * pos["num_contracts"]
+                    pos["status"] = "closed"
+                    pos["exit_reason"] = "profit_target"
+                    pos["exit_time"] = ts_iso
+                    pos["exit_price"] = intrinsic
+                    pos["realized_pnl"] = round(pnl, 2)
+                    daily_realized_pnl += pnl
+                    continue
+
+                # Stop loss: intrinsic exceeds credit * stop_loss_mult
+                if intrinsic >= credit * (1 + stop_loss_mult):
+                    pnl = (credit - intrinsic) * 100 * pos["num_contracts"]
+                    pos["status"] = "closed"
+                    pos["exit_reason"] = "stop_loss"
+                    pos["exit_time"] = ts_iso
+                    pos["exit_price"] = intrinsic
+                    pos["realized_pnl"] = round(pnl, 2)
+                    daily_realized_pnl += pnl
+
+            except Exception:
+                pass
+
+        # ── Entry checks ──
+        open_positions = [p for p in positions if p["status"] == "open"]
+        open_positions += [p for p in new_positions if p["status"] == "open"]
+        if entry_start <= et_min <= entry_end and trades_remaining > 0:
+            if daily_risk < daily_max_loss:
+                for ticker in config.get("tickers", []):
+                    for otype in config.get("option_types", ["put", "call"]):
+                        if trades_remaining <= 0:
+                            break
+                        # Skip if already have an open position for this ticker+type
+                        has_open = any(
+                            p["ticker"] == ticker and p["option_type"] == otype.upper()
+                            for p in open_positions
+                        )
+                        if has_open:
+                            continue
+
+                        try:
+                            candidates = await _build_spreads_for_engine(
+                                client, ticker, otype, config,
+                                sim_date=sim_date,
+                            )
+                            if not candidates:
+                                continue
+
+                            best = candidates[0]
+
+                            # Check daily risk budget
+                            trade_risk = best["total_max_loss"]
+                            if daily_risk + trade_risk > daily_max_loss:
+                                continue
+
+                            # Use actual expiration from spread candidate
+                            exp = best.get("expiration", sim_date)
+                            dte_val = best.get("dte", 0)
+
+                            # Execute through daemon
+                            trade_payload = build_trade_payload({
+                                "trade_type": "credit-spread",
+                                "symbol": ticker,
+                                "option_type": otype.upper(),
+                                "short_strike": best["short_strike"],
+                                "long_strike": best["long_strike"],
+                                "quantity": num_contracts,
+                                "expiration": exp,
+                            })
+                            result = await client.execute_trade(trade_payload)
+
+                            pos_entry = {
+                                "ticker": ticker,
+                                "option_type": otype.upper(),
+                                "short_strike": best["short_strike"],
+                                "long_strike": best["long_strike"],
+                                "spread_width": best["width"],
+                                "credit": best["credit"],
+                                "total_credit": best["total_credit"],
+                                "total_max_loss": best["total_max_loss"],
+                                "roi_pct": best["roi_pct"],
+                                "otm_pct": best["otm_pct"],
+                                "num_contracts": num_contracts,
+                                "entry_time": ts_iso,
+                                "entry_price": best["current_price"],
+                                "expiration": exp,
+                                "dte": dte_val,
+                                "status": "open",
+                                "order_id": result.get("order_id", ""),
+                            }
+                            new_positions.append(pos_entry)
+                            trades_remaining -= 1
+                            daily_risk += trade_risk
+                            open_positions.append(pos_entry)
+
+                        except Exception:
+                            pass
+
+    # ── EOD settlement — only settle positions expiring today ──
+    all_positions = positions + new_positions
+    carry_forward: list[dict] = []
+
+    for pos in [p for p in all_positions if p["status"] == "open"]:
+        pos_exp = pos.get("expiration", sim_date)
+        if pos_exp != sim_date:
+            # Future DTE — carry to next day
+            carry_forward.append(pos)
+            continue
+
+        ticker = pos["ticker"]
+        spot = final_spot.get(ticker, 0)
+        opt_type = pos["option_type"]
+        short_strike = pos["short_strike"]
+
+        if spot <= 0:
+            # Assume OTM
+            pnl = pos["credit"] * 100 * pos["num_contracts"]
+            pos["exit_reason"] = "eod_expire_otm"
+            intrinsic = 0
+        else:
+            if opt_type == "PUT":
+                intrinsic = max(short_strike - spot, 0)
+            else:
+                intrinsic = max(spot - short_strike, 0)
+
+            if intrinsic <= 0:
+                pnl = pos["credit"] * 100 * pos["num_contracts"]
+                pos["exit_reason"] = "eod_expire_otm"
+            else:
+                pnl = (pos["credit"] - intrinsic) * 100 * pos["num_contracts"]
+                pos["exit_reason"] = "eod_itm"
+
+        pos["status"] = "closed"
+        pos["exit_time"] = timestamps[-1] if timestamps else ""
+        pos["exit_price"] = intrinsic if spot > 0 else 0
+        pos["realized_pnl"] = round(pnl, 2)
+        daily_realized_pnl += pnl
+
+    # Compute day result (only count today's trades, not carried positions)
+    closed_positions = [p for p in all_positions if p.get("status") == "closed"]
+    wins = sum(1 for p in closed_positions if p.get("realized_pnl", 0) > 0)
+    losses = sum(1 for p in closed_positions if p.get("realized_pnl", 0) < 0)
+    total_credit = sum(p.get("total_credit", 0) for p in new_positions)
+    total_risk = sum(p.get("total_max_loss", 0) for p in new_positions)
+
+    return {
+        "date": sim_date,
+        "trades": closed_positions + carry_forward,
+        "trades_taken": len(new_positions),
+        "wins": wins,
+        "losses": losses,
+        "net_pnl": round(daily_realized_pnl, 2),
+        "total_credit": round(total_credit, 2),
+        "total_risk": round(total_risk, 2),
+        "win_rate": round(wins / max(len(closed_positions), 1), 4),
+        "carry_forward": carry_forward,
+    }
+
+
+async def _run_sim_range(config: dict, start_date: str, end_date: str) -> dict:
+    """Run the auto-trader across a date range, loading each date on the daemon.
+
+    Multi-DTE positions carry over across days. At range end, any remaining
+    open positions are force-settled at last known spot.
+    """
+    from datetime import date as _date_cls
+
+    client = get_daemon_client()
+    start = _date_cls.fromisoformat(start_date)
+    end = _date_cls.fromisoformat(end_date)
+
+    # Discover available dates by trying to load each trading day
+    results: list[dict] = []
+    current = start
+    total_pnl = 0.0
+    total_trades = 0
+    total_wins = 0
+    peak_risk = 0.0
+    max_drawdown = 0.0
+    running_pnl = 0.0
+    peak_pnl = 0.0
+    skip_count = 0
+    carry_positions: list[dict] = []
+
+    while current <= end:
+        # Skip weekends
+        if current.weekday() >= 5:
+            current += timedelta(days=1)
+            continue
+
+        date_str = current.isoformat()
+        try:
+            # Load the date on the daemon
+            await client._post("/sim/load-date", {"date": date_str})
+            await client._post("/sim/reset")
+
+            # Run one day with carry-over positions
+            day_result = await _run_sim_day(config, carry_positions=carry_positions)
+            carry_positions = day_result.get("carry_forward", [])
+            results.append(day_result)
+
+            total_pnl += day_result.get("net_pnl", 0)
+            total_trades += day_result.get("trades_taken", 0)
+            total_wins += day_result.get("wins", 0)
+            day_risk = day_result.get("total_risk", 0)
+            if day_risk > peak_risk:
+                peak_risk = day_risk
+
+            # Track drawdown
+            running_pnl += day_result.get("net_pnl", 0)
+            if running_pnl > peak_pnl:
+                peak_pnl = running_pnl
+            dd = peak_pnl - running_pnl
+            if dd > max_drawdown:
+                max_drawdown = dd
+
+        except Exception as e:
+            skip_count += 1
+            logger.debug("Skipping %s: %s", date_str, e)
+
+        current += timedelta(days=1)
+
+    # Force-settle any remaining carry positions at last known spot
+    for pos in carry_positions:
+        if pos["status"] != "open":
+            continue
+        # Try to get final spot from the last day's result
+        last_spot = 0
+        if results:
+            last_trades = results[-1].get("trades", [])
+            for t in last_trades:
+                if t.get("ticker") == pos["ticker"] and t.get("entry_price", 0) > 0:
+                    last_spot = t["entry_price"]
+        ticker = pos["ticker"]
+        opt_type = pos["option_type"]
+        short_strike = pos["short_strike"]
+
+        if last_spot <= 0:
+            pnl = pos["credit"] * 100 * pos["num_contracts"]
+            pos["exit_reason"] = "range_end_expire_otm"
+            intrinsic = 0
+        else:
+            if opt_type == "PUT":
+                intrinsic = max(short_strike - last_spot, 0)
+            else:
+                intrinsic = max(last_spot - short_strike, 0)
+            if intrinsic <= 0:
+                pnl = pos["credit"] * 100 * pos["num_contracts"]
+                pos["exit_reason"] = "range_end_expire_otm"
+            else:
+                pnl = (pos["credit"] - intrinsic) * 100 * pos["num_contracts"]
+                pos["exit_reason"] = "range_end_itm"
+        pos["status"] = "closed"
+        pos["realized_pnl"] = round(pnl, 2)
+        pos["exit_price"] = intrinsic if last_spot > 0 else 0
+        total_pnl += pnl
+        running_pnl += pnl
+
+    # Compute aggregate metrics
+    total_losses = total_trades - total_wins
+    win_rate = total_wins / max(total_trades, 1)
+
+    # Profit factor
+    gross_profit = sum(
+        p.get("realized_pnl", 0) for r in results for p in r.get("trades", [])
+        if p.get("realized_pnl", 0) > 0
+    )
+    gross_loss = abs(sum(
+        p.get("realized_pnl", 0) for r in results for p in r.get("trades", [])
+        if p.get("realized_pnl", 0) < 0
+    ))
+    profit_factor = gross_profit / max(gross_loss, 1)
+
+    # Sharpe (daily)
+    daily_pnls = [r.get("net_pnl", 0) for r in results]
+    if len(daily_pnls) > 1:
+        import statistics
+        mean_pnl = statistics.mean(daily_pnls)
+        std_pnl = statistics.stdev(daily_pnls)
+        sharpe = (mean_pnl / std_pnl * (252 ** 0.5)) if std_pnl > 0 else 0
+    else:
+        sharpe = 0
+
+    # val_score = (total_pnl / peak_risk) × win_rate × min(profit_factor, 5) / 5
+    val_score = 0.0
+    if peak_risk > 0:
+        val_score = (total_pnl / peak_risk) * win_rate * min(profit_factor, 5) / 5
+
+    return {
+        "start_date": start_date,
+        "end_date": end_date,
+        "days_traded": len(results),
+        "days_skipped": skip_count,
+        "total_trades": total_trades,
+        "total_wins": total_wins,
+        "total_losses": total_losses,
+        "win_rate": round(win_rate, 4),
+        "total_pnl": round(total_pnl, 2),
+        "peak_risk": round(peak_risk, 2),
+        "max_drawdown": round(max_drawdown, 2),
+        "profit_factor": round(profit_factor, 4),
+        "sharpe": round(sharpe, 4),
+        "val_score": round(val_score, 6),
+        "daily_results": results,
+        "config": config,
+    }
+
+
+# ── Auto-Trader Engine API Endpoints ──────────────────────────────────────────
+
+
+@app.post("/api/auto-trader/config")
+async def api_auto_trader_set_config(request: Request):
+    """Set strategy parameters for the auto-trader engine."""
+    global _auto_trader_config
+    body = await request.json()
+    # Merge with defaults
+    cfg = _default_auto_trader_config()
+    cfg.update(body)
+    _auto_trader_config = cfg
+    return {"status": "ok", "config": cfg}
+
+
+@app.get("/api/auto-trader/config")
+async def api_auto_trader_get_config():
+    """Get current auto-trader engine configuration."""
+    return _get_auto_trader_config()
+
+
+@app.post("/api/auto-trader/run-day")
+async def api_auto_trader_run_day(request: Request):
+    """Run the auto-trader strategy for the current sim day.
+
+    The daemon must be in simulation mode with a date loaded.
+    Steps through all timestamps and returns the full day result.
+    """
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    config = dict(_get_auto_trader_config())
+    if body:
+        config.update(body)
+
+    try:
+        result = await _run_sim_day(config)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Daemon error: {e}")
+    return result
+
+
+@app.post("/api/auto-trader/run-range")
+async def api_auto_trader_run_range(request: Request):
+    """Run the auto-trader across a date range.
+
+    Calls /sim/load-date + run-day for each trading day in the range.
+    Returns aggregate results including val_score.
+    """
+    body = await request.json()
+    start_date = body.get("start_date")
+    end_date = body.get("end_date")
+    if not start_date or not end_date:
+        raise HTTPException(status_code=422, detail="start_date and end_date required")
+
+    config = dict(_get_auto_trader_config())
+    # Allow overriding config in the request body
+    if "config" in body:
+        config.update(body["config"])
+
+    try:
+        result = await _run_sim_range(config, start_date, end_date)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Daemon error: {e}")
+    return result
 
 
 # ── Auto-Trade System ─────────────────────────────────────────────────────────
@@ -3430,6 +4132,203 @@ async def api_auto_trade_stop(username: str = Depends(require_session)):
         _auto_trade_task.cancel()
     logger.info("Auto-trade stopped by %s", username)
     return {"status": "stopped"}
+
+
+# ── Auto-Trader Engine Live Loop ─────────────────────────────────────────────
+# Uses the optimized auto-trader engine config (DTE-aware, carry-over, etc.)
+# for live trading. Runs as a background task that wakes up every interval.
+
+_engine_live_task: asyncio.Task | None = None
+
+
+async def _engine_live_loop(config: dict, interval_seconds: int = 60) -> None:
+    """Background loop: use auto-trader engine logic for live trading.
+
+    Wakes every interval_seconds, evaluates spreads using DTE-aware
+    _build_spreads_for_engine, executes the best candidates via the daemon.
+    Runs during the configured entry window (entry_start_et → entry_end_et).
+    Checks exits on open positions every cycle.
+    """
+    from zoneinfo import ZoneInfo
+    _ET = ZoneInfo("America/New_York")
+
+    client = get_daemon_client()
+    positions: list[dict] = []
+    daily_risk = 0.0
+    num_contracts = config.get("num_contracts", 10)
+    profit_target_pct = config.get("profit_target_pct", 0.50)
+    stop_loss_mult = config.get("stop_loss_mult", 2.0)
+    entry_start = _et_minutes(config.get("entry_start_et", "09:30"))
+    entry_end = _et_minutes(config.get("entry_end_et", "10:30"))
+    max_trades = config.get("max_trades_per_day", 5)
+    daily_max_loss = config.get("max_loss_per_day", 75000)
+    trades_taken = 0
+
+    logger.info("Engine live loop started: %s", {k: v for k, v in config.items() if k != "dte"})
+
+    while True:
+        try:
+            now_et = datetime.now(_ET)
+            et_min = now_et.hour * 60 + now_et.minute
+
+            # Stop after market close (1:00 PM PT / 16:00 ET)
+            if et_min >= 960:
+                logger.info("Engine live loop: market closed, stopping")
+                break
+
+            # Before market open, sleep
+            if et_min < 570:  # 9:30 ET
+                await asyncio.sleep(30)
+                continue
+
+            # Get today's date for DTE filtering
+            today_str = now_et.strftime("%Y-%m-%d")
+
+            # ── Exit checks on open positions ──
+            for pos in [p for p in positions if p["status"] == "open"]:
+                try:
+                    ticker = pos["ticker"]
+                    q = await client.get_quote(ticker)
+                    spot = q.get("last") or q.get("bid") or 0
+                    if spot <= 0:
+                        continue
+
+                    opt_type = pos["option_type"].upper()
+                    short_strike = pos["short_strike"]
+                    if opt_type == "PUT":
+                        intrinsic = max(short_strike - spot, 0)
+                    else:
+                        intrinsic = max(spot - short_strike, 0)
+
+                    credit = pos["credit"]
+                    if intrinsic <= credit * (1 - profit_target_pct):
+                        pos["status"] = "closed"
+                        pos["exit_reason"] = "profit_target"
+                        pnl = (credit - intrinsic) * 100 * pos["num_contracts"]
+                        pos["realized_pnl"] = round(pnl, 2)
+                        logger.info("Engine live: PROFIT TARGET %s %s %s/%s P&L=$%.2f",
+                                    ticker, opt_type, short_strike, pos["long_strike"], pnl)
+
+                    elif intrinsic >= credit * (1 + stop_loss_mult):
+                        pos["status"] = "closed"
+                        pos["exit_reason"] = "stop_loss"
+                        pnl = (credit - intrinsic) * 100 * pos["num_contracts"]
+                        pos["realized_pnl"] = round(pnl, 2)
+                        logger.info("Engine live: STOP LOSS %s %s %s/%s P&L=$%.2f",
+                                    ticker, opt_type, short_strike, pos["long_strike"], pnl)
+                except Exception as e:
+                    logger.debug("Engine live exit check error: %s", e)
+
+            # ── Entry checks (only during entry window) ──
+            open_positions = [p for p in positions if p["status"] == "open"]
+            if entry_start <= et_min <= entry_end and trades_taken < max_trades and daily_risk < daily_max_loss:
+                for ticker in config.get("tickers", ["SPX", "RUT"]):
+                    for otype in config.get("option_types", ["put"]):
+                        if trades_taken >= max_trades:
+                            break
+                        # Skip if already have open position for this ticker+type
+                        if any(p["ticker"] == ticker and p["option_type"] == otype.upper()
+                               for p in open_positions):
+                            continue
+
+                        try:
+                            candidates = await _build_spreads_for_engine(
+                                client, ticker, otype, config, sim_date=today_str,
+                            )
+                            if not candidates:
+                                continue
+
+                            best = candidates[0]
+                            trade_risk = best["total_max_loss"]
+                            if daily_risk + trade_risk > daily_max_loss:
+                                continue
+
+                            exp = best.get("expiration", today_str)
+                            payload = build_trade_payload({
+                                "trade_type": "credit-spread",
+                                "symbol": ticker,
+                                "option_type": otype.upper(),
+                                "short_strike": best["short_strike"],
+                                "long_strike": best["long_strike"],
+                                "quantity": num_contracts,
+                                "expiration": exp,
+                            })
+                            result = await client.execute_trade(payload)
+
+                            pos_entry = {
+                                "ticker": ticker,
+                                "option_type": otype.upper(),
+                                "short_strike": best["short_strike"],
+                                "long_strike": best["long_strike"],
+                                "credit": best["credit"],
+                                "total_credit": best["total_credit"],
+                                "total_max_loss": best["total_max_loss"],
+                                "num_contracts": num_contracts,
+                                "expiration": exp,
+                                "dte": best.get("dte", 0),
+                                "status": "open",
+                                "entry_time": _now_iso(),
+                                "order_id": result.get("order_id", ""),
+                            }
+                            positions.append(pos_entry)
+                            trades_taken += 1
+                            daily_risk += trade_risk
+                            open_positions.append(pos_entry)
+
+                            logger.info("Engine live: ENTERED %s %s %s/%s cr=$%.2f exp=%s dte=%d",
+                                        ticker, otype.upper(), best["short_strike"],
+                                        best["long_strike"], best["credit"], exp, best.get("dte", 0))
+
+                        except Exception as e:
+                            logger.warning("Engine live entry error for %s %s: %s", ticker, otype, e)
+
+            await asyncio.sleep(interval_seconds)
+
+        except asyncio.CancelledError:
+            logger.info("Engine live loop cancelled")
+            break
+        except Exception as e:
+            logger.error("Engine live loop error: %s", e)
+            await asyncio.sleep(30)
+
+
+@app.post("/api/auto-trader/start-live")
+async def api_auto_trader_start_live(request: Request):
+    """Start the auto-trader engine in live mode.
+
+    Uses the optimized engine config (DTE-aware, multi-expiration).
+    Runs as a background task checking every interval_seconds.
+    No authentication required when PUBLIC_MODE is enabled.
+    """
+    global _engine_live_task
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    config = dict(_get_auto_trader_config())
+    if body:
+        config.update(body)
+
+    interval = body.get("interval_seconds", 60)
+
+    if _engine_live_task and not _engine_live_task.done():
+        _engine_live_task.cancel()
+        await asyncio.sleep(0.5)
+
+    _engine_live_task = asyncio.create_task(_engine_live_loop(config, interval))
+    return {"status": "started", "config": config, "interval_seconds": interval}
+
+
+@app.post("/api/auto-trader/stop-live")
+async def api_auto_trader_stop_live():
+    """Stop the live auto-trader engine."""
+    global _engine_live_task
+    if _engine_live_task and not _engine_live_task.done():
+        _engine_live_task.cancel()
+        return {"status": "stopped"}
+    return {"status": "not_running"}
 
 
 @app.get("/api/auto-trade/status")

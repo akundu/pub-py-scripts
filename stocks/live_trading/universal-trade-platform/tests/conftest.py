@@ -65,6 +65,10 @@ async def _setup_providers(tmp_path):
     reset_execution_store()
     reset_option_quote_streaming()
     reset_roll_service()
+    from app.services.simulation_clock import reset_sim_clock
+    from app.services.market_data import set_simulation_mode
+    reset_sim_clock()
+    set_simulation_mode(False)
 
     # Reset daemon shared state between tests
     from utp import _daemon_state

@@ -46,6 +46,15 @@ from app.models import Broker, Quote
 
 logger = logging.getLogger(__name__)
 
+# ── Simulation mode override ───────────────────────────────────────────────
+_simulation_mode: bool = False
+
+
+def set_simulation_mode(enabled: bool) -> None:
+    """When True, _is_market_active() always returns True (CSV sim feeds)."""
+    global _simulation_mode
+    _simulation_mode = enabled
+
 
 def _is_market_active() -> bool:
     """True during market hours +/- 10 minutes (09:20-16:10 ET on trading days).
@@ -53,6 +62,8 @@ def _is_market_active() -> bool:
     Use this to decide whether to fetch live data from IBKR/providers.
     Outside this window, serve only cached data — no provider round-trips.
     """
+    if _simulation_mode:
+        return True
     try:
         from common.market_hours import is_market_hours, is_trading_day
         from zoneinfo import ZoneInfo
@@ -112,7 +123,24 @@ def _is_valid_price(symbol: str, price: float) -> bool:
     return price > 0
 
 
-async def get_quote(symbol: str, broker: Broker = Broker.IBKR) -> Quote:
+def _tick_age_seconds(tick: dict) -> float | None:
+    """Compute age (seconds) of a streaming tick from its ISO timestamp, or None."""
+    try:
+        ts = datetime.fromisoformat(tick["timestamp"])
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - ts).total_seconds()
+    except Exception:
+        return None
+
+
+async def get_quote(
+    symbol: str,
+    broker: Broker = Broker.IBKR,
+    *,
+    max_age: float | None = None,
+    force_refresh: bool = False,
+) -> Quote:
     """Get a quote for a symbol.
 
     Order of precedence:
@@ -121,16 +149,25 @@ async def get_quote(symbol: str, broker: Broker = Broker.IBKR) -> Quote:
     3. Provider reqMktData / snapshot — slow (10-18s TWS, 2s CPG)
 
     All prices are validated against per-index floor prices.
+
+    Parameters:
+        max_age: when set, treat any cached tick older than this as stale.  If
+            the cache is older than ``max_age``, attempt a provider refresh
+            before falling back to stale cache.  None keeps legacy behavior.
+        force_refresh: when True, skip all caches and always hit the provider
+            (subject to market-hours gating).
     """
     symbol = symbol.upper()
 
     # 1. Streaming cache (instant)
     from app.services.market_data_streaming import get_streaming_service
     svc = get_streaming_service()
-    if svc and svc.is_running:
-        tick = svc.get_last_tick(symbol, max_age_seconds=_QUOTE_STREAMING_TTL)
+    fresh_ttl = max_age if max_age is not None else _QUOTE_STREAMING_TTL
+    if not force_refresh and svc and svc.is_running:
+        tick = svc.get_last_tick(symbol, max_age_seconds=fresh_ttl)
         if tick and tick.get("price", 0) > 0 and _is_valid_price(symbol, tick["price"]):
             price = tick["price"]
+            age = _tick_age_seconds(tick)
             return Quote(
                 symbol=symbol,
                 bid=tick.get("bid") or price,
@@ -139,36 +176,107 @@ async def get_quote(symbol: str, broker: Broker = Broker.IBKR) -> Quote:
                 volume=tick.get("volume", 0),
                 timestamp=datetime.fromisoformat(tick["timestamp"]),
                 source="streaming_cache",
+                quote_age_seconds=age,
+                quote_source="fresh_cache",
             )
 
-    # 2. Stale streaming tick (any age — better than a slow provider round-trip)
-    if svc and svc.is_running:
-        stale_tick = svc.get_last_tick(symbol, max_age_seconds=3600)  # 1hr closed TTL
-        if stale_tick and stale_tick.get("price", 0) > 0 and _is_valid_price(symbol, stale_tick["price"]):
-            price = stale_tick["price"]
-            logger.debug("Serving stale streaming tick for %s (age > %ds)", symbol, _QUOTE_STREAMING_TTL)
-            return Quote(
-                symbol=symbol,
-                bid=stale_tick.get("bid") or price,
-                ask=stale_tick.get("ask") or price,
-                last=price,
-                volume=stale_tick.get("volume", 0),
-                timestamp=datetime.fromisoformat(stale_tick["timestamp"]),
-                source="streaming_cache",
-            )
+    # 2. Stale streaming tick (any age — better than a slow provider round-trip).
+    #    When caller provided max_age, we skip this stale branch so the provider
+    #    branch runs (caller wants a forced refresh if possible).  If the provider
+    #    call fails or market is closed, fall back after provider in the helper below.
+    stale_tick_candidate: dict | None = None
+    if svc and svc.is_running and not force_refresh:
+        stale_tick_candidate = svc.get_last_tick(symbol, max_age_seconds=3600)
+
+    if (
+        max_age is None
+        and not force_refresh
+        and stale_tick_candidate
+        and stale_tick_candidate.get("price", 0) > 0
+        and _is_valid_price(symbol, stale_tick_candidate["price"])
+    ):
+        price = stale_tick_candidate["price"]
+        logger.debug("Serving stale streaming tick for %s (age > %ds)", symbol, _QUOTE_STREAMING_TTL)
+        age = _tick_age_seconds(stale_tick_candidate)
+        return Quote(
+            symbol=symbol,
+            bid=stale_tick_candidate.get("bid") or price,
+            ask=stale_tick_candidate.get("ask") or price,
+            last=price,
+            volume=stale_tick_candidate.get("volume", 0),
+            timestamp=datetime.fromisoformat(stale_tick_candidate["timestamp"]),
+            source="streaming_cache",
+            quote_age_seconds=age,
+            quote_source="stale_cache",
+        )
 
     # 3. Provider (only fetch live when market is active +/- 10 min)
     provider = ProviderRegistry.get(broker)
     if not _is_market_active() and hasattr(provider, "is_healthy"):
-        return Quote(symbol=symbol, bid=0, ask=0, last=0, volume=0, source="market_closed")
-    quote = await provider.get_quote(symbol)
+        # Market closed — caller asked for a fresh fetch we cannot honor.  If a
+        # stale cached tick is available, return it so the caller can classify
+        # freshness explicitly.  Otherwise return the "market_closed" sentinel.
+        if (
+            stale_tick_candidate
+            and stale_tick_candidate.get("price", 0) > 0
+            and _is_valid_price(symbol, stale_tick_candidate["price"])
+        ):
+            price = stale_tick_candidate["price"]
+            age = _tick_age_seconds(stale_tick_candidate)
+            return Quote(
+                symbol=symbol,
+                bid=stale_tick_candidate.get("bid") or price,
+                ask=stale_tick_candidate.get("ask") or price,
+                last=price,
+                volume=stale_tick_candidate.get("volume", 0),
+                timestamp=datetime.fromisoformat(stale_tick_candidate["timestamp"]),
+                source="streaming_cache",
+                quote_age_seconds=age,
+                quote_source="stale_cache",
+            )
+        return Quote(
+            symbol=symbol, bid=0, ask=0, last=0, volume=0,
+            source="market_closed", quote_source="market_closed",
+        )
+    try:
+        quote = await provider.get_quote(symbol)
+    except Exception as e:
+        logger.debug("Provider get_quote failed for %s: %s", symbol, e)
+        # Fall back to stale cache if available
+        if (
+            stale_tick_candidate
+            and stale_tick_candidate.get("price", 0) > 0
+            and _is_valid_price(symbol, stale_tick_candidate["price"])
+        ):
+            price = stale_tick_candidate["price"]
+            age = _tick_age_seconds(stale_tick_candidate)
+            return Quote(
+                symbol=symbol,
+                bid=stale_tick_candidate.get("bid") or price,
+                ask=stale_tick_candidate.get("ask") or price,
+                last=price,
+                volume=stale_tick_candidate.get("volume", 0),
+                timestamp=datetime.fromisoformat(stale_tick_candidate["timestamp"]),
+                source="streaming_cache",
+                quote_age_seconds=age,
+                quote_source="stale_cache",
+            )
+        raise
 
     # Validate provider response
     price = quote.last or quote.bid or quote.ask or 0
     if price > 0 and not _is_valid_price(symbol, price):
         logger.warning("Provider returned garbage quote for %s: %.2f — returning zero", symbol, price)
-        return Quote(symbol=symbol, bid=0, ask=0, last=0, volume=0, source="rejected")
+        return Quote(
+            symbol=symbol, bid=0, ask=0, last=0, volume=0,
+            source="rejected", quote_source="rejected",
+        )
 
+    # Decorate with freshness metadata (provider result is "just fetched").
+    if quote.quote_source is None:
+        quote.quote_source = "provider"
+    if quote.quote_age_seconds is None:
+        quote.quote_age_seconds = 0.0
     return quote
 
 
@@ -180,6 +288,8 @@ async def get_option_quotes(
     strike_min: float | None = None,
     strike_max: float | None = None,
     broker: Broker = Broker.IBKR,
+    max_age: float | None = None,
+    force_refresh: bool = False,
 ) -> list[dict]:
     """Get option quotes for a symbol/expiration/type.
 
@@ -187,45 +297,106 @@ async def get_option_quotes(
     1. Option quote streaming cache (< 5 min market hours) — instant
     2. Stale streaming cache (< 30 min) — instant, slightly old
     3. Provider get_option_quotes — slow (2-18s depending on TWS/CPG)
+
+    Parameters:
+        max_age: when set, treat any cached quote older than this as stale.
+            If streaming cache age exceeds ``max_age``, attempt a provider
+            refresh.  None keeps legacy behavior (90s market / 3600s closed).
+        force_refresh: when True, skip all caches and always hit the provider
+            (subject to market-hours gating).
+    """
+    quotes, _age, _source = await get_option_quotes_with_age(
+        symbol, expiration, option_type,
+        strike_min=strike_min, strike_max=strike_max, broker=broker,
+        max_age=max_age, force_refresh=force_refresh,
+    )
+    return quotes
+
+
+async def get_option_quotes_with_age(
+    symbol: str,
+    expiration: str,
+    option_type: str,
+    *,
+    strike_min: float | None = None,
+    strike_max: float | None = None,
+    broker: Broker = Broker.IBKR,
+    max_age: float | None = None,
+    force_refresh: bool = False,
+) -> tuple[list[dict], float | None, str]:
+    """Return (quotes, age_seconds, source) for option quotes.
+
+    ``source`` ∈ {"fresh_cache", "stale_cache", "provider", "empty"}.
+    ``age_seconds`` is the cache age when served from cache, ``0.0`` when
+    freshly fetched from the provider, or ``None`` when no quotes are
+    available.
     """
     symbol = symbol.upper()
 
     from app.services.option_quote_streaming import get_option_quote_streaming
     oq_svc = get_option_quote_streaming()
 
-    # 1. Fresh cache
-    if oq_svc:
+    # 1. Fresh cache (respect caller-supplied max_age, else module default)
+    fresh_ttl = max_age if max_age is not None else _OPTION_CACHE_TTL
+    if not force_refresh and oq_svc:
         cached = oq_svc.get_cached_quotes(
             symbol, expiration, option_type,
             strike_min=strike_min, strike_max=strike_max,
-            max_age=_OPTION_CACHE_TTL,  # 0 = auto
+            max_age=fresh_ttl,
         )
         if cached:
-            return cached
+            age = oq_svc._cache.get_age(symbol, expiration, option_type)
+            return cached, age, "fresh_cache"
 
-    # 2. Stale cache (better than slow provider)
-    if oq_svc:
-        stale = oq_svc.get_cached_quotes(
+    # 2. Stale cache capture (served only if provider is unavailable or when
+    #    no max_age was provided — legacy behavior).  When a caller passes
+    #    max_age, we prefer to attempt a provider refresh first.
+    stale_quotes: list[dict] | None = None
+    stale_age: float | None = None
+    if oq_svc and not force_refresh:
+        stale_quotes = oq_svc.get_cached_quotes(
             symbol, expiration, option_type,
             strike_min=strike_min, strike_max=strike_max,
             max_age=_OPTION_STALE_TTL,
         )
-        if stale:
-            logger.debug("Serving stale option quotes for %s %s %s (< %ds)",
-                         symbol, expiration, option_type, _OPTION_STALE_TTL)
-            return stale
+        if stale_quotes:
+            stale_age = oq_svc._cache.get_age(symbol, expiration, option_type)
+
+    if max_age is None and stale_quotes:
+        logger.debug("Serving stale option quotes for %s %s %s (< %ds)",
+                     symbol, expiration, option_type, _OPTION_STALE_TTL)
+        return stale_quotes, stale_age, "stale_cache"
 
     # 3. Provider (only fetch live when market is active +/- 10 min)
     provider = ProviderRegistry.get(broker)
     if not _is_market_active() and hasattr(provider, "is_healthy"):
-        return []  # No live data outside market window — cache-only
+        # Market closed — honor stale cache if present, else empty.
+        if stale_quotes:
+            return stale_quotes, stale_age, "stale_cache"
+        return [], None, "empty"
     if hasattr(provider, "get_option_quotes"):
-        quotes = await provider.get_option_quotes(
-            symbol, expiration, option_type,
-            strike_min=strike_min, strike_max=strike_max,
-        )
-        return _normalize_option_quotes(quotes)
-    return []
+        try:
+            raw = await provider.get_option_quotes(
+                symbol, expiration, option_type,
+                strike_min=strike_min, strike_max=strike_max,
+            )
+        except Exception as e:
+            logger.debug("Provider get_option_quotes failed for %s %s %s: %s",
+                         symbol, expiration, option_type, e)
+            if stale_quotes:
+                return stale_quotes, stale_age, "stale_cache"
+            return [], None, "empty"
+        quotes = _normalize_option_quotes(raw)
+        if quotes:
+            return quotes, 0.0, "provider"
+        # Provider returned nothing — fall back to stale cache
+        if stale_quotes:
+            return stale_quotes, stale_age, "stale_cache"
+        return [], None, "empty"
+    # Provider doesn't implement get_option_quotes
+    if stale_quotes:
+        return stale_quotes, stale_age, "stale_cache"
+    return [], None, "empty"
 
 
 async def get_option_chain(symbol: str, broker: Broker = Broker.IBKR) -> dict:

@@ -63,6 +63,28 @@ Provider (TWS / CPG / future)
      close, portfolio, utp_voice)
 ```
 
+### Trade Price Freshness
+
+Before any trade is submitted — both in summary mode (no `--confirm`) and execution mode — every price displayed in the order summary is classified by its cache age:
+
+| Age                  | Behavior                                  |
+|----------------------|-------------------------------------------|
+| ≤ 15s                | fresh; annotation like `[3s old]`         |
+| 15s – 60s            | warn; annotation `[⚠ STALE: 47s old]`, trade proceeds |
+| > 60s                | **block**; trade refused, user must retry |
+
+When the cache is staler than 15s, the centralized layer (`app/services/market_data.py`) attempts a provider refresh via `get_quote(..., max_age=...)` / `get_option_quotes_with_age(..., max_age=...)`. Only if the provider fetch fails or the market is closed does the code fall back to stale cache; in that case the age classifier decides whether to show a warning or block.
+
+**HTTP surface:**
+- `GET /market/quote/{sym}?max_age=15&force_refresh=false` — query params enforce freshness; response includes `quote_age_seconds` + `quote_source`.
+- `GET /market/options/{sym}?...&max_age=15` — response includes `meta.age_seconds`, `meta.source`, and a `per_type` age map.
+
+**CLI env var overrides:**
+- `UTP_TRADE_PRICE_FRESH_MAX_AGE` (default 15)
+- `UTP_TRADE_PRICE_BLOCK_MAX_AGE` (default 60)
+
+Dry-run mode (`--dry-run`) disables enforcement and prints `ℹ Dry-run: price freshness enforcement disabled.` so paper-walkthroughs aren't blocked by stale data.
+
 ## Server-First Architecture (v4.0)
 
 UTP now supports an **always-on daemon** that holds the IBKR connection, runs background tasks, and serves the HTTP API. All interaction goes through HTTP — CLI auto-detects the daemon.
@@ -95,6 +117,159 @@ python utp.py repl
 curl http://192.168.1.50:8000/dashboard/summary
 curl http://192.168.1.50:8000/market/quote/SPX
 ```
+
+### Simulation Mode (Historical Replay)
+
+Replay historical CSV data through the full UTP infrastructure — same web UI, same trade commands, same portfolio/P&L tracking — but driven entirely from CSV files for a chosen date, with no broker connection.
+
+```bash
+# Start simulation daemon for April 1 (SPX + RUT)
+python utp.py daemon --sim-date 2026-04-01 --tickers SPX,RUT --server-port 8100
+
+# In another terminal — CLI commands route through sim daemon
+python utp.py quote SPX --server http://localhost:8100
+python utp.py options SPX --strike-range 2 --server http://localhost:8100
+python utp.py portfolio --server http://localhost:8100
+
+# Control simulation clock
+curl -X POST http://localhost:8100/sim/set-time -d '{"time": "10:30"}'
+curl -X POST http://localhost:8100/sim/set-time -d '{"advance_minutes": 5}'
+curl -X POST http://localhost:8100/sim/auto-advance -d '{"enabled": true, "interval": 3.0}'
+
+# Place a simulated trade (instant fill at CSV bid/ask)
+python utp.py trade credit-spread --symbol SPX --otm-pct 2 \
+  --option-type PUT --expiration 2026-04-01 --quantity 10 \
+  --server http://localhost:8100 --confirm
+
+# Generate trade picks at current time
+curl -X POST http://localhost:8100/sim/picks \
+  -H "Content-Type: application/json" \
+  -d '{"tickers":["SPX"],"option_types":["put"],"min_credit":0.50}'
+
+# Parameter sweep (runs full day with different settings)
+curl -X POST http://localhost:8100/sim/sweep \
+  -H "Content-Type: application/json" \
+  -d '{"tickers":["SPX"],"sweep_params":{"num_contracts":[5,10,20],"min_credit":[0.25,0.50]}}'
+
+# Reset and try again
+curl -X POST http://localhost:8100/sim/reset
+
+# Point utp_voice web UI at sim daemon
+UTP_DAEMON_URL=http://localhost:8100 python utp_voice.py serve --port 8801
+```
+
+**Key details:**
+- Data source: `equities_output/` (equity bars) + `options_csv_output/` (option chains)
+- CSVSimulationProvider registered as `Broker.IBKR` — all existing code paths work unchanged
+- SimulationClock controls "now"; equity/option quotes snap to nearest timestamp ≤ sim_time
+- Instant fills: SELL legs at bid, BUY legs at ask
+- Isolated data in `data/utp/sim/` (positions, ledger — resettable)
+- No IBKR connection, no streaming, no background tasks
+- `/sim/*` API endpoints for clock control, picks, sweeps
+
+**Sim-specific CLI flags:**
+| Flag | Required | Default | Description |
+|------|----------|---------|-------------|
+| `--sim-date` | Yes | — | Date to simulate (YYYY-MM-DD) |
+| `--tickers` | Yes | — | Comma-separated tickers (e.g. SPX,RUT,NDX) |
+| `--equities-dir` | No | `../../equities_output` | Equity CSV directory |
+| `--options-dir` | No | `../../options_csv_output` | Options CSV directory |
+| `--server-port` | No | 8000 | HTTP API port |
+
+**Sim API endpoints:**
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/sim/status` | GET | Current date, time (UTC+ET), tickers, timestamp range |
+| `/sim/set-time` | POST | Jump to ET time, advance, or set exact UTC timestamp |
+| `/sim/reset` | POST | Clear positions + ledger, reset clock to market open |
+| `/sim/timestamps` | GET | All available 5-min timestamps |
+| `/sim/auto-advance` | POST | Start/stop auto-advance (default 3s per bar) |
+| `/sim/picks` | POST | Generate candidate credit spreads at current time |
+| `/sim/execute-picks` | POST | Auto-execute top N picks |
+| `/sim/sweep` | POST | Run full day with different parameter combinations |
+| `/sim/load-date` | POST | Hot-swap to a different simulation date |
+
+**Key files:**
+| File | Description |
+|------|-------------|
+| `app/services/simulation_clock.py` | SimulationClock singleton with time control |
+| `app/core/providers/csv_simulation.py` | CSVSimulationProvider (BrokerProvider over CSV) |
+| `app/routes/simulation.py` | /sim/* API endpoints (clock, picks, sweep, load-date) |
+| `app/services/market_data.py` | `set_simulation_mode()` bypasses market hours check |
+
+### Auto-Trader Engine
+
+The auto-trader engine (`utp_voice.py`) runs a credit spread strategy across sim or live data, making entry/exit decisions at each timestamp. Supports **multi-DTE** (0-3 day expirations) with carry-over of positions across days. Accessible via HTTP from both the web UI and CLI.
+
+**Multi-DTE support**: The engine filters expirations by the `dte` config list AND a calendar-week boundary (no crossing into next week). Positions with future expirations carry to the next trading day automatically. Use `--options-dir ../../options_csv_output_full` when starting the daemon to access multi-expiration data.
+
+```bash
+# ── Terminal 1: Start sim daemon with MULTI-DTE options data ──
+python utp.py daemon \
+  --sim-date 2026-04-01 \
+  --tickers SPX,RUT,NDX \
+  --options-dir ../../options_csv_output_full \
+  --server-port 8100
+
+# ── Terminal 2: Start utp_voice (auto-trader engine) ──
+export UTP_DAEMON_URL=http://localhost:8100
+export UTP_VOICE_JWT_SECRET=test-secret
+python utp_voice.py serve --port 8801 --public
+
+# ── Terminal 3: Run commands ──
+# Configure strategy with multi-DTE
+curl -X POST http://localhost:8801/api/auto-trader/config \
+  -d '{"tickers":["SPX"],"dte":[0,1,2],"min_otm_pct":0.02,"spread_width":25}'
+
+# Run single sim day
+curl -X POST http://localhost:8801/api/auto-trader/run-day | jq
+
+# Run date range (returns val_score, carries positions across days)
+curl -X POST http://localhost:8801/api/auto-trader/run-range \
+  -d '{"start_date":"2026-04-01","end_date":"2026-04-05"}' | jq
+
+# CLI client
+python sim_trader.py --voice-url http://localhost:8801 --date 2026-04-01
+python sim_trader.py --start-date 2026-03-01 --end-date 2026-04-17
+
+# Autoresearch evaluation
+python run_sim_research.py
+
+# Full parameter sweep (4,050 combos)
+python run_auto_research.py \
+  --voice-url http://localhost:8801 \
+  --start 2026-01-02 --end 2026-04-17
+
+# Quick sweep (~135 combos)
+python run_auto_research.py --quick \
+  --voice-url http://localhost:8801 \
+  --start 2026-01-02 --end 2026-04-17
+```
+
+**Auto-trader API endpoints (in utp_voice.py):**
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/api/auto-trader/config` | POST | Set strategy parameters (including `dte` list) |
+| `/api/auto-trader/config` | GET | Get current config |
+| `/api/auto-trader/run-day` | POST | Run strategy for one sim day (returns `carry_forward`) |
+| `/api/auto-trader/run-range` | POST | Run across date range with position carry-over |
+
+**Key files:**
+| File | Description |
+|------|-------------|
+| `utp_voice.py` | Auto-trader engine: `_run_sim_day()`, `_run_sim_range()`, `_allowed_expirations()`, REST endpoints |
+| `sim_trader.py` | Thin CLI client with tunable strategy constants |
+| `run_auto_research.py` | Standalone sweep: tests all DTE/ticker/type/OTM/width combos |
+| `run_sim_research.py` | Immutable evaluation harness for autoresearch |
+| `sim_research_program.md` | Agent instructions for parameter optimization |
+
+**Multi-DTE mechanics:**
+- `_allowed_expirations(sim_date, dte_list, available_exps)` — filters by DTE list AND `exp_date <= Friday of sim_date's week`
+- `_build_spreads_for_engine()` — fetches options per valid expiration, tags spreads with `expiration` and `dte`
+- `_run_sim_day(config, carry_positions)` — EOD only settles positions expiring today; future-DTE positions go to `carry_forward`
+- `_run_sim_range()` — passes `carry_positions` across days; force-settles at range end
+
+**val_score formula:** `(total_pnl / peak_risk) × win_rate × min(profit_factor, 5) / 5`
 
 ### Python Client Library
 
@@ -195,6 +370,23 @@ python utp.py trade debit-spread --symbol QQQ --long-strike 480 \
 python utp.py trade iron-condor --symbol SPX --put-short 5500 \
   --put-long 5475 --call-short 5700 --call-long 5725 \
   --expiration 2026-03-20 --quantity 1 --live      # MARKET order (default)
+
+# ── Percentage-based strike placement ──────────────────────────
+# --otm-pct anchors to current SPOT price. Use a single value (symmetric)
+# or 'put:call' split (iron-condor only) for asymmetric wings.
+python utp.py trade credit-spread --symbol SPX --otm-pct 2 \
+  --option-type PUT --expiration 2026-03-20 --quantity 5 --live
+python utp.py trade iron-condor --symbol SPX --otm-pct 2:3 \
+  --width 20 --expiration 2026-03-20 --quantity 5 --live   # 2% put / 3% call
+
+# --close-pct anchors to YESTERDAY'S close (stable late in the day,
+# unlike --otm-pct which drifts as spot moves). Same single/split syntax.
+# Requires db_server reachable at $DB_SERVER_URL (default http://localhost:9102).
+python utp.py trade credit-spread --symbol SPX --close-pct 2 \
+  --option-type PUT --expiration 2026-03-20 --quantity 5 --live
+python utp.py trade iron-condor --symbol SPX --close-pct 1.5:2.5 \
+  --width 20 --expiration 2026-03-20 --quantity 5 --live
+
 python utp.py trade --validate-all               # Test all 5 types (safe)
 python utp.py trade --validate-all --paper       # Paper account validation
 python utp.py trade --validate-all --cleanup     # Clean up after validation
@@ -500,6 +692,7 @@ Every CLI command auto-detects a running daemon via HTTP health check. When daem
 | `market_data.py` | `get_quote()`, `get_option_quotes()` | **Centralized market data access layer.** All quote and option data requests MUST go through this module. Enforces cache → stale → provider fallback. |
 | `option_quote_streaming.py` | `OptionQuoteStreamingService` | Background option quote pre-fetch with in-memory + Redis cache. Module accessor: `init_option_quote_streaming()` / `get_option_quote_streaming()` / `reset_option_quote_streaming()` |
 | `execution_store.py` | `ExecutionStore` | IBKR execution cache with perm_id grouping. Module accessor: `init_execution_store()` / `get_execution_store()` / `reset_execution_store()` |
+| `simulation_clock.py` | `SimulationClock` | Time control for historical simulation. Module accessor: `init_sim_clock()` / `get_sim_clock()` / `reset_sim_clock()` |
 
 ### Routes (`app/routes/`)
 
@@ -512,6 +705,7 @@ Every CLI command auto-detects a running daemon via HTTP health check. When daem
 | `dashboard.py` | `/dashboard` | `GET /summary`, `GET /performance`, `GET /pnl/daily`, `GET /status`, `GET /terminal`, `GET /advisor/recommendations`, `GET /advisor/status` |
 | `import_routes.py` | `/import` | `POST /csv`, `POST /preview`, `GET /formats` |
 | `playbook.py` | `/playbook` | `POST /execute`, `POST /validate` |
+| `simulation.py` | `/sim` | `GET /status`, `POST /set-time`, `POST /reset`, `GET /timestamps`, `POST /auto-advance`, `POST /picks`, `POST /execute-picks`, `POST /sweep` |
 | `auth_routes.py` | `/auth` | `POST /token` |
 | `ws.py` | `/ws` | `WS /ws/orders`, `WS /ws/quotes` |
 
@@ -524,6 +718,7 @@ Every CLI command auto-detects a running daemon via HTTP health check. When daem
 | `ibkr.py` | `IBKRProvider` (stub) + `IBKRLiveProvider` (real) | Live uses `ib_insync`, activated by setting `IBKR_ACCOUNT_ID` |
 | `ibkr_cache.py` | `ContractCache`, `OptionChainCache`, `QuoteSnapshotCache`, `IBKRRateLimiter`, `IBKRCacheManager` | Caching layer for IBKR — no `ib_insync` dependency |
 | `ibkr_rest.py` | `IBKRRestProvider` | IBKR via Client Portal Gateway (CPG) REST API. Used with `--ibkr-api rest --gateway-url`. Supports quotes, options, multi-leg orders, margin checks, portfolio. 10s response cache on balances/positions. |
+| `csv_simulation.py` | `CSVSimulationProvider` | Historical CSV replay. Registered as `Broker.IBKR` in sim mode. Equity bars + option chains loaded into memory; instant fills at bid/ask. |
 
 ### Models (`app/models.py`)
 
@@ -595,7 +790,7 @@ All from env vars / `.env`:
 
 ## Testing
 
-**532 tests in `tests/test_utp.py`, all passing.** Tests use `tmp_path` for isolated persistence. The autouse `_setup_providers` fixture in `conftest.py` initializes and tears down ledger + position store per test.
+**619 tests in `tests/test_utp.py`, all passing.** Tests use `tmp_path` for isolated persistence. The autouse `_setup_providers` fixture in `conftest.py` initializes and tears down ledger + position store per test.
 
 ```bash
 python -m pytest tests/ -v                              # All 359 tests
@@ -663,6 +858,15 @@ python -m pytest tests/test_utp.py -k "TestIBKR" -v     # IBKR tests only
 | `TestOptionQuoteStreaming` | 25 | Option quote cache, Redis persistence, streaming lifecycle, market hours TTL |
 | `TestMarketDataStreaming` | 24 | CPG polling/WS modes, snapshot parsing, tick ingestion, close-band gate |
 | `TestTradeReplay` | 11 | Trade replay from local store, multi_leg/short actions, portfolio fallback |
+| `TestSimulationClock` | 8 | SimulationClock time control, advance, jump_to_et, auto-advance |
+| `TestCSVSimulationProvider` | 10 | CSV data loading, quotes, options, order execution, margin |
+| `TestSimulationRoutes` | 3 | /sim/* API endpoints (status, set-time, reset, timestamps) |
+| `TestSimulationMarketData` | 1 | Simulation mode bypasses market hours check |
+| `TestSimDaemonMode` | 2 | Daemon CLI wiring, data dir resolution |
+| `TestSimulationPicks` | 2 | Pick generation and /sim/picks endpoint |
+| `TestSimulationSweep` | 1 | Parameter sweep /sim/sweep endpoint |
+| `TestSimLoadDate` | 5 | /sim/load-date hot-swap (invalid, not-sim, no-data, success) |
+| `TestAutoTraderEngine` | 16 | Auto-trader config, run-day, run-range, spread filters, DTE filtering, carry-over, CLI config |
 
 ## IBKR Live Provider
 

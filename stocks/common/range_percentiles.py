@@ -368,12 +368,14 @@ EQUITIES_OUTPUT_DIR = PROJECT_ROOT / "equities_output"
 
 # Half-hour slot definitions (main grid)
 HALF_HOUR_SLOTS = [
+    "9:30",
     "10:00", "10:30", "11:00", "11:30", "12:00", "12:30",
     "13:00", "13:30", "14:00", "14:30", "15:00", "15:30",
 ]
 
 # Quarter-hour (15-min) slot definitions
 QUARTER_HOUR_SLOTS = [
+    "9:30", "9:45",
     "10:00", "10:15", "10:30", "10:45",
     "11:00", "11:15", "11:30", "11:45",
     "12:00", "12:15", "12:30", "12:45",
@@ -381,6 +383,9 @@ QUARTER_HOUR_SLOTS = [
     "14:00", "14:15", "14:30", "14:45",
     "15:00", "15:15", "15:30", "15:45",
 ]
+
+# 5-min early slots for first 15 min (9:30 - 9:45 AM ET)
+FIVE_MIN_EARLY_SLOTS = ["9:30", "9:35", "9:45"]
 
 # 10-min slots for last 30 min (3:30 PM - 4:00 PM ET)
 TEN_MIN_SLOTS = ["15:30", "15:40", "15:50"]
@@ -554,8 +559,8 @@ async def compute_hourly_moves_to_close(
         h = row["et_hour"]
         m = row["et_minute"]
 
-        # Skip pre-market bars before 10:00 ET (first half-hour slot)
-        if h < 10:
+        # Skip pre-market bars before 9:30 ET
+        if h < 9 or (h == 9 and m < 30):
             continue
         # Skip at/after close
         if h >= 16:
@@ -577,6 +582,12 @@ async def compute_hourly_moves_to_close(
             m10 = (m // 10) * 10
             ten_slot = f"15:{m10:02d}"
 
+        # 5-min bucket for early session (9:30-9:49 ET)
+        five_early_slot = None
+        if h == 9 and 30 <= m < 50:
+            m5 = (m // 5) * 5
+            five_early_slot = f"9:{m5:02d}"
+
         # 5-min bucket (only for 15:50-15:59)
         five_slot = None
         if h == 15 and m >= 50:
@@ -590,6 +601,7 @@ async def compute_hourly_moves_to_close(
             "move_pct": move_pct,
             "slot_30": hh_slot,
             "slot_15": qh_slot,
+            "slot_5_early": five_early_slot,
             "slot_10": ten_slot,
             "slot_5": five_slot,
         })
@@ -696,6 +708,31 @@ async def compute_hourly_moves_to_close(
             "when_down_day_count": n_down,
         }
 
+    # --- Aggregate 5-min early slots (first 15 min: 9:30-9:45 AM ET) ---
+    slots_5min_early = {}
+    for slot_key in FIVE_MIN_EARLY_SLOTS:
+        subset = records_df[records_df["slot_5_early"] == slot_key]
+        if subset.empty:
+            continue
+        day_agg = subset.sort_values("trading_date").drop_duplicates(subset="trading_date", keep="first")
+        if len(day_agg) < min_days:
+            continue
+        moves = day_agg["move_pct"]
+        mask_up = moves > 0
+        mask_down = moves < 0
+        n_up = int(mask_up.sum())
+        n_down = int(mask_down.sum())
+        labels = _et_label(slot_key)
+        slots_5min_early[slot_key] = {
+            "label_et": labels[0],
+            "label_pt": labels[1],
+            "total_days": len(day_agg),
+            "when_up": build_block(moves[mask_up], n_up, invert=False),
+            "when_up_day_count": n_up,
+            "when_down": build_block(moves[mask_down], n_down, invert=True),
+            "when_down_day_count": n_down,
+        }
+
     # --- Aggregate 10-min slots (last 30 min) ---
     slots_10min = {}
     for slot_key in TEN_MIN_SLOTS:
@@ -753,9 +790,10 @@ async def compute_hourly_moves_to_close(
         "percentiles": percentiles,
         "slots": slots_data,
         "slots_15min": slots_15min,
+        "slots_5min_early": slots_5min_early,
         "slots_10min": slots_10min,
         "slots_5min": slots_5min,
-        "has_fine_data": bool(slots_15min or slots_10min or slots_5min),
+        "has_fine_data": bool(slots_15min or slots_5min_early or slots_10min or slots_5min),
     }
 
 

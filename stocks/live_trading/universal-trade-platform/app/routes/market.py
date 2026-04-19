@@ -22,10 +22,18 @@ async def get_quote(
     symbol: str,
     _user: Annotated[TokenData, Security(require_auth, scopes=["market:read"])],
     broker: Broker = Broker.IBKR,
+    max_age: float | None = None,
+    force_refresh: bool = False,
 ) -> Quote:
-    """Fetch a real-time quote — streaming cache first, provider fallback."""
+    """Fetch a real-time quote — streaming cache first, provider fallback.
+
+    Parameters:
+        max_age: Reject cached quotes older than this (seconds); force a
+            provider refresh before falling through to stale cache.
+        force_refresh: Skip all caches and always hit the provider.
+    """
     from app.services.market_data import get_quote as _get_quote
-    return await _get_quote(symbol, broker)
+    return await _get_quote(symbol, broker, max_age=max_age, force_refresh=force_refresh)
 
 
 class BatchQuoteRequest(BaseModel):
@@ -119,9 +127,17 @@ async def get_options(
     strike_min: float | None = None,
     strike_max: float | None = None,
     list_expirations: bool = False,
+    max_age: float | None = None,
+    force_refresh: bool = False,
 ) -> dict:
-    """Get option chain data — centralized cache → provider fallback."""
-    from app.services.market_data import get_option_quotes as _get_opts
+    """Get option chain data — centralized cache → provider fallback.
+
+    Parameters:
+        max_age: Reject cached quotes older than this (seconds); force a
+            provider refresh before falling through to stale cache.
+        force_refresh: Skip all caches and always hit the provider.
+    """
+    from app.services.market_data import get_option_quotes_with_age as _get_opts_age
     from app.services.market_data import get_option_chain as _get_chain
 
     if list_expirations:
@@ -138,7 +154,10 @@ async def get_options(
 
         # Merge, normalize, deduplicate
         all_exps = set()
-        today_str = __import__("datetime").date.today().isoformat()
+        # In simulation mode, use the sim date (not actual today)
+        from app.services.simulation_clock import get_sim_clock as _get_sim_clock
+        _sim_clock = _get_sim_clock()
+        today_str = _sim_clock.sim_date.isoformat() if _sim_clock else __import__("datetime").date.today().isoformat()
         for e in list(ibkr_exps) + csv_exps:
             norm = e.replace("-", "") if len(e) == 10 else e
             iso = f"{norm[:4]}-{norm[4:6]}-{norm[6:8]}" if len(norm) == 8 else norm
@@ -153,33 +172,56 @@ async def get_options(
     # Fetch quotes through centralized data layer (cache → stale → provider)
     types_to_fetch = [option_type.upper()] if option_type else ["CALL", "PUT"]
     quotes = {}
-    source = "provider"
+    # Track the most-stale internal source label (fresh_cache, stale_cache,
+    # provider, empty).  ``source`` (legacy field) maps this to the older
+    # "streaming_cache" / "streaming_cache_stale" / "provider" vocabulary.
+    internal_source = "provider"
+    worst_age: float | None = None
+    per_type_meta: dict[str, dict] = {}
     for ot in types_to_fetch:
         try:
-            q = await _get_opts(
+            q, age, type_source = await _get_opts_age(
                 symbol, expiration, ot,
                 strike_min=strike_min, strike_max=strike_max,
                 broker=broker,
+                max_age=max_age, force_refresh=force_refresh,
             )
             quotes[ot.lower()] = q
+            per_type_meta[ot.lower()] = {"age_seconds": age, "source": type_source}
+            # Track worst (oldest) age across types for a conservative summary
+            if age is not None:
+                worst_age = age if worst_age is None else max(worst_age, age)
+            # Prefer the most-stale source label so callers can classify
+            if type_source == "stale_cache":
+                internal_source = "stale_cache"
+            elif type_source == "empty" and internal_source == "provider":
+                internal_source = "empty"
+            elif type_source == "fresh_cache" and internal_source == "provider":
+                internal_source = "fresh_cache"
         except Exception as e:
             quotes[ot.lower()] = {"error": str(e)}
+            per_type_meta[ot.lower()] = {"age_seconds": None, "source": "error"}
 
-    # Detect source from whether streaming cache was used
-    from app.services.option_quote_streaming import get_option_quote_streaming
-    oq_svc = get_option_quote_streaming()
-    if oq_svc:
-        age = oq_svc._cache.get_age(symbol.upper(), expiration, types_to_fetch[0])
-        if age is not None and age < 300:
-            source = "streaming_cache"
-        elif age is not None:
-            source = "streaming_cache_stale"
+    # Legacy source mapping — preserve previous API contract.
+    if internal_source == "fresh_cache":
+        legacy_source = "streaming_cache"
+    elif internal_source == "stale_cache":
+        legacy_source = "streaming_cache_stale"
+    else:
+        legacy_source = internal_source  # "provider" or "empty"
 
     return {
         "symbol": symbol.upper(),
         "chain": {"expirations": [], "strikes": []},
         "quotes": quotes,
-        "source": source,
+        "source": legacy_source,
+        "quote_age_seconds": worst_age,
+        "quote_source": internal_source,
+        "meta": {
+            "age_seconds": worst_age,
+            "source": internal_source,
+            "per_type": per_type_meta,
+        },
     }
 
 

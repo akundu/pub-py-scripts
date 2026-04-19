@@ -157,6 +157,46 @@ _DEFAULT_WIDTHS = {"SPX": 25, "NDX": 50, "RUT": 5, "DJX": 25, "TQQQ": 1, "SPY": 
 _EQUITY_PROXY = {"SPX": "SPY", "NDX": "QQQ", "RUT": "IWM"}
 
 
+# ── Trade price-freshness enforcement ────────────────────────────────────────
+# When preparing a trade, prices older than _TRADE_PRICE_FRESH_MAX_AGE seconds
+# are annotated as stale with a warning, and prices older than
+# _TRADE_PRICE_BLOCK_MAX_AGE seconds block the trade entirely.  Caller must
+# retry.  These are read lazily so tests can monkeypatch env vars.
+
+def _trade_price_fresh_max_age() -> float:
+    try:
+        return float(os.environ.get("UTP_TRADE_PRICE_FRESH_MAX_AGE", "15"))
+    except (TypeError, ValueError):
+        return 15.0
+
+
+def _trade_price_block_max_age() -> float:
+    try:
+        return float(os.environ.get("UTP_TRADE_PRICE_BLOCK_MAX_AGE", "60"))
+    except (TypeError, ValueError):
+        return 60.0
+
+
+def _classify_price_age(age_seconds: float | None) -> tuple[str, bool]:
+    """Classify a cache-age (seconds) into (annotation, blocked).
+
+    Returns:
+        annotation: short human-readable suffix like "[12s old]" or
+            "[⚠ STALE: 47s old]".  Never empty (useful to display on every
+            price line).
+        blocked: True when the trade must be refused (age > block threshold).
+    """
+    fresh_max = _trade_price_fresh_max_age()
+    block_max = _trade_price_block_max_age()
+    if age_seconds is None:
+        return ("[just fetched]", False)
+    if age_seconds <= fresh_max:
+        return (f"[{age_seconds:.0f}s old]", False)
+    if age_seconds <= block_max:
+        return (f"[⚠ STALE: {age_seconds:.0f}s old]", False)
+    return (f"[⛔ BLOCKED: {age_seconds:.0f}s old — retry]", True)
+
+
 # ── HTTP Client Library ─────────────────────────────────────────────────────
 
 
@@ -620,7 +660,7 @@ def _resolve_data_dir(base_dir: str, mode: str) -> Path:
     - ``dry-run`` → ``<base>/`` (unchanged)
     """
     base = Path(base_dir)
-    if mode in ("live", "paper"):
+    if mode in ("live", "paper", "sim"):
         return base / mode
     return base
 
@@ -989,6 +1029,8 @@ def _resolve_replay(args, data_dir: str | None = None, server: str | None = None
         args.close = False
         if not hasattr(args, "otm_pct"):
             args.otm_pct = None
+        if not hasattr(args, "close_pct"):
+            args.close_pct = None
         if not hasattr(args, "width"):
             args.width = None
 
@@ -1018,6 +1060,8 @@ def _resolve_replay(args, data_dir: str | None = None, server: str | None = None
         args.close = False
         if not hasattr(args, "otm_pct"):
             args.otm_pct = None
+        if not hasattr(args, "close_pct"):
+            args.close_pct = None
         if not hasattr(args, "width"):
             args.width = None
 
@@ -1087,26 +1131,81 @@ def _round_strike(value: float, increment: float) -> float:
     return round(round(value / increment) * increment, 2)
 
 
+def _parse_split_pct(s: str) -> tuple[float, float]:
+    """Parse a percentage string that may be a single value or "put:call" split.
+
+    Examples:
+        "2"     -> (2.0, 2.0)
+        "2:3"   -> (2.0, 3.0)   # put_pct=2.0, call_pct=3.0
+        "1.5:2.5" -> (1.5, 2.5)
+
+    Raises ValueError on negatives, empty parts, non-numeric, or more than 2 parts.
+    """
+    if s is None:
+        raise ValueError("percentage value is required (got None)")
+    if isinstance(s, (int, float)):
+        # Convenience: numeric inputs work too (mostly for tests).
+        v = float(s)
+        if v < 0:
+            raise ValueError(f"percentage cannot be negative: {v}")
+        return (v, v)
+    raw = str(s).strip()
+    if not raw:
+        raise ValueError("percentage value cannot be empty")
+    parts = raw.split(":")
+    if len(parts) > 2:
+        raise ValueError(
+            f"percentage must be 'N' or 'PUT:CALL' (got {len(parts)} parts: {raw!r})"
+        )
+    out: list[float] = []
+    for i, p in enumerate(parts):
+        ps = p.strip()
+        if not ps:
+            raise ValueError(f"percentage part {i + 1} is empty in {raw!r}")
+        try:
+            v = float(ps)
+        except ValueError:
+            raise ValueError(f"percentage part {i + 1} is not numeric: {ps!r}")
+        if v < 0:
+            raise ValueError(f"percentage cannot be negative: {v}")
+        out.append(v)
+    if len(out) == 1:
+        return (out[0], out[0])
+    return (out[0], out[1])
+
+
 def _resolve_pct_strikes(
     symbol: str,
     option_type: str | None,
-    otm_pct: float,
+    put_pct: float,
+    call_pct: float,
     width: float | None,
-    current_price: float,
+    anchor_price: float,
     is_iron_condor: bool = False,
 ) -> dict[str, float]:
     """Resolve percentage-based OTM strikes to absolute strike prices.
 
+    Args:
+        symbol: Underlying symbol (used for strike increment / default width)
+        option_type: "PUT" or "CALL" (ignored for iron condor)
+        put_pct: % below anchor_price for put-side short strike
+        call_pct: % above anchor_price for call-side short strike
+        width: Spread width in points (None = symbol default)
+        anchor_price: Reference price (typically current spot or prev close)
+        is_iron_condor: Whether to return both wings
+
     Returns dict with short_strike/long_strike for credit spreads,
     or put_short/put_long/call_short/call_long for iron condors.
+
+    For symmetric placement, pass put_pct == call_pct.
     """
     inc = _STRIKE_INCREMENTS.get(symbol.upper(), _DEFAULT_STRIKE_INCREMENT)
     w = width if width is not None else _DEFAULT_WIDTHS.get(symbol.upper(), _DEFAULT_WIDTH)
 
     if is_iron_condor:
-        put_short = _round_strike(current_price * (1 - otm_pct / 100), inc)
+        put_short = _round_strike(anchor_price * (1 - put_pct / 100), inc)
         put_long = _round_strike(put_short - w, inc)
-        call_short = _round_strike(current_price * (1 + otm_pct / 100), inc)
+        call_short = _round_strike(anchor_price * (1 + call_pct / 100), inc)
         call_long = _round_strike(call_short + w, inc)
         return {
             "put_short": put_short, "put_long": put_long,
@@ -1115,10 +1214,10 @@ def _resolve_pct_strikes(
 
     otype = (option_type or "").upper()
     if otype == "PUT":
-        short_strike = _round_strike(current_price * (1 - otm_pct / 100), inc)
+        short_strike = _round_strike(anchor_price * (1 - put_pct / 100), inc)
         long_strike = _round_strike(short_strike - w, inc)
     elif otype == "CALL":
-        short_strike = _round_strike(current_price * (1 + otm_pct / 100), inc)
+        short_strike = _round_strike(anchor_price * (1 + call_pct / 100), inc)
         long_strike = _round_strike(short_strike + w, inc)
     else:
         raise ValueError(f"--option-type must be PUT or CALL, got: {option_type}")
@@ -1299,24 +1398,108 @@ def _validate_strike_args(subcommand: str, args) -> str | None:
     Returns an error message string if invalid, or None if OK.
     """
     otm_pct = getattr(args, "otm_pct", None)
+    close_pct = getattr(args, "close_pct", None)
+
+    # Cannot mix --otm-pct and --close-pct
+    if otm_pct is not None and close_pct is not None:
+        return "Cannot use both --otm-pct and --close-pct (pick one anchor)"
+
+    pct_set = otm_pct is not None or close_pct is not None
+
+    # If a pct flag is set, validate its split-form for credit-spread
+    # (single-sided spreads cannot use a put:call split — pick the side via --option-type).
+    if subcommand == "credit-spread":
+        for flag_name, flag_val in (("--otm-pct", otm_pct), ("--close-pct", close_pct)):
+            if flag_val is None:
+                continue
+            try:
+                put_pct, call_pct = _parse_split_pct(flag_val)
+            except ValueError as e:
+                return f"Invalid {flag_name}: {e}"
+            if put_pct != call_pct:
+                return (
+                    f"{flag_name} cannot use 'put:call' split form for credit-spread "
+                    f"(use a single value; choose side via --option-type)"
+                )
+
+    if subcommand == "iron-condor":
+        for flag_name, flag_val in (("--otm-pct", otm_pct), ("--close-pct", close_pct)):
+            if flag_val is None:
+                continue
+            try:
+                _parse_split_pct(flag_val)
+            except ValueError as e:
+                return f"Invalid {flag_name}: {e}"
 
     if subcommand == "credit-spread":
         has_explicit = args.short_strike is not None or args.long_strike is not None
-        if otm_pct is not None and has_explicit:
-            return "Cannot use --otm-pct with explicit --short-strike/--long-strike"
-        if otm_pct is None and (args.short_strike is None or args.long_strike is None):
-            return "--short-strike and --long-strike are required (or use --otm-pct)"
+        if pct_set and has_explicit:
+            return "Cannot use --otm-pct/--close-pct with explicit --short-strike/--long-strike"
+        if not pct_set and (args.short_strike is None or args.long_strike is None):
+            return "--short-strike and --long-strike are required (or use --otm-pct/--close-pct)"
 
     elif subcommand == "iron-condor":
         has_explicit = any(getattr(args, a, None) is not None
                           for a in ("put_short", "put_long", "call_short", "call_long"))
-        if otm_pct is not None and has_explicit:
-            return "Cannot use --otm-pct with explicit strike arguments"
-        if otm_pct is None and any(getattr(args, a, None) is None
-                                    for a in ("put_short", "put_long", "call_short", "call_long")):
-            return "--put-short/--put-long/--call-short/--call-long are required (or use --otm-pct)"
+        if pct_set and has_explicit:
+            return "Cannot use --otm-pct/--close-pct with explicit strike arguments"
+        if not pct_set and any(getattr(args, a, None) is None
+                                for a in ("put_short", "put_long", "call_short", "call_long")):
+            return "--put-short/--put-long/--call-short/--call-long are required (or use --otm-pct/--close-pct)"
 
     return None
+
+
+def _format_pct_label(put_pct: float, call_pct: float) -> str:
+    """Render the % label for the resolved-strikes message ('3%' or '2:3%')."""
+    if put_pct == call_pct:
+        # Strip trailing .0 for tidy display
+        v = int(put_pct) if put_pct == int(put_pct) else put_pct
+        return f"{v}%"
+    p = int(put_pct) if put_pct == int(put_pct) else put_pct
+    c = int(call_pct) if call_pct == int(call_pct) else call_pct
+    return f"{p}:{c}%"
+
+
+async def _fetch_prev_close_from_db_server(symbol: str) -> float | None:
+    """Fetch previous trading day's close for `symbol` from db_server.
+
+    Returns the close price as float, or None on any error.
+    Reuses the DB_SERVER_URL pattern from elsewhere in this file.
+    """
+    import httpx
+    db_url = os.environ.get("DB_SERVER_URL", "http://localhost:9102")
+    # Minimal payload: lookback short, min_days small — we only need previous_close.
+    params = {
+        "tickers": symbol,
+        "lookback": "30",
+        "min_days": "2",
+        "min_direction_days": "1",
+        "window": "1",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{db_url}/api/range_percentiles", params=params)
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            # Endpoint returns a single dict for one ticker, list for many
+            if isinstance(data, list):
+                if not data:
+                    return None
+                data = data[0]
+            pc = data.get("previous_close")
+            if pc is None:
+                return None
+            try:
+                v = float(pc)
+            except (TypeError, ValueError):
+                return None
+            if v <= 0:
+                return None
+            return v
+    except Exception:
+        return None
 
 
 async def _resolve_otm_strikes_http(args, subcommand: str, client) -> int | None:
@@ -1327,6 +1510,12 @@ async def _resolve_otm_strikes_http(args, subcommand: str, client) -> int | None
     otm_pct = getattr(args, "otm_pct", None)
     if otm_pct is None:
         return None
+
+    try:
+        put_pct, call_pct = _parse_split_pct(otm_pct)
+    except ValueError as e:
+        print(f"  Error: invalid --otm-pct: {e}")
+        return 1
 
     sym = args.symbol
     try:
@@ -1346,7 +1535,9 @@ async def _resolve_otm_strikes_http(args, subcommand: str, client) -> int | None
     is_ic = subcommand == "iron-condor"
     option_type = getattr(args, "option_type", None)
     width = getattr(args, "width", None)
-    strikes = _resolve_pct_strikes(sym, option_type, otm_pct, width, price, is_iron_condor=is_ic)
+    strikes = _resolve_pct_strikes(
+        sym, option_type, put_pct, call_pct, width, price, is_iron_condor=is_ic
+    )
 
     # Snap to actual chain strikes if expiration is available
     expiration = getattr(args, "expiration", None)
@@ -1365,14 +1556,15 @@ async def _resolve_otm_strikes_http(args, subcommand: str, client) -> int | None
     # Print resolved strikes
     w = width if width is not None else _DEFAULT_WIDTHS.get(sym.upper(), _DEFAULT_WIDTH)
     snap_note = " (snapped to chain)" if snapped else ""
+    pct_label = _format_pct_label(put_pct, call_pct)
     if is_ic:
         print(f"  Strikes: put {strikes['put_short']}/{strikes['put_long']} | "
               f"call {strikes['call_short']}/{strikes['call_long']} "
-              f"({otm_pct}% OTM, {w:.0f}pt width) "
+              f"({pct_label} OTM, {w:.0f}pt width) "
               f"— resolved from ${price:,.2f}{snap_note}")
     else:
         print(f"  Strikes: {strikes['short_strike']}/{strikes['long_strike']} "
-              f"({otm_pct}% OTM {option_type}, {w:.0f}pt width) "
+              f"({pct_label} OTM {option_type}, {w:.0f}pt width) "
               f"— resolved from ${price:,.2f}{snap_note}")
 
     return None
@@ -1386,6 +1578,12 @@ async def _resolve_otm_strikes_direct(args, subcommand: str) -> int | None:
     otm_pct = getattr(args, "otm_pct", None)
     if otm_pct is None:
         return None
+
+    try:
+        put_pct, call_pct = _parse_split_pct(otm_pct)
+    except ValueError as e:
+        print(f"  Error: invalid --otm-pct: {e}")
+        return 1
 
     sym = args.symbol
     mode = _get_mode(args)
@@ -1411,7 +1609,9 @@ async def _resolve_otm_strikes_direct(args, subcommand: str) -> int | None:
     is_ic = subcommand == "iron-condor"
     option_type = getattr(args, "option_type", None)
     width = getattr(args, "width", None)
-    strikes = _resolve_pct_strikes(sym, option_type, otm_pct, width, price, is_iron_condor=is_ic)
+    strikes = _resolve_pct_strikes(
+        sym, option_type, put_pct, call_pct, width, price, is_iron_condor=is_ic
+    )
 
     # Snap to actual chain strikes if expiration is available
     expiration = getattr(args, "expiration", None)
@@ -1428,15 +1628,130 @@ async def _resolve_otm_strikes_direct(args, subcommand: str) -> int | None:
 
     w = width if width is not None else _DEFAULT_WIDTHS.get(sym.upper(), _DEFAULT_WIDTH)
     snap_note = " (snapped to chain)" if snapped else ""
+    pct_label = _format_pct_label(put_pct, call_pct)
     if is_ic:
         print(f"  Strikes: put {strikes['put_short']}/{strikes['put_long']} | "
               f"call {strikes['call_short']}/{strikes['call_long']} "
-              f"({otm_pct}% OTM, {w:.0f}pt width) "
+              f"({pct_label} OTM, {w:.0f}pt width) "
               f"— resolved from ${price:,.2f}{snap_note}")
     else:
         print(f"  Strikes: {strikes['short_strike']}/{strikes['long_strike']} "
-              f"({otm_pct}% OTM {option_type}, {w:.0f}pt width) "
+              f"({pct_label} OTM {option_type}, {w:.0f}pt width) "
               f"— resolved from ${price:,.2f}{snap_note}")
+
+    return None
+
+
+async def _resolve_close_pct_strikes_http(args, subcommand: str, client) -> int | None:
+    """If --close-pct is set, fetch prev close via db_server and resolve strikes.
+
+    Returns an error exit code, or None on success.
+    """
+    close_pct = getattr(args, "close_pct", None)
+    if close_pct is None:
+        return None
+
+    try:
+        put_pct, call_pct = _parse_split_pct(close_pct)
+    except ValueError as e:
+        print(f"  Error: invalid --close-pct: {e}")
+        return 1
+
+    sym = args.symbol
+    prev_close = await _fetch_prev_close_from_db_server(sym)
+    if not prev_close:
+        print(f"  Error: could not fetch previous close for {sym} from db_server "
+              f"(check DB_SERVER_URL and that db_server is running)")
+        return 1
+
+    is_ic = subcommand == "iron-condor"
+    option_type = getattr(args, "option_type", None)
+    width = getattr(args, "width", None)
+    strikes = _resolve_pct_strikes(
+        sym, option_type, put_pct, call_pct, width, prev_close, is_iron_condor=is_ic
+    )
+
+    expiration = getattr(args, "expiration", None)
+    if expiration:
+        raw = dict(strikes)
+        strikes = await _snap_strikes_to_chain_http(
+            client, sym, expiration, strikes, option_type, is_ic)
+        snapped = strikes != raw
+    else:
+        snapped = False
+
+    for k, v in strikes.items():
+        setattr(args, k, v)
+
+    w = width if width is not None else _DEFAULT_WIDTHS.get(sym.upper(), _DEFAULT_WIDTH)
+    snap_note = " (snapped to chain)" if snapped else ""
+    pct_label = _format_pct_label(put_pct, call_pct)
+    if is_ic:
+        print(f"  Strikes: put {strikes['put_short']}/{strikes['put_long']} | "
+              f"call {strikes['call_short']}/{strikes['call_long']} "
+              f"({pct_label} OTM, {w:.0f}pt width) "
+              f"— resolved from prev close ${prev_close:,.2f}{snap_note}")
+    else:
+        print(f"  Strikes: {strikes['short_strike']}/{strikes['long_strike']} "
+              f"({pct_label} OTM {option_type}, {w:.0f}pt width) "
+              f"— resolved from prev close ${prev_close:,.2f}{snap_note}")
+
+    return None
+
+
+async def _resolve_close_pct_strikes_direct(args, subcommand: str) -> int | None:
+    """If --close-pct is set, fetch prev close via db_server and resolve strikes.
+
+    Returns an error exit code, or None on success.
+    """
+    close_pct = getattr(args, "close_pct", None)
+    if close_pct is None:
+        return None
+
+    try:
+        put_pct, call_pct = _parse_split_pct(close_pct)
+    except ValueError as e:
+        print(f"  Error: invalid --close-pct: {e}")
+        return 1
+
+    sym = args.symbol
+    prev_close = await _fetch_prev_close_from_db_server(sym)
+    if not prev_close:
+        print(f"  Error: could not fetch previous close for {sym} from db_server "
+              f"(check DB_SERVER_URL and that db_server is running)")
+        return 1
+
+    is_ic = subcommand == "iron-condor"
+    option_type = getattr(args, "option_type", None)
+    width = getattr(args, "width", None)
+    strikes = _resolve_pct_strikes(
+        sym, option_type, put_pct, call_pct, width, prev_close, is_iron_condor=is_ic
+    )
+
+    expiration = getattr(args, "expiration", None)
+    if expiration:
+        raw = dict(strikes)
+        strikes = await _snap_strikes_to_chain_direct(
+            sym, expiration, strikes, option_type, is_ic)
+        snapped = strikes != raw
+    else:
+        snapped = False
+
+    for k, v in strikes.items():
+        setattr(args, k, v)
+
+    w = width if width is not None else _DEFAULT_WIDTHS.get(sym.upper(), _DEFAULT_WIDTH)
+    snap_note = " (snapped to chain)" if snapped else ""
+    pct_label = _format_pct_label(put_pct, call_pct)
+    if is_ic:
+        print(f"  Strikes: put {strikes['put_short']}/{strikes['put_long']} | "
+              f"call {strikes['call_short']}/{strikes['call_long']} "
+              f"({pct_label} OTM, {w:.0f}pt width) "
+              f"— resolved from prev close ${prev_close:,.2f}{snap_note}")
+    else:
+        print(f"  Strikes: {strikes['short_strike']}/{strikes['long_strike']} "
+              f"({pct_label} OTM {option_type}, {w:.0f}pt width) "
+              f"— resolved from prev close ${prev_close:,.2f}{snap_note}")
 
     return None
 
@@ -3549,6 +3864,8 @@ async def _estimate_spread_market_price(client, order) -> dict | None:
     Returns dict with:
         net: float (positive = credit, negative = debit)
         legs: list of {action, option_type, strike, bid, ask, price_used, side}
+        quote_age_seconds: worst-case age across fetched legs, or None
+        quote_source: label describing where quotes came from
     or None if quotes are unavailable.
     """
     if not order.legs:
@@ -3569,11 +3886,20 @@ async def _estimate_spread_market_price(client, order) -> dict | None:
     strike_min = min(order_strikes) - 10 if order_strikes else None
     strike_max = max(order_strikes) + 10 if order_strikes else None
 
-    # Fetch option quotes for each type, with strike range covering the order
+    # Fetch option quotes for each type, with strike range covering the order.
+    # Request freshness bounded by the block threshold so the daemon will force
+    # a provider refresh when its cache is stale.
+    block_max = _trade_price_block_max_age()
+    worst_age: float | None = None
+    quote_source: str = "fresh_cache"
     all_quotes: dict[tuple, dict] = {}  # (strike, type) → quote
     for ot in types_needed:
         try:
-            params = {"expiration": expiration, "option_type": ot}
+            params = {
+                "expiration": expiration,
+                "option_type": ot,
+                "max_age": block_max,
+            }
             if strike_min is not None:
                 params["strike_min"] = strike_min
             if strike_max is not None:
@@ -3586,6 +3912,20 @@ async def _estimate_spread_market_price(client, order) -> dict | None:
                     for q in quotes:
                         key = (q.get("strike", 0), ot)
                         all_quotes[key] = q
+                # Track age/source from response meta
+                meta = data.get("meta") or {}
+                age = meta.get("age_seconds")
+                if age is None:
+                    age = data.get("quote_age_seconds")
+                if age is not None:
+                    worst_age = age if worst_age is None else max(worst_age, age)
+                src = meta.get("source") or data.get("quote_source")
+                if src == "stale_cache" or quote_source == "stale_cache":
+                    quote_source = "stale_cache"
+                elif src == "empty" and quote_source != "stale_cache":
+                    quote_source = "empty"
+                elif src == "provider" and quote_source == "fresh_cache":
+                    quote_source = "provider"
         except Exception:
             pass
 
@@ -3672,6 +4012,8 @@ async def _estimate_spread_market_price(client, order) -> dict | None:
     result = {"net": round(net, 2), "legs": leg_details}
     if has_crossed:
         result["warning"] = "crossed_market"
+    result["quote_age_seconds"] = worst_age
+    result["quote_source"] = quote_source
     return result
 
 
@@ -3701,11 +4043,17 @@ async def _cmd_trade_http(args, server: str) -> int:
             print(f"  Error: {err}")
             return 1
 
-    # Resolve --otm-pct strikes via daemon quote
-    if subcommand in ("credit-spread", "iron-condor") and getattr(args, "otm_pct", None) is not None:
+    # Resolve --otm-pct (spot anchor) or --close-pct (prev close anchor)
+    if subcommand in ("credit-spread", "iron-condor") and (
+        getattr(args, "otm_pct", None) is not None
+        or getattr(args, "close_pct", None) is not None
+    ):
         import httpx
         async with httpx.AsyncClient(base_url=server, timeout=30.0) as quote_client:
-            rc = await _resolve_otm_strikes_http(args, subcommand, quote_client)
+            if getattr(args, "close_pct", None) is not None:
+                rc = await _resolve_close_pct_strikes_http(args, subcommand, quote_client)
+            else:
+                rc = await _resolve_otm_strikes_http(args, subcommand, quote_client)
             if rc is not None:
                 return rc
 
@@ -3730,7 +4078,16 @@ async def _cmd_trade_http(args, server: str) -> int:
         # Show order summary before executing
         confirm = getattr(args, "confirm", False)
 
+        # Freshness enforcement state — collected across every price line so
+        # we can either warn or block before submitting the order.
+        price_blocked: bool = False
+        price_block_reasons: list[str] = []
+        enforce_freshness = mode != "dry-run"
+        block_max = _trade_price_block_max_age()
+
         _print_header("Trade Order Summary")
+        if not enforce_freshness:
+            print(f"  {_color('ℹ', '96')}  Dry-run: price freshness enforcement disabled.")
         if trade_request.equity_order:
             eo = trade_request.equity_order
             print(f"  Type:       equity")
@@ -3744,20 +4101,29 @@ async def _cmd_trade_http(args, server: str) -> int:
                 print(f"  Est. total: ~${total:,.2f} ({action})")
             else:
                 mkt_price = None
+                age = None
                 try:
-                    qr = await client.get(f"/market/quote/{eo.symbol}")
+                    qr = await client.get(
+                        f"/market/quote/{eo.symbol}",
+                        params={"max_age": block_max},
+                    )
                     if qr.status_code == 200:
                         qd = qr.json()
                         mkt_price = qd.get("last") or qd.get("bid") or qd.get("ask")
+                        age = qd.get("quote_age_seconds")
                 except Exception:
                     pass
+                annotation, blocked = _classify_price_age(age)
+                if enforce_freshness and blocked:
+                    price_blocked = True
+                    price_block_reasons.append(f"{eo.symbol} quote {age:.0f}s old")
                 if mkt_price and mkt_price > 0:
                     total = mkt_price * eo.quantity
                     action = "spend" if eo.side.value == "BUY" else "receive"
-                    print(f"  Price:      MARKET (~${mkt_price:.2f})")
+                    print(f"  Price:      MARKET (~${mkt_price:.2f}) {annotation}")
                     print(f"  Est. total: ~${total:,.2f} ({action})")
                 else:
-                    print(f"  Price:      MARKET")
+                    print(f"  Price:      MARKET {annotation}")
         elif trade_request.multi_leg_order:
             order = trade_request.multi_leg_order
             sym = order.legs[0].symbol if order.legs else "?"
@@ -3767,11 +4133,16 @@ async def _cmd_trade_http(args, server: str) -> int:
             print(f"  Exchange:   SMART (best execution)")
 
             # Fetch and show current underlying price with change from prev close
+            ul_age: float | None = None
             try:
-                qr = await client.get(f"/market/quote/{sym}")
+                qr = await client.get(
+                    f"/market/quote/{sym}",
+                    params={"max_age": block_max},
+                )
                 if qr.status_code == 200:
                     qd = qr.json()
                     ul_price = qd.get("last") or qd.get("bid") or qd.get("ask")
+                    ul_age = qd.get("quote_age_seconds")
                     if ul_price and ul_price > 0:
                         # Get prev close: QuestDB (authoritative) → streaming status (fallback)
                         prev_close = None
@@ -3800,25 +4171,32 @@ async def _cmd_trade_http(args, server: str) -> int:
                                     prev_close = ps.get("prev_close")
                             except Exception:
                                 pass
+                        ul_annotation, ul_blocked = _classify_price_age(ul_age)
+                        if enforce_freshness and ul_blocked:
+                            price_blocked = True
+                            price_block_reasons.append(f"{sym} underlying quote {ul_age:.0f}s old")
                         if prev_close and prev_close > 0:
                             chg = ul_price - prev_close
                             chg_pct = (chg / prev_close) * 100
                             chg_color = "92" if chg >= 0 else "91"
                             print(f"  Underlying: ${ul_price:,.2f} "
-                                  f"({_color(f'{chg:+,.2f} / {chg_pct:+.2f}%', chg_color)} from prev close ${prev_close:,.2f})")
+                                  f"({_color(f'{chg:+,.2f} / {chg_pct:+.2f}%', chg_color)} from prev close ${prev_close:,.2f}) "
+                                  f"{ul_annotation}")
                         else:
-                            print(f"  Underlying: ${ul_price:,.2f}")
+                            print(f"  Underlying: ${ul_price:,.2f} {ul_annotation}")
             except Exception:
                 pass
             is_credit = order.legs[0].action.value in ("SELL_TO_OPEN", "SELL_TO_CLOSE") if order.legs else False
             credit_per_spread = None  # set below for ROI calc
             est_legs = None  # set by MARKET path if quotes available
+            legs_age: float | None = None  # worst-case age across option legs
 
             if order.net_price:
                 # Also fetch current bid/ask for context
                 est_result = await _estimate_spread_market_price(client, order)
                 if est_result:
                     est_legs = est_result.get("legs")
+                    legs_age = est_result.get("quote_age_seconds")
                 if is_credit:
                     credit_per_spread = order.net_price
                     print(f"  Net credit: ${order.net_price:.2f} per spread (LIMIT)")
@@ -3833,6 +4211,7 @@ async def _cmd_trade_http(args, server: str) -> int:
                 if est_result is not None:
                     est_net = est_result["net"]
                     est_legs = est_result.get("legs")
+                    legs_age = est_result.get("quote_age_seconds")
                     crossed = est_result.get("warning") == "crossed_market"
                     total = abs(est_net) * order.quantity * 100
                     approx = "~~" if crossed else "~"
@@ -3869,6 +4248,13 @@ async def _cmd_trade_http(args, server: str) -> int:
                     print(f"  Max risk:   ~${max_loss_total:,.2f} (${max_loss_per:.2f}/spread)")
                     print(f"  ROI:        {roi:.1f}%")
 
+            # Classify option-leg freshness once — annotation is applied to
+            # every leg line so the user sees the staleness context.
+            leg_annotation, legs_blocked = _classify_price_age(legs_age)
+            if enforce_freshness and legs_blocked and est_legs:
+                price_blocked = True
+                price_block_reasons.append(f"option legs {legs_age:.0f}s old")
+
             # Show legs with bid/ask pricing, OTM%, and greeks when available
             print(f"  Legs:")
             if est_legs:
@@ -3889,7 +4275,8 @@ async def _cmd_trade_http(args, server: str) -> int:
                     print(f"    {ld['action']:>15} {ld['option_type']:>4} "
                           f"strike={ld['strike']:<10} "
                           f"bid=${ld['bid']:<8.2f} ask=${ld['ask']:<8.2f} "
-                          f"→ {ld['side']} ${ld['price_used']:.2f}{flag}{otm_str}")
+                          f"→ {ld['side']} ${ld['price_used']:.2f}{flag}{otm_str} "
+                          f"{leg_annotation}")
                     # Show greeks if available
                     g = ld.get("greeks")
                     if g:
@@ -3918,6 +4305,16 @@ async def _cmd_trade_http(args, server: str) -> int:
                         otm_str = f" {_color(f'{dist_pct:+.2f}% ({dist_pts:,.0f}pts)', otm_c)}"
                     print(f"    {leg.action.value:>15} {leg.option_type.value:>4} "
                           f"strike={leg.strike} exp={leg.expiration} qty={leg_qty}{otm_str}")
+
+        # Price-freshness block: if any quote is older than the block threshold
+        # and we're not in dry-run, refuse to proceed — user must retry.
+        if enforce_freshness and price_blocked:
+            reason = "; ".join(price_block_reasons) if price_block_reasons else ""
+            print(f"\n  {_color(f'⛔ Trade blocked: one or more quotes older than {block_max:.0f}s and provider refresh failed.', '91')}")
+            if reason:
+                print(f"     Details: {reason}")
+            print(f"     Retry when fresh market data is available.")
+            return 1
 
         if not confirm and mode != "dry-run":
             # Auto-validate with IBKR margin check when --live (catches rejections early)
@@ -3977,8 +4374,18 @@ async def _cmd_trade_http(args, server: str) -> int:
         print(f"  ID:    {data.get('order_id', '?')}")
         if data.get("filled_price"):
             print(f"  Fill:  ${data['filled_price']:.2f}")
-        if data.get("message"):
-            print(f"  Msg:   {data['message']}")
+        msg = data.get("message")
+        if msg:
+            if isinstance(msg, list):
+                print(f"  Msg:   {len(msg)} message(s)")
+                for i, m in enumerate(msg, 1):
+                    text = m if isinstance(m, str) else (m.get("text") or m.get("message") or str(m))
+                    print(f"    {i}. {text}")
+            elif isinstance(msg, dict):
+                text = msg.get("text") or msg.get("message") or str(msg)
+                print(f"  Msg:   {text}")
+            else:
+                print(f"  Msg:   {msg}")
     return 0
 
 
@@ -4699,7 +5106,8 @@ async def _cmd_margin(args) -> int:
 async def _auto_price_spread(provider, symbol: str, expiration: str,
                              strikes: list[float], option_type: str,
                              spread_type: str,
-                             use_mid: bool = False) -> float | None:
+                             use_mid: bool = False,
+                             return_age: bool = False):
     """Fetch live quotes for spread legs and compute the net price.
 
     For credit spreads (you sell short, buy long):
@@ -4713,23 +5121,30 @@ async def _auto_price_spread(provider, symbol: str, expiration: str,
     Args:
         use_mid: If True, return mid-point between market and best-case.
                  If False (default), return the market price.
+        return_age: When True, return a tuple ``(price, age_seconds, source)``
+            instead of just ``price``.  ``age_seconds`` is ``None`` when no
+            quotes were available.
 
-    Returns the selected price, or None if quotes unavailable.
+    Returns the selected price (or tuple when ``return_age``), or ``None``/``(None, None, "empty")``
+    if quotes unavailable.
     """
     strike_min = min(strikes) - 1
     strike_max = max(strikes) + 1
 
-    from app.services.market_data import get_option_quotes as _mkt_opts
-    quotes = await _mkt_opts(
+    from app.services.market_data import get_option_quotes_with_age as _mkt_opts_age
+    block_max = _trade_price_block_max_age()
+    quotes, age, source = await _mkt_opts_age(
         symbol, expiration, option_type,
         strike_min=strike_min, strike_max=strike_max,
+        max_age=block_max,
     )
 
     by_strike = {q["strike"]: q for q in quotes}
     missing = [s for s in strikes if s not in by_strike]
     if missing:
-        return None
+        return (None, None, "empty") if return_age else None
 
+    age_ann, _ = _classify_price_age(age)
     if spread_type == "credit_spread":
         short_strike, long_strike = strikes[0], strikes[1]
         short_q = by_strike[short_strike]
@@ -4739,10 +5154,11 @@ async def _auto_price_spread(provider, symbol: str, expiration: str,
         # Best-case: sell short at ask, buy long at bid (unlikely to fill)
         best = round(short_q["ask"] - long_q["bid"], 2)
         mid = round((market + best) / 2, 2)
-        print(f"  Short {short_strike} bid/ask: ${short_q['bid']:.2f} / ${short_q['ask']:.2f}")
-        print(f"  Long  {long_strike} bid/ask: ${long_q['bid']:.2f} / ${long_q['ask']:.2f}")
+        print(f"  Short {short_strike} bid/ask: ${short_q['bid']:.2f} / ${short_q['ask']:.2f} {age_ann}")
+        print(f"  Long  {long_strike} bid/ask: ${long_q['bid']:.2f} / ${long_q['ask']:.2f} {age_ann}")
         print(f"  Market: ${market:.2f}  |  Mid: ${mid:.2f}  |  Best: ${best:.2f}")
-        return mid if use_mid else market
+        price = mid if use_mid else market
+        return (price, age, source) if return_age else price
     elif spread_type == "debit_spread":
         long_strike, short_strike = strikes[0], strikes[1]
         long_q = by_strike[long_strike]
@@ -4752,17 +5168,19 @@ async def _auto_price_spread(provider, symbol: str, expiration: str,
         # Best-case: buy long at bid, sell short at ask (unlikely to fill)
         best = round(long_q["bid"] - short_q["ask"], 2)
         mid = round((market + best) / 2, 2)
-        print(f"  Long  {long_strike} bid/ask: ${long_q['bid']:.2f} / ${long_q['ask']:.2f}")
-        print(f"  Short {short_strike} bid/ask: ${short_q['bid']:.2f} / ${short_q['ask']:.2f}")
+        print(f"  Long  {long_strike} bid/ask: ${long_q['bid']:.2f} / ${long_q['ask']:.2f} {age_ann}")
+        print(f"  Short {short_strike} bid/ask: ${short_q['bid']:.2f} / ${short_q['ask']:.2f} {age_ann}")
         print(f"  Market: ${market:.2f}  |  Mid: ${mid:.2f}  |  Best: ${best:.2f}")
-        return mid if use_mid else market
-    return None
+        price = mid if use_mid else market
+        return (price, age, source) if return_age else price
+    return (None, None, "empty") if return_age else None
 
 
 async def _auto_price_iron_condor(provider, symbol: str, expiration: str,
                                   put_short: float, put_long: float,
                                   call_short: float, call_long: float,
-                                  use_mid: bool = False) -> float | None:
+                                  use_mid: bool = False,
+                                  return_age: bool = False):
     """Fetch live quotes for all 4 iron condor legs and compute net credit.
 
     Market price: sum of (sell at bid, buy at ask) for each spread wing.
@@ -4770,25 +5188,37 @@ async def _auto_price_iron_condor(provider, symbol: str, expiration: str,
 
     Args:
         use_mid: If True, return mid-point. If False (default), return market price.
+        return_age: When True, return ``(price, age_seconds, source)`` tuple.
     """
-    from app.services.market_data import get_option_quotes as _mkt_opts
+    from app.services.market_data import get_option_quotes_with_age as _mkt_opts_age
+    block_max = _trade_price_block_max_age()
 
     all_strikes = [put_short, put_long, call_short, call_long]
     strike_min = min(all_strikes) - 1
     strike_max = max(all_strikes) + 1
 
-    put_quotes = await _mkt_opts(
-        symbol, expiration, "PUT", strike_min=strike_min, strike_max=strike_max)
-    call_quotes = await _mkt_opts(
-        symbol, expiration, "CALL", strike_min=strike_min, strike_max=strike_max)
+    put_quotes, put_age, put_source = await _mkt_opts_age(
+        symbol, expiration, "PUT",
+        strike_min=strike_min, strike_max=strike_max, max_age=block_max)
+    call_quotes, call_age, call_source = await _mkt_opts_age(
+        symbol, expiration, "CALL",
+        strike_min=strike_min, strike_max=strike_max, max_age=block_max)
+
+    worst_age: float | None = None
+    for a in (put_age, call_age):
+        if a is not None:
+            worst_age = a if worst_age is None else max(worst_age, a)
+    source = "stale_cache" if "stale_cache" in (put_source, call_source) else (
+        "empty" if "empty" in (put_source, call_source) else put_source or call_source or "empty"
+    )
 
     puts_by_strike = {q["strike"]: q for q in put_quotes}
     calls_by_strike = {q["strike"]: q for q in call_quotes}
 
     if put_short not in puts_by_strike or put_long not in puts_by_strike:
-        return None
+        return (None, worst_age, source) if return_age else None
     if call_short not in calls_by_strike or call_long not in calls_by_strike:
-        return None
+        return (None, worst_age, source) if return_age else None
 
     ps = puts_by_strike[put_short]
     pl = puts_by_strike[put_long]
@@ -4801,12 +5231,14 @@ async def _auto_price_iron_condor(provider, symbol: str, expiration: str,
     best = round((ps["ask"] - pl["bid"]) + (cs["ask"] - cl["bid"]), 2)
     mid = round((market + best) / 2, 2)
 
+    age_ann, _ = _classify_price_age(worst_age)
     print(f"  Put  short {put_short} bid/ask: ${ps['bid']:.2f} / ${ps['ask']:.2f}"
-          f"    long {put_long} bid/ask: ${pl['bid']:.2f} / ${pl['ask']:.2f}")
+          f"    long {put_long} bid/ask: ${pl['bid']:.2f} / ${pl['ask']:.2f} {age_ann}")
     print(f"  Call short {call_short} bid/ask: ${cs['bid']:.2f} / ${cs['ask']:.2f}"
-          f"    long {call_long} bid/ask: ${cl['bid']:.2f} / ${cl['ask']:.2f}")
+          f"    long {call_long} bid/ask: ${cl['bid']:.2f} / ${cl['ask']:.2f} {age_ann}")
     print(f"  Market: ${market:.2f}  |  Mid: ${mid:.2f}  |  Best: ${best:.2f}")
-    return mid if use_mid else market
+    price = mid if use_mid else market
+    return (price, worst_age, source) if return_age else price
 
 
 # ── trade ────────────────────────────────────────────────────────────────────
@@ -4844,9 +5276,15 @@ async def _cmd_trade(args) -> int:
             print(f"  Error: {err}")
             return 1
 
-    # Resolve --otm-pct strikes via direct IBKR quote
-    if subcommand in ("credit-spread", "iron-condor") and getattr(args, "otm_pct", None) is not None:
-        rc = await _resolve_otm_strikes_direct(args, subcommand)
+    # Resolve --otm-pct (spot anchor) or --close-pct (prev close anchor)
+    if subcommand in ("credit-spread", "iron-condor") and (
+        getattr(args, "otm_pct", None) is not None
+        or getattr(args, "close_pct", None) is not None
+    ):
+        if getattr(args, "close_pct", None) is not None:
+            rc = await _resolve_close_pct_strikes_direct(args, subcommand)
+        else:
+            rc = await _resolve_otm_strikes_direct(args, subcommand)
         if rc is not None:
             return rc
 
@@ -4875,28 +5313,29 @@ async def _cmd_trade(args) -> int:
 
         close = getattr(args, "close", False)
         computed_price = None
+        legs_age: float | None = None
         try:
             if subcommand == "credit-spread":
                 # Closing a credit spread = buying it back = debit spread pricing
                 spread_type = "debit_spread" if close else "credit_spread"
-                computed_price = await _auto_price_spread(
+                computed_price, legs_age, _src = await _auto_price_spread(
                     ibkr, args.symbol, args.expiration,
                     [args.short_strike, args.long_strike],
                     args.option_type.upper(), spread_type,
-                    use_mid=use_mid)
+                    use_mid=use_mid, return_age=True)
             elif subcommand == "debit-spread":
                 spread_type = "credit_spread" if close else "debit_spread"
-                computed_price = await _auto_price_spread(
+                computed_price, legs_age, _src = await _auto_price_spread(
                     ibkr, args.symbol, args.expiration,
                     [args.long_strike, args.short_strike],
                     args.option_type.upper(), spread_type,
-                    use_mid=use_mid)
+                    use_mid=use_mid, return_age=True)
             elif subcommand == "iron-condor":
-                computed_price = await _auto_price_iron_condor(
+                computed_price, legs_age, _src = await _auto_price_iron_condor(
                     ibkr, args.symbol, args.expiration,
                     args.put_short, args.put_long,
                     args.call_short, args.call_long,
-                    use_mid=use_mid)
+                    use_mid=use_mid, return_age=True)
         except Exception as e:
             print(f"  {_color('Auto-price failed', '93')}: {e}")
 
@@ -4906,6 +5345,14 @@ async def _cmd_trade(args) -> int:
             print(f"  {_color(f'Using {price_label} price', '92')}: ${computed_price:.2f}")
         elif computed_price is None and no_price_given:
             print(f"  {_color('No auto-price available', '93')} — submitting as MARKET order")
+        # Freshness block gate — after auto-pricing so user sees the prices.
+        _leg_ann, legs_blocked = _classify_price_age(legs_age)
+        if legs_blocked:
+            block_max = _trade_price_block_max_age()
+            print(f"\n  {_color(f'⛔ Trade blocked: option-leg quotes older than {block_max:.0f}s and provider refresh failed.', '91')}")
+            print(f"     Retry when fresh market data is available.")
+            await _disconnect(live_provider)
+            return 1
         print()
     else:
         live_provider = None
@@ -6398,6 +6845,122 @@ async def _run_multiprocess_daemon(
     return 0
 
 
+async def _cmd_daemon_sim(args, log_level: str) -> int:
+    """Start daemon in simulation mode — CSV data, no broker connection."""
+    import signal
+    import uvicorn
+    from datetime import date as _date_cls
+    from app.core.provider import ProviderRegistry
+    from app.core.providers.csv_simulation import CSVSimulationProvider
+    from app.services.ledger import init_ledger, get_ledger
+    from app.services.position_store import init_position_store, get_position_store
+    from app.services.simulation_clock import init_sim_clock
+    from app.services.market_data import set_simulation_mode
+
+    sim_date = _date_cls.fromisoformat(args.sim_date)
+
+    tickers_str = getattr(args, "tickers", None)
+    if not tickers_str:
+        print("  Error: --tickers is required in simulation mode (e.g. --tickers SPX,RUT)")
+        return 1
+    tickers = [t.strip().upper() for t in tickers_str.split(",")]
+
+    server_host = getattr(args, "server_host", "0.0.0.0")
+    server_port = getattr(args, "server_port", 8000)
+
+    # Resolve CSV directories relative to this file (utp.py → stocks/live_trading/universal-trade-platform)
+    utp_dir = Path(__file__).resolve().parent
+    stocks_dir = utp_dir.parent.parent  # stocks/
+    equities_dir = Path(getattr(args, "equities_dir", None) or (stocks_dir / "equities_output"))
+    options_dir = Path(getattr(args, "options_dir", None) or (stocks_dir / "options_csv_output"))
+
+    # Initialize persistence in sim data directory
+    data_dir = _resolve_data_dir(getattr(args, "data_dir", "data/utp"), "sim")
+    data_dir.mkdir(parents=True, exist_ok=True)
+    init_ledger(data_dir)
+    init_position_store(data_dir)
+
+    # Create and connect CSV simulation provider
+    sim_provider = CSVSimulationProvider(
+        sim_date=sim_date,
+        tickers=tickers,
+        equities_dir=equities_dir,
+        options_dir=options_dir,
+    )
+    await sim_provider.connect()
+
+    # Initialize simulation clock from loaded equity timestamps
+    all_ts = sim_provider.get_all_equity_timestamps()
+    if not all_ts:
+        print(f"  Error: No equity data found for {sim_date} in {equities_dir}")
+        return 1
+    clock = init_sim_clock(sim_date, all_ts)
+    clock._tickers = tickers  # for status endpoint
+
+    # Register as IBKR provider so existing code paths work
+    ProviderRegistry.register(sim_provider)
+
+    # Enable simulation mode in market_data (bypasses market hours check)
+    set_simulation_mode(True)
+
+    # Initialize LiveDataService (no IBKR — always fallback path)
+    from app.services.dashboard_service import DashboardService
+    from app.services.live_data_service import init_live_data_service
+    store = get_position_store()
+    if store:
+        init_live_data_service(store, DashboardService(store))
+
+    # Set daemon + sim mode flags — env vars must be set BEFORE app.main is
+    # imported so the module-level sim router registration check sees them.
+    os.environ["_UTP_DAEMON_MODE"] = "1"
+    os.environ["_UTP_SIM_MODE"] = "1"
+    import app.main
+    app.main._daemon_mode = True
+
+    print(f"\n  UTP Simulation [{sim_date}] on port {server_port}")
+    print(f"  Tickers: {', '.join(tickers)}")
+    print(f"  Timestamps: {len(all_ts)} ({all_ts[0].isoformat()} → {all_ts[-1].isoformat()})")
+    print(f"  Equities: {equities_dir}")
+    print(f"  Options:  {options_dir}")
+    print(f"  Data dir: {data_dir}")
+    print(f"  HTTP API: http://{server_host}:{server_port}")
+    print()
+
+    # Signal handlers
+    shutdown_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, lambda: shutdown_event.set())
+
+    # Start HTTP server (no background tasks — sim mode has none)
+    config = uvicorn.Config(
+        "app.main:app",
+        host=server_host,
+        port=server_port,
+        log_level=log_level.lower(),
+    )
+    server = uvicorn.Server(config)
+    server_task = asyncio.create_task(server.serve())
+
+    await shutdown_event.wait()
+
+    print("\n  Shutting down simulation daemon...")
+    clock.stop_auto_advance()
+    server.should_exit = True
+    try:
+        await asyncio.wait_for(server_task, timeout=5.0)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        pass
+
+    ProviderRegistry.clear()
+    set_simulation_mode(False)
+    from app.services.simulation_clock import reset_sim_clock
+    reset_sim_clock()
+
+    print("  Simulation daemon stopped.")
+    return 0
+
+
 async def _cmd_daemon(args) -> int:
     """Start long-running daemon: IBKR connection + background loops + HTTP API."""
     import signal
@@ -6411,6 +6974,11 @@ async def _cmd_daemon(args) -> int:
     os.environ["LOG_LEVEL"] = log_level
     import logging as _logging
     _logging.getLogger().setLevel(getattr(_logging, log_level, _logging.INFO))
+
+    # ── Simulation mode (--sim-date) ──────────────────────────────────────
+    sim_date_str = getattr(args, "sim_date", None)
+    if sim_date_str:
+        return await _cmd_daemon_sim(args, log_level)
 
     mode = _get_mode(args)
     if mode == "dry-run":
@@ -8037,17 +8605,26 @@ Examples:
   %(prog)s --symbol NDX --otm-pct 2 --width 100 --option-type CALL \\
     --expiration 2026-03-20 --quantity 10 --live
 
+  Anchored to PREVIOUS DAY'S close (stable late in the trading day):
+  %(prog)s --symbol SPX --close-pct 2 --option-type PUT \\
+    --expiration 2026-03-20 --quantity 25 --live
+
 P&L: credit_received - cost_to_close (max profit = full credit, max loss = width - credit)
                                 ''',
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     t_cs.add_argument("--symbol", required=True, help="Underlying symbol")
     t_cs.add_argument("--expiration", required=True, help="Expiration date YYYY-MM-DD")
     t_cs.add_argument("--short-strike", type=float, default=None,
-                      help="Short leg strike (or use --otm-pct)")
+                      help="Short leg strike (or use --otm-pct/--close-pct)")
     t_cs.add_argument("--long-strike", type=float, default=None,
-                      help="Long leg strike (or use --otm-pct + --width)")
-    t_cs.add_argument("--otm-pct", type=float, default=None,
-                      help="Place short strike this %% OTM from current price (alternative to explicit strikes)")
+                      help="Long leg strike (or use --otm-pct/--close-pct + --width)")
+    t_cs.add_argument("--otm-pct", type=str, default=None,
+                      help="Place short strike this %% OTM from current spot price "
+                           "(single-sided spread — pick side via --option-type)")
+    t_cs.add_argument("--close-pct", type=str, default=None,
+                      help="Place short strike this %% from PREVIOUS trading day's close "
+                           "(fetched from db_server /api/range_percentiles). "
+                           "Stable late-day alternative to --otm-pct.")
     t_cs.add_argument("--width", type=float, default=None,
                       help="Spread width in points (default: SPX=20, NDX=50, RUT=20, equities=5)")
     t_cs.add_argument("--option-type", required=True, choices=["CALL", "PUT"])
@@ -8106,8 +8683,16 @@ Examples:
     --call-short 5700 --call-long 5725 --expiration 2026-03-20 \\
     --quantity 1 --net-price 3.50 --paper
 
-  Percentage-based (resolves strikes from current price):
+  Percentage-based, symmetric (resolves strikes from current spot price):
   %(prog)s --symbol SPX --otm-pct 3 --width 20 \\
+    --expiration 2026-03-20 --quantity 25 --live
+
+  Percentage-based, asymmetric put:call (e.g. 2%% put / 3%% call):
+  %(prog)s --symbol SPX --otm-pct 2:3 --width 20 \\
+    --expiration 2026-03-20 --quantity 25 --live
+
+  Anchored to PREVIOUS DAY'S close (stable late in the trading day):
+  %(prog)s --symbol SPX --close-pct 1.5:2.5 --width 20 \\
     --expiration 2026-03-20 --quantity 25 --live
 
 P&L: combined credit - cost_to_close (max profit = total credit, max loss = wider wing width - credit)
@@ -8116,15 +8701,21 @@ P&L: combined credit - cost_to_close (max profit = total credit, max loss = wide
     t_ic.add_argument("--symbol", required=True, help="Underlying symbol")
     t_ic.add_argument("--expiration", required=True, help="Expiration date YYYY-MM-DD")
     t_ic.add_argument("--put-short", type=float, default=None,
-                      help="Short put strike (or use --otm-pct)")
+                      help="Short put strike (or use --otm-pct/--close-pct)")
     t_ic.add_argument("--put-long", type=float, default=None,
-                      help="Long put strike (or use --otm-pct + --width)")
+                      help="Long put strike (or use --otm-pct/--close-pct + --width)")
     t_ic.add_argument("--call-short", type=float, default=None,
-                      help="Short call strike (or use --otm-pct)")
+                      help="Short call strike (or use --otm-pct/--close-pct)")
     t_ic.add_argument("--call-long", type=float, default=None,
-                      help="Long call strike (or use --otm-pct + --width)")
-    t_ic.add_argument("--otm-pct", type=float, default=None,
-                      help="Place short strikes this %% OTM from current price (alternative to explicit strikes)")
+                      help="Long call strike (or use --otm-pct/--close-pct + --width)")
+    t_ic.add_argument("--otm-pct", type=str, default=None,
+                      help="Place short strikes this %% OTM from current spot price. "
+                           "Single value (e.g. '3') applies symmetrically; "
+                           "split form 'put:call' (e.g. '2:3') sets each wing independently.")
+    t_ic.add_argument("--close-pct", type=str, default=None,
+                      help="Same as --otm-pct but anchored to PREVIOUS trading day's close "
+                           "(fetched from db_server /api/range_percentiles). "
+                           "Single value or split 'put:call'.")
     t_ic.add_argument("--width", type=float, default=None,
                       help="Wing width in points (default: SPX=20, NDX=50, RUT=20, equities=5)")
     t_ic.add_argument("--quantity", type=int, default=1)
@@ -8453,6 +9044,7 @@ Examples:
   %(prog)s --live --no-restart                        No auto-restart on crash
   %(prog)s --server-port 9000 --paper                 Custom API port
   %(prog)s --live --streaming-config configs/streaming_default.yaml
+  %(prog)s --sim-date 2026-04-01 --tickers SPX,RUT --server-port 8100
 
 Stopping:
   Ctrl-C or SIGTERM — clean shutdown (no restart)
@@ -8475,6 +9067,14 @@ Aliases: d
     p_daemon.add_argument("--log-level", default="INFO",
                           choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                           help="Log level (default: INFO)")
+    p_daemon.add_argument("--sim-date", default=None, metavar="YYYY-MM-DD",
+                          help="Start in simulation mode, replaying CSV data for this date")
+    p_daemon.add_argument("--tickers", default=None,
+                          help="Comma-separated tickers for sim mode (e.g. SPX,RUT,NDX)")
+    p_daemon.add_argument("--equities-dir", default=None, metavar="PATH",
+                          help="Equity CSV directory (sim mode, default: ../../equities_output)")
+    p_daemon.add_argument("--options-dir", default=None, metavar="PATH",
+                          help="Options CSV directory (sim mode, default: ../../options_csv_output)")
     _add_connection_args(p_daemon, default_paper=True)
 
     # ── repl ──
