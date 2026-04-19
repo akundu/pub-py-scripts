@@ -14739,21 +14739,103 @@ def _range_percentiles_methodology_html(exclude_outliers: bool = True) -> str:
   that point in the day to the 4:00 PM ET close.</p>
 
   <h4 style="font-size:13px;color:var(--text-primary,#c9d1d9);margin:18px 0 6px;">Outlier Handling ({outlier_status})</h4>
-  <p>Uses IQR-based winsorization (standard Tukey fence). The interquartile range (IQR = Q3 &minus; Q1,
-  the middle 50% of returns) defines the "normal" spread. Values beyond Q1 &minus; 1.5&times;IQR or
-  Q3 + 1.5&times;IQR are <em>capped</em> (not removed) to the fence value.</p>
-  <ul style="margin:4px 0 8px 20px;">
-    <li><strong>No data points are removed</strong> — all trading days remain in the sample count.
-    A day that moved &minus;3.5% in a distribution with fences at &minus;2.5% is counted as &minus;2.5%.</li>
-    <li><strong>Caps are per-ticker</strong> — computed from each ticker's own return distribution.
-    SPX (IQR ~1.0%) gets tighter fences (~&plusmn;2%) than RUT (IQR ~1.7%, fences ~&plusmn;3.3%).</li>
-    <li><strong>Effect on percentiles:</strong> P75–P95 are barely affected (outliers sit in the tails).
-    P100 changes the most — it's capped from the single worst day to the fence. For example, NDX P100 UP
-    goes from 3.43% (raw) to 2.77% (winsorized), a 0.66% reduction. P95 is unchanged.</li>
-    <li><strong>Why 1.5&times; IQR?</strong> This is the standard Tukey fence used in boxplot whiskers.
-    For normally-distributed data, it captures ~99.3% of values. For fat-tailed financial returns, it
-    typically clips 2–5% of the most extreme days.</li>
-  </ul>
+
+  <p><strong>What is IQR?</strong> The Interquartile Range (IQR) = Q3 &minus; Q1, where Q1 is the 25th
+  percentile and Q3 is the 75th percentile. It measures the spread of the middle 50% of values,
+  ignoring the tails entirely. For NDX daily returns: Q1 = &minus;0.55%, Q3 = +0.78%, IQR = 1.33%.</p>
+
+  <p><strong>Winsorization</strong> caps extreme values at a fence computed from IQR:</p>
+  <pre style="background:var(--bg-secondary,#161b22);padding:10px;border-radius:6px;font-size:11px;overflow-x:auto;margin:8px 0;">
+Lower fence = Q1 &minus; 1.5 &times; IQR     (e.g., &minus;0.55% &minus; 1.5 &times; 1.33% = <strong>&minus;2.55%</strong>)
+Upper fence = Q3 + 1.5 &times; IQR     (e.g., +0.78% + 1.5 &times; 1.33% = <strong>+2.77%</strong>)
+
+Any return beyond the fence is CAPPED to the fence value (not removed).
+A &minus;3.5% day becomes &minus;2.55%. The day still counts in sample size.</pre>
+
+  <p><strong>Why IQR instead of standard deviation?</strong> Standard deviation is itself influenced by
+  outliers — a single &minus;5% crash inflates &sigma;, making the fence wider, which then fails to
+  clip the very outlier you're trying to detect. IQR uses only the middle 50% to set the fence,
+  so it's <em>robust to the outliers it's detecting</em>.</p>
+
+  <p><strong>Why factor = 1.5?</strong> This is the standard Tukey fence (John Tukey, 1977), the same
+  formula used in every boxplot's whiskers.</p>
+  <table style="font-size:11px;border-collapse:collapse;margin:8px 0;">
+    <tr style="border-bottom:1px solid var(--border-color,#30363d);">
+      <th style="text-align:left;padding:3px 10px 3px 0;">Factor</th>
+      <th style="padding:3px 10px;">Name</th>
+      <th style="padding:3px 10px;">Normal data</th>
+      <th style="padding:3px 10px;">Financial returns</th>
+      <th style="padding:3px 10px;">Verdict</th>
+    </tr>
+    <tr><td style="padding:2px 10px 2px 0;">1.0&times;</td><td style="padding:2px 10px;">Inner fence</td>
+        <td style="padding:2px 10px;">Clips ~3%</td><td style="padding:2px 10px;">Clips ~8-10%</td>
+        <td style="padding:2px 10px;color:#da3633;">Too aggressive</td></tr>
+    <tr style="background:rgba(35,134,54,0.1);"><td style="padding:2px 10px 2px 0;font-weight:bold;">1.5&times;</td>
+        <td style="padding:2px 10px;font-weight:bold;">Tukey fence ★</td>
+        <td style="padding:2px 10px;">Clips ~0.7%</td><td style="padding:2px 10px;">Clips ~2-5%</td>
+        <td style="padding:2px 10px;color:#3fb950;font-weight:bold;">Standard choice</td></tr>
+    <tr><td style="padding:2px 10px 2px 0;">2.0&times;</td><td style="padding:2px 10px;">—</td>
+        <td style="padding:2px 10px;">Clips ~0.1%</td><td style="padding:2px 10px;">Clips ~1%</td>
+        <td style="padding:2px 10px;">Permissive</td></tr>
+    <tr><td style="padding:2px 10px 2px 0;">2.5&times;</td><td style="padding:2px 10px;">Outer fence</td>
+        <td style="padding:2px 10px;">Clips ~0.01%</td><td style="padding:2px 10px;">Clips ~0.5%</td>
+        <td style="padding:2px 10px;color:#d29922;">Almost nothing clipped</td></tr>
+  </table>
+
+  <p><strong>Per-ticker fences</strong> (computed dynamically from each ticker's own distribution):</p>
+  <table style="font-size:11px;border-collapse:collapse;margin:8px 0;">
+    <tr style="border-bottom:1px solid var(--border-color,#30363d);">
+      <th style="text-align:left;padding:3px 10px 3px 0;">Ticker</th>
+      <th style="padding:3px 10px;">IQR</th>
+      <th style="padding:3px 10px;">Lower Fence</th>
+      <th style="padding:3px 10px;">Upper Fence</th>
+      <th style="padding:3px 10px;">Typical Days Clipped</th>
+    </tr>
+    <tr><td style="padding:2px 10px 2px 0;">SPX</td><td style="padding:2px 10px;">~1.0%</td>
+        <td style="padding:2px 10px;">~&minus;1.8%</td><td style="padding:2px 10px;">~+2.0%</td>
+        <td style="padding:2px 10px;">4-5 / 120 days</td></tr>
+    <tr><td style="padding:2px 10px 2px 0;">NDX</td><td style="padding:2px 10px;">~1.3%</td>
+        <td style="padding:2px 10px;">~&minus;2.6%</td><td style="padding:2px 10px;">~+2.8%</td>
+        <td style="padding:2px 10px;">2-3 / 120 days</td></tr>
+    <tr><td style="padding:2px 10px 2px 0;">RUT</td><td style="padding:2px 10px;">~1.7%</td>
+        <td style="padding:2px 10px;">~&minus;3.2%</td><td style="padding:2px 10px;">~+3.4%</td>
+        <td style="padding:2px 10px;">1-2 / 120 days</td></tr>
+  </table>
+  <p style="font-size:11px;opacity:0.8;">More volatile tickers (RUT) have wider fences because their
+  IQR is larger. Fences adapt automatically as market conditions change — they're recomputed on every request.</p>
+
+  <p><strong>Effect on percentiles:</strong> P75–P95 are barely affected (outliers sit beyond these
+  levels). P100 changes the most — it gets capped from the single worst historical day to the fence
+  value. Pass <code>?outliers=1</code> to see raw unfiltered data. The toggle button in the top-right
+  switches between filtered and raw views.</p>
+
+  <h4 style="font-size:13px;color:var(--text-primary,#c9d1d9);margin:18px 0 6px;">How /predictions Handles Outliers</h4>
+  <p>The <code>/predictions</code> endpoint uses three different outlier methods across its models:</p>
+  <table style="font-size:11px;border-collapse:collapse;margin:8px 0;">
+    <tr style="border-bottom:1px solid var(--border-color,#30363d);">
+      <th style="text-align:left;padding:3px 10px 3px 0;">Model</th>
+      <th style="padding:3px 10px;">Method</th>
+      <th style="padding:3px 10px;">How It Works</th>
+    </tr>
+    <tr><td style="padding:2px 10px 2px 0;">LightGBM (training)</td>
+        <td style="padding:2px 10px;">5&sigma; clipping</td>
+        <td style="padding:2px 10px;font-size:10px;">Training targets clipped at mean &plusmn; 5 std devs before model training. Prevents extreme days from distorting quantile regression.</td></tr>
+    <tr><td style="padding:2px 10px 2px 0;">Time-aware percentile</td>
+        <td style="padding:2px 10px;">3&sigma; filtering</td>
+        <td style="padding:2px 10px;font-size:10px;">Removes returns beyond 3 std devs, but only if &ge;80% of samples survive. Falls back to raw data if filtering is too aggressive.</td></tr>
+    <tr><td style="padding:2px 10px 2px 0;">Static percentile</td>
+        <td style="padding:2px 10px;">1.5&times; IQR winsorization</td>
+        <td style="padding:2px 10px;font-size:10px;">Same Tukey fence as this page. Caps extreme values, no samples removed.</td></tr>
+    <tr><td style="padding:2px 10px 2px 0;">Empirical continuous</td>
+        <td style="padding:2px 10px;">1.5&times; IQR winsorization</td>
+        <td style="padding:2px 10px;font-size:10px;">Same as static percentile.</td></tr>
+    <tr><td style="padding:2px 10px 2px 0;">Combined bands</td>
+        <td style="padding:2px 10px;">Inherits from above</td>
+        <td style="padding:2px 10px;font-size:10px;">Takes the wider of LightGBM + percentile, so inherits both methods' outlier handling.</td></tr>
+  </table>
+  <p style="font-size:11px;opacity:0.8;">The LightGBM 5&sigma; clip is very permissive (almost never triggers).
+  The 3&sigma; filter on the time-aware model is the most defensive but has a safety fallback. The IQR
+  winsorization on static/empirical is the same as this page's default.</p>
 
   <h4 style="font-size:13px;color:var(--text-primary,#c9d1d9);margin:18px 0 6px;">Credit Spread Strike Selection</h4>
 
