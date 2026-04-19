@@ -91,6 +91,25 @@ def _load_recommended(ticker: str) -> dict:
     return result
 
 
+def _ensure_recommended_in_percentiles(percentiles: list[int], ticker: str) -> list[int]:
+    """Ensure all recommended percentile values are in the percentiles list.
+
+    If the auto-calibrator recommends P97 but it's not in the default list,
+    this adds it so the ★ row is visible in the table.
+    """
+    rec = _load_recommended(ticker)
+    needed = set()
+    for context in rec.values():
+        if isinstance(context, dict):
+            for v in context.values():
+                if isinstance(v, int) and 0 < v <= 100:
+                    needed.add(v)
+    added = needed - set(percentiles)
+    if added:
+        return sorted(set(percentiles) | added)
+    return percentiles
+
+
 def _winsorize_iqr(values, factor=1.5):
     """Winsorize values using IQR fences: cap at Q1 - factor*IQR and Q3 + factor*IQR.
 
@@ -566,6 +585,9 @@ async def compute_hourly_moves_to_close(
 
     db_symbol, polygon_symbol, is_index, _ = parse_symbol(ticker)
     display_ticker = ticker.replace("I:", "") if ticker.startswith("I:") else ticker
+
+    # Ensure recommended percentiles are in the list so ★ rows are always visible
+    percentiles = _ensure_recommended_in_percentiles(percentiles, display_ticker)
 
     logger = get_logger("range_percentiles", level=log_level) if DB_AVAILABLE else None
 
@@ -1091,6 +1113,9 @@ async def compute_range_percentiles_multi_window(
 
     db_symbol, _, is_index, _ = parse_symbol(ticker)
     display_ticker = ticker.replace("I:", "") if ticker.startswith("I:") else ticker
+
+    # Ensure recommended percentiles are in the list so ★ rows are always visible
+    percentiles = _ensure_recommended_in_percentiles(percentiles, display_ticker)
 
     logger = get_logger("range_percentiles", level=log_level)
     db = StockQuestDB(
