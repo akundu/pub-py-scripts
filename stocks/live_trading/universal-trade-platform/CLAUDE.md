@@ -11,7 +11,7 @@ A unified multi-broker trading API (FastAPI) supporting Robinhood, E\*TRADE, and
 | File | Purpose |
 |------|---------|
 | `utp.py` | ALL CLI operations + API server |
-| `tests/test_utp.py` | ALL tests (532 tests) |
+| `tests/test_utp.py` | ALL tests (654 tests) |
 
 There are no standalone scripts. Do not create new top-level scripts unless explicitly asked.
 
@@ -201,6 +201,16 @@ UTP_DAEMON_URL=http://localhost:8100 python utp_voice.py serve --port 8801
 
 The auto-trader engine (`utp_voice.py`) runs a credit spread strategy across sim or live data, making entry/exit decisions at each timestamp. Supports **multi-DTE** (0-3 day expirations) with carry-over of positions across days. Accessible via HTTP from both the web UI and CLI.
 
+**Three Execution Modes:**
+
+| Mode | CLI Flag | Data Source | Fills | Display |
+|------|----------|-------------|-------|---------|
+| **Historical Sim** | `--date 2026-04-02` | CSV files via sim daemon | Instant at CSV bid/ask | SSE stream, ~10s/bar |
+| **Shadow Live** | `--shadow` | Real IBKR live daemon | Fake fill after 5s delay | SSE stream, real-time |
+| **Live Trading** | `--live` | Real IBKR live daemon | Real IBKR submission | SSE stream, real-time |
+
+**Diversity Controls:** The engine uses `_select_diverse_spread()` to penalize concentration risk. When `diversity_enabled: true` (default), candidates are scored with penalties for same ticker+type (-25), same ticker (-15), same DTE (-10), overlapping strikes (-15), and bonuses for new tickers (+10) and new DTEs (+5).
+
 **Multi-DTE support**: The engine filters expirations by the `dte` config list AND a calendar-week boundary (no crossing into next week). Positions with future expirations carry to the next trading day automatically. Use `--options-dir ../../options_csv_output_full` when starting the daemon to access multi-expiration data.
 
 ```bash
@@ -217,50 +227,58 @@ export UTP_VOICE_JWT_SECRET=test-secret
 python utp_voice.py serve --port 8801 --public
 
 # ── Terminal 3: Run commands ──
-# Configure strategy with multi-DTE
+
+# Mode 1: Historical Sim (streaming display)
+python sim_trader.py --date 2026-04-02                    # 10s/bar (default)
+python sim_trader.py --date 2026-04-02 --sim-speed 0      # instant backtest
+python sim_trader.py --date 2026-04-02 --sim-speed 30     # slow replay
+python sim_trader.py --start-date 2026-03-01 --end-date 2026-04-17  # multi-day (no stream)
+
+# Mode 2: Shadow (requires live IBKR daemon on port 8000)
+python sim_trader.py --shadow                             # 60s interval
+python sim_trader.py --shadow --interval 30               # check every 30s
+
+# Mode 3: Live (requires live IBKR daemon)
+python sim_trader.py --live                               # start engine
+python sim_trader.py --live --follow                      # start + tail stream
+
+# Direct API usage
 curl -X POST http://localhost:8801/api/auto-trader/config \
-  -d '{"tickers":["SPX"],"dte":[0,1,2],"min_otm_pct":0.02,"spread_width":25}'
-
-# Run single sim day
+  -d '{"tickers":["SPX"],"dte":[0,1,2],"min_otm_pct":0.02}'
 curl -X POST http://localhost:8801/api/auto-trader/run-day | jq
-
-# Run date range (returns val_score, carries positions across days)
 curl -X POST http://localhost:8801/api/auto-trader/run-range \
   -d '{"start_date":"2026-04-01","end_date":"2026-04-05"}' | jq
 
-# CLI client
-python sim_trader.py --voice-url http://localhost:8801 --date 2026-04-01
-python sim_trader.py --start-date 2026-03-01 --end-date 2026-04-17
-
-# Autoresearch evaluation
-python run_sim_research.py
-
-# Full parameter sweep (4,050 combos)
-python run_auto_research.py \
-  --voice-url http://localhost:8801 \
+# Autoresearch
+python run_auto_research.py --voice-url http://localhost:8801 \
   --start 2026-01-02 --end 2026-04-17
-
-# Quick sweep (~135 combos)
-python run_auto_research.py --quick \
-  --voice-url http://localhost:8801 \
+python run_auto_research.py --quick --voice-url http://localhost:8801 \
   --start 2026-01-02 --end 2026-04-17
 ```
 
 **Auto-trader API endpoints (in utp_voice.py):**
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/auto-trader/config` | POST | Set strategy parameters (including `dte` list) |
-| `/api/auto-trader/config` | GET | Get current config |
+| `/api/auto-trader/config` | GET/POST | Get/set strategy parameters (including `dte` list, `diversity_enabled`) |
 | `/api/auto-trader/run-day` | POST | Run strategy for one sim day (returns `carry_forward`) |
+| `/api/auto-trader/run-day-stream` | GET/POST | Run sim day with SSE streaming (`?sim_speed=10`) |
 | `/api/auto-trader/run-range` | POST | Run across date range with position carry-over |
+| `/api/auto-trader/start-live` | POST | Start live trading engine loop |
+| `/api/auto-trader/stop-live` | POST | Stop live trading engine |
+| `/api/auto-trader/live-stream` | GET | SSE stream of live mode events |
+| `/api/auto-trader/start-shadow` | POST | Start shadow mode (real prices, fake fills) |
+| `/api/auto-trader/stop-shadow` | POST | Stop shadow mode |
+| `/api/auto-trader/shadow-stream` | GET | SSE stream of shadow mode events |
+| `/api/auto-trader/shadow-positions` | GET | Current shadow portfolio |
 
 **Key files:**
 | File | Description |
 |------|-------------|
-| `utp_voice.py` | Auto-trader engine: `_run_sim_day()`, `_run_sim_range()`, `_allowed_expirations()`, REST endpoints |
-| `sim_trader.py` | Thin CLI client with tunable strategy constants |
-| `run_auto_research.py` | Standalone sweep: tests all DTE/ticker/type/OTM/width combos |
-| `run_sim_research.py` | Immutable evaluation harness for autoresearch |
+| `utp_voice.py` | Auto-trader engine: `_run_sim_day()`, `_run_sim_day_streaming()`, `_run_shadow_loop()`, `_select_diverse_spread()`, event bus, REST endpoints |
+| `sim_trader.py` | CLI client: `--date`, `--shadow`, `--live`, `--follow`, `--sim-speed`, SSE stream consumer |
+| `run_auto_research.py` | Original sweep: DTE/ticker/type/OTM/width (fixed contracts=10) |
+| `run_full_sweep.py` | Comprehensive sweep: all params + contracts + diversity + risk bounds + phase 2 fine-tune |
+| `run_sim_research.py` | Immutable evaluation harness for autoresearch (DO NOT MODIFY) |
 | `sim_research_program.md` | Agent instructions for parameter optimization |
 
 **Multi-DTE mechanics:**
@@ -270,6 +288,44 @@ python run_auto_research.py --quick \
 - `_run_sim_range()` — passes `carry_positions` across days; force-settles at range end
 
 **val_score formula:** `(total_pnl / peak_risk) × win_rate × min(profit_factor, 5) / 5`
+
+**Comprehensive parameter sweep (`run_full_sweep.py`):**
+
+Expands on `run_auto_research.py` by sweeping ALL tunable parameters with risk bounds enforcement.
+
+```bash
+# Parallel quick sweep (8 workers, ~1 hour)
+python run_full_sweep.py --quick --workers 8 \
+  --start 2026-02-18 --end 2026-04-17
+
+# Single worker (sequential, ~6 hours)
+python run_full_sweep.py --quick \
+  --start 2026-02-18 --end 2026-04-17
+
+# Phase 1 + phase 2 fine-tuning
+python run_full_sweep.py --quick --fine-tune --workers 8 \
+  --start 2026-02-18 --end 2026-04-17
+
+# Resume interrupted run
+python run_full_sweep.py --quick --workers 8 \
+  --start 2026-02-18 --end 2026-04-17 \
+  --resume results/full_sweep/sweep_20260419.json
+
+# Use pre-started voice servers
+python run_full_sweep.py --quick \
+  --voice-urls http://localhost:8801,http://localhost:8802
+```
+
+**Parallelism:** `--workers N` spawns N independent (daemon, voice) pairs on consecutive ports (8100+i, 8801+i). Each worker processes combos sequentially to avoid sim clock races. Combos are partitioned round-robin across workers. With 8 workers, a 432-combo sweep finishes in ~1 hour instead of ~6.
+
+| Phase | What it sweeps | Quick combos | Full combos |
+|-------|---------------|-------------|------------|
+| **Phase 1** | tickers × types × DTE × OTM% × width × contracts × max_trades × diversity | ~432 | ~16K |
+| **Phase 2** | Top-N phase 1 × entry_start × entry_end × profit_target × stop_loss | ~3,800 | ~3,800 |
+
+**Risk bounds:** Max $50K/trade, max $500K/day. Combos exceeding per-trade limit are auto-skipped.
+
+**Output:** `results/full_sweep/sweep_{ts}.json` + `summary_{ts}.csv` (ranked by val_score, with diversity comparison and failure analysis).
 
 ### Python Client Library
 
@@ -790,7 +846,7 @@ All from env vars / `.env`:
 
 ## Testing
 
-**619 tests in `tests/test_utp.py`, all passing.** Tests use `tmp_path` for isolated persistence. The autouse `_setup_providers` fixture in `conftest.py` initializes and tears down ledger + position store per test.
+**654 tests in `tests/test_utp.py`, all passing.** Tests use `tmp_path` for isolated persistence. The autouse `_setup_providers` fixture in `conftest.py` initializes and tears down ledger + position store per test.
 
 ```bash
 python -m pytest tests/ -v                              # All 359 tests
@@ -866,7 +922,7 @@ python -m pytest tests/test_utp.py -k "TestIBKR" -v     # IBKR tests only
 | `TestSimulationPicks` | 2 | Pick generation and /sim/picks endpoint |
 | `TestSimulationSweep` | 1 | Parameter sweep /sim/sweep endpoint |
 | `TestSimLoadDate` | 5 | /sim/load-date hot-swap (invalid, not-sim, no-data, success) |
-| `TestAutoTraderEngine` | 16 | Auto-trader config, run-day, run-range, spread filters, DTE filtering, carry-over, CLI config |
+| `TestAutoTraderEngine` | 32 | Auto-trader config, run-day, run-range, spread filters, DTE filtering, carry-over, CLI config, diversity, streaming, shadow, event bus |
 
 ## IBKR Live Provider
 

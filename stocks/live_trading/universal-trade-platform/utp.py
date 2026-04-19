@@ -2898,6 +2898,92 @@ async def _cmd_status_http(args, server: str) -> int:
     return 0
 
 
+async def _cmd_latency_probe(args) -> int:
+    """Probe a running daemon for provider call latency over a fixed window.
+
+    Resets the daemon's latency buffer, sleeps for ``--duration`` seconds, then
+    fetches the histogram and prints p50/p95/p99 per (method, symbol).
+    """
+    import httpx
+
+    server = _detect_server(args)
+    if not server:
+        port = getattr(args, "server_port", 8000)
+        print(f"  No daemon detected on http://localhost:{port}")
+        print(f"  Start one first:")
+        print(f"    python utp.py daemon --paper --force-market-open \\")
+        print(f"      --streaming-config configs/streaming_default.yaml")
+        return 1
+
+    duration = max(1, int(getattr(args, "duration", 60)))
+    method = getattr(args, "filter_method", None)
+    symbol = getattr(args, "filter_symbol", None)
+    no_reset = getattr(args, "no_reset", False)
+
+    _print_header(f"Latency probe ({duration}s) — daemon at {server}")
+
+    async with httpx.AsyncClient(base_url=server, timeout=30.0) as client:
+        if not no_reset:
+            r = await client.post("/market/streaming/latency/reset")
+            if r.status_code != 200:
+                print(f"  ⚠ Reset failed: HTTP {r.status_code} — continuing anyway")
+            else:
+                print(f"  ✓ Reset latency buffer")
+
+        # Countdown — print every 5s so the user knows it's alive
+        elapsed = 0
+        step = 5
+        while elapsed < duration:
+            wait = min(step, duration - elapsed)
+            await asyncio.sleep(wait)
+            elapsed += wait
+            print(f"  …{elapsed}/{duration}s", flush=True)
+
+        params = {}
+        if method:
+            params["method"] = method
+        if symbol:
+            params["symbol"] = symbol
+        params["recent_n"] = 0  # we just want aggregates
+        r = await client.get("/market/streaming/latency", params=params)
+        if r.status_code != 200:
+            print(f"  Histogram fetch failed: HTTP {r.status_code}")
+            return 1
+        data = r.json()
+
+    total = data.get("total_samples", 0)
+    buckets = data.get("buckets", {}) or {}
+    print(f"\n  Total samples: {total}  |  Buckets: {len(buckets)}")
+    if not buckets:
+        print(f"  No samples recorded.")
+        print(f"  Tips: ensure the streaming-config is loaded and IBKR is connected.")
+        print(f"        --force-market-open enables streamer fetches outside market hours.")
+        return 0
+
+    # Sort by p95 desc — slowest call sites surface first.
+    rows = sorted(
+        buckets.values(),
+        key=lambda b: (b.get("p95_ms", 0), b.get("count", 0)),
+        reverse=True,
+    )
+    header = f"  {'Method':<32} {'Symbol':<8} {'N':>5} {'p50':>9} {'p95':>9} {'p99':>9} {'max':>9} {'errs':>5}"
+    print()
+    print(header)
+    print("  " + "─" * (len(header) - 2))
+    for b in rows:
+        m = (b.get("method") or "")[:32]
+        s = (b.get("symbol") or "*")[:8]
+        n = b.get("count", 0)
+        p50 = b.get("p50_ms", 0)
+        p95 = b.get("p95_ms", 0)
+        p99 = b.get("p99_ms", 0)
+        mx = b.get("max_ms", 0)
+        err = b.get("errors", 0)
+        print(f"  {m:<32} {s:<8} {n:>5} {p50:>8.1f}ms {p95:>8.1f}ms {p99:>8.1f}ms {mx:>8.1f}ms {err:>5}")
+    print()
+    return 0
+
+
 async def _cmd_orders_http(args, server: str) -> int:
     """Orders via HTTP."""
     import httpx
@@ -6975,6 +7061,12 @@ async def _cmd_daemon(args) -> int:
     import logging as _logging
     _logging.getLogger().setLevel(getattr(_logging, log_level, _logging.INFO))
 
+    # Honor --force-market-open: makes streamer + market_data treat the
+    # market as open so latency probes work outside trading hours.
+    if getattr(args, "force_market_open", False):
+        os.environ["UTP_FORCE_MARKET_OPEN"] = "true"
+        print("  ⚠ UTP_FORCE_MARKET_OPEN=true — market hours gating disabled")
+
     # ── Simulation mode (--sim-date) ──────────────────────────────────────
     sim_date_str = getattr(args, "sim_date", None)
     if sim_date_str:
@@ -7161,6 +7253,12 @@ async def _cmd_daemon(args) -> int:
             from app.services.streaming_config import load_streaming_config
             from app.services.market_data_streaming import init_streaming_service
             stream_cfg = load_streaming_config(streaming_config_path)
+
+            # Export pre/post-market window into env vars so the gating helpers
+            # in market_data and option_quote_streaming honor the YAML setting.
+            os.environ["UTP_PREMARKET_MINUTES"] = str(stream_cfg.option_quotes_premarket_minutes)
+            os.environ["UTP_POSTMARKET_MINUTES"] = str(stream_cfg.option_quotes_postmarket_minutes)
+
             _streaming_svc = init_streaming_service(stream_cfg, live_provider)
 
             async def _streaming_bg():
@@ -8819,6 +8917,42 @@ Aliases: pb
     pb_list = pb_sub.add_parser("list", help="List available playbooks", aliases=["ls"])
     pb_list.add_argument("--dir", default="playbooks", help="Playbooks directory (default: playbooks/)")
 
+    # ── latency-probe ──
+    p_lat = subparsers.add_parser("latency-probe",
+                                   help="Measure provider call latency over a fixed window",
+                                   aliases=["latency"],
+                                   description='''
+Probe a running daemon for provider call latency over a fixed window.
+
+The daemon's latency ring buffer is reset, then we sleep for --duration
+seconds while the streaming service makes its normal IBKR calls. After the
+window, the histogram is fetched and printed: p50/p95/p99/max per
+(method, symbol).
+
+Run the daemon with --force-market-open to exercise IBKR even when the
+market is closed (otherwise the streamer skips its IBKR cycle).
+                                   ''',
+                                   epilog='''
+Examples:
+  %(prog)s --duration 60                Default 60s probe
+  %(prog)s --duration 120 --filter-symbol SPX
+  %(prog)s --filter-method provider.get_option_quotes --duration 90
+  %(prog)s --no-reset                   Add to existing buffer (no clear)
+                                   ''',
+                                   formatter_class=argparse.RawDescriptionHelpFormatter)
+    p_lat.add_argument("--duration", type=int, default=60,
+                       help="Window length in seconds (default: 60)")
+    p_lat.add_argument("--filter-method", default=None,
+                       help="Restrict histogram to a specific method (e.g. provider.get_option_quotes)")
+    p_lat.add_argument("--filter-symbol", default=None,
+                       help="Restrict histogram to a specific symbol (e.g. SPX)")
+    p_lat.add_argument("--no-reset", action="store_true",
+                       help="Don't reset the daemon's latency buffer first")
+    p_lat.add_argument("--server", default=None, metavar="URL",
+                       help="Daemon URL (default: auto-detect localhost:8000)")
+    p_lat.add_argument("--server-port", type=int, default=8000,
+                       help="Port for daemon auto-detection (default: 8000)")
+
     # ── status ──
     p_status = subparsers.add_parser("status",
                                       help="System dashboard (positions, orders, connections)",
@@ -9075,6 +9209,9 @@ Aliases: d
                           help="Equity CSV directory (sim mode, default: ../../equities_output)")
     p_daemon.add_argument("--options-dir", default=None, metavar="PATH",
                           help="Options CSV directory (sim mode, default: ../../options_csv_output)")
+    p_daemon.add_argument("--force-market-open", action="store_true",
+                          help="Bypass market-hours gate (sets UTP_FORCE_MARKET_OPEN=true). "
+                               "Use for latency probes / streamer testing outside trading hours.")
     _add_connection_args(p_daemon, default_paper=True)
 
     # ── repl ──
@@ -9480,6 +9617,7 @@ Aliases: rl
         "activity": "trades",
         "exec": "executions",
         "rl": "roll",
+        "latency": "latency-probe",
     }
     cmd = alias_map.get(cmd, cmd)
 
@@ -9553,6 +9691,8 @@ Aliases: rl
         rc = asyncio.run(_cmd_executions(args))
     elif cmd == "roll":
         rc = asyncio.run(_cmd_roll(args))
+    elif cmd == "latency-probe":
+        rc = asyncio.run(_cmd_latency_probe(args))
     elif cmd == "etrade-auth":
         rc = _cmd_etrade_auth(args)
     else:

@@ -31,8 +31,12 @@ from app.services.streaming_config import StreamingConfig
 
 logger = logging.getLogger(__name__)
 
-# Redis key prefix for option quote prices
+# Redis key prefix for option quote prices.  Two cache instances live in this
+# service (CSV-only, IBKR-only) and need non-colliding namespaces so a daemon
+# restart can warm-load each without crosstalk.  Default keeps the historical
+# prefix for backwards-compat with on-disk Redis state.
 _REDIS_QUOTES_KEY_PREFIX = "utp:option_quotes"
+_REDIS_QUOTES_KEY_PREFIX_IBKR = "utp:option_quotes_ibkr"
 _REDIS_QUOTES_TTL = 24 * 3600  # 24 hours — large TTL; freshness enforced by age check
 
 
@@ -54,18 +58,22 @@ class OptionQuoteCache:
     Redis keys are mode-agnostic so TWS and CPG share the same cache.
     """
 
-    def __init__(self, redis_client=None) -> None:
+    def __init__(
+        self,
+        redis_client=None,
+        redis_key_prefix: str = _REDIS_QUOTES_KEY_PREFIX,
+    ) -> None:
         self._cache: dict[tuple[str, str, str], CachedQuotes] = {}
         self._redis = redis_client
+        self._redis_key_prefix = redis_key_prefix
 
     def set_redis(self, redis_client) -> None:
         """Set or update the Redis client (called after connect)."""
         self._redis = redis_client
 
-    @staticmethod
-    def _redis_key(symbol: str, expiration: str, option_type: str) -> str:
-        """Build Redis hash key: utp:option_quotes:SPX:2026-03-25:CALL"""
-        return f"{_REDIS_QUOTES_KEY_PREFIX}:{symbol}:{expiration}:{option_type}"
+    def _redis_key(self, symbol: str, expiration: str, option_type: str) -> str:
+        """Build Redis hash key (prefix configurable per cache instance)."""
+        return f"{self._redis_key_prefix}:{symbol}:{expiration}:{option_type}"
 
     def get(
         self,
@@ -201,15 +209,22 @@ class OptionQuoteCache:
         self._cache.clear()
 
 
-# ── Market hours (with 10-min buffer) ────────────────────────────────────────
-# US equity market: 9:30 AM - 4:00 PM ET = 13:30 - 20:00 UTC
-# With 10-min buffer: 9:20 AM - 4:10 PM ET = 13:20 - 20:10 UTC
-_MARKET_OPEN_UTC = 13.0 + 20 / 60.0   # 13:20 UTC = 9:20 AM ET
-_MARKET_CLOSE_UTC = 20.0 + 10 / 60.0  # 20:10 UTC = 4:10 PM ET
+# ── Market hours (configurable buffer via env vars) ──────────────────────────
+# Regular hours: 9:30 AM - 4:00 PM ET = 13:30 - 20:00 UTC.  Pre/post buffers
+# are read from market_data._premarket_min() / _postmarket_min(), which honor
+# UTP_PREMARKET_MINUTES / UTP_POSTMARKET_MINUTES env vars (default 10/10).
 
 
 def _is_market_hours() -> bool:
-    """True if within US equity market hours (±10 min buffer) — holiday-aware."""
+    """True if within US equity market hours (configurable buffer).
+
+    Honors ``UTP_FORCE_MARKET_OPEN=true`` for latency probes and out-of-hours
+    streamer testing.  Buffer minutes come from
+    ``UTP_PREMARKET_MINUTES`` / ``UTP_POSTMARKET_MINUTES`` (default 10/10).
+    """
+    from app.services.market_data import _is_market_open_forced, _market_window_minutes
+    if _is_market_open_forced():
+        return True
     try:
         from common.market_hours import is_trading_day
         if not is_trading_day():
@@ -218,9 +233,14 @@ def _is_market_hours() -> bool:
         now = datetime.now(timezone.utc)
         if now.weekday() >= 5:
             return False
-    now = datetime.now(timezone.utc)
-    hour = now.hour + now.minute / 60.0
-    return _MARKET_OPEN_UTC <= hour < _MARKET_CLOSE_UTC
+    open_min, close_min = _market_window_minutes()
+    # Convert ET minutes-from-midnight to UTC fractional hours.  ET vs UTC
+    # offset: regular hours 13:30–20:00 UTC correspond to 09:30–16:00 ET.
+    # We instead compute in ET directly (no DST math needed for the bound check).
+    from zoneinfo import ZoneInfo
+    now_et = datetime.now(ZoneInfo("America/New_York"))
+    minutes = now_et.hour * 60 + now_et.minute
+    return open_min <= minutes < close_min
 
 
 # ── Helper: normalize expiration format ───────────────────────────────────────
@@ -262,7 +282,16 @@ class OptionQuoteStreamingService:
         self._config = config
         self._provider = provider
         self._streaming_svc = streaming_svc  # MarketDataStreamingService for tick cache
-        self._cache = OptionQuoteCache()
+        # Two source-tagged caches.  The CSV cache holds wide-strike, lower-
+        # frequency CSV data; the IBKR cache holds narrow-strike, higher-
+        # frequency provider data with greeks.  get_merged_quotes() picks the
+        # winner per-strike at read time.
+        self._cache = OptionQuoteCache(
+            redis_key_prefix=_REDIS_QUOTES_KEY_PREFIX,
+        )
+        self._ibkr_cache = OptionQuoteCache(
+            redis_key_prefix=_REDIS_QUOTES_KEY_PREFIX_IBKR,
+        )
         self._running = False
         self._task: Optional[asyncio.Task] = None
 
@@ -359,8 +388,19 @@ class OptionQuoteStreamingService:
             "cache_misses": self._cache_misses,
             "errors": self._errors,
             "uptime_seconds": round(uptime, 1),
+            # Source-tagged cache stats. ``cache`` retained as alias for
+            # csv_cache for backwards compat with existing dashboards.
+            "csv_cache": self._cache.stats(),
+            "ibkr_cache": self._ibkr_cache.stats(),
             "cache": self._cache.stats(),
             "cache_detail": self._cache.detail(),
+            "ibkr_cache_detail": self._ibkr_cache.detail(),
+            "merge_config": {
+                "ibkr_max_age_sec": self._config.option_quotes_ibkr_max_age_sec,
+                "csv_max_age_market_sec": self._config.option_quotes_csv_max_age_market_sec,
+                "premarket_minutes": self._config.option_quotes_premarket_minutes,
+                "postmarket_minutes": self._config.option_quotes_postmarket_minutes,
+            },
             "per_symbol": per_symbol,
             "current_cycle": {
                 "phase": self._cycle_phase,
@@ -379,6 +419,9 @@ class OptionQuoteStreamingService:
                 "poll_interval": self._config.option_quotes_poll_interval,
                 "strike_range_pct": self._config.option_quotes_strike_range_pct,
                 "num_expirations": self._config.option_quotes_num_expirations,
+                "ibkr_strike_range_pct": self._config.option_quotes_ibkr_strike_range_pct,
+                "csv_strike_range_pct": self._config.option_quotes_csv_strike_range_pct,
+                "ibkr_dte_list": self._config.option_quotes_ibkr_dte_list,
             },
             "csv_primary": {
                 "enabled": self._csv_primary,
@@ -405,8 +448,9 @@ class OptionQuoteStreamingService:
         await self._redis_connect()
         await self._redis_load_conid_cache()
 
-        # Share Redis client with the quote cache for persistence
+        # Share Redis client with both quote caches for persistence
         self._cache.set_redis(self._redis)
+        self._ibkr_cache.set_redis(self._redis)
 
         # Warm quote cache from Redis — instant prices on restart
         await self._redis_load_quotes()
@@ -504,16 +548,25 @@ class OptionQuoteStreamingService:
             logger.warning("Failed to load conID cache from Redis: %s", e)
 
     async def _redis_load_quotes(self) -> None:
-        """Load cached option quotes from Redis on startup for instant serving."""
+        """Load cached option quotes from Redis on startup for instant serving.
+
+        Warms both caches in parallel — CSV and IBKR have separate Redis prefixes
+        and either may have data from a prior session.
+        """
         if not self._redis:
             return
         try:
             symbols = [s.symbol for s in self._config.symbols if s.sec_type in ("IND", "STK")]
             # Use next N trading days as candidate expirations
             expirations = _next_n_trading_days(self._config.option_quotes_num_expirations)
-            loaded = await self._cache.load_from_redis(symbols, expirations)
-            if loaded:
-                logger.info("Warm-started %d quote cache entries from Redis", loaded)
+            csv_loaded = await self._cache.load_from_redis(symbols, expirations)
+            ibkr_loaded = await self._ibkr_cache.load_from_redis(symbols, expirations)
+            total = csv_loaded + ibkr_loaded
+            if total:
+                logger.info(
+                    "Warm-started %d quote cache entries from Redis (csv=%d, ibkr=%d)",
+                    total, csv_loaded, ibkr_loaded,
+                )
         except Exception as e:
             logger.warning("Failed to load quotes from Redis: %s", e)
 
@@ -720,10 +773,19 @@ class OptionQuoteStreamingService:
             nonlocal completed
             async with sem:
                 try:
-                    quotes = await self._provider.get_option_quotes(
-                        symbol, exp, opt_type,
-                        strike_min=smin, strike_max=smax,
-                    )
+                    from app.services.provider_timing import timed
+                    async with timed(
+                        "streamer.get_option_quotes",
+                        symbol=symbol,
+                        expiration=exp,
+                        option_type=opt_type,
+                        strike_min=smin,
+                        strike_max=smax,
+                    ):
+                        quotes = await self._provider.get_option_quotes(
+                            symbol, exp, opt_type,
+                            strike_min=smin, strike_max=smax,
+                        )
                 except Exception as e:
                     self._fetches_failed += 1
                     self._errors += 1
@@ -732,10 +794,13 @@ class OptionQuoteStreamingService:
                                    symbol, exp, opt_type, e)
                     return
 
-                # Store results immediately — survives timeout cancellation
+                # Store results immediately — survives timeout cancellation.
+                # IBKR data lives in the IBKR-only cache; the read-time merge
+                # in get_merged_quotes() decides per-strike whether IBKR or CSV
+                # wins (IBKR wins when fresher than ibkr_max_age_sec).
                 fetch_ts = datetime.now(timezone.utc).isoformat()
                 if quotes:
-                    self._cache.put(symbol, exp, opt_type, quotes)
+                    self._ibkr_cache.put(symbol, exp, opt_type, quotes)
                 self._fetches_ok += 1
                 self._symbol_last_fetch_utc[symbol] = fetch_ts
                 price = self._symbol_last_price.get(symbol, 0)
@@ -829,26 +894,79 @@ class OptionQuoteStreamingService:
                 await asyncio.sleep(min(0.5, remaining))
                 remaining -= 0.5
 
+    @staticmethod
+    def _dte_for_exp(exp: str, today: date | None = None) -> int | None:
+        """Return integer days from today to expiration. None if unparseable."""
+        if today is None:
+            today = date.today()
+        try:
+            d = date.fromisoformat(_normalize_exp(exp))
+        except Exception:
+            return None
+        return (d - today).days
+
+    def _build_fetch_jobs(
+        self,
+        symbol: str,
+        price: float,
+        expirations: list[str],
+        price_source: str,
+    ) -> tuple[list[tuple], list[tuple]]:
+        """Build (csv_jobs, ibkr_jobs) for one symbol.
+
+        csv_jobs use the wide CSV strike range and cover every resolved
+        expiration.  ibkr_jobs use the tight IBKR strike range and cover
+        only the DTEs in ``option_quotes_ibkr_dte_list`` (or all when None).
+        """
+        csv_pct = self._config.option_quotes_csv_strike_range_pct / 100.0
+        ibkr_pct = self._config.option_quotes_ibkr_strike_range_pct / 100.0
+        csv_min = round(price * (1 - csv_pct), 2)
+        csv_max = round(price * (1 + csv_pct), 2)
+        ibkr_min = round(price * (1 - ibkr_pct), 2)
+        ibkr_max = round(price * (1 + ibkr_pct), 2)
+
+        ibkr_dtes = self._config.option_quotes_ibkr_dte_list
+        today = date.today()
+
+        csv_jobs: list[tuple] = []
+        ibkr_jobs: list[tuple] = []
+        for exp in expirations:
+            dte = self._dte_for_exp(exp, today)
+            for opt_type in ("CALL", "PUT"):
+                csv_jobs.append((symbol, exp, opt_type, csv_min, csv_max, price_source))
+                # IBKR tier: include if no DTE filter, or if DTE is in filter list
+                if ibkr_dtes is None or (dte is not None and dte in ibkr_dtes):
+                    ibkr_jobs.append((symbol, exp, opt_type, ibkr_min, ibkr_max, price_source))
+        return csv_jobs, ibkr_jobs
+
     async def _run_one_cycle(self) -> None:
         """Fetch option quotes for all configured symbols.
 
-        When csv_primary is enabled, reads bid/ask/volume from CSV exports (~10ms)
-        and overlays IBKR greeks every greeks_interval seconds.
-        Otherwise, uses the original IBKR-only fetch path.
+        Two parallel job lists are built per cycle:
+        - **csv_jobs**: every resolved (sym, exp, type) at the wide CSV strike range.
+        - **ibkr_jobs**: subset filtered by ``option_quotes_ibkr_dte_list`` at the
+          tight IBKR strike range.  Used when the IBKR overlay interval elapses.
+
+        When csv_primary is enabled, csv_jobs feed the per-cycle CSV reader and
+        ibkr_jobs feed the periodic IBKR overlay.  Otherwise (legacy IBKR-only
+        path) ibkr_jobs are used directly.
         """
         from app.services.market_data import _is_market_active
         if not _is_market_active():
             self._cycles_skipped_market_closed += 1
-            if self._cache.stats()["entries"] > 0:
+            # Skip provider work if either cache has data — readers can still
+            # serve via the merge.  An empty pair lets us fall through and let
+            # the CSV reader populate at least once on a cold daemon start.
+            if self._cache.stats()["entries"] > 0 or self._ibkr_cache.stats()["entries"] > 0:
                 return
 
-        pct = self._config.option_quotes_strike_range_pct / 100.0
         num_exp = self._config.option_quotes_num_expirations
 
         # Phase 1: resolve prices and expirations
         self._cycle_phase = "resolving"
         self._cycle_started_utc = datetime.now(timezone.utc).isoformat()
-        fetch_jobs: list[tuple[str, str, str, float, float, str]] = []
+        csv_jobs: list[tuple[str, str, str, float, float, str]] = []
+        ibkr_jobs: list[tuple[str, str, str, float, float, str]] = []
         for sym_cfg in self._config.symbols:
             if sym_cfg.sec_type not in ("IND", "STK"):
                 continue
@@ -863,9 +981,6 @@ class OptionQuoteStreamingService:
             self._symbol_last_price_source[symbol] = price_source
             self._symbol_skips.pop(symbol, None)
 
-            strike_min = round(price * (1 - pct), 2)
-            strike_max = round(price * (1 + pct), 2)
-
             expirations = await self._get_expirations(symbol, num_exp)
             if not expirations:
                 self._symbol_skips[symbol] = "no_expirations"
@@ -873,31 +988,45 @@ class OptionQuoteStreamingService:
 
             self._symbol_expirations[symbol] = expirations
 
-            for exp in expirations:
-                for opt_type in ("CALL", "PUT"):
-                    fetch_jobs.append((symbol, exp, opt_type, strike_min, strike_max, price_source))
+            sym_csv, sym_ibkr = self._build_fetch_jobs(
+                symbol, price, expirations, price_source,
+            )
+            csv_jobs.extend(sym_csv)
+            ibkr_jobs.extend(sym_ibkr)
 
-        if not fetch_jobs:
+        if not csv_jobs and not ibkr_jobs:
             self._cycle_phase = "idle"
             return
 
-        self._cycle_jobs_total = len(fetch_jobs)
+        # Total jobs the cycle is responsible for (csv first, ibkr layered on top)
+        self._cycle_jobs_total = len(csv_jobs) if self._csv_primary and self._csv_dir else len(ibkr_jobs)
 
         if self._csv_primary and self._csv_dir:
-            await self._run_csv_primary_cycle(fetch_jobs)
+            await self._run_csv_primary_cycle(csv_jobs, ibkr_jobs)
         else:
-            await self._fetch_from_ibkr(fetch_jobs)
+            await self._fetch_from_ibkr(ibkr_jobs)
 
     # Track last CSV snapshot timestamp per (symbol, exp, type) to avoid
     # redundant cache updates when the CSV hasn't changed.
     _csv_last_snap_ts: dict[str, str] = {}
 
-    async def _run_csv_primary_cycle(self, fetch_jobs: list[tuple]) -> None:
-        """CSV primary path: instant bid/ask from CSV, IBKR prices+greeks every greeks_interval."""
+    async def _run_csv_primary_cycle(
+        self,
+        csv_jobs: list[tuple],
+        ibkr_jobs: list[tuple] | None = None,
+    ) -> None:
+        """CSV primary path: instant bid/ask from CSV, IBKR prices+greeks every greeks_interval.
+
+        ``csv_jobs`` and ``ibkr_jobs`` are kept separate so the IBKR overlay
+        can be narrower (tight strike range, DTE-filtered) than the CSV cycle.
+        For backwards compat, if ``ibkr_jobs`` is None we reuse ``csv_jobs``.
+        """
+        if ibkr_jobs is None:
+            ibkr_jobs = csv_jobs
         self._cycle_phase = "csv_reading"
         fetch_ts = datetime.now(timezone.utc).isoformat()
 
-        for symbol, exp, opt_type, smin, smax, psrc in fetch_jobs:
+        for symbol, exp, opt_type, smin, smax, psrc in csv_jobs:
             csv_quotes, snap_ts = self._load_csv_latest_snapshot(
                 symbol, exp, opt_type, strike_min=smin, strike_max=smax,
             )
@@ -923,14 +1052,15 @@ class OptionQuoteStreamingService:
             else:
                 self._fetches_failed += 1
 
-        # Periodically fetch full quotes (prices + greeks) from IBKR.
-        # Run with a timeout so a slow IBKR fetch doesn't block CSV cycles.
+        # Periodically fetch full quotes (prices + greeks) from IBKR — tight
+        # strike range, DTE-filtered subset of jobs (see _build_fetch_jobs).
+        # Skip if no IBKR jobs (e.g. all DTEs filtered out, CSV-only).
         now = time.monotonic()
-        if now - self._last_greeks_fetch >= self._greeks_interval:
+        if ibkr_jobs and now - self._last_greeks_fetch >= self._greeks_interval:
             self._last_greeks_fetch = now  # Set before fetch to prevent re-trigger
             try:
                 await asyncio.wait_for(
-                    self._fetch_from_ibkr(fetch_jobs),
+                    self._fetch_from_ibkr(ibkr_jobs),
                     timeout=self._greeks_interval * 0.9,  # 90% of interval
                 )
             except asyncio.TimeoutError:
@@ -1013,6 +1143,122 @@ class OptionQuoteStreamingService:
                            symbol, all_exps[:5])
         return filtered
 
+    def get_merged_quotes(
+        self,
+        symbol: str,
+        expiration: str,
+        option_type: str,
+        *,
+        strike_min: float | None = None,
+        strike_max: float | None = None,
+        ibkr_max_age_sec: float | None = None,
+        csv_max_age_sec: float | None = None,
+    ) -> tuple[list[dict], dict]:
+        """Per-strike merge of IBKR + CSV caches.
+
+        Selection rule (matches user spec):
+          1. IBKR has the strike AND its cache age ≤ ``ibkr_max_age_sec`` → IBKR
+             (source="ibkr_fresh")
+          2. else CSV has the strike AND CSV is not too stale → CSV (source="csv")
+          3. else IBKR has the strike (stale) → IBKR (source="ibkr_stale")
+          4. else: skip
+
+        CSV staleness rule (matches user spec for #2):
+          - During market hours: drop CSV when csv_age > csv_max_age_sec
+            (default 900s = 15 min via ``option_quotes_csv_max_age_market_sec``)
+          - Outside market hours: no CSV staleness gate (live data isn't being
+            produced; CSV is the freshest thing we have)
+          - csv_max_age_sec=0 disables the gate entirely
+
+        Each returned quote dict is a copy with two added fields:
+          - ``source``: one of {"ibkr_fresh", "csv", "ibkr_stale"}
+          - ``age_seconds``: float — age of the source cache entry
+
+        Returns ``(quotes, meta)`` where ``meta`` is a diagnostics dict:
+          ``{ibkr_age, csv_age, ibkr_max_age_sec, csv_max_age_sec,
+             csv_gated, n_ibkr_fresh, n_csv, n_ibkr_stale,
+             n_dropped_csv_stale}``
+        """
+        if ibkr_max_age_sec is None:
+            ibkr_max_age_sec = float(self._config.option_quotes_ibkr_max_age_sec)
+        if csv_max_age_sec is None:
+            csv_max_age_sec = float(self._config.option_quotes_csv_max_age_market_sec)
+
+        # Pull both snapshots (no max_age filter — we make per-strike decisions).
+        ibkr_quotes = self._ibkr_cache.get(symbol, expiration, option_type, max_age_seconds=86400.0)
+        ibkr_age = self._ibkr_cache.get_age(symbol, expiration, option_type)
+        csv_quotes = self._cache.get(symbol, expiration, option_type, max_age_seconds=86400.0)
+        csv_age = self._cache.get_age(symbol, expiration, option_type)
+
+        # Decide CSV usability up-front.  The staleness gate only applies
+        # during market hours — outside, CSV is always the freshest source.
+        csv_gated = False
+        csv_usable = csv_quotes is not None
+        if csv_usable and csv_max_age_sec > 0 and csv_age is not None:
+            if _is_market_hours() and csv_age > csv_max_age_sec:
+                csv_gated = True
+                csv_usable = False
+
+        ibkr_by_strike = {float(q.get("strike", 0)): q for q in (ibkr_quotes or [])}
+        csv_by_strike = {float(q.get("strike", 0)): q for q in (csv_quotes or [])} if csv_usable else {}
+        all_strikes = sorted(set(ibkr_by_strike) | set(csv_by_strike))
+        if strike_min is not None:
+            all_strikes = [s for s in all_strikes if s >= strike_min]
+        if strike_max is not None:
+            all_strikes = [s for s in all_strikes if s <= strike_max]
+
+        merged: list[dict] = []
+        n_ibkr_fresh = n_csv = n_ibkr_stale = 0
+        ibkr_fresh = ibkr_age is not None and ibkr_age <= ibkr_max_age_sec
+
+        for strike in all_strikes:
+            ibkr_q = ibkr_by_strike.get(strike)
+            csv_q = csv_by_strike.get(strike)
+
+            if ibkr_q is not None and ibkr_fresh:
+                row = dict(ibkr_q)
+                row["source"] = "ibkr_fresh"
+                row["age_seconds"] = round(ibkr_age, 1)
+                n_ibkr_fresh += 1
+            elif csv_q is not None:
+                row = dict(csv_q)
+                row["source"] = "csv"
+                row["age_seconds"] = round(csv_age, 1) if csv_age is not None else None
+                n_csv += 1
+            elif ibkr_q is not None:
+                # Stale IBKR is better than nothing for strikes CSV doesn't cover
+                # (or when CSV itself was gated out for being too stale).
+                row = dict(ibkr_q)
+                row["source"] = "ibkr_stale"
+                row["age_seconds"] = round(ibkr_age, 1) if ibkr_age is not None else None
+                n_ibkr_stale += 1
+            else:
+                continue
+            merged.append(row)
+
+        # Count strikes dropped because CSV was gated and IBKR didn't cover them
+        n_dropped_csv_stale = 0
+        if csv_gated and csv_quotes:
+            csv_strikes = {float(q.get("strike", 0)) for q in csv_quotes}
+            if strike_min is not None:
+                csv_strikes = {s for s in csv_strikes if s >= strike_min}
+            if strike_max is not None:
+                csv_strikes = {s for s in csv_strikes if s <= strike_max}
+            n_dropped_csv_stale = len(csv_strikes - set(ibkr_by_strike))
+
+        meta = {
+            "ibkr_age": round(ibkr_age, 1) if ibkr_age is not None else None,
+            "csv_age": round(csv_age, 1) if csv_age is not None else None,
+            "ibkr_max_age_sec": ibkr_max_age_sec,
+            "csv_max_age_sec": csv_max_age_sec,
+            "csv_gated": csv_gated,
+            "n_ibkr_fresh": n_ibkr_fresh,
+            "n_csv": n_csv,
+            "n_ibkr_stale": n_ibkr_stale,
+            "n_dropped_csv_stale": n_dropped_csv_stale,
+        }
+        return merged, meta
+
     def get_cached_quotes(
         self,
         symbol: str,
@@ -1022,39 +1268,26 @@ class OptionQuoteStreamingService:
         strike_max: float | None = None,
         max_age: float = 0,
     ) -> list[dict] | None:
-        """Get cached quotes, optionally filtered by strike range.
+        """Get cached quotes via the read-time merge.
 
-        max_age=0 (default) auto-selects:
-        - Market hours (9:20a-4:10p ET, Mon-Fri): 5 minutes
-        - Outside market hours: serve whatever is cached (no age limit)
+        Backwards-compat shim — delegates to :meth:`get_merged_quotes` so all
+        existing callers pick up the IBKR/CSV merge automatically.
+
+        ``max_age`` here is interpreted as ``ibkr_max_age_sec`` (the freshness
+        threshold for preferring IBKR over CSV).  ``max_age=0`` (default)
+        applies the configured IBKR threshold.
         """
-        if max_age <= 0:
-            try:
-                from common.market_hours import is_market_hours
-                is_open = is_market_hours()
-            except Exception:
-                is_open = _is_market_hours()  # local fallback
-            max_age = 90.0 if is_open else 3600.0
-
-        quotes = self._cache.get(symbol, expiration, option_type, max_age_seconds=max_age)
-        if quotes is None:
+        ibkr_max_age = max_age if max_age and max_age > 0 else None
+        merged, _meta = self.get_merged_quotes(
+            symbol, expiration, option_type,
+            strike_min=strike_min, strike_max=strike_max,
+            ibkr_max_age_sec=ibkr_max_age,
+        )
+        if not merged:
             self._cache_misses += 1
             return None
         self._cache_hits += 1
-
-        # Apply strike filtering if requested
-        if strike_min is not None or strike_max is not None:
-            filtered = []
-            for q in quotes:
-                strike = q.get("strike", 0)
-                if strike_min is not None and strike < strike_min:
-                    continue
-                if strike_max is not None and strike > strike_max:
-                    continue
-                filtered.append(q)
-            return filtered
-
-        return quotes
+        return merged
 
 
 # ── Module-level singleton ───────────────────────────────────────────────────

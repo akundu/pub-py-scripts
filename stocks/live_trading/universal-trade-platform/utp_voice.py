@@ -45,7 +45,7 @@ if _stocks_root not in sys.path:
 import bcrypt as _bcrypt
 import httpx
 from fastapi import FastAPI, Request, Response, HTTPException, Depends, Cookie, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from jose import JWTError, jwt
 import uvicorn
 
@@ -2048,6 +2048,7 @@ def _default_auto_trader_config() -> dict:
         "stop_loss_mult": 2.0,
         "entry_start_et": "09:30",  # 6:30 PT — best premiums at open
         "entry_end_et": "10:30",   # 7:30 PT — cutoff for new entries
+        "diversity_enabled": True,
     }
 
 
@@ -2231,6 +2232,95 @@ async def _build_spreads_for_engine(
     return result
 
 
+def _select_diverse_spread(
+    candidates: list[dict],
+    open_positions: list[dict],
+    config: dict,
+) -> dict | None:
+    """Score each candidate with diversity penalties against open positions.
+
+    base_score = roi_pct
+    Penalties (per matching open position):
+      - Same ticker+option_type: -25
+      - Same ticker (different type): -15
+      - Same DTE: -10
+      - Strike within 2x width: -15
+    Bonuses:
+      - Ticker not in any open position: +10
+      - DTE not in any open position: +5
+
+    Returns highest-scoring candidate, or None if no candidates.
+    """
+    if not candidates:
+        return None
+    if not config.get("diversity_enabled", True) or not open_positions:
+        return candidates[0]
+
+    best_score = -999999
+    best_cand = None
+
+    open_tickers = {p.get("ticker") for p in open_positions}
+    open_dtes = {p.get("dte") for p in open_positions}
+
+    for cand in candidates:
+        score = cand.get("roi_pct", 0)
+        c_ticker = cand.get("ticker", "")
+        c_otype = cand.get("option_type", "").upper()
+        c_dte = cand.get("dte", 0)
+        c_short = cand.get("short_strike", 0)
+        c_width = cand.get("width", cand.get("spread_width", 25))
+
+        for pos in open_positions:
+            p_ticker = pos.get("ticker", "")
+            p_otype = pos.get("option_type", "").upper()
+            p_dte = pos.get("dte", 0)
+            p_short = pos.get("short_strike", 0)
+
+            if c_ticker == p_ticker and c_otype == p_otype:
+                score -= 25
+            elif c_ticker == p_ticker:
+                score -= 15
+
+            if c_dte == p_dte:
+                score -= 10
+
+            if c_ticker == p_ticker and c_short and p_short and c_width:
+                if abs(c_short - p_short) < 2 * c_width:
+                    score -= 15
+
+        # Bonuses
+        if c_ticker not in open_tickers:
+            score += 10
+        if c_dte not in open_dtes:
+            score += 5
+
+        if score > best_score:
+            best_score = score
+            best_cand = cand
+
+    return best_cand
+
+
+# ── Engine Event Bus (SSE streaming for live/shadow modes) ───────────────────
+
+_engine_event_subscribers: dict[str, list[asyncio.Queue]] = {}
+
+
+def _emit_engine_event(mode: str, event: dict) -> None:
+    """Push an event to all subscribers of the given mode."""
+    for q in _engine_event_subscribers.get(mode, []):
+        try:
+            q.put_nowait(event)
+        except asyncio.QueueFull:
+            pass  # drop if consumer is slow
+
+
+# ── Shadow Mode State ────────────────────────────────────────────────────────
+
+_shadow_positions: list[dict] = []
+_shadow_task: asyncio.Task | None = None
+
+
 async def _run_sim_day(config: dict, carry_positions: list[dict] | None = None) -> dict:
     """Run the auto-trader strategy for one simulated day.
 
@@ -2367,7 +2457,11 @@ async def _run_sim_day(config: dict, carry_positions: list[dict] | None = None) 
                             if not candidates:
                                 continue
 
-                            best = candidates[0]
+                            best = _select_diverse_spread(
+                                candidates, open_positions, config,
+                            )
+                            if not best:
+                                continue
 
                             # Check daily risk budget
                             trade_risk = best["total_max_loss"]
@@ -2625,6 +2719,400 @@ async def _run_sim_range(config: dict, start_date: str, end_date: str) -> dict:
         "daily_results": results,
         "config": config,
     }
+
+
+async def _run_sim_day_streaming(config: dict) -> Any:
+    """Async generator that yields SSE events for each bar of a sim day.
+
+    Same entry/exit logic as _run_sim_day(), but yields JSON SSE events
+    after each timestamp so the client can render real-time progress.
+    """
+    from zoneinfo import ZoneInfo
+    _ET = ZoneInfo("America/New_York")
+    _PT = ZoneInfo("America/Los_Angeles")
+
+    client = get_daemon_client()
+    sim_speed = config.get("sim_speed", 10)
+    positions: list[dict] = []
+    trades_remaining = config.get("max_trades_per_day", 5)
+    daily_max_loss = config.get("max_loss_per_day", 15000)
+    daily_risk = 0.0
+    daily_realized_pnl = 0.0
+    num_contracts = config.get("num_contracts", 10)
+    profit_target_pct = config.get("profit_target_pct", 0.50)
+    stop_loss_mult = config.get("stop_loss_mult", 2.0)
+    entry_start = _et_minutes(config.get("entry_start_et", "09:45"))
+    entry_end = _et_minutes(config.get("entry_end_et", "15:00"))
+
+    sim_status = await client._get("/sim/status")
+    sim_date = sim_status.get("date", "")
+
+    ts_data = await client._get("/sim/timestamps")
+    timestamps = ts_data.get("timestamps", [])
+    total_bars = len(timestamps)
+
+    if not timestamps:
+        yield f"data: {json.dumps({'event': 'summary', 'date': sim_date, 'error': 'no timestamps'})}\n\n"
+        return
+
+    final_spot: dict[str, float] = {}
+    actions_log: list[str] = []
+
+    for bar_idx, ts_iso in enumerate(timestamps):
+        await client._post("/sim/set-time", {"timestamp": ts_iso})
+        ts_dt = datetime.fromisoformat(ts_iso)
+        et_time = ts_dt.astimezone(_ET)
+        pt_time = ts_dt.astimezone(_PT)
+        et_min = et_time.hour * 60 + et_time.minute
+        actions: list[str] = []
+
+        # Track spot prices
+        for ticker in config.get("tickers", []):
+            try:
+                q = await client.get_quote(ticker)
+                spot = q.get("last") or q.get("bid") or 0
+                if spot > 0:
+                    final_spot[ticker] = spot
+            except Exception:
+                pass
+
+        # ── Exit checks ──
+        all_open = [p for p in positions if p["status"] == "open"]
+        for pos in all_open:
+            try:
+                ticker = pos["ticker"]
+                spot = final_spot.get(ticker, 0)
+                if spot <= 0:
+                    continue
+                opt_type = pos["option_type"].upper()
+                short_strike = pos["short_strike"]
+                if opt_type == "PUT":
+                    intrinsic = max(short_strike - spot, 0)
+                else:
+                    intrinsic = max(spot - short_strike, 0)
+                credit = pos["credit"]
+
+                exit_reason = None
+                if intrinsic <= credit * (1 - profit_target_pct):
+                    exit_reason = "profit_target"
+                elif intrinsic >= credit * (1 + stop_loss_mult):
+                    exit_reason = "stop_loss"
+
+                if exit_reason:
+                    pnl = (credit - intrinsic) * 100 * pos["num_contracts"]
+                    pos["status"] = "closed"
+                    pos["exit_reason"] = exit_reason
+                    pos["exit_time"] = ts_iso
+                    pos["exit_price"] = intrinsic
+                    pos["realized_pnl"] = round(pnl, 2)
+                    daily_realized_pnl += pnl
+                    actions.append(
+                        f"EXIT: {ticker} {opt_type} {short_strike}/{pos['long_strike']} "
+                        f"-> {exit_reason}  P&L: ${pnl:+,.2f}"
+                    )
+            except Exception:
+                pass
+
+        # ── Entry checks ──
+        open_positions = [p for p in positions if p["status"] == "open"]
+        if entry_start <= et_min <= entry_end and trades_remaining > 0 and daily_risk < daily_max_loss:
+            for ticker in config.get("tickers", []):
+                for otype in config.get("option_types", ["put", "call"]):
+                    if trades_remaining <= 0:
+                        break
+                    has_open = any(
+                        p["ticker"] == ticker and p["option_type"] == otype.upper()
+                        for p in open_positions
+                    )
+                    if has_open:
+                        continue
+                    try:
+                        candidates = await _build_spreads_for_engine(
+                            client, ticker, otype, config, sim_date=sim_date,
+                        )
+                        if not candidates:
+                            continue
+                        best = _select_diverse_spread(candidates, open_positions, config)
+                        if not best:
+                            continue
+                        trade_risk = best["total_max_loss"]
+                        if daily_risk + trade_risk > daily_max_loss:
+                            continue
+
+                        exp = best.get("expiration", sim_date)
+                        dte_val = best.get("dte", 0)
+                        trade_payload = build_trade_payload({
+                            "trade_type": "credit-spread",
+                            "symbol": ticker,
+                            "option_type": otype.upper(),
+                            "short_strike": best["short_strike"],
+                            "long_strike": best["long_strike"],
+                            "quantity": num_contracts,
+                            "expiration": exp,
+                        })
+                        result = await client.execute_trade(trade_payload)
+                        pos_entry = {
+                            "ticker": ticker, "option_type": otype.upper(),
+                            "short_strike": best["short_strike"],
+                            "long_strike": best["long_strike"],
+                            "spread_width": best["width"], "credit": best["credit"],
+                            "total_credit": best["total_credit"],
+                            "total_max_loss": best["total_max_loss"],
+                            "roi_pct": best["roi_pct"], "otm_pct": best["otm_pct"],
+                            "num_contracts": num_contracts, "entry_time": ts_iso,
+                            "entry_price": best["current_price"],
+                            "expiration": exp, "dte": dte_val,
+                            "status": "open", "order_id": result.get("order_id", ""),
+                        }
+                        positions.append(pos_entry)
+                        trades_remaining -= 1
+                        daily_risk += trade_risk
+                        open_positions.append(pos_entry)
+                        actions.append(
+                            f"ENTRY: {ticker} {otype.upper()} "
+                            f"{best['short_strike']}/{best['long_strike']} "
+                            f"cr=${best['credit']:.2f} x{num_contracts} "
+                            f"DTE={dte_val} (ROI {best['roi_pct']:.1f}%, "
+                            f"OTM {best['otm_pct']:.1f}%)"
+                        )
+                    except Exception:
+                        pass
+
+        actions_log.extend(actions)
+        open_now = [p for p in positions if p["status"] == "open"]
+
+        event = {
+            "event": "tick",
+            "time_pt": pt_time.strftime("%H:%M"),
+            "time_et": et_time.strftime("%H:%M"),
+            "bar": bar_idx + 1,
+            "total_bars": total_bars,
+            "prices": {t: round(final_spot.get(t, 0), 2) for t in config.get("tickers", [])},
+            "actions": actions,
+            "positions": [
+                {"ticker": p["ticker"], "type": p["option_type"],
+                 "strikes": f"{p['short_strike']}/{p['long_strike']}",
+                 "credit": p["credit"], "pnl": p.get("realized_pnl", 0),
+                 "status": p["status"]}
+                for p in open_now
+            ],
+            "daily_pnl": round(daily_realized_pnl, 2),
+            "risk": {
+                "used": round(daily_risk, 2), "cap": daily_max_loss,
+                "open_count": len(open_now),
+                "max_positions": config.get("max_trades_per_day", 5),
+            },
+        }
+        yield f"data: {json.dumps(event)}\n\n"
+
+        if sim_speed > 0:
+            await asyncio.sleep(sim_speed)
+
+    # ── EOD settlement ──
+    for pos in [p for p in positions if p["status"] == "open"]:
+        ticker = pos["ticker"]
+        spot = final_spot.get(ticker, 0)
+        opt_type = pos["option_type"]
+        short_strike = pos["short_strike"]
+        if spot <= 0:
+            pnl = pos["credit"] * 100 * pos["num_contracts"]
+            pos["exit_reason"] = "eod_expire_otm"
+            intrinsic = 0
+        else:
+            if opt_type == "PUT":
+                intrinsic = max(short_strike - spot, 0)
+            else:
+                intrinsic = max(spot - short_strike, 0)
+            if intrinsic <= 0:
+                pnl = pos["credit"] * 100 * pos["num_contracts"]
+                pos["exit_reason"] = "eod_expire_otm"
+            else:
+                pnl = (pos["credit"] - intrinsic) * 100 * pos["num_contracts"]
+                pos["exit_reason"] = "eod_itm"
+        pos["status"] = "closed"
+        pos["exit_price"] = intrinsic if spot > 0 else 0
+        pos["realized_pnl"] = round(pnl, 2)
+        daily_realized_pnl += pnl
+
+    closed = [p for p in positions if p.get("status") == "closed"]
+    wins = sum(1 for p in closed if p.get("realized_pnl", 0) > 0)
+    summary = {
+        "event": "summary",
+        "date": sim_date,
+        "trades_taken": len(positions),
+        "wins": wins,
+        "net_pnl": round(daily_realized_pnl, 2),
+        "total_risk": round(daily_risk, 2),
+        "win_rate": round(wins / max(len(closed), 1), 4),
+        "trades": closed,
+    }
+    yield f"data: {json.dumps(summary)}\n\n"
+
+
+async def _run_shadow_loop(config: dict, interval_seconds: int = 60) -> None:
+    """Background loop: shadow mode with real IBKR prices but no execution.
+
+    Gets real quotes from the daemon (connected to live IBKR), builds spreads,
+    but does NOT call execute_trade(). Instead fake-fills after a 5s delay.
+    Emits SSE events to the "shadow" event bus.
+    """
+    global _shadow_positions
+    from zoneinfo import ZoneInfo
+    _ET = ZoneInfo("America/New_York")
+
+    client = get_daemon_client()
+    _shadow_positions = []
+    daily_risk = 0.0
+    num_contracts = config.get("num_contracts", 10)
+    profit_target_pct = config.get("profit_target_pct", 0.50)
+    stop_loss_mult = config.get("stop_loss_mult", 2.0)
+    entry_start = _et_minutes(config.get("entry_start_et", "09:30"))
+    entry_end = _et_minutes(config.get("entry_end_et", "10:30"))
+    max_trades = config.get("max_trades_per_day", 5)
+    daily_max_loss = config.get("max_loss_per_day", 75000)
+    trades_taken = 0
+    spot_cache: dict[str, float] = {}
+
+    logger.info("Shadow loop started: %s", {k: v for k, v in config.items() if k != "dte"})
+
+    while True:
+        try:
+            now_et = datetime.now(_ET)
+            et_min = now_et.hour * 60 + now_et.minute
+
+            if et_min >= 960:
+                logger.info("Shadow loop: market closed, stopping")
+                break
+            if et_min < 570:
+                await asyncio.sleep(30)
+                continue
+
+            today_str = now_et.strftime("%Y-%m-%d")
+            actions: list[str] = []
+
+            # Fetch prices
+            for ticker in config.get("tickers", []):
+                try:
+                    q = await client.get_quote(ticker)
+                    spot = q.get("last") or q.get("bid") or 0
+                    if spot > 0:
+                        spot_cache[ticker] = spot
+                except Exception:
+                    pass
+
+            # Exit checks
+            for pos in [p for p in _shadow_positions if p["status"] == "open"]:
+                try:
+                    ticker = pos["ticker"]
+                    spot = spot_cache.get(ticker, 0)
+                    if spot <= 0:
+                        continue
+                    opt_type = pos["option_type"].upper()
+                    short_strike = pos["short_strike"]
+                    if opt_type == "PUT":
+                        intrinsic = max(short_strike - spot, 0)
+                    else:
+                        intrinsic = max(spot - short_strike, 0)
+                    credit = pos["credit"]
+
+                    exit_reason = None
+                    if intrinsic <= credit * (1 - profit_target_pct):
+                        exit_reason = "profit_target"
+                    elif intrinsic >= credit * (1 + stop_loss_mult):
+                        exit_reason = "stop_loss"
+
+                    if exit_reason:
+                        pnl = (credit - intrinsic) * 100 * pos["num_contracts"]
+                        pos["status"] = "closed"
+                        pos["exit_reason"] = exit_reason
+                        pos["realized_pnl"] = round(pnl, 2)
+                        actions.append(f"EXIT: {ticker} {opt_type} -> {exit_reason} P&L=${pnl:+,.2f}")
+                except Exception:
+                    pass
+
+            # Entry checks
+            open_positions = [p for p in _shadow_positions if p["status"] == "open"]
+            if entry_start <= et_min <= entry_end and trades_taken < max_trades and daily_risk < daily_max_loss:
+                for ticker in config.get("tickers", ["SPX", "RUT"]):
+                    for otype in config.get("option_types", ["put"]):
+                        if trades_taken >= max_trades:
+                            break
+                        if any(p["ticker"] == ticker and p["option_type"] == otype.upper()
+                               for p in open_positions):
+                            continue
+                        try:
+                            candidates = await _build_spreads_for_engine(
+                                client, ticker, otype, config, sim_date=today_str,
+                            )
+                            if not candidates:
+                                continue
+                            best = _select_diverse_spread(candidates, open_positions, config)
+                            if not best:
+                                continue
+                            trade_risk = best["total_max_loss"]
+                            if daily_risk + trade_risk > daily_max_loss:
+                                continue
+
+                            # Shadow: fake fill after 5s delay
+                            await asyncio.sleep(5)
+
+                            exp = best.get("expiration", today_str)
+                            pos_entry = {
+                                "ticker": ticker, "option_type": otype.upper(),
+                                "short_strike": best["short_strike"],
+                                "long_strike": best["long_strike"],
+                                "credit": best["credit"],
+                                "total_credit": best["total_credit"],
+                                "total_max_loss": best["total_max_loss"],
+                                "num_contracts": num_contracts,
+                                "expiration": exp, "dte": best.get("dte", 0),
+                                "status": "open", "entry_time": _now_iso(),
+                                "roi_pct": best.get("roi_pct", 0),
+                                "otm_pct": best.get("otm_pct", 0),
+                            }
+                            _shadow_positions.append(pos_entry)
+                            trades_taken += 1
+                            daily_risk += trade_risk
+                            open_positions.append(pos_entry)
+                            actions.append(
+                                f"ENTRY: {ticker} {otype.upper()} "
+                                f"{best['short_strike']}/{best['long_strike']} "
+                                f"cr=${best['credit']:.2f} (shadow fill)"
+                            )
+                            logger.info("Shadow: ENTERED %s %s %s/%s cr=$%.2f",
+                                        ticker, otype.upper(), best["short_strike"],
+                                        best["long_strike"], best["credit"])
+                        except Exception as e:
+                            logger.debug("Shadow entry error for %s %s: %s", ticker, otype, e)
+
+            # Emit event
+            open_now = [p for p in _shadow_positions if p["status"] == "open"]
+            daily_pnl = sum(p.get("realized_pnl", 0) for p in _shadow_positions if p.get("status") == "closed")
+            _emit_engine_event("shadow", {
+                "event": "tick",
+                "time_et": now_et.strftime("%H:%M"),
+                "prices": dict(spot_cache),
+                "actions": actions,
+                "positions": [
+                    {"ticker": p["ticker"], "type": p["option_type"],
+                     "strikes": f"{p['short_strike']}/{p['long_strike']}",
+                     "credit": p["credit"], "status": "open"}
+                    for p in open_now
+                ],
+                "daily_pnl": round(daily_pnl, 2),
+                "risk": {"used": round(daily_risk, 2), "cap": daily_max_loss,
+                         "open_count": len(open_now), "trades_taken": trades_taken,
+                         "max_trades": max_trades},
+            })
+
+            await asyncio.sleep(interval_seconds)
+
+        except asyncio.CancelledError:
+            logger.info("Shadow loop cancelled")
+            break
+        except Exception as e:
+            logger.error("Shadow loop error: %s", e)
+            await asyncio.sleep(30)
 
 
 # ── Auto-Trader Engine API Endpoints ──────────────────────────────────────────
@@ -3371,6 +3859,9 @@ async def api_options_grid(
         # Fetch option quotes from daemon only (daemon handles CSV + IBKR internally)
         types = ["PUT", "CALL"] if option_type == "BOTH" else [option_type.upper()]
         chain_data = {}
+        # Per-type merge breakdown (from daemon's read-time merge):
+        # {put: {n_ibkr_fresh, n_csv, n_ibkr_stale, n_dropped_csv_stale}, call: {...}}
+        merge_meta: dict[str, dict] = {}
         source = "unknown"
         fetched_at = None
         cached_at = None
@@ -3390,6 +3881,17 @@ async def api_options_grid(
                     cached_at = _now_iso()
                 else:
                     chain_data[ot.lower()] = []
+                # Pass through merge breakdown from the daemon (counts per source).
+                per_type = (data.get("meta") or {}).get("per_type") or {}
+                meta_for_type = per_type.get(ot.lower()) or {}
+                if meta_for_type:
+                    merge_meta[ot.lower()] = {
+                        "source": meta_for_type.get("source"),
+                        "age_seconds": meta_for_type.get("age_seconds"),
+                        "n_ibkr_fresh": meta_for_type.get("n_ibkr_fresh", 0),
+                        "n_csv": meta_for_type.get("n_csv", 0),
+                        "n_ibkr_stale": meta_for_type.get("n_ibkr_stale", 0),
+                    }
             except Exception as e:
                 logger.debug("Options fetch from daemon failed %s %s %s: %s", symbol, expiration, ot, e)
                 chain_data[ot.lower()] = []
@@ -3412,6 +3914,7 @@ async def api_options_grid(
             "strike_range": {"min": strike_min, "max": strike_max},
             "chain": chain_data,
             "source": source,
+            "merge_meta": merge_meta,  # per-type counts: ibkr_fresh / csv / ibkr_stale
             "fetched_at": fetched_at,
             "cached_at": cached_at,
             "prefetching": prefetching,
@@ -4164,6 +4667,8 @@ async def _engine_live_loop(config: dict, interval_seconds: int = 60) -> None:
     daily_max_loss = config.get("max_loss_per_day", 75000)
     trades_taken = 0
 
+    final_spot_live: dict[str, float] = {}
+
     logger.info("Engine live loop started: %s", {k: v for k, v in config.items() if k != "dte"})
 
     while True:
@@ -4183,6 +4688,16 @@ async def _engine_live_loop(config: dict, interval_seconds: int = 60) -> None:
 
             # Get today's date for DTE filtering
             today_str = now_et.strftime("%Y-%m-%d")
+
+            # Fetch latest prices for all tickers
+            for ticker in config.get("tickers", []):
+                try:
+                    q = await client.get_quote(ticker)
+                    spot = q.get("last") or q.get("bid") or 0
+                    if spot > 0:
+                        final_spot_live[ticker] = spot
+                except Exception:
+                    pass
 
             # ── Exit checks on open positions ──
             for pos in [p for p in positions if p["status"] == "open"]:
@@ -4238,7 +4753,11 @@ async def _engine_live_loop(config: dict, interval_seconds: int = 60) -> None:
                             if not candidates:
                                 continue
 
-                            best = candidates[0]
+                            best = _select_diverse_spread(
+                                candidates, open_positions, config,
+                            )
+                            if not best:
+                                continue
                             trade_risk = best["total_max_loss"]
                             if daily_risk + trade_risk > daily_max_loss:
                                 continue
@@ -4281,6 +4800,25 @@ async def _engine_live_loop(config: dict, interval_seconds: int = 60) -> None:
 
                         except Exception as e:
                             logger.warning("Engine live entry error for %s %s: %s", ticker, otype, e)
+
+            # Emit SSE tick event
+            open_now = [p for p in positions if p["status"] == "open"]
+            daily_pnl = sum(p.get("realized_pnl", 0) for p in positions if p.get("status") == "closed")
+            _emit_engine_event("live", {
+                "event": "tick",
+                "time_et": now_et.strftime("%H:%M"),
+                "prices": {t: final_spot_live.get(t, 0) for t in config.get("tickers", [])},
+                "positions": [
+                    {"ticker": p["ticker"], "type": p["option_type"],
+                     "strikes": f"{p['short_strike']}/{p['long_strike']}",
+                     "credit": p["credit"], "status": "open"}
+                    for p in open_now
+                ],
+                "daily_pnl": round(daily_pnl, 2),
+                "risk": {"used": round(daily_risk, 2), "cap": daily_max_loss,
+                         "open_count": len(open_now), "trades_taken": trades_taken,
+                         "max_trades": max_trades},
+            })
 
             await asyncio.sleep(interval_seconds)
 
@@ -4329,6 +4867,114 @@ async def api_auto_trader_stop_live():
         _engine_live_task.cancel()
         return {"status": "stopped"}
     return {"status": "not_running"}
+
+
+@app.api_route("/api/auto-trader/run-day-stream", methods=["GET", "POST"])
+async def api_auto_trader_run_day_stream(request: Request):
+    """Run the auto-trader strategy for one sim day with SSE streaming.
+
+    Returns a Server-Sent Events stream with a tick event per bar.
+    Body or query param: sim_speed (seconds between bars, default 10, 0=instant).
+    """
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    config = dict(_get_auto_trader_config())
+    if body:
+        config.update(body)
+
+    # Accept sim_speed from query params
+    sim_speed_param = request.query_params.get("sim_speed")
+    if sim_speed_param is not None:
+        config["sim_speed"] = float(sim_speed_param)
+
+    return StreamingResponse(
+        _run_sim_day_streaming(config),
+        media_type="text/event-stream",
+    )
+
+
+@app.post("/api/auto-trader/start-shadow")
+async def api_auto_trader_start_shadow(request: Request):
+    """Start the auto-trader engine in shadow mode.
+
+    Gets real IBKR prices but does NOT execute trades.
+    """
+    global _shadow_task
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    config = dict(_get_auto_trader_config())
+    if body:
+        config.update(body)
+
+    interval = body.get("interval_seconds", 60)
+
+    if _shadow_task and not _shadow_task.done():
+        _shadow_task.cancel()
+        await asyncio.sleep(0.5)
+
+    _shadow_task = asyncio.create_task(_run_shadow_loop(config, interval))
+    return {"status": "started", "mode": "shadow", "config": config, "interval_seconds": interval}
+
+
+@app.post("/api/auto-trader/stop-shadow")
+async def api_auto_trader_stop_shadow():
+    """Stop the shadow auto-trader engine."""
+    global _shadow_task
+    if _shadow_task and not _shadow_task.done():
+        _shadow_task.cancel()
+        return {"status": "stopped"}
+    return {"status": "not_running"}
+
+
+@app.get("/api/auto-trader/shadow-positions")
+async def api_auto_trader_shadow_positions():
+    """Get current shadow portfolio."""
+    return {"positions": _shadow_positions}
+
+
+async def _sse_stream_generator(mode: str):
+    """Async generator that yields SSE events from the engine event bus."""
+    q: asyncio.Queue = asyncio.Queue(maxsize=100)
+    _engine_event_subscribers.setdefault(mode, []).append(q)
+    try:
+        while True:
+            try:
+                event = await asyncio.wait_for(q.get(), timeout=30)
+                yield f"data: {json.dumps(event)}\n\n"
+            except asyncio.TimeoutError:
+                yield f": keepalive\n\n"
+    except asyncio.CancelledError:
+        pass
+    finally:
+        subs = _engine_event_subscribers.get(mode, [])
+        if q in subs:
+            subs.remove(q)
+
+
+@app.get("/api/auto-trader/shadow-stream")
+async def api_auto_trader_shadow_stream():
+    """SSE stream of shadow mode events."""
+    return StreamingResponse(
+        _sse_stream_generator("shadow"),
+        media_type="text/event-stream",
+    )
+
+
+@app.get("/api/auto-trader/live-stream")
+async def api_auto_trader_live_stream():
+    """SSE stream of live mode events."""
+    return StreamingResponse(
+        _sse_stream_generator("live"),
+        media_type="text/event-stream",
+    )
 
 
 @app.get("/api/auto-trade/status")

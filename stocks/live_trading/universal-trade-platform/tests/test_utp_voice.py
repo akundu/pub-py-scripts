@@ -1009,6 +1009,101 @@ class TestOptionsGridAPI:
             assert "chain" in data
             assert "source" in data
 
+    def test_options_grid_surfaces_merge_meta(self, client, auth_cookie):
+        """The /api/options-grid endpoint forwards the daemon's per-type
+        merge breakdown so the UI can render a freshness footer/badges."""
+        mock_client = AsyncMock()
+        mock_client.get_quote.return_value = {"last": 2500.0}
+        mock_client.get_options.side_effect = [
+            {"expirations": ["2099-04-06"]},
+            {  # PUT chain — daemon returns merge meta
+                "quotes": {"put": [
+                    {"strike": 2490, "bid": 3.0, "ask": 3.5,
+                     "source": "ibkr_fresh", "age_seconds": 8.2},
+                    {"strike": 2480, "bid": 1.5, "ask": 1.8,
+                     "source": "csv", "age_seconds": 42.1},
+                ]},
+                "meta": {"per_type": {"put": {
+                    "source": "fresh_cache",
+                    "age_seconds": 8.2,
+                    "n_ibkr_fresh": 1,
+                    "n_csv": 1,
+                    "n_ibkr_stale": 0,
+                }}},
+            },
+            {  # CALL chain — all fresh IBKR
+                "quotes": {"call": [
+                    {"strike": 2510, "bid": 2.5, "ask": 3.0,
+                     "source": "ibkr_fresh", "age_seconds": 5.0},
+                ]},
+                "meta": {"per_type": {"call": {
+                    "source": "fresh_cache",
+                    "age_seconds": 5.0,
+                    "n_ibkr_fresh": 1,
+                    "n_csv": 0,
+                    "n_ibkr_stale": 0,
+                }}},
+            },
+        ]
+
+        with patch.object(utp_voice, "get_daemon_client", return_value=mock_client), \
+             patch.object(utp_voice, "_get_csv_expirations", return_value=[]):
+            resp = client.get("/api/options-grid?symbol=RUT&strike_range_pct=3",
+                              cookies=auth_cookie)
+            assert resp.status_code == 200
+            data = resp.json()
+            # Per-row source tags survive the round-trip
+            put0 = data["chain"]["put"][0]
+            assert put0["source"] == "ibkr_fresh"
+            assert put0["age_seconds"] == 8.2
+            # Merge meta is forwarded under "merge_meta"
+            assert "merge_meta" in data
+            assert data["merge_meta"]["put"]["n_ibkr_fresh"] == 1
+            assert data["merge_meta"]["put"]["n_csv"] == 1
+            assert data["merge_meta"]["call"]["n_ibkr_fresh"] == 1
+
+    def test_template_has_quote_source_helper(self):
+        """The HTML template contains the per-cell source-mark helpers."""
+        from pathlib import Path
+        tpl = (Path(__file__).resolve().parent.parent
+               / "templates" / "utp_voice.html").read_text()
+        # CSS classes present
+        assert ".qsrc-ibkr-fresh" in tpl
+        assert ".qsrc-csv" in tpl
+        assert ".qsrc-ibkr-stale" in tpl
+        # JS helper that renders the dot per cell
+        assert "function srcMark(o)" in tpl
+        # Helper used in chain rendering
+        assert "${srcMark(c)}" in tpl
+        assert "${srcMark(p)}" in tpl
+        assert "${srcMark(o)}" in tpl
+        # Merge breakdown badges in the source panel
+        assert "merge_meta" in tpl
+        assert "qsrc-ibkr-fresh" in tpl
+
+    def test_render_portfolio_pid_declared_before_use(self):
+        """Regression: `_renderPortfolio` had a TDZ bug — `getRollBadge(pid)`
+        was called on the line *above* the `const pid = ...` declaration,
+        producing 'Cannot access pid before initialization' in the browser.
+        """
+        from pathlib import Path
+        tpl = (Path(__file__).resolve().parent.parent
+               / "templates" / "utp_voice.html").read_text()
+        # Find the function body
+        start = tpl.index("function _renderPortfolio(")
+        # Stop at the next top-level `function ` declaration
+        end = tpl.index("\nfunction ", start + 1)
+        body = tpl[start:end]
+        # `pid` declaration must come before any read of `pid`
+        decl_idx = body.find("const pid = p.position_id")
+        first_use_idx = body.find("getRollBadge(pid)")
+        assert decl_idx > 0, "pid declaration not found"
+        assert first_use_idx > 0, "getRollBadge(pid) usage not found"
+        assert decl_idx < first_use_idx, (
+            "TDZ regression: `getRollBadge(pid)` is called before "
+            "`const pid = ...` is declared in _renderPortfolio()."
+        )
+
 
 class TestQuickTradeAPI:
     def test_quick_trade_requires_auth(self, client):

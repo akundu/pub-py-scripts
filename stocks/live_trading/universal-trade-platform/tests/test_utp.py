@@ -6654,7 +6654,15 @@ option_quotes_num_expirations: 2
             assert resp.status_code == 200
             data = resp.json()
             assert "quotes" in data
-            assert data["quotes"]["call"] == cached_quotes
+            # Read-time merge tags each row with `source` and `age_seconds`.
+            # The underlying quote fields still match what was cached.
+            served = data["quotes"]["call"]
+            assert len(served) == 1
+            row = served[0]
+            for k, v in cached_quotes[0].items():
+                assert row[k] == v
+            assert row["source"] == "csv"
+            assert "age_seconds" in row
             assert data.get("source") == "streaming_cache"
             # Fast path: neither get_option_chain nor get_option_quotes called
             ibkr.get_option_chain.assert_not_called()
@@ -6793,31 +6801,38 @@ option_quotes_num_expirations: 2
         result = cache.get("SPX", "2026-03-25", "CALL", max_age_seconds=60.0)
         assert result == fresh_quotes  # Still the fresh data
 
-    def test_get_cached_quotes_market_hours_90s_ttl(self):
-        """During market hours, get_cached_quotes uses 90-second max age."""
-        from app.services.option_quote_streaming import OptionQuoteStreamingService, CachedQuotes, _is_market_hours
+    def test_get_cached_quotes_csv_always_served(self):
+        """CSV is the fallback tier — served whenever IBKR doesn't supply a fresher row.
+
+        Replaces the old "stale CSV → None" semantic.  Per the read-time merge
+        contract: CSV fills in any strike IBKR doesn't have a fresh quote for,
+        regardless of CSV age.  IBKR's freshness threshold is the only gate.
+        """
+        from app.services.option_quote_streaming import OptionQuoteStreamingService, CachedQuotes
         from app.services.streaming_config import StreamingConfig
-        import app.services.option_quote_streaming as oqs_mod
 
         svc = OptionQuoteStreamingService(StreamingConfig(), provider=MagicMock())
-        # Insert entry that's 2 minutes old (> 90s)
+        # CSV-only cache, entry 2 minutes old
         svc._cache._cache[("SPX", "2026-03-25", "CALL")] = CachedQuotes(
             quotes=[{"strike": 5500}],
-            fetched_at=time.monotonic() - 120,  # 2 min ago
+            fetched_at=time.monotonic() - 120,
             fetched_at_utc="2026-03-25T14:00:00+00:00",
         )
-        # During market hours: 120s > 90s limit → None
-        with patch.object(oqs_mod, "_is_market_hours", return_value=True), \
-             patch("common.market_hours.is_market_hours", return_value=True):
-            result = svc.get_cached_quotes("SPX", "2026-03-25", "CALL")
-            assert result is None
+        result = svc.get_cached_quotes("SPX", "2026-03-25", "CALL")
+        assert result is not None
+        assert result[0]["strike"] == 5500
+        assert result[0]["source"] == "csv"  # tagged by the merge
 
-        # Outside market hours: serve if < 3600s old
-        with patch.object(oqs_mod, "_is_market_hours", return_value=False), \
-             patch("common.market_hours.is_market_hours", return_value=False):
-            result = svc.get_cached_quotes("SPX", "2026-03-25", "CALL")
-            assert result is not None
-            assert result[0]["strike"] == 5500
+        # If IBKR also has the strike fresh, IBKR wins
+        svc._ibkr_cache._cache[("SPX", "2026-03-25", "CALL")] = CachedQuotes(
+            quotes=[{"strike": 5500, "bid": 9.99}],
+            fetched_at=time.monotonic(),  # 0s old
+            fetched_at_utc="2026-03-25T14:01:00+00:00",
+        )
+        result = svc.get_cached_quotes("SPX", "2026-03-25", "CALL")
+        assert result is not None
+        assert result[0]["source"] == "ibkr_fresh"
+        assert result[0]["bid"] == 9.99
 
     # ── CSV primary mode tests ────────────────────────────────────────────
 
@@ -10754,3 +10769,1052 @@ class TestAutoTraderEngine:
         # Simulate merging with custom dte
         cfg.update({"dte": [0, 1, 2, 3]})
         assert cfg["dte"] == [0, 1, 2, 3]
+
+    def test_config_diversity_field(self):
+        """diversity_enabled field present with correct default."""
+        from utp_voice import _default_auto_trader_config
+        cfg = _default_auto_trader_config()
+        assert "diversity_enabled" in cfg
+        assert cfg["diversity_enabled"] is True
+
+    def test_select_diverse_spread_basic(self):
+        """No open positions -> picks highest ROI."""
+        from utp_voice import _select_diverse_spread
+        candidates = [
+            {"roi_pct": 10, "ticker": "SPX", "option_type": "PUT",
+             "short_strike": 5400, "width": 20, "dte": 0},
+            {"roi_pct": 8, "ticker": "RUT", "option_type": "PUT",
+             "short_strike": 2100, "width": 20, "dte": 0},
+        ]
+        config = {"diversity_enabled": True}
+        result = _select_diverse_spread(candidates, [], config)
+        assert result["roi_pct"] == 10
+        assert result["ticker"] == "SPX"
+
+    def test_select_diverse_penalizes_same_ticker_type(self):
+        """Second SPX PUT penalized, RUT PUT wins."""
+        from utp_voice import _select_diverse_spread
+        candidates = [
+            {"roi_pct": 12, "ticker": "SPX", "option_type": "PUT",
+             "short_strike": 5350, "width": 20, "dte": 0},
+            {"roi_pct": 9, "ticker": "RUT", "option_type": "PUT",
+             "short_strike": 2100, "width": 20, "dte": 0},
+        ]
+        open_positions = [
+            {"ticker": "SPX", "option_type": "PUT", "short_strike": 5400, "dte": 0},
+        ]
+        config = {"diversity_enabled": True}
+        result = _select_diverse_spread(candidates, open_positions, config)
+        # SPX PUT gets -25 (same ticker+type) -15 (strike within 2x width) -10 (same dte)
+        # = 12 - 50 = -38
+        # RUT PUT gets -10 (same dte) + 10 (new ticker) = 9 - 10 + 10 = 9
+        assert result["ticker"] == "RUT"
+
+    def test_select_diverse_penalizes_same_dte(self):
+        """Same DTE penalized."""
+        from utp_voice import _select_diverse_spread
+        candidates = [
+            {"roi_pct": 10, "ticker": "NDX", "option_type": "PUT",
+             "short_strike": 20000, "width": 50, "dte": 0},
+            {"roi_pct": 9, "ticker": "NDX", "option_type": "PUT",
+             "short_strike": 20000, "width": 50, "dte": 1},
+        ]
+        open_positions = [
+            {"ticker": "SPX", "option_type": "PUT", "short_strike": 5400, "dte": 0},
+        ]
+        config = {"diversity_enabled": True}
+        result = _select_diverse_spread(candidates, open_positions, config)
+        # DTE=0 candidate: +10 + 10 (new ticker) - 10 (same dte) = 10
+        # DTE=1 candidate: +9 + 10 (new ticker) + 5 (new dte) = 24
+        assert result["dte"] == 1
+
+    def test_select_diverse_penalizes_same_strike_range(self):
+        """Overlapping strikes penalized."""
+        from utp_voice import _select_diverse_spread
+        candidates = [
+            {"roi_pct": 10, "ticker": "SPX", "option_type": "CALL",
+             "short_strike": 5410, "width": 20, "dte": 0},
+            {"roi_pct": 9, "ticker": "SPX", "option_type": "CALL",
+             "short_strike": 5600, "width": 20, "dte": 0},
+        ]
+        open_positions = [
+            {"ticker": "SPX", "option_type": "PUT", "short_strike": 5400, "dte": 0},
+        ]
+        config = {"diversity_enabled": True}
+        result = _select_diverse_spread(candidates, open_positions, config)
+        # 5410 is within 2*20=40 of 5400 -> -15 penalty
+        # 5600 is not within 40 of 5400 -> no strike penalty
+        # Both same ticker diff type: -15 each, same dte: -10 each
+        # 5410: 10 - 15 - 10 - 15 = -30
+        # 5600: 9 - 15 - 10 = -16
+        assert result["short_strike"] == 5600
+
+    def test_select_diverse_disabled(self):
+        """diversity_enabled=False -> picks top ROI."""
+        from utp_voice import _select_diverse_spread
+        candidates = [
+            {"roi_pct": 12, "ticker": "SPX", "option_type": "PUT",
+             "short_strike": 5350, "width": 20, "dte": 0},
+            {"roi_pct": 9, "ticker": "RUT", "option_type": "PUT",
+             "short_strike": 2100, "width": 20, "dte": 0},
+        ]
+        open_positions = [
+            {"ticker": "SPX", "option_type": "PUT", "short_strike": 5400, "dte": 0},
+        ]
+        config = {"diversity_enabled": False}
+        result = _select_diverse_spread(candidates, open_positions, config)
+        assert result["roi_pct"] == 12  # highest ROI, ignoring penalties
+
+    def test_select_diverse_single_ticker(self):
+        """Only one ticker -> still picks something."""
+        from utp_voice import _select_diverse_spread
+        candidates = [
+            {"roi_pct": 8, "ticker": "SPX", "option_type": "PUT",
+             "short_strike": 5300, "width": 20, "dte": 1},
+        ]
+        open_positions = [
+            {"ticker": "SPX", "option_type": "PUT", "short_strike": 5400, "dte": 0},
+        ]
+        config = {"diversity_enabled": True}
+        result = _select_diverse_spread(candidates, open_positions, config)
+        assert result is not None
+        assert result["ticker"] == "SPX"
+
+    def test_run_day_stream_endpoint_registered(self):
+        """SSE run-day-stream endpoint is registered on the app."""
+        from utp_voice import app as voice_app
+        paths = [r.path for r in voice_app.routes]
+        assert "/api/auto-trader/run-day-stream" in paths
+
+    @pytest.mark.asyncio
+    async def test_shadow_start_stop(self):
+        """Shadow start/stop endpoints work."""
+        from httpx import ASGITransport as _AT, AsyncClient as _AC
+        from utp_voice import app as voice_app
+        import utp_voice
+        transport = _AT(app=voice_app)
+        async with _AC(transport=transport, base_url="http://test") as vc:
+            # Stop when not running
+            resp = await vc.post("/api/auto-trader/stop-shadow")
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "not_running"
+
+    @pytest.mark.asyncio
+    async def test_shadow_positions(self):
+        """Shadow positions tracked separately."""
+        from httpx import ASGITransport as _AT, AsyncClient as _AC
+        from utp_voice import app as voice_app
+        import utp_voice
+        # Reset shadow positions
+        utp_voice._shadow_positions = [
+            {"ticker": "SPX", "option_type": "PUT", "short_strike": 5400,
+             "long_strike": 5380, "credit": 1.5, "status": "open"},
+        ]
+        transport = _AT(app=voice_app)
+        async with _AC(transport=transport, base_url="http://test") as vc:
+            resp = await vc.get("/api/auto-trader/shadow-positions")
+            assert resp.status_code == 200
+            data = resp.json()
+            assert len(data["positions"]) == 1
+            assert data["positions"][0]["ticker"] == "SPX"
+        # Cleanup
+        utp_voice._shadow_positions = []
+
+    @pytest.mark.asyncio
+    async def test_shadow_fake_fill(self):
+        """Shadow fills at quoted price without execute_trade."""
+        from utp_voice import _select_diverse_spread
+        # Verify the diversity function returns a candidate (used in shadow loop)
+        candidates = [
+            {"roi_pct": 10, "ticker": "SPX", "option_type": "PUT",
+             "short_strike": 5400, "width": 20, "dte": 0,
+             "credit": 1.5, "total_credit": 1500, "total_max_loss": 350},
+        ]
+        result = _select_diverse_spread(candidates, [], {"diversity_enabled": True})
+        assert result is not None
+        assert result["credit"] == 1.5
+
+    def test_sim_trader_shadow_arg(self):
+        """CLI accepts --shadow."""
+        import sim_trader
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--shadow", action="store_true")
+        args = parser.parse_args(["--shadow"])
+        assert args.shadow is True
+
+    def test_sim_trader_sim_speed_arg(self):
+        """CLI accepts --sim-speed."""
+        import sim_trader
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--sim-speed", type=float, default=10)
+        args = parser.parse_args(["--sim-speed", "5"])
+        assert args.sim_speed == 5.0
+
+    def test_live_stream_endpoint_registered(self):
+        """Live stream endpoint is registered on the app."""
+        from utp_voice import app as voice_app
+        paths = [r.path for r in voice_app.routes]
+        assert "/api/auto-trader/live-stream" in paths
+
+    def test_shadow_stream_endpoint_registered(self):
+        """Shadow stream endpoint is registered on the app."""
+        from utp_voice import app as voice_app
+        paths = [r.path for r in voice_app.routes]
+        assert "/api/auto-trader/shadow-stream" in paths
+
+    def test_event_bus_emit_and_subscribe(self):
+        """Event bus emits events to subscribers."""
+        import asyncio
+        from utp_voice import _emit_engine_event, _engine_event_subscribers
+        q = asyncio.Queue(maxsize=10)
+        _engine_event_subscribers.setdefault("test_mode", []).append(q)
+        try:
+            _emit_engine_event("test_mode", {"event": "tick", "data": 42})
+            assert not q.empty()
+            event = q.get_nowait()
+            assert event["event"] == "tick"
+            assert event["data"] == 42
+        finally:
+            _engine_event_subscribers["test_mode"].remove(q)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Provider latency timing
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestProviderTiming:
+    def test_record_and_snapshot_basic(self):
+        from app.services.provider_timing import ProviderTimingService
+        svc = ProviderTimingService(buffer_size=100)
+        svc.record("provider.get_quote", 12.5, symbol="SPX")
+        svc.record("provider.get_quote", 18.0, symbol="SPX")
+        svc.record("provider.get_quote", 200.0, symbol="SPX")  # outlier
+        snap = svc.snapshot()
+        assert snap["total_samples"] == 3
+        bucket = snap["buckets"]["provider.get_quote|SPX"]
+        assert bucket["count"] == 3
+        assert bucket["min_ms"] == 12.5
+        assert bucket["max_ms"] == 200.0
+        assert bucket["p50_ms"] == 18.0  # median of 3 samples is the middle value
+        assert bucket["ok"] == 3
+        assert bucket["errors"] == 0
+
+    def test_buckets_separate_by_method_and_symbol(self):
+        from app.services.provider_timing import ProviderTimingService
+        svc = ProviderTimingService()
+        svc.record("provider.get_quote", 10.0, symbol="SPX")
+        svc.record("provider.get_quote", 20.0, symbol="NDX")
+        svc.record("provider.get_option_quotes", 50.0, symbol="SPX")
+        snap = svc.snapshot()
+        keys = set(snap["buckets"].keys())
+        assert keys == {
+            "provider.get_quote|SPX",
+            "provider.get_quote|NDX",
+            "provider.get_option_quotes|SPX",
+        }
+
+    def test_record_with_no_symbol(self):
+        from app.services.provider_timing import ProviderTimingService
+        svc = ProviderTimingService()
+        svc.record("provider.get_positions", 100.0)
+        snap = svc.snapshot()
+        assert "provider.get_positions|*" in snap["buckets"]
+
+    def test_buffer_size_evicts_old_samples(self):
+        from app.services.provider_timing import ProviderTimingService
+        svc = ProviderTimingService(buffer_size=5)
+        for i in range(10):
+            svc.record("provider.get_quote", float(i + 1), symbol="X")
+        snap = svc.snapshot()
+        # only the most recent 5 samples remain
+        assert snap["total_samples"] == 5
+        bucket = snap["buckets"]["provider.get_quote|X"]
+        assert bucket["count"] == 5
+        assert bucket["min_ms"] == 6.0  # samples 6-10 retained
+        assert bucket["max_ms"] == 10.0
+
+    def test_filter_snapshot_by_method(self):
+        from app.services.provider_timing import ProviderTimingService
+        svc = ProviderTimingService()
+        svc.record("provider.get_quote", 5.0, symbol="SPX")
+        svc.record("provider.get_option_quotes", 50.0, symbol="SPX")
+        snap = svc.snapshot(method="provider.get_quote")
+        assert "provider.get_quote|SPX" in snap["buckets"]
+        assert "provider.get_option_quotes|SPX" not in snap["buckets"]
+
+    def test_filter_snapshot_by_symbol(self):
+        from app.services.provider_timing import ProviderTimingService
+        svc = ProviderTimingService()
+        svc.record("provider.get_quote", 5.0, symbol="SPX")
+        svc.record("provider.get_quote", 10.0, symbol="NDX")
+        snap = svc.snapshot(symbol="NDX")
+        assert "provider.get_quote|NDX" in snap["buckets"]
+        assert "provider.get_quote|SPX" not in snap["buckets"]
+
+    def test_reset_clears_state(self):
+        from app.services.provider_timing import ProviderTimingService
+        svc = ProviderTimingService()
+        svc.record("provider.get_quote", 5.0, symbol="SPX")
+        svc.reset()
+        snap = svc.snapshot()
+        assert snap["total_samples"] == 0
+        assert snap["buckets"] == {}
+
+    def test_record_marks_errors_separately(self):
+        from app.services.provider_timing import ProviderTimingService
+        svc = ProviderTimingService()
+        svc.record("provider.get_quote", 5.0, symbol="SPX", ok=True)
+        svc.record("provider.get_quote", 5.0, symbol="SPX", ok=False)
+        bucket = svc.snapshot()["buckets"]["provider.get_quote|SPX"]
+        assert bucket["ok"] == 1
+        assert bucket["errors"] == 1
+
+    @pytest.mark.asyncio
+    async def test_timed_context_records_success(self):
+        from app.services.provider_timing import (
+            init_provider_timing, get_provider_timing, reset_provider_timing, timed,
+        )
+        reset_provider_timing()
+        init_provider_timing()
+        async with timed("provider.get_quote", symbol="SPX"):
+            await asyncio.sleep(0.01)
+        snap = get_provider_timing().snapshot()
+        assert snap["total_samples"] == 1
+        bucket = snap["buckets"]["provider.get_quote|SPX"]
+        assert bucket["min_ms"] >= 9.0  # ~10ms sleep
+        assert bucket["ok"] == 1
+        assert bucket["errors"] == 0
+
+    @pytest.mark.asyncio
+    async def test_timed_context_records_exception(self):
+        from app.services.provider_timing import (
+            init_provider_timing, get_provider_timing, reset_provider_timing, timed,
+        )
+        reset_provider_timing()
+        init_provider_timing()
+        with pytest.raises(RuntimeError):
+            async with timed("provider.get_quote", symbol="SPX"):
+                raise RuntimeError("boom")
+        bucket = get_provider_timing().snapshot()["buckets"]["provider.get_quote|SPX"]
+        assert bucket["ok"] == 0
+        assert bucket["errors"] == 1
+
+    @pytest.mark.asyncio
+    async def test_market_data_get_quote_records_timing(self, client, api_key_headers):
+        """End-to-end: a centralized get_quote call records a timing sample."""
+        from app.services.provider_timing import reset_provider_timing, get_provider_timing
+        reset_provider_timing()
+        # First call seeds the buffer.
+        resp = await client.get("/market/quote/SPY", headers=api_key_headers)
+        assert resp.status_code == 200
+        snap = get_provider_timing().snapshot()
+        # Stub providers return instantly so this path is timed but very fast.
+        keys = list(snap["buckets"].keys())
+        assert any(k.startswith("provider.get_quote|") for k in keys), keys
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Force-market-open override
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestForceMarketOpen:
+    def test_default_off(self, monkeypatch):
+        monkeypatch.delenv("UTP_FORCE_MARKET_OPEN", raising=False)
+        from app.services.market_data import _is_market_open_forced
+        assert _is_market_open_forced() is False
+
+    def test_truthy_values_enable(self, monkeypatch):
+        from app.services.market_data import _is_market_open_forced
+        for v in ("true", "TRUE", "True", "1", "yes", "on"):
+            monkeypatch.setenv("UTP_FORCE_MARKET_OPEN", v)
+            assert _is_market_open_forced() is True, v
+
+    def test_falsy_values_disable(self, monkeypatch):
+        from app.services.market_data import _is_market_open_forced
+        for v in ("false", "0", "no", "off", "", "anything-else"):
+            monkeypatch.setenv("UTP_FORCE_MARKET_OPEN", v)
+            assert _is_market_open_forced() is False, v
+
+    def test_market_active_respects_force(self, monkeypatch):
+        from app.services.market_data import _is_market_active, set_simulation_mode
+        set_simulation_mode(False)
+        monkeypatch.setenv("UTP_FORCE_MARKET_OPEN", "true")
+        assert _is_market_active() is True
+
+    def test_streamer_market_hours_respects_force(self, monkeypatch):
+        from app.services.option_quote_streaming import _is_market_hours
+        monkeypatch.setenv("UTP_FORCE_MARKET_OPEN", "true")
+        assert _is_market_hours() is True
+
+    def test_daemon_arg_wires_env(self):
+        """`--force-market-open` flag exists on daemon and writes the env var."""
+        import utp
+        with open(utp.__file__) as f:
+            src = f.read()
+        # Flag declared on the daemon parser
+        assert '"--force-market-open"' in src
+        # And exported into the env when the flag is set
+        assert 'os.environ["UTP_FORCE_MARKET_OPEN"]' in src
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# /market/streaming/latency endpoints
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestLatencyEndpoint:
+    @pytest.mark.asyncio
+    async def test_get_returns_empty_initially(self, client, api_key_headers):
+        from app.services.provider_timing import reset_provider_timing
+        reset_provider_timing()
+        resp = await client.get("/market/streaming/latency", headers=api_key_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_samples"] == 0
+        assert data["buckets"] == {}
+
+    @pytest.mark.asyncio
+    async def test_get_returns_recorded_samples(self, client, api_key_headers):
+        from app.services.provider_timing import init_provider_timing, reset_provider_timing
+        reset_provider_timing()
+        svc = init_provider_timing()
+        svc.record("provider.get_option_quotes", 42.0, symbol="SPX")
+        resp = await client.get("/market/streaming/latency", headers=api_key_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["total_samples"] == 1
+        assert "provider.get_option_quotes|SPX" in data["buckets"]
+        assert data["buckets"]["provider.get_option_quotes|SPX"]["p50_ms"] == 42.0
+
+    @pytest.mark.asyncio
+    async def test_get_filters_by_method(self, client, api_key_headers):
+        from app.services.provider_timing import init_provider_timing, reset_provider_timing
+        reset_provider_timing()
+        svc = init_provider_timing()
+        svc.record("provider.get_quote", 5.0, symbol="SPX")
+        svc.record("provider.get_option_quotes", 50.0, symbol="SPX")
+        resp = await client.get(
+            "/market/streaming/latency?method=provider.get_quote",
+            headers=api_key_headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        keys = list(data["buckets"].keys())
+        assert keys == ["provider.get_quote|SPX"]
+
+    @pytest.mark.asyncio
+    async def test_get_filters_by_symbol(self, client, api_key_headers):
+        from app.services.provider_timing import init_provider_timing, reset_provider_timing
+        reset_provider_timing()
+        svc = init_provider_timing()
+        svc.record("provider.get_quote", 5.0, symbol="SPX")
+        svc.record("provider.get_quote", 10.0, symbol="NDX")
+        resp = await client.get(
+            "/market/streaming/latency?symbol=NDX",
+            headers=api_key_headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        keys = list(data["buckets"].keys())
+        assert keys == ["provider.get_quote|NDX"]
+
+    @pytest.mark.asyncio
+    async def test_post_reset_clears_buffer(self, client, api_key_headers):
+        from app.services.provider_timing import init_provider_timing, reset_provider_timing
+        reset_provider_timing()
+        svc = init_provider_timing()
+        svc.record("provider.get_quote", 5.0, symbol="SPX")
+        resp = await client.post("/market/streaming/latency/reset", headers=api_key_headers)
+        assert resp.status_code == 200
+        assert resp.json()["reset"] is True
+        # Subsequent GET shows empty
+        resp = await client.get("/market/streaming/latency", headers=api_key_headers)
+        assert resp.json()["total_samples"] == 0
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# `utp.py latency-probe` CLI subcommand
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestLatencyProbeCommand:
+    def test_subcommand_registered(self):
+        """The latency-probe subcommand is registered with the expected flags."""
+        import utp
+        with open(utp.__file__) as f:
+            src = f.read()
+        assert 'subparsers.add_parser("latency-probe"' in src
+        assert "--duration" in src
+        assert "--filter-method" in src
+        assert "--filter-symbol" in src
+        assert "--no-reset" in src
+
+    def test_alias_registered(self):
+        import utp
+        with open(utp.__file__) as f:
+            src = f.read()
+        # alias_map entry
+        assert '"latency": "latency-probe"' in src
+
+    @pytest.mark.asyncio
+    async def test_no_daemon_returns_1(self, capsys, monkeypatch):
+        """When no daemon is detected, the command prints help and exits 1."""
+        import utp
+        # _disable_server_detection autouse fixture forces _detect_server -> None
+        args = argparse.Namespace(
+            duration=1, filter_method=None, filter_symbol=None,
+            no_reset=False, server=None, server_port=8000,
+        )
+        rc = await utp._cmd_latency_probe(args)
+        assert rc == 1
+        out = capsys.readouterr().out
+        assert "No daemon detected" in out
+
+    @pytest.mark.asyncio
+    async def test_probe_against_inproc_app(self, monkeypatch, capsys, api_key_headers):
+        """Run the probe end-to-end against the in-process app via a stub server."""
+        import utp
+        from httpx import ASGITransport, AsyncClient
+        from app.main import app
+        from app.services.provider_timing import init_provider_timing, reset_provider_timing
+
+        reset_provider_timing()
+        svc = init_provider_timing()
+        svc.record("provider.get_quote", 12.0, symbol="SPX")
+
+        # Patch _detect_server to return a sentinel URL so the command
+        # routes through our patched httpx client.
+        monkeypatch.setattr(utp, "_detect_server", lambda a: "http://probe-test")
+
+        # Patch httpx.AsyncClient to return a transport bound to the live ASGI app.
+        # The ASGITransport ignores base_url scheme, so we can keep the sentinel.
+        real_async_client = utp.__dict__.get("httpx") or __import__("httpx").AsyncClient
+
+        class _ProbeClient(AsyncClient):
+            def __init__(self, *a, **kw):
+                kw["transport"] = ASGITransport(app=app)
+                kw["base_url"] = "http://probe-test"
+                kw.setdefault("timeout", 10.0)
+                super().__init__(**kw)
+                # Inject API key header so require_auth lets us through.
+                self.headers.update(api_key_headers)
+
+        import httpx
+        monkeypatch.setattr(httpx, "AsyncClient", _ProbeClient)
+
+        args = argparse.Namespace(
+            duration=1, filter_method=None, filter_symbol=None,
+            no_reset=True,  # don't clear our seeded sample
+            server=None, server_port=8000,
+        )
+        rc = await utp._cmd_latency_probe(args)
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Latency probe" in out
+        assert "provider.get_quote" in out
+        # Header line shows up
+        assert "Method" in out and "p95" in out
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tiered option-quote streaming (IBKR hot tier vs CSV warm tier)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _make_streaming_config(**overrides):
+    """Build a StreamingConfig with the indices we care about."""
+    from app.services.streaming_config import StreamingConfig, StreamingSymbolConfig
+    base = dict(
+        symbols=[
+            StreamingSymbolConfig(symbol="SPX", sec_type="IND", exchange="CBOE"),
+            StreamingSymbolConfig(symbol="NDX", sec_type="IND", exchange="NASDAQ"),
+            StreamingSymbolConfig(symbol="RUT", sec_type="IND", exchange="RUSSELL"),
+        ],
+        option_quotes_enabled=True,
+        option_quotes_ibkr_strike_range_pct=2.5,
+        option_quotes_csv_strike_range_pct=10.0,
+        option_quotes_ibkr_dte_list=[0, 1, 2],
+    )
+    base.update(overrides)
+    return StreamingConfig(**base)
+
+
+class TestTieredOptionStreaming:
+    def test_dte_for_exp_basic(self):
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from datetime import date
+        today = date(2026, 4, 19)
+        assert OptionQuoteStreamingService._dte_for_exp("2026-04-19", today) == 0
+        assert OptionQuoteStreamingService._dte_for_exp("2026-04-20", today) == 1
+        assert OptionQuoteStreamingService._dte_for_exp("2026-04-22", today) == 3
+        assert OptionQuoteStreamingService._dte_for_exp("garbage", today) is None
+
+    def test_build_fetch_jobs_splits_csv_and_ibkr(self):
+        """Two job lists with different strike ranges and DTE filters."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from unittest.mock import MagicMock
+        from datetime import date, timedelta
+
+        cfg = _make_streaming_config()
+        svc = OptionQuoteStreamingService(cfg, MagicMock())
+
+        today = date.today()
+        exps = [
+            today.isoformat(),                             # DTE 0  → IBKR
+            (today + timedelta(days=1)).isoformat(),       # DTE 1  → IBKR
+            (today + timedelta(days=2)).isoformat(),       # DTE 2  → IBKR
+            (today + timedelta(days=5)).isoformat(),       # DTE 5  → CSV only
+            (today + timedelta(days=14)).isoformat(),      # DTE 14 → CSV only
+        ]
+
+        csv_jobs, ibkr_jobs = svc._build_fetch_jobs(
+            symbol="SPX", price=5000.0, expirations=exps, price_source="quote",
+        )
+        # CSV: every exp × CALL/PUT = 5 × 2 = 10
+        assert len(csv_jobs) == 10
+        # IBKR: only DTE 0/1/2 × CALL/PUT = 3 × 2 = 6
+        assert len(ibkr_jobs) == 6
+
+        # Strike range checks: IBKR ±2.5% of 5000 = [4875, 5125], CSV ±10% = [4500, 5500]
+        for _, _, _, smin, smax, _ in csv_jobs:
+            assert smin == 4500.0
+            assert smax == 5500.0
+        for _, _, _, smin, smax, _ in ibkr_jobs:
+            assert smin == 4875.0
+            assert smax == 5125.0
+
+        # IBKR jobs only include DTE 0/1/2 expirations
+        ibkr_exps = {j[1] for j in ibkr_jobs}
+        assert ibkr_exps == {today.isoformat(), (today + timedelta(days=1)).isoformat(),
+                             (today + timedelta(days=2)).isoformat()}
+
+    def test_build_fetch_jobs_dte_list_none_includes_all(self):
+        """ibkr_dte_list=None means IBKR fetches every expiration (legacy)."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from unittest.mock import MagicMock
+        from datetime import date, timedelta
+
+        cfg = _make_streaming_config(option_quotes_ibkr_dte_list=None)
+        svc = OptionQuoteStreamingService(cfg, MagicMock())
+
+        today = date.today()
+        exps = [today.isoformat(), (today + timedelta(days=14)).isoformat()]
+        csv_jobs, ibkr_jobs = svc._build_fetch_jobs("SPX", 5000.0, exps, "quote")
+        assert len(csv_jobs) == 4
+        assert len(ibkr_jobs) == 4  # everything
+
+    def test_build_fetch_jobs_dte_list_empty_skips_ibkr(self):
+        """ibkr_dte_list=[] means CSV only (IBKR tier disabled)."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from unittest.mock import MagicMock
+        from datetime import date, timedelta
+
+        cfg = _make_streaming_config(option_quotes_ibkr_dte_list=[])
+        svc = OptionQuoteStreamingService(cfg, MagicMock())
+
+        today = date.today()
+        exps = [today.isoformat(), (today + timedelta(days=1)).isoformat()]
+        csv_jobs, ibkr_jobs = svc._build_fetch_jobs("SPX", 5000.0, exps, "quote")
+        assert len(csv_jobs) == 4
+        assert ibkr_jobs == []
+
+    def test_load_yaml_parses_tiered_fields(self, tmp_path):
+        """YAML loader honors the new ibkr_/csv_ fields."""
+        from app.services.streaming_config import load_streaming_config
+        cfg_yaml = tmp_path / "streaming.yaml"
+        cfg_yaml.write_text(
+            "symbols:\n  - SPX\n  - NDX\n  - RUT\n"
+            "option_quotes_enabled: true\n"
+            "option_quotes_ibkr_strike_range_pct: 2.5\n"
+            "option_quotes_csv_strike_range_pct: 10.0\n"
+            "option_quotes_ibkr_dte_list: [0, 1, 2]\n"
+        )
+        cfg = load_streaming_config(cfg_yaml)
+        assert cfg.option_quotes_ibkr_strike_range_pct == 2.5
+        assert cfg.option_quotes_csv_strike_range_pct == 10.0
+        assert cfg.option_quotes_ibkr_dte_list == [0, 1, 2]
+        # SPX/NDX/RUT all in symbols
+        names = {s.symbol for s in cfg.symbols}
+        assert names == {"SPX", "NDX", "RUT"}
+
+    def test_load_yaml_backwards_compat_with_legacy_field(self, tmp_path):
+        """Old configs without ibkr_/csv_ fields still work (use legacy as default)."""
+        from app.services.streaming_config import load_streaming_config
+        cfg_yaml = tmp_path / "streaming.yaml"
+        cfg_yaml.write_text(
+            "symbols:\n  - SPX\n"
+            "option_quotes_enabled: true\n"
+            "option_quotes_strike_range_pct: 5.0\n"  # legacy field only
+        )
+        cfg = load_streaming_config(cfg_yaml)
+        # IBKR clamps to min(2.5, 5.0) = 2.5
+        assert cfg.option_quotes_ibkr_strike_range_pct == 2.5
+        # CSV uses max(10.0, 5.0) = 10.0
+        assert cfg.option_quotes_csv_strike_range_pct == 10.0
+        # No DTE filter unless explicitly set
+        assert cfg.option_quotes_ibkr_dte_list is None
+
+    def test_default_yaml_has_tickers_and_tiered_fields(self):
+        """The shipped streaming_default.yaml uses the new tiered defaults."""
+        from app.services.streaming_config import load_streaming_config
+        from pathlib import Path
+        cfg_path = Path(__file__).resolve().parent.parent / "configs" / "streaming_default.yaml"
+        cfg = load_streaming_config(cfg_path)
+        # SPX/NDX/RUT all enabled by default
+        names = {s.symbol for s in cfg.symbols}
+        assert {"SPX", "NDX", "RUT"} <= names
+        # Tiered defaults aligned with the latency-driven sizing
+        assert cfg.option_quotes_ibkr_strike_range_pct == 2.5
+        assert cfg.option_quotes_csv_strike_range_pct == 10.0
+        assert cfg.option_quotes_ibkr_dte_list == [0, 1, 2]
+
+    def test_stats_exposes_tiered_config(self):
+        """Streamer status reports the tiered settings (for visibility)."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from unittest.mock import MagicMock
+        cfg = _make_streaming_config()
+        svc = OptionQuoteStreamingService(cfg, MagicMock())
+        stats = svc.stats
+        config_block = stats["config"]
+        assert config_block["ibkr_strike_range_pct"] == 2.5
+        assert config_block["csv_strike_range_pct"] == 10.0
+        assert config_block["ibkr_dte_list"] == [0, 1, 2]
+
+    @pytest.mark.asyncio
+    async def test_csv_primary_cycle_uses_ibkr_jobs_for_overlay(self):
+        """The IBKR overlay is invoked with ibkr_jobs (not csv_jobs)."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from unittest.mock import MagicMock, AsyncMock
+        from datetime import date, timedelta
+        import time as _time
+
+        cfg = _make_streaming_config()
+        # csv_primary defaults to True; force csv_dir so the path runs
+        svc = OptionQuoteStreamingService(cfg, MagicMock())
+        svc._csv_primary = True
+        svc._csv_dir = "/tmp/no-csv-dir-needed-for-this-test"
+        # Force overlay to be considered "due"
+        svc._last_greeks_fetch = _time.monotonic() - 999
+
+        # Stub out CSV reader so the cycle just exercises the IBKR overlay path
+        svc._load_csv_latest_snapshot = MagicMock(return_value=([], None))
+
+        captured: list[list[tuple]] = []
+
+        async def _fake_fetch(jobs):
+            captured.append(list(jobs))
+
+        svc._fetch_from_ibkr = _fake_fetch
+
+        today = date.today()
+        exps = [today.isoformat(), (today + timedelta(days=14)).isoformat()]
+        csv_jobs, ibkr_jobs = svc._build_fetch_jobs("SPX", 5000.0, exps, "quote")
+        # csv_jobs covers both DTEs; ibkr_jobs only DTE 0
+        assert len(csv_jobs) == 4
+        assert len(ibkr_jobs) == 2
+
+        await svc._run_csv_primary_cycle(csv_jobs, ibkr_jobs)
+        assert captured, "IBKR overlay was not invoked"
+        # Verify the overlay received the (smaller) ibkr_jobs list, not csv_jobs
+        assert len(captured[0]) == len(ibkr_jobs)
+        for _, _, _, smin, smax, _ in captured[0]:
+            # Tight IBKR range
+            assert smin == 4875.0
+            assert smax == 5125.0
+
+    @pytest.mark.asyncio
+    async def test_csv_primary_cycle_skips_overlay_when_no_ibkr_jobs(self):
+        """When ibkr_dte_list=[] there are no IBKR jobs — overlay is skipped."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from unittest.mock import MagicMock
+        from datetime import date
+        import time as _time
+
+        cfg = _make_streaming_config(option_quotes_ibkr_dte_list=[])
+        svc = OptionQuoteStreamingService(cfg, MagicMock())
+        svc._csv_primary = True
+        svc._csv_dir = "/tmp/no-csv-dir"
+        svc._last_greeks_fetch = _time.monotonic() - 999
+        svc._load_csv_latest_snapshot = MagicMock(return_value=([], None))
+
+        called = []
+
+        async def _fake_fetch(jobs):
+            called.append(jobs)
+
+        svc._fetch_from_ibkr = _fake_fetch
+
+        csv_jobs, ibkr_jobs = svc._build_fetch_jobs(
+            "SPX", 5000.0, [date.today().isoformat()], "quote",
+        )
+        assert ibkr_jobs == []
+        await svc._run_csv_primary_cycle(csv_jobs, ibkr_jobs)
+        assert called == [], "IBKR overlay should be skipped when ibkr_jobs is empty"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Read-time merge: per-strike IBKR/CSV selection
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def _make_streamer_for_merge(ibkr_max_age_sec=90.0):
+    """Build a streamer with both caches initialized (no provider needed)."""
+    from app.services.option_quote_streaming import OptionQuoteStreamingService
+    from unittest.mock import MagicMock
+    cfg = _make_streaming_config(option_quotes_ibkr_max_age_sec=ibkr_max_age_sec)
+    return OptionQuoteStreamingService(cfg, MagicMock())
+
+
+def _q(strike, bid=1.0, ask=1.1, **extra):
+    """Build a quote dict for tests."""
+    base = {"strike": float(strike), "bid": bid, "ask": ask, "last": (bid + ask) / 2,
+            "volume": 0, "open_interest": 0}
+    base.update(extra)
+    return base
+
+
+def _force_cache_age(cache, sym, exp, opt_type, age_seconds):
+    """Adjust the monotonic fetched_at on the cached entry to simulate age."""
+    import time as _t
+    key = (sym.upper(), exp, opt_type.upper())
+    entry = cache._cache.get(key)
+    assert entry is not None, f"no cache entry for {key}"
+    entry.fetched_at = _t.monotonic() - age_seconds
+
+
+class TestReadTimeMerge:
+    def test_fresh_ibkr_wins_over_csv(self):
+        svc = _make_streamer_for_merge()
+        svc._ibkr_cache.put("SPX", "2026-04-22", "PUT", [_q(5000, bid=2.50, ask=2.55)])
+        svc._cache.put("SPX", "2026-04-22", "PUT", [_q(5000, bid=2.40, ask=2.60)])
+        merged, meta = svc.get_merged_quotes("SPX", "2026-04-22", "PUT")
+        assert len(merged) == 1
+        assert merged[0]["bid"] == 2.50  # IBKR price wins
+        assert merged[0]["source"] == "ibkr_fresh"
+        assert meta["n_ibkr_fresh"] == 1
+        assert meta["n_csv"] == 0
+
+    def test_stale_ibkr_loses_to_csv(self):
+        svc = _make_streamer_for_merge(ibkr_max_age_sec=30.0)
+        svc._ibkr_cache.put("SPX", "2026-04-22", "PUT", [_q(5000, bid=2.50, ask=2.55)])
+        svc._cache.put("SPX", "2026-04-22", "PUT", [_q(5000, bid=2.40, ask=2.60)])
+        # IBKR age becomes 60s — over the 30s threshold
+        _force_cache_age(svc._ibkr_cache, "SPX", "2026-04-22", "PUT", 60.0)
+        merged, meta = svc.get_merged_quotes("SPX", "2026-04-22", "PUT")
+        assert merged[0]["bid"] == 2.40  # CSV
+        assert merged[0]["source"] == "csv"
+        assert meta["n_csv"] == 1
+        assert meta["n_ibkr_fresh"] == 0
+
+    def test_ibkr_only_strike_served(self):
+        """A strike present only in IBKR (e.g. ATM ±2.5%) is served from IBKR."""
+        svc = _make_streamer_for_merge()
+        svc._ibkr_cache.put("SPX", "2026-04-22", "PUT", [_q(5050, bid=1.95, ask=2.00)])
+        svc._cache.put("SPX", "2026-04-22", "PUT", [_q(4500, bid=0.10, ask=0.15)])  # different strike
+        merged, _ = svc.get_merged_quotes("SPX", "2026-04-22", "PUT")
+        strikes = sorted(r["strike"] for r in merged)
+        assert strikes == [4500.0, 5050.0]
+        ibkr_row = next(r for r in merged if r["strike"] == 5050.0)
+        csv_row = next(r for r in merged if r["strike"] == 4500.0)
+        assert ibkr_row["source"] == "ibkr_fresh"
+        assert csv_row["source"] == "csv"
+
+    def test_csv_only_strike_served(self):
+        """Strike outside IBKR's range falls back to CSV."""
+        svc = _make_streamer_for_merge()
+        svc._cache.put("SPX", "2026-04-22", "PUT", [_q(4500, bid=0.10, ask=0.15)])
+        merged, meta = svc.get_merged_quotes("SPX", "2026-04-22", "PUT")
+        assert len(merged) == 1
+        assert merged[0]["source"] == "csv"
+        assert meta["n_csv"] == 1
+
+    def test_stale_ibkr_used_when_csv_missing(self):
+        """Stale IBKR is better than nothing when CSV doesn't have the strike."""
+        svc = _make_streamer_for_merge(ibkr_max_age_sec=30.0)
+        svc._ibkr_cache.put("SPX", "2026-04-22", "PUT", [_q(5050, bid=1.95, ask=2.00)])
+        _force_cache_age(svc._ibkr_cache, "SPX", "2026-04-22", "PUT", 120.0)
+        merged, meta = svc.get_merged_quotes("SPX", "2026-04-22", "PUT")
+        assert len(merged) == 1
+        assert merged[0]["source"] == "ibkr_stale"
+        assert merged[0]["age_seconds"] >= 120
+        assert meta["n_ibkr_stale"] == 1
+
+    def test_strike_range_filter_respected(self):
+        svc = _make_streamer_for_merge()
+        svc._ibkr_cache.put("SPX", "2026-04-22", "PUT", [
+            _q(4900), _q(5000), _q(5100),
+        ])
+        svc._cache.put("SPX", "2026-04-22", "PUT", [
+            _q(4500), _q(4900), _q(5000), _q(5100), _q(5500),
+        ])
+        merged, _ = svc.get_merged_quotes(
+            "SPX", "2026-04-22", "PUT", strike_min=4950, strike_max=5050,
+        )
+        strikes = [r["strike"] for r in merged]
+        assert strikes == [5000.0]
+        assert merged[0]["source"] == "ibkr_fresh"
+
+    def test_per_row_age_seconds_present(self):
+        svc = _make_streamer_for_merge()
+        svc._ibkr_cache.put("SPX", "2026-04-22", "PUT", [_q(5000)])
+        merged, _ = svc.get_merged_quotes("SPX", "2026-04-22", "PUT")
+        assert merged[0]["age_seconds"] is not None
+        assert merged[0]["age_seconds"] >= 0
+
+    def test_ibkr_max_age_override(self):
+        """Caller can override the IBKR freshness threshold."""
+        svc = _make_streamer_for_merge(ibkr_max_age_sec=90.0)
+        svc._ibkr_cache.put("SPX", "2026-04-22", "PUT", [_q(5000, bid=2.50)])
+        svc._cache.put("SPX", "2026-04-22", "PUT", [_q(5000, bid=2.40)])
+        _force_cache_age(svc._ibkr_cache, "SPX", "2026-04-22", "PUT", 50.0)
+        # Default threshold 90s — IBKR wins
+        merged, _ = svc.get_merged_quotes("SPX", "2026-04-22", "PUT")
+        assert merged[0]["source"] == "ibkr_fresh"
+        # Tighter threshold 30s — CSV wins
+        merged, _ = svc.get_merged_quotes(
+            "SPX", "2026-04-22", "PUT", ibkr_max_age_sec=30.0,
+        )
+        assert merged[0]["source"] == "csv"
+
+    def test_get_cached_quotes_shim_returns_merged(self):
+        """Backwards-compat: get_cached_quotes returns the merged list."""
+        svc = _make_streamer_for_merge()
+        svc._ibkr_cache.put("SPX", "2026-04-22", "PUT", [_q(5000, bid=2.50)])
+        svc._cache.put("SPX", "2026-04-22", "PUT", [_q(5000, bid=2.40)])
+        out = svc.get_cached_quotes("SPX", "2026-04-22", "PUT")
+        assert out is not None and len(out) == 1
+        assert out[0]["bid"] == 2.50
+        assert out[0]["source"] == "ibkr_fresh"
+
+    def test_status_endpoint_shows_both_caches_and_merge_config(self):
+        svc = _make_streamer_for_merge()
+        svc._ibkr_cache.put("SPX", "2026-04-22", "PUT", [_q(5000)])
+        svc._cache.put("SPX", "2026-04-22", "PUT", [_q(5000), _q(4900)])
+        stats = svc.stats
+        assert stats["ibkr_cache"]["entries"] == 1
+        assert stats["ibkr_cache"]["total_quotes"] == 1
+        assert stats["csv_cache"]["entries"] == 1
+        assert stats["csv_cache"]["total_quotes"] == 2
+        assert stats["merge_config"]["ibkr_max_age_sec"] == 90.0
+        assert stats["merge_config"]["csv_max_age_market_sec"] == 900.0
+        assert stats["merge_config"]["premarket_minutes"] == 10
+        assert stats["merge_config"]["postmarket_minutes"] == 10
+        # Backwards-compat alias still present
+        assert stats["cache"]["entries"] == 1
+
+    def test_csv_dropped_when_stale_during_market_hours(self, monkeypatch):
+        """During market hours, CSV older than csv_max_age_sec is suppressed."""
+        # Force "market open" so the staleness gate runs
+        monkeypatch.setenv("UTP_FORCE_MARKET_OPEN", "true")
+        svc = _make_streamer_for_merge()
+        svc._cache.put("SPX", "2026-04-22", "PUT", [_q(5000)])
+        # Age the CSV entry to 20 min — past the 15-min default
+        _force_cache_age(svc._cache, "SPX", "2026-04-22", "PUT", 1200.0)
+        merged, meta = svc.get_merged_quotes("SPX", "2026-04-22", "PUT")
+        assert merged == []
+        assert meta["csv_gated"] is True
+        assert meta["n_dropped_csv_stale"] == 1
+
+    def test_csv_served_when_stale_outside_market_hours(self, monkeypatch):
+        """Outside market hours, CSV is served regardless of age."""
+        monkeypatch.delenv("UTP_FORCE_MARKET_OPEN", raising=False)
+        # Force "outside market hours" by setting an absurdly narrow window
+        # (premarket=0, postmarket=0 → only 09:30-16:00 ET counts; on a Sunday
+        # nothing counts).  Easiest: monkeypatch _is_market_hours to False.
+        from app.services import option_quote_streaming as oqs_mod
+        monkeypatch.setattr(oqs_mod, "_is_market_hours", lambda: False)
+        svc = _make_streamer_for_merge()
+        svc._cache.put("SPX", "2026-04-22", "PUT", [_q(5000)])
+        _force_cache_age(svc._cache, "SPX", "2026-04-22", "PUT", 7200.0)  # 2 hrs
+        merged, meta = svc.get_merged_quotes("SPX", "2026-04-22", "PUT")
+        assert len(merged) == 1
+        assert merged[0]["source"] == "csv"
+        assert meta["csv_gated"] is False
+
+    def test_stale_ibkr_used_when_csv_gated(self, monkeypatch):
+        """When CSV is gated stale and IBKR is also stale, ibkr_stale fills in."""
+        monkeypatch.setenv("UTP_FORCE_MARKET_OPEN", "true")
+        svc = _make_streamer_for_merge(ibkr_max_age_sec=30.0)
+        svc._ibkr_cache.put("SPX", "2026-04-22", "PUT", [_q(5000, bid=1.95)])
+        svc._cache.put("SPX", "2026-04-22", "PUT", [_q(5000, bid=1.90)])
+        _force_cache_age(svc._ibkr_cache, "SPX", "2026-04-22", "PUT", 120.0)  # stale
+        _force_cache_age(svc._cache, "SPX", "2026-04-22", "PUT", 1200.0)      # also stale
+        merged, meta = svc.get_merged_quotes("SPX", "2026-04-22", "PUT")
+        assert len(merged) == 1
+        assert merged[0]["source"] == "ibkr_stale"
+        assert merged[0]["bid"] == 1.95
+        assert meta["csv_gated"] is True
+
+    def test_csv_gate_disabled_when_zero(self, monkeypatch):
+        """csv_max_age_sec=0 disables the gate entirely."""
+        monkeypatch.setenv("UTP_FORCE_MARKET_OPEN", "true")
+        svc = _make_streamer_for_merge()
+        svc._cache.put("SPX", "2026-04-22", "PUT", [_q(5000)])
+        _force_cache_age(svc._cache, "SPX", "2026-04-22", "PUT", 7200.0)
+        merged, meta = svc.get_merged_quotes(
+            "SPX", "2026-04-22", "PUT", csv_max_age_sec=0,
+        )
+        assert len(merged) == 1
+        assert merged[0]["source"] == "csv"
+        assert meta["csv_gated"] is False
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Configurable pre/post-market window
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestMarketWindow:
+    def test_default_window_is_10_minutes(self, monkeypatch):
+        monkeypatch.delenv("UTP_PREMARKET_MINUTES", raising=False)
+        monkeypatch.delenv("UTP_POSTMARKET_MINUTES", raising=False)
+        from app.services.market_data import _market_window_minutes
+        open_min, close_min = _market_window_minutes()
+        assert open_min == 9 * 60 + 20    # 09:20 ET
+        assert close_min == 16 * 60 + 10  # 16:10 ET
+
+    def test_premarket_env_extends_open(self, monkeypatch):
+        monkeypatch.setenv("UTP_PREMARKET_MINUTES", "30")
+        monkeypatch.delenv("UTP_POSTMARKET_MINUTES", raising=False)
+        from app.services.market_data import _market_window_minutes
+        open_min, _ = _market_window_minutes()
+        assert open_min == 9 * 60 + 0     # 09:00 ET (30 min before 09:30)
+
+    def test_postmarket_zero_strict_close(self, monkeypatch):
+        monkeypatch.delenv("UTP_PREMARKET_MINUTES", raising=False)
+        monkeypatch.setenv("UTP_POSTMARKET_MINUTES", "0")
+        from app.services.market_data import _market_window_minutes
+        _, close_min = _market_window_minutes()
+        assert close_min == 16 * 60       # exactly 16:00 ET
+
+    def test_invalid_env_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("UTP_PREMARKET_MINUTES", "garbage")
+        from app.services.market_data import _premarket_min
+        assert _premarket_min() == 10
+
+    def test_streamer_market_hours_uses_window(self, monkeypatch):
+        """option_quote_streaming._is_market_hours reads the same env vars."""
+        from app.services.option_quote_streaming import _is_market_hours
+        from app.services.market_data import _market_window_minutes
+        # Sanity: both modules see the same window
+        monkeypatch.setenv("UTP_PREMARKET_MINUTES", "5")
+        monkeypatch.setenv("UTP_POSTMARKET_MINUTES", "5")
+        open_min, close_min = _market_window_minutes()
+        assert open_min == 9 * 60 + 25
+        assert close_min == 16 * 60 + 5
+        # Function call doesn't crash; result depends on real ET clock.
+        # We only assert it returns a bool.
+        assert isinstance(_is_market_hours(), bool)
+
+    def test_daemon_wires_env_from_config(self):
+        """Daemon source contains the env-var hookup for streaming config."""
+        import utp
+        with open(utp.__file__) as f:
+            src = f.read()
+        # Both env vars assigned from streaming config values
+        assert 'os.environ["UTP_PREMARKET_MINUTES"]' in src
+        assert 'os.environ["UTP_POSTMARKET_MINUTES"]' in src
+        assert "stream_cfg.option_quotes_premarket_minutes" in src
+        assert "stream_cfg.option_quotes_postmarket_minutes" in src

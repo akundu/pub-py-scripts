@@ -76,13 +76,47 @@ class StreamingConfig:
     # Option quote streaming (background pre-fetch)
     option_quotes_enabled: bool = False
     option_quotes_poll_interval: float = 15.0      # Seconds between CSV read cycles
-    option_quotes_strike_range_pct: float = 3.0
+    option_quotes_strike_range_pct: float = 3.0    # Legacy — used as fallback if
+                                                   # ibkr_/csv_ specific ranges aren't set.
     option_quotes_num_expirations: int = 6         # Cover DTE 0 through 5
 
     # CSV exports as primary fast source for option quotes
     option_quotes_csv_primary: bool = True         # Use CSV exports as primary (instant bid/ask)
     option_quotes_csv_dir: str = ""                # Empty = auto-resolve ../../csv_exports/options
     option_quotes_greeks_interval: float = 60.0    # Seconds between IBKR fetches (prices + greeks)
+
+    # ── Tiered fetch ─────────────────────────────────────────────────────────
+    # Split what we ask from IBKR (hot, frequent, narrow) vs CSV (warm, slower,
+    # broad).  IBKR option quote latency is ~5s p50 / ~10s p95 per call, so a
+    # realistic IBKR cycle floor is ~60s for 3 symbols × 3 DTEs × 2 types at
+    # concurrency 3.  CSV is file I/O — cheap and fast.
+    option_quotes_ibkr_strike_range_pct: float = 2.5   # ±% of spot, IBKR tier
+    option_quotes_csv_strike_range_pct: float = 10.0   # ±% of spot, CSV tier
+    # Which DTEs to fetch from IBKR.  None = all expirations (legacy behavior).
+    # Default [0, 1, 2] keeps IBKR focused on near-term where freshness matters
+    # most; longer DTEs are served from CSV.
+    option_quotes_ibkr_dte_list: Optional[list[int]] = None
+
+    # ── Read-time merge ──────────────────────────────────────────────────────
+    # IBKR data is preferred for any strike where the IBKR cache is fresher
+    # than this threshold.  Outside that window — or on strikes IBKR doesn't
+    # cover — the CSV cache fills in (subject to its own staleness gate).
+    # Stale IBKR is used as last resort when CSV doesn't have the strike.
+    option_quotes_ibkr_max_age_sec: float = 90.0
+
+    # CSV staleness gate (applies during market hours only).  CSV exports
+    # update on a delay; if the latest snapshot is older than this we suppress
+    # the row so callers don't trade on minutes-old data.  Outside market
+    # hours, CSV is served regardless of age (live data isn't being produced
+    # anyway).  Set to 0 to disable the gate.
+    option_quotes_csv_max_age_market_sec: float = 900.0   # 15 min
+
+    # ── Pre/post-market window ───────────────────────────────────────────────
+    # Extend the "market is active" window so the streamer fetches IBKR data
+    # before/after regular hours.  Defaults give 09:20–16:10 ET — 10 min on
+    # each side of regular hours (09:30–16:00 ET).
+    option_quotes_premarket_minutes: int = 10
+    option_quotes_postmarket_minutes: int = 10
 
     def validate(self) -> list[str]:
         """Validate config. Returns list of errors (empty = valid)."""
@@ -177,6 +211,35 @@ def load_streaming_config(path: str | Path) -> StreamingConfig:
         option_quotes_csv_primary=raw.get("option_quotes_csv_primary", True),
         option_quotes_csv_dir=raw.get("option_quotes_csv_dir", ""),
         option_quotes_greeks_interval=float(raw.get("option_quotes_greeks_interval", 60.0)),  # IBKR overlay interval
+        # Tiered fetch — fall back to legacy strike_range_pct so existing configs
+        # keep working unchanged.
+        option_quotes_ibkr_strike_range_pct=float(
+            raw.get(
+                "option_quotes_ibkr_strike_range_pct",
+                # If user shrunk legacy field below 2.5, respect that.
+                min(2.5, float(raw.get("option_quotes_strike_range_pct", 2.5))),
+            )
+        ),
+        option_quotes_csv_strike_range_pct=float(
+            raw.get(
+                "option_quotes_csv_strike_range_pct",
+                # CSV defaults wide; respect legacy if it was set higher.
+                max(10.0, float(raw.get("option_quotes_strike_range_pct", 10.0))),
+            )
+        ),
+        option_quotes_ibkr_dte_list=raw.get("option_quotes_ibkr_dte_list", None),
+        option_quotes_ibkr_max_age_sec=float(
+            raw.get("option_quotes_ibkr_max_age_sec", 90.0)
+        ),
+        option_quotes_csv_max_age_market_sec=float(
+            raw.get("option_quotes_csv_max_age_market_sec", 900.0)
+        ),
+        option_quotes_premarket_minutes=int(
+            raw.get("option_quotes_premarket_minutes", 10)
+        ),
+        option_quotes_postmarket_minutes=int(
+            raw.get("option_quotes_postmarket_minutes", 10)
+        ),
     )
 
     errors = config.validate()

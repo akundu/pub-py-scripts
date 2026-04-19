@@ -86,6 +86,18 @@ cpg_poll_interval: 2.0
 # ── Option quote streaming (background pre-fetch) ─────────────────────────
 # When enabled, the daemon continuously pre-fetches option quotes for streaming
 # symbols and caches them for instant serving via CLI and REST endpoints.
+#
+# Two-tier fetch:
+#   IBKR tier — narrow strike range (±2.5%), only DTE 0-2, frequent.  This is
+#               the freshness-critical hot zone where most trading attention
+#               focuses.  Realistic floor cycle is ~60s given measured IBKR
+#               latency of ~5s p50 / ~10s p95 per call (use `utp.py
+#               latency-probe` to verify).
+#   CSV tier  — wide strike range (±10%), all DTEs available in CSV exports,
+#               every option_quotes_poll_interval seconds.  File I/O — cheap.
+#
+# Read merge (in app/services/market_data.py): IBKR data wins when fresher than
+# the CSV warm cache; CSV fills in everything outside IBKR's hot zone.
 
 # Enable background option quote streaming
 option_quotes_enabled: true
@@ -93,16 +105,56 @@ option_quotes_enabled: true
 # Seconds between CSV read cycles (reads tail of CSV files for latest prices)
 option_quotes_poll_interval: 15
 
-# Seconds between IBKR overlay fetches (live prices + greeks from broker)
+# Seconds between IBKR overlay fetches (tight strike range, DTE-filtered).
+# Per-call IBKR latency is ~5s p50 / ~10s p95 (timing varies symbol-to-symbol);
+# 60s is a realistic floor for 3 symbols × 3 DTEs × 2 types at concurrency 3.
 option_quotes_greeks_interval: 60
 
-# Strike range as percentage of current price (e.g., 10.0 = ±10%)
+# ── Tiered strike ranges ──────────────────────────────────────────────────
+# IBKR tier: narrow band around ATM where freshness matters most
+option_quotes_ibkr_strike_range_pct: 2.5
+
+# CSV tier: wide band — file reads are cheap so we cover more strikes
+option_quotes_csv_strike_range_pct: 10.0
+
+# Which DTEs to fetch from IBKR.  Omit (or set to ~) to fetch every resolved
+# expiration (legacy behavior).  Default focuses IBKR budget on DTE 0–2.
+option_quotes_ibkr_dte_list: [0, 1, 2]
+
+# Legacy: fallback if the ibkr_/csv_-specific ranges above aren't set.  Kept
+# for backwards compat with older configs.
 option_quotes_strike_range_pct: 10.0
 
-# Number of upcoming expirations to fetch per symbol
+# Number of upcoming expirations to fetch per symbol (CSV scope).  IBKR scope
+# is further filtered by option_quotes_ibkr_dte_list.
 option_quotes_num_expirations: 6  # Cover DTE 0 through 5
 
 # CSV exports as primary fast source for option bid/ask/volume (~10ms per read)
 # IBKR data overlaid every greeks_interval seconds
 option_quotes_csv_primary: true
 option_quotes_csv_dir: ""          # Empty = auto-resolve ../../csv_exports/options
+
+# ── Read-time merge ──────────────────────────────────────────────────────
+# Per-strike rule applied at read time:
+#   1. IBKR has the strike AND its cache age ≤ ibkr_max_age_sec → IBKR wins
+#      (each row tagged source="ibkr_fresh")
+#   2. else CSV has the strike → CSV wins (source="csv")
+#   3. else IBKR has the strike (stale) → IBKR (source="ibkr_stale")
+# So within ibkr_max_age_sec, IBKR always wins.  Outside it — or for strikes
+# IBKR doesn't cover (anything beyond ±ibkr_strike_range_pct) — CSV fills in.
+option_quotes_ibkr_max_age_sec: 90
+
+# CSV staleness gate (applies during market hours only).  CSV exports lag
+# real-time by a few minutes; if the latest snapshot is older than this we
+# drop the row instead of returning stale data.  Outside market hours, CSV
+# is served regardless of age (live data isn't being produced).  Set 0 to
+# disable the gate.
+option_quotes_csv_max_age_market_sec: 900   # 15 min
+
+# ── Pre/post-market window ───────────────────────────────────────────────
+# How many minutes before regular open and after regular close to keep the
+# IBKR stream active.  Defaults extend from 09:20 ET to 16:10 ET (10 min on
+# each side of 09:30–16:00 ET regular hours).  Set to 0 to gate strictly to
+# regular hours; raise to 30 for early-pre-market warm-up.
+option_quotes_premarket_minutes: 10
+option_quotes_postmarket_minutes: 10

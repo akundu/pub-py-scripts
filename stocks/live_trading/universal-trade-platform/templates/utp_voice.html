@@ -250,6 +250,19 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
 .freshness-banner .sep { color:var(--muted); margin:0 2px; }
 .freshness-banner .age { color:var(--muted); }
 
+/* ── Per-cell quote source marks ──────────────────────────────── */
+/* Tiny dot rendered next to each option bid showing the quote's origin
+   per the daemon's read-time merge:
+     ibkr_fresh  → green   (preferred, ≤ ibkr_max_age_sec)
+     csv         → yellow  (CSV fallback, within freshness gate)
+     ibkr_stale  → red     (last-resort, IBKR is past freshness window)
+*/
+.qsrc { display:inline-block; width:5px; height:5px; border-radius:50%;
+        margin-right:3px; vertical-align:middle; flex-shrink:0; }
+.qsrc-ibkr-fresh { background:var(--green-b); }
+.qsrc-csv        { background:var(--yellow); }
+.qsrc-ibkr-stale { background:var(--red-b); }
+
 /* ── Cache Clear Icons ────────────────────────────────────────── */
 .cache-clear-btn { cursor:pointer; color:var(--muted); font-size:12px; opacity:0.5; transition:opacity 0.15s; }
 .cache-clear-btn:hover { opacity:1; color:var(--red-b); }
@@ -1732,11 +1745,11 @@ function _renderPortfolio(d, tbl, kpis) {
       const pnl = p.broker_unrealized_pnl ?? p.unrealized_pnl ?? p.pnl ?? 0;
       totalCost += cost; totalValue += value; totalPnl += pnl;
 
+      const pid = p.position_id||'';
       const bs = p.breach_status;
       const rollBadge = getRollBadge(pid);
       const badge = (bs ? `<span class="badge badge-${bs.severity}">${bs.severity} ${bs.distance_pct}%</span>` : '') + rollBadge;
       const pnlCls = pnl>=0 ? 'pos' : 'neg';
-      const pid = p.position_id||'';
       const exp = p.expiration || '';
 
       // Cr/ROI/MaxLoss from spread_metrics
@@ -2267,6 +2280,22 @@ function renderOptsSrcPanel(d) {
     const t = d.fetched_at ? new Date(d.fetched_at).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true}) : '';
     const age = d.fetched_at ? timeSince(d.fetched_at) : '?';
     h += `<span><span class="src-dot ${dot}" style="width:5px;height:5px;border-radius:50%;display:inline-block"></span> ${sym}: ${srcN} ${t} (<span class="freshness-age" data-iso="${d.fetched_at||''}">${age} ago</span>)</span>`;
+
+    // Per-side merge breakdown (ibkr_fresh / csv / ibkr_stale).
+    // Comes from the daemon's read-time merge surfaced via /api/options-grid.
+    const mm = d.merge_meta || {};
+    const mkBadge = (label, m) => {
+      if (!m) return '';
+      const f = m.n_ibkr_fresh || 0, c = m.n_csv || 0, s = m.n_ibkr_stale || 0;
+      if (!f && !c && !s) return '';
+      const parts = [];
+      if (f) parts.push(`<span class="qsrc qsrc-ibkr-fresh"></span>${f}`);
+      if (c) parts.push(`<span class="qsrc qsrc-csv"></span>${c}`);
+      if (s) parts.push(`<span class="qsrc qsrc-ibkr-stale"></span>${s}`);
+      return `<span style="margin-left:8px">${label}: ${parts.join(' ')}</span>`;
+    };
+    h += mkBadge('P', mm.put);
+    h += mkBadge('C', mm.call);
   }
   // Other cached tickers
   for (const s of CHAIN_TICKERS) {
@@ -2489,13 +2518,13 @@ function renderChainGrid(puts, calls, cp, sym, exp) {
     html += `<td class="num greek-col" data-field="c-iv" data-strike="${s}" style="${callBg}">${cg.iv!=null?(cg.iv*100).toFixed(0)+'%':'--'}</td>`;
     // Call percentile (empirical + predicted combined)
     html += `<td class="num pctl-col" style="${callBg};white-space:nowrap">${pctlBadge(cPctl)}${cPred ? ' '+predBadge(cPred) : ''}</td>`;
-    // Calls
-    html += `<td class="num cell-tap" data-field="c-bid" data-strike="${s}" style="${callBg}" onclick="addLeg(${s},'CALL','SELL','${sym}','${exp}')">${c?c.bid?.toFixed(2)||'--':'--'}</td>`;
+    // Calls — bid cell carries a tiny source dot (ibkr_fresh / csv / ibkr_stale)
+    html += `<td class="num cell-tap" data-field="c-bid" data-strike="${s}" style="${callBg}" onclick="addLeg(${s},'CALL','SELL','${sym}','${exp}')">${srcMark(c)}${c?c.bid?.toFixed(2)||'--':'--'}</td>`;
     html += `<td class="num cell-tap" data-field="c-ask" data-strike="${s}" style="${callBg}" onclick="addLeg(${s},'CALL','BUY','${sym}','${exp}')">${c?c.ask?.toFixed(2)||'--':'--'}</td>`;
     // Strike + distance %
     html += `<td class="num" style="text-align:center;font-weight:bold;font-size:13px;${isAtm?'color:var(--blue);background:rgba(88,166,255,0.1);':'color:var(--text);'}">${s}${distPct(s,cp,sym)}</td>`;
-    // Puts
-    html += `<td class="num cell-tap" data-field="p-bid" data-strike="${s}" style="${putBg}" onclick="addLeg(${s},'PUT','SELL','${sym}','${exp}')">${p?p.bid?.toFixed(2)||'--':'--'}</td>`;
+    // Puts — bid cell carries a tiny source dot (ibkr_fresh / csv / ibkr_stale)
+    html += `<td class="num cell-tap" data-field="p-bid" data-strike="${s}" style="${putBg}" onclick="addLeg(${s},'PUT','SELL','${sym}','${exp}')">${srcMark(p)}${p?p.bid?.toFixed(2)||'--':'--'}</td>`;
     html += `<td class="num cell-tap" data-field="p-ask" data-strike="${s}" style="${putBg}" onclick="addLeg(${s},'PUT','BUY','${sym}','${exp}')">${p?p.ask?.toFixed(2)||'--':'--'}</td>`;
     // Put percentile (empirical + predicted combined)
     html += `<td class="num pctl-col" style="${putBg};white-space:nowrap">${pctlBadge(pPctl)}${pPred ? ' '+predBadge(pPred) : ''}</td>`;
@@ -2507,6 +2536,22 @@ function renderChainGrid(puts, calls, cp, sym, exp) {
   }
   html += '</tbody></table>';
   return html;
+}
+
+// Render a per-cell source dot tagged by the daemon's read-time merge.
+// Returns a small <span> with a colored dot + tooltip showing source + age.
+function srcMark(o) {
+  if (!o || !o.source) return '';
+  const cls = o.source === 'ibkr_fresh' ? 'qsrc-ibkr-fresh'
+            : o.source === 'csv'        ? 'qsrc-csv'
+            : o.source === 'ibkr_stale' ? 'qsrc-ibkr-stale'
+            : '';
+  if (!cls) return '';
+  const age = (o.age_seconds != null) ? Math.round(o.age_seconds) + 's' : '?';
+  const label = o.source === 'ibkr_fresh' ? 'IBKR fresh'
+              : o.source === 'csv'        ? 'CSV'
+              : 'IBKR stale';
+  return `<span class="qsrc ${cls}" title="${label} — ${age} old"></span>`;
 }
 
 function refilterChain() {
@@ -2568,7 +2613,7 @@ function renderSingleChain(options, cp, type, sym, exp) {
     const rowId = isAtm ? 'id="atm-row"' : '';
     html += `<tr class="strike-row" data-strike="${o.strike}" ${rowId} style="${isAtm?'border-top:2px solid var(--blue);border-bottom:2px solid var(--blue);':''}">`;
     html += `<td class="num" style="font-weight:bold;${isAtm?'color:var(--blue)':''}">${o.strike}${distPct(o.strike,cp,sym)}</td>`;
-    html += `<td class="num cell-tap" data-field="${prefix}-bid" data-strike="${o.strike}" onclick="addLeg(${o.strike},'${type}','SELL','${optGridData?.symbol||''}','${optGridData?.expiration||''}')">${o.bid?.toFixed(2)||'--'}</td>`;
+    html += `<td class="num cell-tap" data-field="${prefix}-bid" data-strike="${o.strike}" onclick="addLeg(${o.strike},'${type}','SELL','${optGridData?.symbol||''}','${optGridData?.expiration||''}')">${srcMark(o)}${o.bid?.toFixed(2)||'--'}</td>`;
     html += `<td class="num cell-tap" data-field="${prefix}-ask" data-strike="${o.strike}" onclick="addLeg(${o.strike},'${type}','BUY','${optGridData?.symbol||''}','${optGridData?.expiration||''}')">${o.ask?.toFixed(2)||'--'}</td>`;
     html += `<td class="num" data-field="${prefix}-last" data-strike="${o.strike}">${o.last?.toFixed(2)||'--'}</td>`;
     html += `<td class="num" data-field="${prefix}-vol" data-strike="${o.strike}" style="font-size:11px">${o.volume||''}</td>`;

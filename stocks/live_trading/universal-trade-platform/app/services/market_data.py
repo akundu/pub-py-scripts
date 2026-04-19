@@ -38,6 +38,7 @@ Usage:
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import datetime, timezone
 
@@ -56,14 +57,55 @@ def set_simulation_mode(enabled: bool) -> None:
     _simulation_mode = enabled
 
 
-def _is_market_active() -> bool:
-    """True during market hours +/- 10 minutes (09:20-16:10 ET on trading days).
+def _is_market_open_forced() -> bool:
+    """True if UTP_FORCE_MARKET_OPEN env var is set to a truthy value.
 
+    Used to allow latency probes / streamer testing to run outside market
+    hours.  Off by default — production code paths still gate on the real
+    market clock.
+    """
+    val = os.environ.get("UTP_FORCE_MARKET_OPEN", "").strip().lower()
+    return val in ("1", "true", "yes", "on")
+
+
+def _premarket_min() -> int:
+    """Minutes BEFORE 09:30 ET that count as 'market active'.  Default 10."""
+    try:
+        return int(os.environ.get("UTP_PREMARKET_MINUTES", "10"))
+    except ValueError:
+        return 10
+
+
+def _postmarket_min() -> int:
+    """Minutes AFTER 16:00 ET that count as 'market active'.  Default 10."""
+    try:
+        return int(os.environ.get("UTP_POSTMARKET_MINUTES", "10"))
+    except ValueError:
+        return 10
+
+
+def _market_window_minutes() -> tuple[int, int]:
+    """Return (open_min, close_min) — minutes-from-midnight ET inclusive bounds.
+
+    Defaults to 09:20 (560) – 16:10 (970), matching the historical 10-min buffer
+    on each side of regular hours (09:30–16:00 ET).  Both buffers are tunable
+    via env vars (``UTP_PREMARKET_MINUTES``, ``UTP_POSTMARKET_MINUTES``).
+    """
+    open_min = 9 * 60 + 30 - _premarket_min()    # default 560 = 09:20 ET
+    close_min = 16 * 60 + _postmarket_min()      # default 970 = 16:10 ET
+    return open_min, close_min
+
+
+def _is_market_active() -> bool:
+    """True during market hours plus/minus the configured pre/post buffers.
+
+    Default window is 09:20-16:10 ET (10 min before/after regular hours).
     Use this to decide whether to fetch live data from IBKR/providers.
     Outside this window, serve only cached data — no provider round-trips.
     """
-    if _simulation_mode:
+    if _simulation_mode or _is_market_open_forced():
         return True
+    open_min, close_min = _market_window_minutes()
     try:
         from common.market_hours import is_market_hours, is_trading_day
         from zoneinfo import ZoneInfo
@@ -71,20 +113,19 @@ def _is_market_active() -> bool:
         # If market is open right now, definitely active
         if is_market_hours(now_utc):
             return True
-        # Check 10 min buffer around market hours on trading days
         now_et = now_utc.astimezone(ZoneInfo("America/New_York"))
         if not is_trading_day(now_et.date()):
             return False
         minutes = now_et.hour * 60 + now_et.minute
-        return 560 <= minutes <= 970  # 09:20 to 16:10
+        return open_min <= minutes <= close_min
     except Exception:
-        # Fallback: simple ET clock check (09:20-16:10)
+        # Fallback: simple ET clock check
         from zoneinfo import ZoneInfo
         now_et = datetime.now(ZoneInfo("America/New_York"))
         if now_et.weekday() >= 5:
             return False
         minutes = now_et.hour * 60 + now_et.minute
-        return 560 <= minutes <= 970  # 09:20 to 16:10
+        return open_min <= minutes <= close_min
 
 
 def _is_market_open() -> bool:
@@ -239,7 +280,9 @@ async def get_quote(
             source="market_closed", quote_source="market_closed",
         )
     try:
-        quote = await provider.get_quote(symbol)
+        from app.services.provider_timing import timed
+        async with timed("provider.get_quote", symbol=symbol, broker=broker.value):
+            quote = await provider.get_quote(symbol)
     except Exception as e:
         logger.debug("Provider get_quote failed for %s: %s", symbol, e)
         # Fall back to stale cache if available
@@ -376,10 +419,20 @@ async def get_option_quotes_with_age(
         return [], None, "empty"
     if hasattr(provider, "get_option_quotes"):
         try:
-            raw = await provider.get_option_quotes(
-                symbol, expiration, option_type,
-                strike_min=strike_min, strike_max=strike_max,
-            )
+            from app.services.provider_timing import timed
+            async with timed(
+                "provider.get_option_quotes",
+                symbol=symbol,
+                expiration=expiration,
+                option_type=option_type,
+                strike_min=strike_min,
+                strike_max=strike_max,
+                broker=broker.value,
+            ):
+                raw = await provider.get_option_quotes(
+                    symbol, expiration, option_type,
+                    strike_min=strike_min, strike_max=strike_max,
+                )
         except Exception as e:
             logger.debug("Provider get_option_quotes failed for %s %s %s: %s",
                          symbol, expiration, option_type, e)
@@ -408,7 +461,9 @@ async def get_option_chain(symbol: str, broker: Broker = Broker.IBKR) -> dict:
     """
     symbol = symbol.upper()
     provider = ProviderRegistry.get(broker)
-    return await provider.get_option_chain(symbol)
+    from app.services.provider_timing import timed
+    async with timed("provider.get_option_chain", symbol=symbol, broker=broker.value):
+        return await provider.get_option_chain(symbol)
 
 
 def _normalize_option_quotes(quotes: list[dict]) -> list[dict]:

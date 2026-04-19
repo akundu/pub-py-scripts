@@ -187,7 +187,18 @@ async def get_options(
                 max_age=max_age, force_refresh=force_refresh,
             )
             quotes[ot.lower()] = q
-            per_type_meta[ot.lower()] = {"age_seconds": age, "source": type_source}
+            # Per-row source counts surface the IBKR/CSV merge breakdown so
+            # the UI can render a freshness footer (e.g. "8 IBKR fresh, 12 CSV").
+            n_ibkr_fresh = sum(1 for r in q if r.get("source") == "ibkr_fresh")
+            n_csv = sum(1 for r in q if r.get("source") == "csv")
+            n_ibkr_stale = sum(1 for r in q if r.get("source") == "ibkr_stale")
+            per_type_meta[ot.lower()] = {
+                "age_seconds": age,
+                "source": type_source,
+                "n_ibkr_fresh": n_ibkr_fresh,
+                "n_csv": n_csv,
+                "n_ibkr_stale": n_ibkr_stale,
+            }
             # Track worst (oldest) age across types for a conservative summary
             if age is not None:
                 worst_age = age if worst_age is None else max(worst_age, age)
@@ -299,3 +310,43 @@ async def streaming_unsubscribe(
 
     removed = await svc.unsubscribe([s.upper() for s in request.symbols])
     return {"unsubscribed": removed, "total_subscriptions": svc.subscription_count}
+
+
+# ── Provider latency telemetry ─────────────────────────────────────────────
+
+
+@router.get("/streaming/latency")
+async def provider_latency(
+    _user: Annotated[TokenData, Security(require_auth, scopes=["market:read"])],
+    method: str | None = None,
+    symbol: str | None = None,
+    recent_n: int = 20,
+) -> dict:
+    """Histogram of provider call latency (p50/p95/p99 per method+symbol).
+
+    Filter via ``?method=provider.get_option_quotes`` or ``?symbol=SPX``.
+    ``recent_n`` controls how many of the most recent raw samples are
+    returned alongside aggregates (default 20).
+    """
+    from app.services.provider_timing import get_provider_timing
+    svc = get_provider_timing()
+    if svc is None:
+        return {"total_samples": 0, "buckets": {}, "recent": []}
+    return svc.snapshot(method=method, symbol=symbol, recent_n=recent_n)
+
+
+@router.post("/streaming/latency/reset")
+async def provider_latency_reset(
+    _user: Annotated[TokenData, Security(require_auth, scopes=["market:read"])],
+) -> dict:
+    """Clear the latency ring buffer + per-bucket counters.
+
+    Used at the start of a probe so the resulting histogram covers only
+    samples gathered during the probe window.
+    """
+    from app.services.provider_timing import get_provider_timing
+    svc = get_provider_timing()
+    if svc is None:
+        return {"reset": False, "reason": "service_not_initialized"}
+    svc.reset()
+    return {"reset": True}

@@ -67,8 +67,14 @@ async def _setup_providers(tmp_path):
     reset_roll_service()
     from app.services.simulation_clock import reset_sim_clock
     from app.services.market_data import set_simulation_mode
+    from app.services.provider_timing import reset_provider_timing
     reset_sim_clock()
     set_simulation_mode(False)
+    reset_provider_timing()
+    # Always clear the force-market-open override between tests so production
+    # market-hours gating is the default.
+    import os as _os
+    _os.environ.pop("UTP_FORCE_MARKET_OPEN", None)
 
     # Reset daemon shared state between tests
     from utp import _daemon_state
