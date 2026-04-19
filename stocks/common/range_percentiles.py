@@ -36,12 +36,11 @@ _CALIBRATION_CACHE = {}  # module-level cache for recommended percentiles
 _CALIBRATION_FILE = SCRIPT_DIR.parent / "results" / "calibration" / "recommended_percentiles.json"
 
 # Hardcoded fallback defaults (used when calibration file is missing or stale).
-# Based on 250-day directional analysis: UP days have wider tails than DOWN days
-# across all tickers, so call (up) side needs wider bands than put (down) side.
+# Based on 94% target hit rate with directional asymmetry (UP tails wider than DOWN).
 _DEFAULT_RECOMMENDED = {
-    "NDX": {"close_to_close": {"put": 95, "call": 97}, "intraday": {"put": 90, "call": 95}, "max_move": {"put": 90, "call": 90}},
-    "SPX": {"close_to_close": {"put": 95, "call": 97}, "intraday": {"put": 90, "call": 95}, "max_move": {"put": 90, "call": 90}},
-    "RUT": {"close_to_close": {"put": 95, "call": 98}, "intraday": {"put": 90, "call": 95}, "max_move": {"put": 90, "call": 90}},
+    "NDX": {"close_to_close": {"put": 99, "call": 100}, "intraday": {"put": 98, "call": 99}, "max_move": {"put": 97, "call": 98}},
+    "SPX": {"close_to_close": {"put": 99, "call": 100}, "intraday": {"put": 98, "call": 99}, "max_move": {"put": 97, "call": 98}},
+    "RUT": {"close_to_close": {"put": 100, "call": 100}, "intraday": {"put": 99, "call": 99}, "max_move": {"put": 98, "call": 98}},
 }
 
 
