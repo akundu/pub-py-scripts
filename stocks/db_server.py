@@ -7046,6 +7046,10 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
 </html>
 '''
 
+    # Inject outlier toggle button (top-right)
+    exclude_outliers = params.get('exclude_outliers', True)
+    html = html.replace("<body>", "<body>\n" + _outlier_toggle_html(exclude_outliers), 1)
+
     # Inject methodology documentation before </body>
     html = html.replace("</body>", _predictions_methodology_html() + "\n</body>", 1)
 
@@ -9861,12 +9865,14 @@ async def handle_predictions_page(request: web.Request) -> web.Response:
         day_tabs = compute_default_prediction_days()
 
     # Get query parameters
+    exclude_outliers = request.query.get('outliers', '').strip().lower() not in {"1", "true", "yes", "on"}
     params = {
         'date': request.query.get('date'),
         'days_ahead': request.query.get('days_ahead'),
         'cache': request.query.get('cache', 'true').lower() == 'true',
         'refresh_interval': int(request.query.get('refresh_interval', '30')),
         'day_tabs': day_tabs,
+        'exclude_outliers': exclude_outliers,
     }
 
     if _wants_json_response(request):
@@ -14915,45 +14921,46 @@ def _predictions_methodology_html() -> str:
 """
 
 
-def _outlier_toggle_html(exclude_outliers: bool, endpoint: str = "range_percentiles") -> str:
-    """Generate outlier toggle button + AJAX reload script."""
-    checked = "" if exclude_outliers else "checked"
-    label = "Showing Raw (with outliers)" if not exclude_outliers else "Outliers Filtered"
-    btn_style = "background:#da3633;color:white;" if not exclude_outliers else "background:#238636;color:white;"
+def _outlier_toggle_html(exclude_outliers: bool) -> str:
+    """Generate outlier toggle button + AJAX reload script.
+
+    Small, discreet toggle positioned next to the theme toggle (top-right).
+    """
+    label = "Raw" if not exclude_outliers else "Filtered"
+    dot_color = "#da3633" if not exclude_outliers else "#238636"
     return f"""
-<button class="theme-toggle" id="outlierToggle" style="{btn_style}margin-left:8px;position:relative;"
-    onclick="toggleOutliers()">
+<button id="outlierToggle" onclick="toggleOutliers()"
+    style="position:absolute;top:15px;right:90px;padding:4px 10px;border-radius:6px;
+    border:1px solid var(--border-color,#30363d);background:var(--bg-secondary,#161b22);
+    color:var(--text-secondary,#8b949e);font-size:11px;cursor:pointer;z-index:10;">
+    <span style="display:inline-block;width:7px;height:7px;border-radius:50%;background:{dot_color};
+    margin-right:4px;vertical-align:middle;"></span>
     <span id="outlierLabel">{label}</span>
-    <span id="outlierSpinner" style="display:none;margin-left:6px;">⏳</span>
+    <span id="outlierSpinner" style="display:none;font-size:10px;margin-left:3px;">⏳</span>
 </button>
 <script>
 function toggleOutliers() {{
-    var btn = document.getElementById('outlierToggle');
     var label = document.getElementById('outlierLabel');
     var spinner = document.getElementById('outlierSpinner');
+    var btn = document.getElementById('outlierToggle');
     var url = new URL(window.location.href);
     var currentlyFiltered = !url.searchParams.has('outliers') || url.searchParams.get('outliers') !== '1';
 
-    // Show loading state
     spinner.style.display = 'inline';
     label.style.opacity = '0.5';
     btn.style.pointerEvents = 'none';
 
-    // Toggle the parameter
     if (currentlyFiltered) {{
         url.searchParams.set('outliers', '1');
     }} else {{
         url.searchParams.delete('outliers');
     }}
 
-    // Update URL bar without reload
     window.history.replaceState(null, '', url.toString());
 
-    // Fetch new content via AJAX
     fetch(url.toString(), {{headers: {{'Accept': 'text/html'}}}})
         .then(function(r) {{ return r.text(); }})
         .then(function(html) {{
-            // Replace the entire page content
             document.open();
             document.write(html);
             document.close();
@@ -14962,7 +14969,7 @@ function toggleOutliers() {{
             spinner.style.display = 'none';
             label.style.opacity = '1';
             btn.style.pointerEvents = '';
-            label.textContent = 'Error: ' + e.message;
+            label.textContent = 'Error';
         }});
 }}
 </script>
@@ -15487,14 +15494,8 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
             # Inject WebSocket live-price script
             html = _inject_range_percentiles_ws_script(html, tickers)
 
-            # Inject outlier toggle button next to theme toggle
-            toggle_html = _outlier_toggle_html(exclude_outliers)
-            theme_pos = html.find('id="themeToggle"')
-            if theme_pos >= 0:
-                btn_close = html.find('</button>', theme_pos)
-                if btn_close >= 0:
-                    insert_at = btn_close + len('</button>')
-                    html = html[:insert_at] + toggle_html + html[insert_at:]
+            # Inject outlier toggle button (top-right, next to theme toggle)
+            html = html.replace("<body>", "<body>\n" + _outlier_toggle_html(exclude_outliers), 1)
 
             # Inject methodology documentation
             html = html.replace("</body>", _range_percentiles_methodology_html(exclude_outliers) + "\n</body>", 1)
@@ -15673,14 +15674,8 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
         # Inject WebSocket live-price script
         html = _inject_range_percentiles_ws_script(html, tickers)
 
-        # Inject outlier toggle button next to theme toggle
-        toggle_html = _outlier_toggle_html(exclude_outliers)
-        theme_pos = html.find('id="themeToggle"')
-        if theme_pos >= 0:
-            btn_close = html.find('</button>', theme_pos)
-            if btn_close >= 0:
-                insert_at = btn_close + len('</button>')
-                html = html[:insert_at] + toggle_html + html[insert_at:]
+        # Inject outlier toggle button (top-right, next to theme toggle)
+        html = html.replace("<body>", "<body>\n" + _outlier_toggle_html(exclude_outliers), 1)
 
         # Inject methodology documentation
         html = html.replace("</body>", _range_percentiles_methodology_html(exclude_outliers) + "\n</body>", 1)
