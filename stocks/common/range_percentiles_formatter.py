@@ -2055,7 +2055,11 @@ def format_hourly_moves_as_html(hourly_data: dict) -> str:
     except (TypeError, ValueError):
         prev_close_fmt = str(prev_close)
 
-    sorted_slots = sorted(slots.keys())
+    def _time_sort_key(s):
+        h, m = s.split(":")
+        return (int(h), int(m))
+
+    sorted_slots = sorted(slots.keys(), key=_time_sort_key)
     if not sorted_slots:
         return ""
 
@@ -2072,7 +2076,7 @@ def format_hourly_moves_as_html(hourly_data: dict) -> str:
 """)
 
     # --- Tier 1: Quarter-hour (15-min) tables ---
-    sorted_15 = sorted(slots_15min.keys())
+    sorted_15 = sorted(slots_15min.keys(), key=_time_sort_key)
     if sorted_15:
         html_parts.append(_render_slot_table(slots_15min, sorted_15, percentiles, "down",
                                               "DOWN MOVES TO CLOSE (per 15-min)", ticker=ticker))
@@ -2088,7 +2092,7 @@ def format_hourly_moves_as_html(hourly_data: dict) -> str:
                                               "UP MOVES TO CLOSE (per half-hour)", ticker=ticker))
 
     # --- Tier 1b: 5-min early tables (first 15 min: 9:30-9:45 AM ET) ---
-    sorted_5_early = sorted(slots_5min_early.keys())
+    sorted_5_early = sorted(slots_5min_early.keys(), key=_time_sort_key)
     if sorted_5_early:
         html_parts.append('\n        <h3>First 15 Minutes (5-min detail)</h3>\n')
         html_parts.append(_render_slot_table(slots_5min_early, sorted_5_early, percentiles, "down",
@@ -2098,7 +2102,7 @@ def format_hourly_moves_as_html(hourly_data: dict) -> str:
                                               "UP MOVES TO CLOSE (first 15-min, 5-min detail)", ticker=ticker))
 
     # --- Tier 2: 10-min tables (last 30 min) ---
-    sorted_10 = sorted(slots_10min.keys())
+    sorted_10 = sorted(slots_10min.keys(), key=_time_sort_key)
     if sorted_10:
         html_parts.append('\n        <h3>Last 30 Minutes (10-min detail)</h3>\n')
         html_parts.append(_render_slot_table(slots_10min, sorted_10, percentiles, "down",
@@ -2108,7 +2112,7 @@ def format_hourly_moves_as_html(hourly_data: dict) -> str:
                                               "UP MOVES TO CLOSE (per 10-min)", ticker=ticker))
 
     # --- Tier 3: 5-min tables (last 10 min) ---
-    sorted_5 = sorted(slots_5min.keys())
+    sorted_5 = sorted(slots_5min.keys(), key=_time_sort_key)
     if sorted_5:
         html_parts.append('\n        <h3>Last 10 Minutes (5-min detail)</h3>\n')
         html_parts.append(_render_slot_table(slots_5min, sorted_5, percentiles, "down",
