@@ -14718,45 +14718,76 @@ def _range_percentiles_methodology_html(exclude_outliers: bool = True) -> str:
 <div style="max-width:1200px;margin:40px auto 20px;padding:25px 30px;font-size:12px;color:var(--text-secondary,#8b949e);
     line-height:1.7;border-top:1px solid var(--border-color,#30363d);">
   <h3 style="font-size:14px;color:var(--text-primary,#c9d1d9);margin:0 0 12px;">Methodology</h3>
+
   <p><strong>Data Source:</strong> 5-minute OHLCV bars from Polygon.io, stored in <code>equities_output/</code>.
   Daily close-to-close returns computed from QuestDB <code>daily_prices</code> table.</p>
 
   <p><strong>Percentile Computation:</strong> Returns are split by direction (up days vs down days).
   Each percentile (P75–P100) is computed independently from the relevant direction's distribution.
-  For example, DOWN P95 = 95th percentile of all negative-return days (i.e., 95% of down days had a move smaller than this).</p>
+  For example, DOWN P95 = 95th percentile of all negative-return days (i.e., 95% of down days had a move
+  smaller than this). P100 = the single worst observed day in the sample.</p>
 
   <p><strong>Intraday Move-to-Close:</strong> For each 5-min bar during market hours, computes
-  <code>(day_close - bar_price) / bar_price</code>. Aggregated by time slot (10-min early/late, 15-min midday),
+  <code>(day_close &minus; bar_price) / bar_price</code>. Aggregated by time slot (10-min early/late, 15-min midday),
   one record per day per slot (first bar in the slot). Shows how much room remains for price to move from
   that point in the day to the 4:00 PM ET close.</p>
 
-  <p><strong>Outlier Handling ({outlier_status}):</strong> IQR-based winsorization (Tukey fence) caps extreme
-  values at Q1 &minus; 1.5&times;IQR and Q3 + 1.5&times;IQR. No data points are removed — all trading days
-  are included in sample counts, but extreme returns are capped to the fence value. This prevents a single
-  Black Swan day from dominating the P95–P100 bands. Pass <code>?outliers=1</code> to see raw unfiltered data.
-  The cap values are computed dynamically from each ticker's own return distribution, so more volatile
-  tickers (e.g., RUT) have wider fences than less volatile ones (e.g., SPX).</p>
+  <h4 style="font-size:13px;color:var(--text-primary,#c9d1d9);margin:18px 0 6px;">Outlier Handling ({outlier_status})</h4>
+  <p>Uses IQR-based winsorization (standard Tukey fence). The interquartile range (IQR = Q3 &minus; Q1,
+  the middle 50% of returns) defines the "normal" spread. Values beyond Q1 &minus; 1.5&times;IQR or
+  Q3 + 1.5&times;IQR are <em>capped</em> (not removed) to the fence value.</p>
+  <ul style="margin:4px 0 8px 20px;">
+    <li><strong>No data points are removed</strong> — all trading days remain in the sample count.
+    A day that moved &minus;3.5% in a distribution with fences at &minus;2.5% is counted as &minus;2.5%.</li>
+    <li><strong>Caps are per-ticker</strong> — computed from each ticker's own return distribution.
+    SPX (IQR ~1.0%) gets tighter fences (~&plusmn;2%) than RUT (IQR ~1.7%, fences ~&plusmn;3.3%).</li>
+    <li><strong>Effect on percentiles:</strong> P75–P95 are barely affected (outliers sit in the tails).
+    P100 changes the most — it's capped from the single worst day to the fence. For example, NDX P100 UP
+    goes from 3.43% (raw) to 2.77% (winsorized), a 0.66% reduction. P95 is unchanged.</li>
+    <li><strong>Why 1.5&times; IQR?</strong> This is the standard Tukey fence used in boxplot whiskers.
+    For normally-distributed data, it captures ~99.3% of values. For fat-tailed financial returns, it
+    typically clips 2–5% of the most extreme days.</li>
+  </ul>
 
-  <p><strong>Time Slots:</strong> 10-min intervals for 9:30–11:00 AM ET and 3:30–3:50 PM ET (higher volatility
-  periods). 15-min intervals for 11:00 AM – 3:15 PM ET. 5-min intervals for the last 10 minutes (3:50–3:55 PM ET).
-  All times shown in your browser's local timezone with ET reference below.</p>
-
-  <p><strong>Credit Spread Guidance:</strong> Place short strikes outside the band boundary of your target
-  percentile. Recommended levels by ticker (based on 60-day backtests):</p>
+  <h4 style="font-size:13px;color:var(--text-primary,#c9d1d9);margin:18px 0 6px;">Credit Spread Guidance</h4>
+  <p>Place short strikes <em>outside</em> the band boundary of your target percentile. The table below
+  shows which band to use for each ticker, based on 60-day backtests that test whether the actual
+  closing price fell within the predicted band:</p>
   <table style="font-size:12px;border-collapse:collapse;margin:8px 0;">
     <tr style="border-bottom:1px solid var(--border-color,#30363d);">
       <th style="text-align:left;padding:4px 12px 4px 0;">Ticker</th>
       <th style="padding:4px 12px;">Suggested Band</th>
       <th style="padding:4px 12px;">Hit Rate</th>
       <th style="padding:4px 12px;">Avg Width</th>
+      <th style="padding:4px 12px;">What it means</th>
     </tr>
     <tr><td style="padding:3px 12px 3px 0;">SPX</td><td style="padding:3px 12px;">P98</td>
-        <td style="padding:3px 12px;">93%</td><td style="padding:3px 12px;">~2.7%</td></tr>
+        <td style="padding:3px 12px;">93%</td><td style="padding:3px 12px;">~2.7%</td>
+        <td style="padding:3px 12px;font-size:11px;">On 93% of days, the close fell within &plusmn;1.35% of current price</td></tr>
     <tr><td style="padding:3px 12px 3px 0;">NDX</td><td style="padding:3px 12px;">P99</td>
-        <td style="padding:3px 12px;">95%</td><td style="padding:3px 12px;">~3.6%</td></tr>
+        <td style="padding:3px 12px;">95%</td><td style="padding:3px 12px;">~3.6%</td>
+        <td style="padding:3px 12px;font-size:11px;">On 95% of days, the close fell within &plusmn;1.8% of current price</td></tr>
     <tr><td style="padding:3px 12px 3px 0;">RUT</td><td style="padding:3px 12px;">P100</td>
-        <td style="padding:3px 12px;">98%</td><td style="padding:3px 12px;">~4.8%</td></tr>
+        <td style="padding:3px 12px;">98%</td><td style="padding:3px 12px;">~4.8%</td>
+        <td style="padding:3px 12px;font-size:11px;">On 98% of days, the close fell within &plusmn;2.4% of current price</td></tr>
   </table>
+  <ul style="margin:4px 0 8px 20px;font-size:11px;">
+    <li><strong>Hit Rate</strong> = % of backtest days where the actual close landed inside the band.
+    Computed by running <code>backtest_band_accuracy.py</code> over 60 trading days, training the model
+    fresh each day on prior data (no lookahead).</li>
+    <li><strong>Avg Width</strong> = average distance between the low and high band boundaries, as a
+    percentage of the current price. Wider = safer but less premium collected.</li>
+    <li><strong>Suggested Band</strong> = the tightest percentile that still achieves a useful hit rate.
+    SPX can use P98 (tighter) because the model is more accurate for it. RUT needs P100 because its
+    model misses more often at tighter bands (P95 only hits 82%).</li>
+    <li><strong>What gets pruned:</strong> Using P98 instead of P100 prunes ~1% from each edge of the
+    distribution. For NDX, this tightens the band from ~4.3% to ~3.6% width — the short strike moves
+    ~0.35% closer to current price on each side, collecting more premium but with 2–5% more breach risk.</li>
+  </ul>
+
+  <p><strong>Time Slots:</strong> 10-min intervals for 9:30–11:00 AM ET and 3:30–3:50 PM ET (higher volatility
+  periods). 15-min intervals for 11:00 AM – 3:15 PM ET. 5-min intervals for the last 10 minutes (3:50–3:55 PM ET).
+  All times shown in your browser's local timezone with ET reference below.</p>
 
   <p><strong>Parameters:</strong> <code>?lookback=N</code> (trading days, default 120),
   <code>?start_date=YYYY-MM-DD&amp;end_date=YYYY-MM-DD</code> (overrides lookback),
@@ -14807,52 +14838,73 @@ def _predictions_methodology_html() -> str:
   bar_momentum_3, cumulative_intraday_range, time_to_close_squared
   </span></p>
 
-  <p><strong>Outlier Handling:</strong> LightGBM training clips targets at 5 std devs. Time-aware
-  percentile filters at 3 std devs (with 80% fallback). Static and empirical percentile models use
-  IQR winsorization (1.5&times; Tukey fence). No data points are removed — extreme values are capped.</p>
+  <h4 style="font-size:13px;color:var(--text-primary,#c9d1d9);margin:18px 0 6px;">Outlier Handling</h4>
+  <ul style="margin:4px 0 8px 20px;">
+    <li><strong>LightGBM training:</strong> Clips target values at 5 std devs from the mean before
+    training. This prevents extreme days from distorting the quantile regression.</li>
+    <li><strong>Time-aware percentile:</strong> Filters at 3 std devs with 80% fallback — if filtering
+    removes &gt;20% of samples, raw data is used instead.</li>
+    <li><strong>Static &amp; empirical percentile:</strong> IQR winsorization (1.5&times; Tukey fence).
+    No data points removed — extreme values capped to Q1 &minus; 1.5&times;IQR / Q3 + 1.5&times;IQR.</li>
+  </ul>
 
-  <p><strong>Backtest Results (60-day NDX):</strong></p>
+  <h4 style="font-size:13px;color:var(--text-primary,#c9d1d9);margin:18px 0 6px;">Backtest Results (60-day)</h4>
+  <p>Each day in the backtest: train model on all prior data, predict at 10:00 AM, check if actual close
+  fell within the Combined band. No lookahead — fresh model each day.</p>
   <table style="font-size:12px;border-collapse:collapse;margin:8px 0;">
     <tr style="border-bottom:1px solid var(--border-color,#30363d);">
       <th style="text-align:left;padding:4px 12px 4px 0;">Ticker</th>
       <th style="padding:4px 8px;">P95</th><th style="padding:4px 8px;">P98</th>
       <th style="padding:4px 8px;">P99</th><th style="padding:4px 8px;">P100</th>
       <th style="padding:4px 8px;">Mid Err</th>
+      <th style="padding:4px 8px;">P95 Width</th>
     </tr>
     <tr><td style="padding:3px 12px 3px 0;">NDX</td>
         <td style="padding:3px 8px;">83%</td><td style="padding:3px 8px;">88%</td>
         <td style="padding:3px 8px;">95%</td><td style="padding:3px 8px;">97%</td>
-        <td style="padding:3px 8px;">0.82%</td></tr>
+        <td style="padding:3px 8px;">0.82%</td><td style="padding:3px 8px;">2.79%</td></tr>
     <tr><td style="padding:3px 12px 3px 0;">SPX</td>
         <td style="padding:3px 8px;">90%</td><td style="padding:3px 8px;">93%</td>
         <td style="padding:3px 8px;">95%</td><td style="padding:3px 8px;">95%</td>
-        <td style="padding:3px 8px;">0.57%</td></tr>
+        <td style="padding:3px 8px;">0.57%</td><td style="padding:3px 8px;">2.21%</td></tr>
     <tr><td style="padding:3px 12px 3px 0;">RUT</td>
         <td style="padding:3px 8px;">82%</td><td style="padding:3px 8px;">85%</td>
         <td style="padding:3px 8px;">88%</td><td style="padding:3px 8px;">98%</td>
-        <td style="padding:3px 8px;">0.88%</td></tr>
+        <td style="padding:3px 8px;">0.88%</td><td style="padding:3px 8px;">2.90%</td></tr>
   </table>
 
-  <p><strong>Credit Spread Guidance:</strong> Place short strikes outside the band boundary of your target
-  percentile. Use the Combined bands (recommended). Suggested levels by ticker:</p>
+  <h4 style="font-size:13px;color:var(--text-primary,#c9d1d9);margin:18px 0 6px;">Credit Spread Guidance</h4>
+  <p>Place short strikes <em>outside</em> the Combined band boundary. The suggested band is the tightest
+  percentile with a useful hit rate for each ticker:</p>
   <table style="font-size:12px;border-collapse:collapse;margin:8px 0;">
     <tr style="border-bottom:1px solid var(--border-color,#30363d);">
       <th style="text-align:left;padding:4px 12px 4px 0;">Ticker</th>
       <th style="padding:4px 12px;">Band</th>
       <th style="padding:4px 12px;">Hit Rate</th>
-      <th style="padding:4px 12px;">Width</th>
-      <th style="padding:4px 12px;">Mid Error</th>
+      <th style="padding:4px 12px;">Avg Width</th>
+      <th style="padding:4px 12px;">What it means</th>
     </tr>
     <tr><td style="padding:3px 12px 3px 0;">SPX</td><td style="padding:3px 12px;">P98</td>
         <td style="padding:3px 12px;">93%</td><td style="padding:3px 12px;">~2.7%</td>
-        <td style="padding:3px 12px;">0.57%</td></tr>
+        <td style="padding:3px 12px;font-size:11px;">93% of days, close within &plusmn;1.35% of current price</td></tr>
     <tr><td style="padding:3px 12px 3px 0;">NDX</td><td style="padding:3px 12px;">P99</td>
         <td style="padding:3px 12px;">95%</td><td style="padding:3px 12px;">~3.6%</td>
-        <td style="padding:3px 12px;">0.82%</td></tr>
+        <td style="padding:3px 12px;font-size:11px;">95% of days, close within &plusmn;1.8% of current price</td></tr>
     <tr><td style="padding:3px 12px 3px 0;">RUT</td><td style="padding:3px 12px;">P100</td>
         <td style="padding:3px 12px;">98%</td><td style="padding:3px 12px;">~4.8%</td>
-        <td style="padding:3px 12px;">0.88%</td></tr>
+        <td style="padding:3px 12px;font-size:11px;">98% of days, close within &plusmn;2.4% of current price</td></tr>
   </table>
+  <ul style="margin:4px 0 8px 20px;font-size:11px;">
+    <li><strong>Hit Rate</strong> = % of days the actual close landed inside the band (backtest, no lookahead).</li>
+    <li><strong>Avg Width</strong> = band_high &minus; band_low as % of price. Half-width = distance from
+    current price to each edge.</li>
+    <li><strong>Edge pruning:</strong> Using P98 vs P100 prunes ~1% from each tail. For NDX, this tightens
+    bands from ~4.3% to ~3.6% — short strike moves ~0.35% closer on each side, collecting more premium
+    but with 2–5% more breach risk.</li>
+    <li><strong>Model limitation:</strong> Predicts <em>close</em> price, not intraday max excursion. Price
+    may temporarily breach your short strike before reverting to close within the band. Use the
+    /range_percentiles intraday section for max-move analysis.</li>
+  </ul>
 
   <p><strong>Parameters:</strong> <code>?lookback=N</code> (training days, default 150, range 30–1260),
   <code>?cache=false</code> (force refresh).</p>
@@ -14860,6 +14912,60 @@ def _predictions_methodology_html() -> str:
   <p><strong>Consecutive-Day Streaks:</strong> Tested for 0DTE but showed no predictive value (42–50%
   directional accuracy). Active only for multi-day (DTE 1+) predictions where momentum carries over.</p>
 </div>
+"""
+
+
+def _outlier_toggle_html(exclude_outliers: bool, endpoint: str = "range_percentiles") -> str:
+    """Generate outlier toggle button + AJAX reload script."""
+    checked = "" if exclude_outliers else "checked"
+    label = "Showing Raw (with outliers)" if not exclude_outliers else "Outliers Filtered"
+    btn_style = "background:#da3633;color:white;" if not exclude_outliers else "background:#238636;color:white;"
+    return f"""
+<button class="theme-toggle" id="outlierToggle" style="{btn_style}margin-left:8px;position:relative;"
+    onclick="toggleOutliers()">
+    <span id="outlierLabel">{label}</span>
+    <span id="outlierSpinner" style="display:none;margin-left:6px;">⏳</span>
+</button>
+<script>
+function toggleOutliers() {{
+    var btn = document.getElementById('outlierToggle');
+    var label = document.getElementById('outlierLabel');
+    var spinner = document.getElementById('outlierSpinner');
+    var url = new URL(window.location.href);
+    var currentlyFiltered = !url.searchParams.has('outliers') || url.searchParams.get('outliers') !== '1';
+
+    // Show loading state
+    spinner.style.display = 'inline';
+    label.style.opacity = '0.5';
+    btn.style.pointerEvents = 'none';
+
+    // Toggle the parameter
+    if (currentlyFiltered) {{
+        url.searchParams.set('outliers', '1');
+    }} else {{
+        url.searchParams.delete('outliers');
+    }}
+
+    // Update URL bar without reload
+    window.history.replaceState(null, '', url.toString());
+
+    // Fetch new content via AJAX
+    fetch(url.toString(), {{headers: {{'Accept': 'text/html'}}}})
+        .then(function(r) {{ return r.text(); }})
+        .then(function(html) {{
+            // Replace the entire page content
+            document.open();
+            document.write(html);
+            document.close();
+        }})
+        .catch(function(e) {{
+            spinner.style.display = 'none';
+            label.style.opacity = '1';
+            btn.style.pointerEvents = '';
+            label.textContent = 'Error: ' + e.message;
+        }});
+}}
+</script>
 """
 
 
@@ -15381,6 +15487,15 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
             # Inject WebSocket live-price script
             html = _inject_range_percentiles_ws_script(html, tickers)
 
+            # Inject outlier toggle button next to theme toggle
+            toggle_html = _outlier_toggle_html(exclude_outliers)
+            theme_pos = html.find('id="themeToggle"')
+            if theme_pos >= 0:
+                btn_close = html.find('</button>', theme_pos)
+                if btn_close >= 0:
+                    insert_at = btn_close + len('</button>')
+                    html = html[:insert_at] + toggle_html + html[insert_at:]
+
             # Inject methodology documentation
             html = html.replace("</body>", _range_percentiles_methodology_html(exclude_outliers) + "\n</body>", 1)
 
@@ -15557,6 +15672,15 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
 
         # Inject WebSocket live-price script
         html = _inject_range_percentiles_ws_script(html, tickers)
+
+        # Inject outlier toggle button next to theme toggle
+        toggle_html = _outlier_toggle_html(exclude_outliers)
+        theme_pos = html.find('id="themeToggle"')
+        if theme_pos >= 0:
+            btn_close = html.find('</button>', theme_pos)
+            if btn_close >= 0:
+                insert_at = btn_close + len('</button>')
+                html = html[:insert_at] + toggle_html + html[insert_at:]
 
         # Inject methodology documentation
         html = html.replace("</body>", _range_percentiles_methodology_html(exclude_outliers) + "\n</body>", 1)
