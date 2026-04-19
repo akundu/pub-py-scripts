@@ -1903,8 +1903,14 @@ def _direction_badge(direction: str) -> str:
 
 
 def _render_slot_table(slots: dict, sorted_keys: list[str], percentiles: list[int],
-                       direction: str, title: str, ticker: str = "") -> str:
-    """Render a single DOWN or UP table for a set of slots."""
+                       direction: str, title: str, ticker: str = "",
+                       highlight_p: int = 0) -> str:
+    """Render a single DOWN or UP table for a set of slots.
+
+    Args:
+        highlight_p: Percentile row to highlight as recommended (e.g., 95).
+                     0 = no highlighting.
+    """
     parts = []
     dir_key = "when_down" if direction == "down" else "when_up"
     count_key = "when_down_day_count" if direction == "down" else "when_up_day_count"
@@ -1928,12 +1934,62 @@ def _render_slot_table(slots: dict, sorted_keys: list[str], percentiles: list[in
     parts.append('                    </tr>\n                </thead>\n                <tbody>\n')
 
     for p in percentiles:
-        parts.append(f'                    <tr>\n                        <td>p{p}</td>\n')
+        row_style = ""
+        if p == highlight_p:
+            row_style = ' style="background:rgba(35,134,54,0.15);font-weight:bold;"'
+        parts.append(f'                    <tr{row_style}>\n                        <td>p{p}{"  ★" if p == highlight_p else ""}</td>\n')
         for s in sorted_keys:
             block = slots[s].get(dir_key)
             if block:
                 pct = block["pct"][f"p{p}"]
                 price = block["price"][f"p{p}"]
+                parts.append(f'                        <td>{sign}{pct}%</td>\n')
+                parts.append(f'                        <td class="price-cell" data-pct="{pct}" data-ticker="{ticker}" data-section="hourly">${price:,.2f}</td>\n')
+            else:
+                parts.append('                        <td class="insuf">--</td>\n                        <td class="insuf">--</td>\n')
+        parts.append('                    </tr>\n')
+
+    parts.append('                </tbody>\n            </table>\n        </div>\n')
+    return "".join(parts)
+
+
+def _render_max_move_table(slots: dict, sorted_keys: list[str], percentiles: list[int],
+                           direction: str, title: str, ticker: str = "",
+                           highlight_p: int = 0) -> str:
+    """Render a max-move (intraday excursion) table for a set of slots."""
+    parts = []
+    move_key = "max_down_pct" if direction == "down" else "max_up_pct"
+    price_key = "max_down_price" if direction == "down" else "max_up_price"
+    arrow = "⬇️" if direction == "down" else "⬆️"
+    sign = "" if direction == "down" else "+"
+
+    parts.append(f'\n        {_direction_badge(direction)}{arrow} {title}</div>\n')
+    parts.append('        <div class="table-wrap">\n            <table>\n                <thead>\n                    <tr>\n                        <th></th>\n')
+
+    for s in sorted_keys:
+        info = slots[s]
+        mm = info.get("max_move")
+        n = mm["day_count"] if mm else 0
+        et_h, et_m = s.split(":")
+        parts.append(f'                        <th colspan="2">'
+                     f'<span class="local-time-slot" data-et-hour="{et_h}" data-et-min="{et_m}" '
+                     f'data-n="{n}" data-et-label="{info["label_et"]}"></span></th>\n')
+
+    parts.append('                    </tr>\n                    <tr>\n                        <th></th>\n')
+    for _ in sorted_keys:
+        parts.append('                        <th>%</th>\n                        <th>$</th>\n')
+    parts.append('                    </tr>\n                </thead>\n                <tbody>\n')
+
+    for p in percentiles:
+        row_style = ""
+        if p == highlight_p:
+            row_style = ' style="background:rgba(35,134,54,0.15);font-weight:bold;"'
+        parts.append(f'                    <tr{row_style}>\n                        <td>p{p}{"  ★" if p == highlight_p else ""}</td>\n')
+        for s in sorted_keys:
+            mm = slots[s].get("max_move")
+            if mm:
+                pct = mm[move_key][f"p{p}"]
+                price = mm[price_key][f"p{p}"]
                 parts.append(f'                        <td>{sign}{pct}%</td>\n')
                 parts.append(f'                        <td class="price-cell" data-pct="{pct}" data-ticker="{ticker}" data-section="hourly">${price:,.2f}</td>\n')
             else:
@@ -2049,6 +2105,13 @@ def format_hourly_moves_as_html(hourly_data: dict) -> str:
     slots_10min = hourly_data.get("slots_10min", {})
     slots_5min = hourly_data.get("slots_5min", {})
     has_fine = hourly_data.get("has_fine_data", False)
+    recommended = hourly_data.get("recommended", {})
+    intraday_rec = recommended.get("intraday", {})
+    max_move_rec = recommended.get("max_move", {})
+    rec_put_intraday = intraday_rec.get("put", 0)
+    rec_call_intraday = intraday_rec.get("call", 0)
+    rec_put_maxmove = max_move_rec.get("put", 0)
+    rec_call_maxmove = max_move_rec.get("call", 0)
 
     try:
         prev_close_fmt = f"${float(prev_close):,.2f}"
@@ -2075,21 +2138,39 @@ def format_hourly_moves_as_html(hourly_data: dict) -> str:
         </div>
 """)
 
-    # --- Primary table: 10-min early (9:30-11:00 ET) + 15-min rest of day ---
+    # --- Primary table: Move-to-Close ---
     sorted_primary = sorted(slots_primary.keys(), key=_time_sort_key)
     if sorted_primary:
         html_parts.append(_render_slot_table(slots_primary, sorted_primary, percentiles, "down",
-                                              "DOWN MOVES TO CLOSE", ticker=ticker))
+                                              "DOWN MOVES TO CLOSE", ticker=ticker,
+                                              highlight_p=rec_put_intraday))
         html_parts.append('        <div style="margin-top:30px"></div>\n')
         html_parts.append(_render_slot_table(slots_primary, sorted_primary, percentiles, "up",
-                                              "UP MOVES TO CLOSE", ticker=ticker))
+                                              "UP MOVES TO CLOSE", ticker=ticker,
+                                              highlight_p=rec_call_intraday))
     else:
-        # Fallback to half-hour if no primary data
         html_parts.append(_render_slot_table(slots, sorted_slots, percentiles, "down",
-                                              "DOWN MOVES TO CLOSE (per half-hour)", ticker=ticker))
+                                              "DOWN MOVES TO CLOSE (per half-hour)", ticker=ticker,
+                                              highlight_p=rec_put_intraday))
         html_parts.append('        <div style="margin-top:30px"></div>\n')
         html_parts.append(_render_slot_table(slots, sorted_slots, percentiles, "up",
-                                              "UP MOVES TO CLOSE (per half-hour)", ticker=ticker))
+                                              "UP MOVES TO CLOSE (per half-hour)", ticker=ticker,
+                                              highlight_p=rec_call_intraday))
+
+    # --- Max-Move (Intraday Excursion) tables ---
+    if sorted_primary and any(slots_primary[s].get("max_move") for s in sorted_primary):
+        html_parts.append('\n        <h3 style="margin-top:35px;">Max Intraday Excursion (High/Low After This Time)</h3>\n')
+        html_parts.append('        <div class="hourly-info" style="margin-bottom:12px;font-size:12px;">'
+                          'Maximum high and minimum low reached <em>after</em> each time slot through close. '
+                          'Unlike move-to-close (which only measures where the day <em>closed</em>), this shows '
+                          'the worst-case intraday spike — the price your short strike could be tested at.</div>\n')
+        html_parts.append(_render_max_move_table(slots_primary, sorted_primary, percentiles, "down",
+                                                  "MAX DOWN EXCURSION (worst intraday low)", ticker=ticker,
+                                                  highlight_p=rec_put_maxmove))
+        html_parts.append('        <div style="margin-top:30px"></div>\n')
+        html_parts.append(_render_max_move_table(slots_primary, sorted_primary, percentiles, "up",
+                                                  "MAX UP EXCURSION (highest intraday high)", ticker=ticker,
+                                                  highlight_p=rec_call_maxmove))
 
     # --- Tier 2: 10-min tables (last 30 min) ---
     sorted_10 = sorted(slots_10min.keys(), key=_time_sort_key)

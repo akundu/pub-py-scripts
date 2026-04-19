@@ -590,10 +590,33 @@ async def compute_hourly_moves_to_close(
         latest_date = max(day_closes.keys())
         previous_close = day_closes[latest_date]
 
+    # --- Precompute suffix max-high and min-low per trading day ---
+    # For each bar, stores the max high and min low from that bar through end of day.
+    # Used for max-move (intraday excursion) analysis.
+    import numpy as np
+    suffix_max_high = {}  # DataFrame integer index -> max_high_after
+    suffix_min_low = {}   # DataFrame integer index -> min_low_after
+    for td, grp in all_bars.groupby("trading_date"):
+        grp_sorted = grp.sort_values("timestamp")
+        highs = grp_sorted["high"].values.astype(float) if "high" in grp_sorted.columns else grp_sorted["close"].values.astype(float)
+        lows = grp_sorted["low"].values.astype(float) if "low" in grp_sorted.columns else grp_sorted["close"].values.astype(float)
+        idx_list = grp_sorted.index.tolist()
+        # Reverse cumulative max/min (suffix)
+        n = len(highs)
+        s_max = np.empty(n)
+        s_min = np.empty(n)
+        s_max[-1] = highs[-1]
+        s_min[-1] = lows[-1]
+        for i in range(n - 2, -1, -1):
+            s_max[i] = max(highs[i], s_max[i + 1])
+            s_min[i] = min(lows[i], s_min[i + 1])
+        for i in range(n):
+            suffix_max_high[idx_list[i]] = float(s_max[i])
+            suffix_min_low[idx_list[i]] = float(s_min[i])
+
     # --- Build records for each slot type ---
-    # For each bar, compute its half-hour bucket, 10-min bucket, 5-min bucket
     records = []
-    for _, row in all_bars.iterrows():
+    for row_idx, row in all_bars.iterrows():
         td = row["trading_date"]
         day_close = day_closes.get(td)
         if day_close is None:
@@ -612,6 +635,12 @@ async def compute_hourly_moves_to_close(
             continue
 
         move_pct = (day_close - price) / price
+
+        # Max-move: how far did price go UP and DOWN from this bar through close
+        max_high = suffix_max_high.get(row_idx, price)
+        min_low = suffix_min_low.get(row_idx, price)
+        max_up_pct = (max_high - price) / price if price > 0 else 0.0
+        max_down_pct = (min_low - price) / price if price > 0 else 0.0
 
         # Half-hour bucket: floor to nearest 30 min
         m30 = (m // 30) * 30
@@ -657,6 +686,8 @@ async def compute_hourly_moves_to_close(
             "price": price,
             "day_close": day_close,
             "move_pct": move_pct,
+            "max_up_pct": max_up_pct,
+            "max_down_pct": max_down_pct,
             "slot_30": hh_slot,
             "slot_15": qh_slot,
             "slot_primary": primary_slot,
@@ -695,6 +726,33 @@ async def compute_hourly_moves_to_close(
             "pct": {f"p{p}": r[f"p{p}_pct"] for p in percentiles},
             "price": {f"p{p}": r[f"p{p}_price"] for p in percentiles},
         }
+
+    def build_max_move_block(day_agg) -> dict | None:
+        """Build max-move percentiles from aggregated day records."""
+        if len(day_agg) < min_days:
+            return None
+        up_moves = day_agg["max_up_pct"]
+        down_moves = day_agg["max_down_pct"]
+        result = {"day_count": len(day_agg)}
+        # Max upside excursion percentiles
+        up_pcts = {}
+        up_prices = {}
+        for p in percentiles:
+            q = float(up_moves.quantile(p / 100.0))
+            up_pcts[f"p{p}"] = round(q * 100, 2)
+            up_prices[f"p{p}"] = round(previous_close * (1 + q), 2)
+        result["max_up_pct"] = up_pcts
+        result["max_up_price"] = up_prices
+        # Max downside excursion percentiles (invert so p95 = 95th percentile of downside)
+        dn_pcts = {}
+        dn_prices = {}
+        for p in percentiles:
+            q = float(down_moves.quantile((100 - p) / 100.0))
+            dn_pcts[f"p{p}"] = round(q * 100, 2)
+            dn_prices[f"p{p}"] = round(previous_close * (1 + q), 2)
+        result["max_down_pct"] = dn_pcts
+        result["max_down_price"] = dn_prices
+        return result
 
     def aggregate_slot(df_subset) -> dict | None:
         """Aggregate multiple 5-min bars within a slot by taking the FIRST bar per trading day."""
@@ -744,6 +802,7 @@ async def compute_hourly_moves_to_close(
             "when_up_day_count": n_up,
             "when_down": build_block(moves[mask_down], n_down, invert=True),
             "when_down_day_count": n_down,
+            "max_move": build_max_move_block(day_agg),
         }
 
     # --- Aggregate quarter-hour (15-min) slots ---
@@ -769,6 +828,7 @@ async def compute_hourly_moves_to_close(
             "when_up_day_count": n_up,
             "when_down": build_block(moves[mask_down], n_down, invert=True),
             "when_down_day_count": n_down,
+            "max_move": build_max_move_block(day_agg),
         }
 
     # --- Aggregate primary slots (10-min early + 15-min rest of day) ---
@@ -794,6 +854,7 @@ async def compute_hourly_moves_to_close(
             "when_up_day_count": n_up,
             "when_down": build_block(moves[mask_down], n_down, invert=True),
             "when_down_day_count": n_down,
+            "max_move": build_max_move_block(day_agg),
         }
 
     # --- Aggregate 10-min slots (last 30 min) ---
@@ -819,6 +880,7 @@ async def compute_hourly_moves_to_close(
             "when_up_day_count": n_up,
             "when_down": build_block(moves[mask_down], n_down, invert=True),
             "when_down_day_count": n_down,
+            "max_move": build_max_move_block(day_agg),
         }
 
     # --- Aggregate 5-min slots (last 10 min) ---
@@ -843,14 +905,33 @@ async def compute_hourly_moves_to_close(
             "when_up": build_block(moves[mask_up], n_up, invert=False),
             "when_up_day_count": n_up,
             "when_down": build_block(moves[mask_down], n_down, invert=True),
+            "max_move": build_max_move_block(day_agg),
             "when_down_day_count": n_down,
         }
+
+    # Recommended percentiles per ticker for credit spread strike selection
+    ticker_upper = display_ticker.upper()
+    recommended = {
+        "close_to_close": {
+            "put": {"NDX": 98, "SPX": 95, "RUT": 98}.get(ticker_upper, 95),
+            "call": {"NDX": 95, "SPX": 95, "RUT": 95}.get(ticker_upper, 95),
+        },
+        "intraday": {
+            "put": {"NDX": 95, "SPX": 90, "RUT": 95}.get(ticker_upper, 90),
+            "call": {"NDX": 90, "SPX": 90, "RUT": 90}.get(ticker_upper, 90),
+        },
+        "max_move": {
+            "put": {"NDX": 90, "SPX": 90, "RUT": 90}.get(ticker_upper, 90),
+            "call": {"NDX": 90, "SPX": 90, "RUT": 90}.get(ticker_upper, 90),
+        },
+    }
 
     return {
         "ticker": display_ticker,
         "previous_close": previous_close,
         "lookback_trading_days": lookback,
         "percentiles": percentiles,
+        "recommended": recommended,
         "slots": slots_data,
         "slots_primary": slots_primary,
         "slots_15min": slots_15min,
