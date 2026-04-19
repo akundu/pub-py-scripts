@@ -14802,6 +14802,9 @@ async def handle_range_percentiles_api(request: web.Request) -> web.Response:
     start_date = request.query.get('start_date', None)
     end_date = request.query.get('end_date', None)
 
+    # Parse outlier control: default=exclude, ?outliers=1 to include raw
+    exclude_outliers = request.query.get('outliers', '').strip().lower() not in {"1", "true", "yes", "on"}
+
     # Get DB config
     db_instance = request.app.get('db_instance')
     if not db_instance or not hasattr(db_instance, 'db_config'):
@@ -14826,6 +14829,7 @@ async def handle_range_percentiles_api(request: web.Request) -> web.Response:
             window=window,
             start_date=start_date,
             end_date=end_date,
+            exclude_outliers=exclude_outliers,
         )
 
         return web.json_response(results if len(results) != 1 else results[0])
@@ -15107,6 +15111,7 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
         # Parse optional date range (overrides lookback)
         start_date = request.query.get('start_date', None)
         end_date = request.query.get('end_date', None)
+        exclude_outliers = request.query.get('outliers', '').strip().lower() not in {"1", "true", "yes", "on"}
 
         # Parse optional momentum filter parameters
         momentum_filter = None
@@ -15140,6 +15145,7 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                 momentum_filter=momentum_filter,
                 start_date=start_date,
                 end_date=end_date,
+                exclude_outliers=exclude_outliers,
             )
 
             # Intraday hourly computation scans many 5-min CSV files and can be expensive.
@@ -15161,6 +15167,7 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                             log_level="WARNING",
                             start_date=start_date,
                             end_date=end_date,
+                            exclude_outliers=exclude_outliers,
                         )
                         display_t = ticker_name.replace("I:", "") if ticker_name.startswith("I:") else ticker_name
                         hourly[display_t] = hourly_data
@@ -15302,6 +15309,7 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
     # Parse optional date range (overrides lookback) — single-window path
     start_date = request.query.get('start_date', None)
     end_date = request.query.get('end_date', None)
+    exclude_outliers = request.query.get('outliers', '').strip().lower() not in {"1", "true", "yes", "on"}
 
     # Get DB config
     db_instance = request.app.get('db_instance')
@@ -15328,6 +15336,7 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
             window=window,
             start_date=start_date,
             end_date=end_date,
+            exclude_outliers=exclude_outliers,
         )
 
         data_list = results if isinstance(results, list) else [results]
@@ -15347,6 +15356,7 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                         log_level="WARNING",
                         start_date=start_date,
                         end_date=end_date,
+                        exclude_outliers=exclude_outliers,
                     )
                     display_t = ticker_name.replace("I:", "") if ticker_name.startswith("I:") else ticker_name
                     hourly[display_t] = hourly_data

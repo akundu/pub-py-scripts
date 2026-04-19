@@ -122,9 +122,22 @@ def _train_statistical(
     return predictor
 
 
+def _winsorize_iqr(values, factor=2.5):
+    """Winsorize values using IQR fences."""
+    arr = np.asarray(values, dtype=float)
+    if len(arr) < 20:
+        return arr
+    q1, q3 = np.percentile(arr, [25, 75])
+    iqr = q3 - q1
+    if iqr <= 0:
+        return arr
+    return np.clip(arr, q1 - factor * iqr, q3 + factor * iqr)
+
+
 def _get_daily_moves(
     pct_df: pd.DataFrame,
     train_dates: set,
+    exclude_outliers: bool = True,
 ) -> Optional[np.ndarray]:
     """Extract one prev_close→day_close return per date from pct_df.
 
@@ -133,13 +146,17 @@ def _get_daily_moves(
     daily = pct_df[pct_df['date'].isin(train_dates)].drop_duplicates(subset='date')
     if len(daily) < 10:
         return None
-    return ((daily['day_close'] - daily['prev_close']) / daily['prev_close'] * 100).values
+    moves = ((daily['day_close'] - daily['prev_close']) / daily['prev_close'] * 100).values
+    if exclude_outliers:
+        moves = _winsorize_iqr(moves)
+    return moves
 
 
 def compute_static_percentile_prediction(
     pct_df: pd.DataFrame,
     prev_close: float,
     train_dates: set,
+    exclude_outliers: bool = True,
 ) -> Optional[Dict[str, UnifiedBand]]:
     """Compute static percentile bands using direction-split approach.
 
@@ -148,7 +165,7 @@ def compute_static_percentile_prediction(
     /range_percentiles endpoint). Falls back to all-moves-combined if either
     direction has fewer than 5 samples.
     """
-    moves = _get_daily_moves(pct_df, train_dates)
+    moves = _get_daily_moves(pct_df, train_dates, exclude_outliers=exclude_outliers)
     if moves is None:
         return None
 
@@ -167,6 +184,7 @@ def compute_empirical_continuous_prediction(
     pct_df: pd.DataFrame,
     prev_close: float,
     train_dates: set,
+    exclude_outliers: bool = True,
 ) -> Optional[Dict[str, UnifiedBand]]:
     """Compute static bands using all-moves-combined symmetric percentiles.
 
@@ -174,7 +192,7 @@ def compute_empirical_continuous_prediction(
     prev_close→day_close returns and computes symmetric percentiles (e.g.,
     P95 = 2.5th to 97.5th percentile of all moves regardless of direction).
     """
-    moves = _get_daily_moves(pct_df, train_dates)
+    moves = _get_daily_moves(pct_df, train_dates, exclude_outliers=exclude_outliers)
     if moves is None:
         return None
 
@@ -346,6 +364,7 @@ def make_unified_prediction(
     data_source: str = "csv",
     intraday_vol_factor: float = 1.0,
     use_gap_adjustment: bool = True,
+    exclude_outliers: bool = True,
 ) -> Optional[UnifiedPrediction]:
     """Produce a unified prediction combining both models."""
     above = current_price >= prev_close
@@ -358,10 +377,10 @@ def make_unified_prediction(
     )
 
     # Percentile model — static close-to-close (direction-split, does not change throughout the day)
-    pct_bands = compute_static_percentile_prediction(pct_df, prev_close, train_dates)
+    pct_bands = compute_static_percentile_prediction(pct_df, prev_close, train_dates, exclude_outliers=exclude_outliers)
 
     # Empirical continuous model — old all-moves-combined approach (for comparison)
-    empc_bands = compute_empirical_continuous_prediction(pct_df, prev_close, train_dates)
+    empc_bands = compute_empirical_continuous_prediction(pct_df, prev_close, train_dates, exclude_outliers=exclude_outliers)
 
     # Time-aware percentile model (used for combined bands only)
     time_aware_pct_bands = compute_percentile_prediction(

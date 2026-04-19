@@ -32,6 +32,25 @@ MIN_DIRECTION_DAYS_DEFAULT = 5
 DEFAULT_WINDOW = 0  # window=0 represents today (0DTE)
 
 
+def _winsorize_iqr(values, factor=2.5):
+    """Winsorize values using IQR fences: cap at Q1 - factor*IQR and Q3 + factor*IQR.
+
+    Preserves sample count while limiting the impact of extreme outliers.
+    2.5x IQR is a standard "outer fence" that keeps ~99% of normally-distributed data.
+    """
+    import numpy as np
+    arr = np.asarray(values, dtype=float)
+    if len(arr) < 20:
+        return arr
+    q1, q3 = np.percentile(arr, [25, 75])
+    iqr = q3 - q1
+    if iqr <= 0:
+        return arr
+    lower = q1 - factor * iqr
+    upper = q3 + factor * iqr
+    return np.clip(arr, lower, upper)
+
+
 def compute_default_windows() -> list:
     """Compute smart default windows based on trading calendar.
 
@@ -136,6 +155,7 @@ async def compute_range_percentiles(
     override_close: float | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    exclude_outliers: bool = True,
 ) -> dict:
     """
     Compute range percentiles for a single ticker.
@@ -251,6 +271,13 @@ async def compute_range_percentiles(
         close_float = df["close"].astype(float)
         return_pct = (close_float - prev_float) / prev_float  # as decimal, e.g. -0.01 = -1%
 
+        # Winsorize outliers: cap at Q1 - 2.5*IQR / Q3 + 2.5*IQR
+        if exclude_outliers:
+            import numpy as np
+            winsorized = _winsorize_iqr(return_pct.values)
+            return_pct = return_pct.copy()
+            return_pct.iloc[:] = winsorized
+
         mask_up = return_pct > 0
         mask_down = return_pct < 0
         n_up = int(mask_up.sum())
@@ -322,6 +349,7 @@ async def compute_range_percentiles_multi(
     window: int = DEFAULT_WINDOW,
     start_date: str | None = None,
     end_date: str | None = None,
+    exclude_outliers: bool = True,
 ) -> list[dict]:
     """
     Compute range percentiles for multiple tickers.
@@ -352,6 +380,7 @@ async def compute_range_percentiles_multi(
             override_close=override_close,
             start_date=start_date,
             end_date=end_date,
+            exclude_outliers=exclude_outliers,
         )
         results.append(out)
     return results
@@ -447,6 +476,7 @@ async def compute_hourly_moves_to_close(
     override_close: float | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    exclude_outliers: bool = True,
 ) -> dict:
     """
     Compute intraday moves to close for 0DTE analysis using 5-min CSV data.
@@ -627,6 +657,11 @@ async def compute_hourly_moves_to_close(
         raise ValueError(f"No intraday records for {display_ticker}")
 
     records_df = pd.DataFrame(records)
+
+    # Winsorize intraday move_pct to cap extreme outliers
+    if exclude_outliers and len(records_df) >= 20:
+        import numpy as np
+        records_df["move_pct"] = _winsorize_iqr(records_df["move_pct"].values)
 
     # --- Helper to build percentile blocks ---
     def return_percentiles_from_series(return_series, ref_close: float, invert: bool = False) -> dict:
@@ -850,6 +885,7 @@ async def compute_range_percentiles_multi_window(
     momentum_filter: dict | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    exclude_outliers: bool = True,
 ) -> dict:
     """
     Compute range percentiles for multiple window sizes (single ticker).
@@ -1032,6 +1068,12 @@ async def compute_range_percentiles_multi_window(
             close_float = df_window["close"].astype(float)
             return_pct = (close_float - prev_float) / prev_float
 
+            # Winsorize outliers
+            if exclude_outliers:
+                winsorized = _winsorize_iqr(return_pct.values)
+                return_pct = return_pct.copy()
+                return_pct.iloc[:] = winsorized
+
             mask_up = return_pct > 0
             mask_down = return_pct < 0
             n_up = int(mask_up.sum())
@@ -1157,6 +1199,7 @@ async def compute_range_percentiles_multi_window_batch(
     momentum_filter: dict | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    exclude_outliers: bool = True,
 ) -> list[dict]:
     """
     Compute multi-window percentiles for multiple tickers.
@@ -1190,6 +1233,7 @@ async def compute_range_percentiles_multi_window_batch(
             momentum_filter=momentum_filter,
             start_date=start_date,
             end_date=end_date,
+            exclude_outliers=exclude_outliers,
         )
         results.append(out)
     return results
