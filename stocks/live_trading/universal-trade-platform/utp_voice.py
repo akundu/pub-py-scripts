@@ -3201,6 +3201,38 @@ async def api_position_limits(username: str = Depends(require_session)):
     return await _check_position_limits()
 
 
+# ── Roll Management Proxy Endpoints ──────────────────────────────────────────
+
+@app.get("/api/roll/suggestions")
+async def api_roll_suggestions(username: str = Depends(require_session)):
+    """Proxy to daemon GET /roll/suggestions."""
+    client = get_daemon_client()
+    try:
+        return await client._get("/roll/suggestions")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.post("/api/roll/execute/{suggestion_id}")
+async def api_roll_execute(suggestion_id: str, username: str = Depends(require_session)):
+    """Proxy to daemon POST /roll/execute/{suggestion_id}."""
+    client = get_daemon_client()
+    try:
+        return await client._post(f"/roll/execute/{suggestion_id}")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@app.post("/api/roll/dismiss/{suggestion_id}")
+async def api_roll_dismiss(suggestion_id: str, username: str = Depends(require_session)):
+    """Proxy to daemon POST /roll/dismiss/{suggestion_id}."""
+    client = get_daemon_client()
+    try:
+        return await client._post(f"/roll/dismiss/{suggestion_id}")
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
 @app.get("/api/trades/list")
 async def api_trades_list(
     days: int = 0,

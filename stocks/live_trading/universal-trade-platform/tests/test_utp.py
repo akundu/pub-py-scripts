@@ -8408,8 +8408,8 @@ class TestRollService:
         assert isinstance(resp.json(), list)
 
     @pytest.mark.asyncio
-    async def test_execute_endpoint_stub(self, client, api_key_headers):
-        """POST /roll/execute should return 501 not-implemented."""
+    async def test_execute_endpoint_dry_run(self, client, api_key_headers):
+        """POST /roll/execute with X-Dry-Run should return suggestion preview."""
         from app.services.roll_service import init_roll_service, RollConfig, RollSuggestion
 
         svc = init_roll_service(RollConfig())
@@ -8440,8 +8440,12 @@ class TestRollService:
         )
         svc._suggestions["exec-001"] = s
 
-        resp = await client.post("/roll/execute/exec-001", headers=api_key_headers)
-        assert resp.status_code == 501
+        headers = {**api_key_headers, "X-Dry-Run": "true"}
+        resp = await client.post("/roll/execute/exec-001", headers=headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "dry_run"
+        assert data["suggestion"]["suggestion_id"] == "exec-001"
 
     @pytest.mark.asyncio
     async def test_config_endpoint(self, client, api_key_headers):
@@ -8467,3 +8471,296 @@ class TestRollService:
         data = resp.json()
         assert data["mirror_trigger_severity"] == "critical"
         assert data["auto_execute"] is True
+
+    @pytest.mark.asyncio
+    async def test_execute_forward_roll(self, tmp_path):
+        """Forward roll: close current + open new. Both execute_trade calls succeed."""
+        from app.services.roll_service import RollConfig, RollService, RollSuggestion
+        from app.services.position_store import get_position_store
+        from app.models import OrderResult, Broker, OrderStatus
+
+        svc = RollService(RollConfig())
+        pos = self._make_position(
+            position_id="fwd-pos-1",
+            short_strike=5600, long_strike=5575, option_type="PUT",
+        )
+
+        store = get_position_store()
+        store._positions["fwd-pos-1"] = {**pos, "status": "open"}
+        store._save()
+
+        s = RollSuggestion(
+            suggestion_id="fwd-001",
+            position_id="fwd-pos-1",
+            symbol="SPX",
+            roll_type="forward",
+            severity="watch",
+            distance_pct=1.5,
+            current_short_strike=5600,
+            current_long_strike=5575,
+            current_option_type="PUT",
+            current_expiration="20260414",
+            current_quantity=1,
+            current_max_loss=2500,
+            new_short_strike=5550,
+            new_long_strike=5525,
+            new_option_type="PUT",
+            new_expiration="20260416",
+            new_width=25,
+            estimated_credit=0,
+            estimated_close_cost=0,
+            net_cost=0,
+            new_max_loss=2500,
+            covers_close=False,
+            reason="test forward",
+        )
+        svc._suggestions["fwd-001"] = s
+
+        mock_result = OrderResult(
+            broker=Broker.IBKR, status=OrderStatus.FILLED,
+            message="Filled", filled_price=1.50,
+        )
+
+        with patch("app.services.trade_service.execute_trade", new_callable=AsyncMock, return_value=mock_result):
+            result = await svc.execute_roll("fwd-001")
+
+        assert result["status"] == "executed"
+        assert result["roll_type"] == "forward"
+        assert "close_result" in result
+        assert "open_result" in result
+        assert s.status == "executed"
+
+    @pytest.mark.asyncio
+    async def test_execute_mirror_roll(self, tmp_path):
+        """Mirror roll: only open new (no close). Single execute_trade call."""
+        from app.services.roll_service import RollConfig, RollService, RollSuggestion
+        from app.services.position_store import get_position_store
+        from app.models import OrderResult, Broker, OrderStatus
+
+        svc = RollService(RollConfig())
+        pos = self._make_position(
+            position_id="mir-pos-1",
+            short_strike=5600, long_strike=5575, option_type="PUT",
+        )
+
+        store = get_position_store()
+        store._positions["mir-pos-1"] = {**pos, "status": "open"}
+        store._save()
+
+        s = RollSuggestion(
+            suggestion_id="mir-001",
+            position_id="mir-pos-1",
+            symbol="SPX",
+            roll_type="mirror",
+            severity="warning",
+            distance_pct=0.8,
+            current_short_strike=5600,
+            current_long_strike=5575,
+            current_option_type="PUT",
+            current_expiration="20260414",
+            current_quantity=1,
+            current_max_loss=2500,
+            new_short_strike=5605,
+            new_long_strike=5630,
+            new_option_type="CALL",
+            new_expiration="20260414",
+            new_width=25,
+            estimated_credit=0,
+            estimated_close_cost=0,
+            net_cost=0,
+            new_max_loss=2500,
+            covers_close=False,
+            reason="test mirror",
+        )
+        svc._suggestions["mir-001"] = s
+
+        mock_result = OrderResult(
+            broker=Broker.IBKR, status=OrderStatus.FILLED,
+            message="Filled", filled_price=2.00,
+        )
+
+        call_count = 0
+        async def mock_execute(request, dry_run=False):
+            nonlocal call_count
+            call_count += 1
+            return mock_result
+
+        with patch("app.services.trade_service.execute_trade", side_effect=mock_execute):
+            result = await svc.execute_roll("mir-001")
+
+        assert result["status"] == "executed"
+        assert result["roll_type"] == "mirror"
+        assert "open_result" in result
+        assert "close_result" not in result  # Mirror = no close
+        assert call_count == 1  # Only one trade (open)
+        assert s.status == "executed"
+
+    @pytest.mark.asyncio
+    async def test_execute_nonexistent_suggestion(self):
+        """Executing a nonexistent suggestion returns error."""
+        from app.services.roll_service import RollConfig, RollService
+
+        svc = RollService(RollConfig())
+        result = await svc.execute_roll("does-not-exist")
+        assert "error" in result
+        assert "not found" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_execute_already_executed(self):
+        """Executing an already-executed suggestion returns error."""
+        from app.services.roll_service import RollConfig, RollService, RollSuggestion
+
+        svc = RollService(RollConfig())
+        s = RollSuggestion(
+            suggestion_id="done-001",
+            position_id="pos-1",
+            symbol="SPX",
+            roll_type="mirror",
+            severity="warning",
+            distance_pct=0.8,
+            current_short_strike=5600,
+            current_long_strike=5575,
+            current_option_type="PUT",
+            current_expiration="20260414",
+            current_quantity=1,
+            current_max_loss=2500,
+            new_short_strike=5600,
+            new_long_strike=5625,
+            new_option_type="CALL",
+            new_expiration="20260414",
+            new_width=25,
+            estimated_credit=0,
+            estimated_close_cost=0,
+            net_cost=0,
+            new_max_loss=2500,
+            covers_close=False,
+            reason="test",
+            status="executed",
+        )
+        svc._suggestions["done-001"] = s
+
+        result = await svc.execute_roll("done-001")
+        assert "error" in result
+        assert "executed" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_forward_roll_close_fails(self, tmp_path):
+        """Forward roll: if close fails, return error without opening new."""
+        from app.services.roll_service import RollConfig, RollService, RollSuggestion
+        from app.services.position_store import get_position_store
+
+        svc = RollService(RollConfig())
+
+        # No position in store → _get_position_legs returns [] → _close_position returns error
+        s = RollSuggestion(
+            suggestion_id="fail-001",
+            position_id="no-such-pos",
+            symbol="SPX",
+            roll_type="forward",
+            severity="watch",
+            distance_pct=1.5,
+            current_short_strike=5600,
+            current_long_strike=5575,
+            current_option_type="PUT",
+            current_expiration="20260414",
+            current_quantity=1,
+            current_max_loss=2500,
+            new_short_strike=5550,
+            new_long_strike=5525,
+            new_option_type="PUT",
+            new_expiration="20260416",
+            new_width=25,
+            estimated_credit=0,
+            estimated_close_cost=0,
+            net_cost=0,
+            new_max_loss=2500,
+            covers_close=False,
+            reason="test fail",
+        )
+        svc._suggestions["fail-001"] = s
+
+        result = await svc.execute_roll("fail-001")
+        assert "error" in result
+        assert "close" in result["error"].lower() or "legs" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_execute_endpoint_real(self, client, api_key_headers):
+        """POST /roll/execute without dry-run should call execute_roll."""
+        from app.services.roll_service import init_roll_service, RollConfig, RollSuggestion
+        from app.services.position_store import get_position_store
+        from app.models import OrderResult, Broker, OrderStatus
+
+        svc = init_roll_service(RollConfig())
+
+        pos = self._make_position(position_id="api-pos-1")
+        store = get_position_store()
+        store._positions["api-pos-1"] = {**pos, "status": "open"}
+        store._save()
+
+        s = RollSuggestion(
+            suggestion_id="api-exec-001",
+            position_id="api-pos-1",
+            symbol="SPX",
+            roll_type="mirror",
+            severity="warning",
+            distance_pct=0.8,
+            current_short_strike=5600,
+            current_long_strike=5575,
+            current_option_type="PUT",
+            current_expiration="20260414",
+            current_quantity=1,
+            current_max_loss=2500,
+            new_short_strike=5605,
+            new_long_strike=5630,
+            new_option_type="CALL",
+            new_expiration="20260414",
+            new_width=25,
+            estimated_credit=0,
+            estimated_close_cost=0,
+            net_cost=0,
+            new_max_loss=2500,
+            covers_close=False,
+            reason="test",
+        )
+        svc._suggestions["api-exec-001"] = s
+
+        mock_result = OrderResult(
+            broker=Broker.IBKR, status=OrderStatus.FILLED,
+            message="Filled", filled_price=2.00,
+        )
+
+        with patch("app.services.trade_service.execute_trade", new_callable=AsyncMock, return_value=mock_result):
+            resp = await client.post("/roll/execute/api-exec-001", headers=api_key_headers)
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "executed"
+        assert data["roll_type"] == "mirror"
+
+    def test_format_expiration(self):
+        """Test expiration format conversion helper."""
+        from app.services.roll_service import _format_expiration
+
+        assert _format_expiration("20260414") == "2026-04-14"
+        assert _format_expiration("2026-04-14") == "2026-04-14"
+        assert _format_expiration("") == ""
+
+    def test_get_position_legs(self):
+        """Test leg extraction from position store."""
+        from app.services.roll_service import RollConfig, RollService
+        from app.services.position_store import get_position_store
+
+        svc = RollService(RollConfig())
+        pos = self._make_position(position_id="legs-pos-1")
+        store = get_position_store()
+        store._positions["legs-pos-1"] = {**pos, "status": "open"}
+        store._save()
+
+        legs = svc._get_position_legs("legs-pos-1")
+        assert len(legs) == 2
+        assert any("SELL" in l.get("action", "") for l in legs)
+        assert any("BUY" in l.get("action", "") for l in legs)
+
+        # Nonexistent position
+        legs = svc._get_position_legs("no-such-pos")
+        assert legs == []

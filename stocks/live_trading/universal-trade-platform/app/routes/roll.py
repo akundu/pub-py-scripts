@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Security
+from fastapi import APIRouter, Header, HTTPException, Security
 
 from app.auth import TokenData, require_auth
 from app.services.roll_service import get_roll_service
@@ -32,15 +32,29 @@ async def get_suggestions(
 async def execute_suggestion(
     suggestion_id: str,
     _user: Annotated[TokenData, Security(require_auth, scopes=["trade:write"])],
+    x_dry_run: Annotated[str | None, Header()] = None,
 ) -> dict:
-    """Execute a roll suggestion. Phase 2 — currently returns not-implemented."""
+    """Execute a roll suggestion.
+
+    For FORWARD rolls: closes current position, then opens new spread.
+    For MIRROR rolls: opens new spread only (keeps original).
+
+    Set X-Dry-Run: true header to preview without executing.
+    """
     svc = _get_service()
+
+    dry_run = (x_dry_run or "").lower() == "true"
+    if dry_run:
+        suggestion = svc.get_suggestion(suggestion_id)
+        if not suggestion:
+            raise HTTPException(status_code=404, detail="Suggestion not found")
+        return {"status": "dry_run", "suggestion": suggestion.to_dict()}
+
     result = await svc.execute_roll(suggestion_id)
     if "error" in result:
-        if "not found" in result["error"]:
+        if "not found" in result["error"].lower():
             raise HTTPException(status_code=404, detail=result["error"])
-        if "not implemented" in result["error"]:
-            raise HTTPException(status_code=501, detail=result["error"])
+        raise HTTPException(status_code=400, detail=result["error"])
     return result
 
 

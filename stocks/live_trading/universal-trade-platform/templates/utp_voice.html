@@ -1579,6 +1579,90 @@ async function checkHealth() {
   finally { _healthLoading = false; }
 }
 
+// ── Roll Suggestions ────────────────────────────────────────────────────────
+let _rollSuggestions = [];
+
+async function fetchRollSuggestions() {
+  try {
+    const r = await fetch('/api/roll/suggestions');
+    if (r.ok) _rollSuggestions = await r.json();
+  } catch(e) { /* daemon may not be running */ }
+}
+
+function getRollBadge(positionId) {
+  const matches = _rollSuggestions.filter(s => s.position_id && positionId.startsWith(s.position_id.substring(0,6)));
+  if (!matches.length) return '';
+  const s = matches[0];
+  return `<span class="badge badge-warning" style="cursor:pointer;margin-left:4px" onclick="event.stopPropagation();showRollModal('${s.suggestion_id}')" title="${s.roll_type} roll available">Roll</span>`;
+}
+
+function showRollModal(suggestionId) {
+  const s = _rollSuggestions.find(x => x.suggestion_id === suggestionId);
+  if (!s) return;
+  const exp = s.new_expiration || '';
+  const expFmt = exp.length===8 ? `${exp.substring(0,4)}-${exp.substring(4,6)}-${exp.substring(6)}` : exp;
+  const html = `
+    <div style="padding:16px;max-width:400px">
+      <div style="font-size:16px;font-weight:bold;margin-bottom:12px">${s.roll_type.toUpperCase()} Roll — ${s.symbol}</div>
+      <div style="font-size:12px;color:var(--muted);margin-bottom:8px">Severity: <span class="badge badge-${s.severity}">${s.severity}</span> (${s.distance_pct}% from short)</div>
+      <div style="background:var(--bg);border-radius:6px;padding:8px;margin-bottom:8px;font-size:12px">
+        <div style="color:var(--yellow);font-weight:bold;margin-bottom:4px">Current Position</div>
+        <div>${s.current_option_type} ${s.current_short_strike}/${s.current_long_strike} exp ${s.current_expiration} x${s.current_quantity}</div>
+      </div>
+      <div style="background:var(--bg);border-radius:6px;padding:8px;margin-bottom:8px;font-size:12px">
+        <div style="color:var(--green-b);font-weight:bold;margin-bottom:4px">Suggested Roll</div>
+        <div>${s.new_option_type} ${s.new_short_strike}/${s.new_long_strike} exp ${expFmt} x${s.current_quantity}</div>
+        <div style="margin-top:4px;color:var(--muted)">${s.roll_type === 'forward' ? 'Close current, open new' : 'Open new (keep original)'}</div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:12px">
+        <button class="btn btn-green btn-sm" onclick="executeRoll('${s.suggestion_id}')">Execute</button>
+        <button class="btn btn-sm" style="background:var(--surface)" onclick="dismissRoll('${s.suggestion_id}')">Dismiss</button>
+        <button class="btn btn-sm" style="background:var(--surface)" onclick="closeModal()">Cancel</button>
+      </div>
+    </div>`;
+  // Use existing modal infrastructure or create inline
+  const existing = document.getElementById('roll-modal');
+  if (existing) existing.remove();
+  const modal = document.createElement('div');
+  modal.id = 'roll-modal';
+  modal.style.cssText = 'position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.7);z-index:1000;display:flex;align-items:center;justify-content:center';
+  modal.innerHTML = `<div style="background:var(--surface);border-radius:12px;border:1px solid var(--border)">${html}</div>`;
+  modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+  document.body.appendChild(modal);
+}
+
+function closeModal() {
+  const m = document.getElementById('roll-modal');
+  if (m) m.remove();
+}
+
+async function executeRoll(suggestionId) {
+  closeModal();
+  try {
+    const r = await fetch(`/api/roll/execute/${suggestionId}`, {method:'POST'});
+    if (r.ok) {
+      const result = await r.json();
+      showToast(result.status === 'executed' ? 'Roll executed successfully' : 'Roll failed: ' + (result.error||'unknown'), result.status === 'executed' ? 'success' : 'error');
+      fetchRollSuggestions();
+      loadPortfolio();
+    } else {
+      const err = await r.json();
+      showToast('Roll failed: ' + (err.detail||'unknown error'), 'error');
+    }
+  } catch(e) {
+    showToast('Roll error: ' + e.message, 'error');
+  }
+}
+
+async function dismissRoll(suggestionId) {
+  closeModal();
+  try {
+    await fetch(`/api/roll/dismiss/${suggestionId}`, {method:'POST'});
+    showToast('Roll suggestion dismissed', 'info');
+    fetchRollSuggestions();
+  } catch(e) { /* ignore */ }
+}
+
 // ── Portfolio Tab ────────────────────────────────────────────────────────────
 let _portfolioData = null;  // last portfolio response for IDB caching
 let _portfolioLoading = false;
@@ -1601,6 +1685,8 @@ async function loadPortfolio() {
   }
 
   try {
+    // Fetch roll suggestions in parallel with portfolio
+    fetchRollSuggestions();
     const r = await fetch('/api/portfolio');
     if (r.status===401) { showLogin(); return; }
     const d = await r.json();
@@ -1647,7 +1733,8 @@ function _renderPortfolio(d, tbl, kpis) {
       totalCost += cost; totalValue += value; totalPnl += pnl;
 
       const bs = p.breach_status;
-      const badge = bs ? `<span class="badge badge-${bs.severity}">${bs.severity} ${bs.distance_pct}%</span>` : '';
+      const rollBadge = getRollBadge(pid);
+      const badge = (bs ? `<span class="badge badge-${bs.severity}">${bs.severity} ${bs.distance_pct}%</span>` : '') + rollBadge;
       const pnlCls = pnl>=0 ? 'pos' : 'neg';
       const pid = p.position_id||'';
       const exp = p.expiration || '';
@@ -1719,9 +1806,13 @@ function _renderPortfolio(d, tbl, kpis) {
       html += `</div>`;
 
       // Actions
+      const rollMatch = _rollSuggestions.find(s => s.position_id && pid.startsWith(s.position_id.substring(0,6)));
       html += `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">`;
       html += `<button class="btn btn-red btn-sm" onclick="event.stopPropagation();showCloseDialog('${pid}',${qty})">Close</button>`;
       html += `<button class="btn btn-green btn-sm" onclick="event.stopPropagation();buyMore(decodeURIComponent('${posJson}'))">Buy More</button>`;
+      if (rollMatch) {
+        html += `<button class="btn btn-sm" style="background:var(--yellow);color:#000" onclick="event.stopPropagation();showRollModal('${rollMatch.suggestion_id}')">Roll</button>`;
+      }
       html += `</div>`;
       html += `</div></td></tr>`;
     }

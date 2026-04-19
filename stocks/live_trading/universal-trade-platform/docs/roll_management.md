@@ -123,9 +123,24 @@ Output:
 ### Execute a Roll
 
 ```bash
-# Execute a roll suggestion (Phase 2 — currently returns not-implemented)
+# Preview a roll suggestion (shows details without executing)
 python utp.py roll execute abc123
 python utp.py roll ex abc123       # alias
+
+# Execute after confirming the preview
+python utp.py roll execute abc123 --confirm
+```
+
+### Manual Forward/Mirror Roll
+
+```bash
+# Forward roll: close current + open new at further DTE
+python utp.py roll forward <position-id>            # preview
+python utp.py roll forward <position-id> --confirm  # execute
+
+# Mirror roll: open opposite-side spread (keep original)
+python utp.py roll mirror <position-id>             # preview
+python utp.py roll mirror <position-id> --confirm   # execute
 ```
 
 ### Dismiss a Suggestion
@@ -194,11 +209,38 @@ Returns all pending roll suggestions.
 
 ### POST /roll/execute/{suggestion_id}
 
-Execute a roll suggestion. Currently returns 501 (Phase 2).
+Execute a roll suggestion. Set `X-Dry-Run: true` header to preview without executing.
 
-**Response (Phase 1):**
+**Headers:**
+- `X-Dry-Run: true` (optional) -- return suggestion details without executing
+
+**Dry-run response:**
 ```json
-{"detail": "not implemented"}
+{"status": "dry_run", "suggestion": { ... }}
+```
+
+**Execution response (forward):**
+```json
+{
+  "status": "executed",
+  "roll_type": "forward",
+  "close_result": {"order_id": "...", "status": "FILLED", ...},
+  "open_result": {"order_id": "...", "status": "FILLED", ...}
+}
+```
+
+**Execution response (mirror):**
+```json
+{
+  "status": "executed",
+  "roll_type": "mirror",
+  "open_result": {"order_id": "...", "status": "FILLED", ...}
+}
+```
+
+**Error response (400):**
+```json
+{"detail": "Failed to close: ..."}
 ```
 
 ### POST /roll/dismiss/{suggestion_id}
@@ -274,10 +316,12 @@ RollService.scan_positions()
 
 | File | Purpose |
 |------|---------|
-| `app/services/roll_service.py` | Core service: `RollConfig`, `RollSuggestion`, `RollService`, module accessors |
-| `app/routes/roll.py` | REST endpoints: suggestions, execute, dismiss, config |
+| `app/services/roll_service.py` | Core service: `RollConfig`, `RollSuggestion`, `RollService`, execution helpers, module accessors |
+| `app/routes/roll.py` | REST endpoints: suggestions, execute (with dry-run), dismiss, config |
 | `app/main.py` | Registration: router, service init, background loop, teardown |
-| `utp.py` | CLI: `roll` subcommand with `suggestions`, `execute`, `dismiss`, `config` actions |
+| `utp.py` | CLI: `roll` subcommand with `suggestions`, `execute`, `dismiss`, `forward`, `mirror`, `config` actions |
+| `utp_voice.py` | Voice UI proxy endpoints: `/api/roll/suggestions`, `/api/roll/execute`, `/api/roll/dismiss` |
+| `templates/utp_voice.html` | Voice UI: roll badges in portfolio, roll modal with execute/dismiss buttons |
 
 ### Singleton Pattern
 
@@ -320,15 +364,89 @@ Suggestions automatically expire after 5 minutes. Stale suggestions from previou
 
 The scan skips positions that already have a pending suggestion, preventing suggestion spam for the same position.
 
-## Phase 2 (Planned)
+## Execution Flow (Phase 2)
 
-Phase 2 will add:
-- Live option quote lookup for accurate credit/cost estimates
-- Actual trade execution via UTP trade infrastructure
-- Close-then-open atomic roll execution
-- Width expansion for credit-neutral forward rolls
-- Integration with profit target service for the new position
-- Roll history tracking in the ledger
+Roll execution is implemented via `RollService.execute_roll()` which delegates to the UTP trade infrastructure.
+
+### Forward Roll Execution
+
+1. **Close current position**: Build closing legs (reverse SELL/BUY actions), submit as MARKET multi-leg order via `execute_trade()`. The `closing_position_id` is set so the position store marks it closed.
+2. **Wait for fill**: The trade service handles order polling and fill tracking.
+3. **Open new spread**: Build new legs with the suggested strikes and expiration, submit as MARKET multi-leg order.
+4. **Verify**: Both orders must succeed. If the close succeeds but the open fails, the suggestion is marked as `partial` and an error is returned with the close result for manual recovery.
+
+### Mirror Roll Execution
+
+1. **Open new spread only**: The original position is kept. A new opposite-side spread is opened at the suggested strikes.
+2. No close is needed since mirror rolls are additive hedges.
+
+### Dry-Run Mode
+
+Set `X-Dry-Run: true` header on `POST /roll/execute/{id}` to preview the suggestion details without executing. The CLI shows a preview by default and requires `--confirm` to execute.
+
+### Manual Rolls
+
+Use `roll forward <position-id>` or `roll mirror <position-id>` to manually trigger a roll for a specific position:
+
+```bash
+# Preview a forward roll for a position
+python utp.py roll forward pos-abc123
+
+# Execute it
+python utp.py roll forward pos-abc123 --confirm
+
+# Mirror roll
+python utp.py roll mirror pos-abc123 --confirm
+```
+
+These commands trigger a fresh scan, find the matching suggestion, show a preview, and execute on `--confirm`.
+
+## Voice UI Integration (Phase 3)
+
+The voice UI (`utp_voice.py` / `templates/utp_voice.html`) provides roll management through the portfolio view:
+
+### Roll Badges
+
+When a position has a pending roll suggestion, a yellow "Roll" badge appears in the Risk column of the portfolio table. The badge is clickable.
+
+### Roll Modal
+
+Clicking the Roll badge opens a modal showing:
+- Current position details (type, strikes, expiration, quantity)
+- Suggested roll (mirror or forward, new strikes, new expiration)
+- Execution plan (close+open for forward, open-only for mirror)
+- Execute / Dismiss / Cancel buttons
+
+### Proxy Endpoints
+
+The voice UI proxies roll requests through the daemon:
+- `GET /api/roll/suggestions` -- fetch pending suggestions
+- `POST /api/roll/execute/{id}` -- execute a suggestion
+- `POST /api/roll/dismiss/{id}` -- dismiss a suggestion
+
+Roll suggestions are fetched in parallel with portfolio data on each portfolio load.
+
+## Troubleshooting
+
+### No suggestions generated
+
+- **Position not multi-leg**: Only `multi_leg` order types (credit spreads) are scanned
+- **Severity too low**: Check `forward_trigger_severity` and `mirror_trigger_severity` in config
+- **Not expiration day**: Mirror rolls only trigger on expiration day
+- **Outside time window**: Mirror rolls only trigger within `mirror_time_window_utc`
+- **Already has suggestion**: Each position gets at most one pending suggestion per type
+
+### Expired suggestions
+
+Suggestions expire after 5 minutes. Run `roll suggestions` to trigger a fresh scan.
+
+### Failed close in forward roll
+
+If the close succeeds but the open fails, the result includes `close_result` for reference. The original position is already closed at this point. Manually open the intended spread or investigate the error.
+
+### No quotes available
+
+If `get_quote()` fails for a symbol, that position is skipped silently. Check that the daemon has a working IBKR connection or streaming data.
 
 ## Examples
 

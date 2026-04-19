@@ -5912,14 +5912,32 @@ async def _cmd_roll_http(args, server: str) -> int:
 
         elif action in ("execute", "ex"):
             sid = getattr(args, "suggestion_id", "")
-            resp = await client.post(f"/roll/execute/{sid}")
-            if resp.status_code == 501:
-                print("  Roll execution not yet implemented (Phase 2)")
-                return 0
+            confirm = getattr(args, "confirm", False)
+
+            # First preview the suggestion
+            resp = await client.post(
+                f"/roll/execute/{sid}",
+                headers={"X-Dry-Run": "true"},
+            )
             if resp.status_code != 200:
                 print(f"  Error: {resp.status_code} {resp.text}")
                 return 1
-            print(f"  Roll executed: {resp.json()}")
+
+            preview = resp.json()
+            suggestion = preview.get("suggestion", {})
+            _print_roll_preview(suggestion)
+
+            if not confirm:
+                print("  Add --confirm to execute this roll.")
+                return 0
+
+            # Execute
+            resp = await client.post(f"/roll/execute/{sid}")
+            if resp.status_code != 200:
+                print(f"  Error: {resp.status_code} {resp.text}")
+                return 1
+            result = resp.json()
+            _print_roll_result(result)
             return 0
 
         elif action in ("dismiss", "dm"):
@@ -5930,6 +5948,14 @@ async def _cmd_roll_http(args, server: str) -> int:
                 return 1
             print(f"  Suggestion {sid} dismissed")
             return 0
+
+        elif action in ("forward", "fwd"):
+            pos_id = getattr(args, "position_id", "")
+            return await _cmd_roll_manual_http(client, pos_id, "forward", args)
+
+        elif action in ("mirror", "mir"):
+            pos_id = getattr(args, "position_id", "")
+            return await _cmd_roll_manual_http(client, pos_id, "mirror", args)
 
         elif action == "config":
             # Check if any updates
@@ -5959,8 +5985,46 @@ async def _cmd_roll_http(args, server: str) -> int:
             return 0
 
         else:
-            print("  Unknown roll action. Use: suggestions, execute, dismiss, config")
+            print("  Unknown roll action. Use: suggestions, execute, dismiss, forward, mirror, config")
             return 1
+
+
+async def _cmd_roll_manual_http(client, pos_id: str, roll_type: str, args) -> int:
+    """Manual roll: trigger a scan, find/create suggestion for position, show preview."""
+    confirm = getattr(args, "confirm", False)
+
+    # Trigger a scan to generate fresh suggestions
+    resp = await client.get("/roll/suggestions")
+    if resp.status_code != 200:
+        print(f"  Error fetching suggestions: {resp.status_code}")
+        return 1
+
+    suggestions = resp.json()
+    # Find a suggestion matching this position and roll type
+    match = None
+    for s in suggestions:
+        if s.get("position_id", "").startswith(pos_id) and s.get("roll_type") == roll_type:
+            match = s
+            break
+
+    if not match:
+        print(f"  No {roll_type} roll suggestion found for position {pos_id}")
+        print(f"  Ensure the position exists and meets the {roll_type} trigger threshold.")
+        return 1
+
+    sid = match["suggestion_id"]
+    _print_roll_preview(match)
+
+    if not confirm:
+        print(f"  To execute: utp.py roll {roll_type} {pos_id} --confirm")
+        return 0
+
+    resp = await client.post(f"/roll/execute/{sid}")
+    if resp.status_code != 200:
+        print(f"  Error: {resp.status_code} {resp.text}")
+        return 1
+    _print_roll_result(resp.json())
+    return 0
 
 
 def _print_roll_suggestions(suggestions: list[dict]) -> None:
@@ -6011,6 +6075,70 @@ def _print_roll_suggestions(suggestions: list[dict]) -> None:
     print()
 
 
+def _print_roll_preview(suggestion: dict) -> None:
+    """Display a roll suggestion preview before execution."""
+    _print_header("Roll Preview")
+    rtype = suggestion.get("roll_type", "")
+    sym = suggestion.get("symbol", "")
+    sev = suggestion.get("severity", "")
+    dist = suggestion.get("distance_pct", 0)
+
+    print(f"  Roll type:     {rtype.upper()}")
+    print(f"  Symbol:        {sym}")
+    print(f"  Severity:      {sev} ({dist:.1f}% from short strike)")
+    print()
+    print(f"  Current position:")
+    print(f"    {suggestion.get('current_option_type', '')} "
+          f"{suggestion.get('current_short_strike', 0):.0f}/"
+          f"{suggestion.get('current_long_strike', 0):.0f} "
+          f"exp {suggestion.get('current_expiration', '')} "
+          f"x{suggestion.get('current_quantity', 0)}")
+    print()
+    print(f"  New position:")
+    print(f"    {suggestion.get('new_option_type', '')} "
+          f"{suggestion.get('new_short_strike', 0):.0f}/"
+          f"{suggestion.get('new_long_strike', 0):.0f} "
+          f"exp {suggestion.get('new_expiration', '')} "
+          f"x{suggestion.get('current_quantity', 0)}")
+    print()
+
+    if rtype == "forward":
+        print("  Execution plan: CLOSE current -> OPEN new spread")
+    elif rtype == "mirror":
+        print("  Execution plan: OPEN new spread (keep original)")
+    print()
+
+
+def _print_roll_result(result: dict) -> None:
+    """Display the result of a roll execution."""
+    _print_header("Roll Execution Result")
+    status = result.get("status", "unknown")
+    rtype = result.get("roll_type", "")
+
+    if status == "executed":
+        print(f"  Status:    {_color('EXECUTED', '92')}")
+        print(f"  Roll type: {rtype}")
+
+        close_r = result.get("close_result")
+        if close_r:
+            fill = close_r.get("filled_price")
+            print(f"  Close:     order {close_r.get('order_id', '')[:8]} "
+                  f"status={close_r.get('status', '')} "
+                  f"{'fill=$' + str(fill) if fill else ''}")
+
+        open_r = result.get("open_result")
+        if open_r:
+            fill = open_r.get("filled_price")
+            print(f"  Open:      order {open_r.get('order_id', '')[:8]} "
+                  f"status={open_r.get('status', '')} "
+                  f"{'fill=$' + str(fill) if fill else ''}")
+    else:
+        print(f"  Status: {status}")
+        if result.get("error"):
+            print(f"  Error:  {result['error']}")
+    print()
+
+
 def _print_roll_config(config: dict) -> None:
     """Display roll configuration."""
     _print_header("Roll Configuration")
@@ -6033,7 +6161,7 @@ def _print_roll_config(config: dict) -> None:
 
 
 async def _cmd_roll(args) -> int:
-    """Roll management — suggestions, execute, dismiss, config."""
+    """Roll management — suggestions, execute, dismiss, forward, mirror, config."""
     server = _detect_server(args)
     if server:
         rc = await _try_daemon(server, _cmd_roll_http, args)
@@ -6058,14 +6186,24 @@ async def _cmd_roll(args) -> int:
 
     elif action in ("execute", "ex"):
         sid = getattr(args, "suggestion_id", "")
+        confirm = getattr(args, "confirm", False)
+
+        s = svc.get_suggestion(sid)
+        if not s:
+            print(f"  Suggestion {sid} not found")
+            return 1
+
+        _print_roll_preview(s.to_dict())
+
+        if not confirm:
+            print("  Add --confirm to execute this roll.")
+            return 0
+
         result = await svc.execute_roll(sid)
         if "error" in result:
-            if "not implemented" in result["error"]:
-                print("  Roll execution not yet implemented (Phase 2)")
-                return 0
             print(f"  Error: {result['error']}")
             return 1
-        print(f"  Roll executed: {result}")
+        _print_roll_result(result)
         return 0
 
     elif action in ("dismiss", "dm"):
@@ -6075,6 +6213,39 @@ async def _cmd_roll(args) -> int:
         else:
             print(f"  Suggestion {sid} not found or not pending")
             return 1
+        return 0
+
+    elif action in ("forward", "fwd", "mirror", "mir"):
+        pos_id = getattr(args, "position_id", "")
+        confirm = getattr(args, "confirm", False)
+        roll_type = "forward" if action in ("forward", "fwd") else "mirror"
+
+        # Trigger scan to generate suggestions
+        await svc.scan_positions()
+        suggestions = svc.get_suggestions()
+
+        match = None
+        for s_dict in suggestions:
+            if s_dict.get("position_id", "").startswith(pos_id) and s_dict.get("roll_type") == roll_type:
+                match = s_dict
+                break
+
+        if not match:
+            print(f"  No {roll_type} roll suggestion found for position {pos_id}")
+            return 1
+
+        sid = match["suggestion_id"]
+        _print_roll_preview(match)
+
+        if not confirm:
+            print(f"  To execute: utp.py roll {roll_type} {pos_id} --confirm")
+            return 0
+
+        result = await svc.execute_roll(sid)
+        if "error" in result:
+            print(f"  Error: {result['error']}")
+            return 1
+        _print_roll_result(result)
         return 0
 
     elif action == "config":
@@ -6097,7 +6268,7 @@ async def _cmd_roll(args) -> int:
         return 0
 
     else:
-        print("  Unknown roll action. Use: suggestions, execute, dismiss, config")
+        print("  Unknown roll action. Use: suggestions, execute, dismiss, forward, mirror, config")
         return 1
 
 
@@ -8622,8 +8793,10 @@ Forward rolls move the same-side spread to a further DTE.
                                     epilog='''
 Examples:
   %(prog)s suggestions              Show pending roll suggestions
-  %(prog)s execute abc123           Execute a roll suggestion
+  %(prog)s execute abc123 --confirm Execute a roll suggestion
   %(prog)s dismiss abc123           Dismiss a suggestion
+  %(prog)s forward pos-id --confirm Manual forward roll for a position
+  %(prog)s mirror pos-id --confirm  Manual mirror roll for a position
   %(prog)s config                   Show roll configuration
   %(prog)s config --mirror-trigger critical  Change mirror trigger level
 
@@ -8640,11 +8813,27 @@ Aliases: rl
     roll_exec_p = roll_sub.add_parser("execute", aliases=["ex"],
                                        help="Execute a roll suggestion")
     roll_exec_p.add_argument("suggestion_id", help="Suggestion ID (or prefix)")
+    roll_exec_p.add_argument("--confirm", action="store_true",
+                              help="Confirm execution (without this, shows preview only)")
 
     # roll dismiss <suggestion-id>
     roll_dismiss_p = roll_sub.add_parser("dismiss", aliases=["dm"],
                                           help="Dismiss a roll suggestion")
     roll_dismiss_p.add_argument("suggestion_id", help="Suggestion ID (or prefix)")
+
+    # roll forward <position-id>
+    roll_fwd_p = roll_sub.add_parser("forward", aliases=["fwd"],
+                                      help="Manual forward roll for a position")
+    roll_fwd_p.add_argument("position_id", help="Position ID (or prefix)")
+    roll_fwd_p.add_argument("--confirm", action="store_true",
+                             help="Confirm execution (without this, shows preview only)")
+
+    # roll mirror <position-id>
+    roll_mir_p = roll_sub.add_parser("mirror", aliases=["mir"],
+                                      help="Manual mirror roll for a position")
+    roll_mir_p.add_argument("position_id", help="Position ID (or prefix)")
+    roll_mir_p.add_argument("--confirm", action="store_true",
+                             help="Confirm execution (without this, shows preview only)")
 
     # roll config
     roll_config_p = roll_sub.add_parser("config", help="View or update roll configuration")

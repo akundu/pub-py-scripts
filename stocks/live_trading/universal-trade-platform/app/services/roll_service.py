@@ -543,13 +543,156 @@ class RollService:
         return False
 
     async def execute_roll(self, suggestion_id: str) -> dict:
-        """Execute a roll suggestion. Phase 2 stub."""
+        """Execute a roll suggestion.
+
+        For FORWARD rolls: close current position first, then open new spread.
+        For MIRROR rolls: just open the new position (keep original).
+        """
         s = self.get_suggestion(suggestion_id)
         if not s:
             return {"error": f"Suggestion {suggestion_id} not found"}
         if s.status != "pending":
             return {"error": f"Suggestion {suggestion_id} is {s.status}, not pending"}
-        return {"error": "not implemented"}
+
+        try:
+            if s.roll_type == "forward":
+                # Step 1: Close current position
+                close_result = await self._close_position(s)
+                if close_result.get("error"):
+                    return {"error": f"Failed to close: {close_result['error']}"}
+
+                # Step 2: Open new position
+                open_result = await self._open_new_spread(s)
+                if open_result.get("error"):
+                    s.status = "partial"
+                    return {
+                        "error": f"Closed original but failed to open new: {open_result['error']}",
+                        "close_result": close_result,
+                    }
+
+                s.status = "executed"
+                return {
+                    "status": "executed",
+                    "roll_type": "forward",
+                    "close_result": close_result,
+                    "open_result": open_result,
+                }
+
+            elif s.roll_type == "mirror":
+                # Just open the mirror position (keep original)
+                open_result = await self._open_new_spread(s)
+                if open_result.get("error"):
+                    return {"error": f"Failed to open mirror: {open_result['error']}"}
+
+                s.status = "executed"
+                return {
+                    "status": "executed",
+                    "roll_type": "mirror",
+                    "open_result": open_result,
+                }
+
+            else:
+                return {"error": f"Unknown roll type: {s.roll_type}"}
+        except Exception as e:
+            logger.error("Roll execution failed for %s: %s", suggestion_id, e)
+            return {"error": str(e) or f"{type(e).__name__}"}
+
+    async def _close_position(self, suggestion: RollSuggestion) -> dict:
+        """Close the current position via the trade service."""
+        from app.services.trade_service import execute_trade
+        from app.models import (
+            TradeRequest, MultiLegOrder, OptionLeg,
+            OrderType, OptionType, OptionAction, Broker,
+        )
+
+        # Build closing legs (reverse the original)
+        legs = []
+        for leg_data in self._get_position_legs(suggestion.position_id):
+            action_str = leg_data.get("action", "")
+            close_action = (
+                OptionAction.BUY_TO_CLOSE
+                if "SELL" in action_str
+                else OptionAction.SELL_TO_CLOSE
+            )
+            legs.append(OptionLeg(
+                symbol=suggestion.symbol,
+                expiration=_format_expiration(suggestion.current_expiration),
+                strike=float(leg_data.get("strike", 0)),
+                option_type=OptionType(leg_data.get("option_type", "PUT")),
+                action=close_action,
+                quantity=1,
+            ))
+
+        if not legs:
+            return {"error": "No legs found for position"}
+
+        order = MultiLegOrder(
+            broker=Broker.IBKR,
+            legs=legs,
+            order_type=OrderType.MARKET,
+            quantity=suggestion.current_quantity,
+        )
+        request = TradeRequest(
+            multi_leg_order=order,
+            closing_position_id=suggestion.position_id,
+        )
+        result = await execute_trade(request, dry_run=False)
+        return result.model_dump()
+
+    async def _open_new_spread(self, suggestion: RollSuggestion) -> dict:
+        """Open the new spread position."""
+        from app.services.trade_service import execute_trade
+        from app.models import (
+            TradeRequest, MultiLegOrder, OptionLeg,
+            OrderType, OptionType, OptionAction, Broker,
+        )
+
+        ot = OptionType(suggestion.new_option_type)
+        # Determine short/long based on option type
+        if ot == OptionType.PUT:
+            short_strike = max(suggestion.new_short_strike, suggestion.new_long_strike)
+            long_strike = min(suggestion.new_short_strike, suggestion.new_long_strike)
+        else:
+            short_strike = min(suggestion.new_short_strike, suggestion.new_long_strike)
+            long_strike = max(suggestion.new_short_strike, suggestion.new_long_strike)
+
+        exp_str = _format_expiration(suggestion.new_expiration)
+
+        legs = [
+            OptionLeg(
+                symbol=suggestion.symbol, expiration=exp_str,
+                strike=short_strike, option_type=ot,
+                action=OptionAction.SELL_TO_OPEN, quantity=1,
+            ),
+            OptionLeg(
+                symbol=suggestion.symbol, expiration=exp_str,
+                strike=long_strike, option_type=ot,
+                action=OptionAction.BUY_TO_OPEN, quantity=1,
+            ),
+        ]
+
+        order = MultiLegOrder(
+            broker=Broker.IBKR,
+            legs=legs,
+            order_type=OrderType.MARKET,
+            quantity=suggestion.current_quantity,
+        )
+        request = TradeRequest(multi_leg_order=order)
+        result = await execute_trade(request, dry_run=False)
+        return result.model_dump()
+
+    def _get_position_legs(self, position_id: str) -> list[dict]:
+        """Get legs from position store."""
+        from app.services.position_store import get_position_store
+
+        store = get_position_store()
+        if not store:
+            return []
+        positions = store.get_open_positions()
+        for p in positions:
+            if p.get("position_id", "").startswith(position_id):
+                return p.get("legs") or []
+        return []
 
     def _expire_suggestions(self) -> None:
         """Remove suggestions older than TTL."""
@@ -561,6 +704,13 @@ class RollService:
         ]
         for sid in expired:
             self._suggestions[sid].status = "expired"
+
+
+def _format_expiration(exp: str) -> str:
+    """Convert YYYYMMDD to YYYY-MM-DD if needed."""
+    if len(exp) == 8 and "-" not in exp:
+        return f"{exp[:4]}-{exp[4:6]}-{exp[6:]}"
+    return exp
 
 
 def _strike_rounding(symbol: str) -> int:
