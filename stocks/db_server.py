@@ -15182,6 +15182,7 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                     "percentiles": percentiles,
                     "min_days": min_days,
                     "min_direction_days": min_direction_days,
+                    "outliers_excluded": exclude_outliers,
                 }
                 if momentum_filter:
                     params["momentum_filter"] = momentum_filter
@@ -15373,6 +15374,7 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                     "percentiles": percentiles,
                     "min_days": min_days,
                     "min_direction_days": min_direction_days,
+                    "outliers_excluded": exclude_outliers,
                 },
                 "data": data_list,
                 "hourly": hourly,

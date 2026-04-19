@@ -122,8 +122,8 @@ def _train_statistical(
     return predictor
 
 
-def _winsorize_iqr(values, factor=2.5):
-    """Winsorize values using IQR fences."""
+def _winsorize_iqr(values, factor=1.5):
+    """Winsorize values using IQR fences (standard Tukey fence)."""
     arr = np.asarray(values, dtype=float)
     if len(arr) < 20:
         return arr

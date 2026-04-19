@@ -32,11 +32,11 @@ MIN_DIRECTION_DAYS_DEFAULT = 5
 DEFAULT_WINDOW = 0  # window=0 represents today (0DTE)
 
 
-def _winsorize_iqr(values, factor=2.5):
+def _winsorize_iqr(values, factor=1.5):
     """Winsorize values using IQR fences: cap at Q1 - factor*IQR and Q3 + factor*IQR.
 
     Preserves sample count while limiting the impact of extreme outliers.
-    2.5x IQR is a standard "outer fence" that keeps ~99% of normally-distributed data.
+    1.5x IQR is the standard Tukey fence (same as boxplot whiskers).
     """
     import numpy as np
     arr = np.asarray(values, dtype=float)
