@@ -757,10 +757,21 @@ async def compute_hourly_moves_to_close(
 
     records_df = pd.DataFrame(records)
 
-    # Winsorize intraday move_pct to cap extreme outliers
-    if exclude_outliers and len(records_df) >= 20:
+    # Winsorize move_pct PER TIME SLOT (not globally).
+    # Each slot has its own natural distribution — 9:30 AM moves are wider than 3:30 PM.
+    # Global winsorization would use the mixed distribution's tight IQR to clip
+    # early-morning values that are perfectly normal for that time of day.
+    if exclude_outliers:
         import numpy as np
-        records_df["move_pct"] = _winsorize_iqr(records_df["move_pct"].values)
+        for slot_col in ["slot_primary", "slot_30", "slot_15", "slot_10", "slot_5"]:
+            if slot_col not in records_df.columns:
+                continue
+            for slot_val in records_df[slot_col].dropna().unique():
+                mask = records_df[slot_col] == slot_val
+                if mask.sum() >= 20:
+                    records_df.loc[mask, "move_pct"] = _winsorize_iqr(records_df.loc[mask, "move_pct"].values)
+                    records_df.loc[mask, "max_up_pct"] = _winsorize_iqr(records_df.loc[mask, "max_up_pct"].values)
+                    records_df.loc[mask, "max_down_pct"] = _winsorize_iqr(records_df.loc[mask, "max_down_pct"].values)
 
     # --- Helper to build percentile blocks ---
     def return_percentiles_from_series(return_series, ref_close: float, invert: bool = False) -> dict:
