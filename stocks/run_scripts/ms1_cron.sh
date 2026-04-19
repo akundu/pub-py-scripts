@@ -40,3 +40,11 @@ python3 scripts/options_chain_download.py SPX RUT NDX DJX \
 #build the close models
 rm /tmp/close_model.log /tmp/rebuild_prediction_data.log
 /bin/sh run_scripts/build_close_models.sh > /tmp/close_model.log 2>&1 && /bin/bash run_scripts/rebuild_prediction_data.sh > /tmp/rebuild_prediction_data.log 2>&1
+
+# Calibrate recommended percentiles (skip weekends — only run before trading days)
+DOW=$(date +%u)  # 1=Mon ... 7=Sun
+if [ "$DOW" -le 5 ]; then
+    python3 -W ignore -m scripts.calibrate_recommendations --days 90 --target 92.5 \
+        --tickers NDX,SPX,RUT --output results/calibration/recommended_percentiles.json \
+        > /tmp/calibrate_recommendations.log 2>&1
+fi

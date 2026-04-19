@@ -765,10 +765,10 @@ def _generate_ticker_content_html(result: dict, ticker_id: str) -> tuple[str, di
     today_str = today.strftime('%Y-%m-%d')
 
     ticker = result["ticker"]
-    ticker_upper = ticker.upper()
-    # Recommended close-to-close percentiles for highlighting
-    rec_put_c2c = {"NDX": 98, "SPX": 95, "RUT": 98}.get(ticker_upper, 95)
-    rec_call_c2c = {"NDX": 95, "SPX": 95, "RUT": 95}.get(ticker_upper, 95)
+    # Recommended close-to-close percentiles for highlighting (from calibration)
+    rec_data = result.get("recommended", {}).get("close_to_close", {})
+    rec_put_c2c = rec_data.get("put", 95)
+    rec_call_c2c = rec_data.get("call", 95)
     metadata = result["metadata"]
     last_date = metadata["last_trading_day"]
     prev_close = metadata["previous_close"]

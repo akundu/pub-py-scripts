@@ -32,6 +32,63 @@ MIN_DIRECTION_DAYS_DEFAULT = 5
 DEFAULT_WINDOW = 0  # window=0 represents today (0DTE)
 
 
+_CALIBRATION_CACHE = {}  # module-level cache for recommended percentiles
+_CALIBRATION_FILE = SCRIPT_DIR.parent / "results" / "calibration" / "recommended_percentiles.json"
+
+# Hardcoded fallback defaults (used when calibration file is missing or stale)
+_DEFAULT_RECOMMENDED = {
+    "NDX": {"close_to_close": {"put": 98, "call": 95}, "intraday": {"put": 95, "call": 90}, "max_move": {"put": 90, "call": 90}},
+    "SPX": {"close_to_close": {"put": 95, "call": 95}, "intraday": {"put": 90, "call": 90}, "max_move": {"put": 90, "call": 90}},
+    "RUT": {"close_to_close": {"put": 98, "call": 95}, "intraday": {"put": 95, "call": 90}, "max_move": {"put": 90, "call": 90}},
+}
+
+
+def _load_recommended(ticker: str) -> dict:
+    """Load recommended percentiles from calibration JSON, with fallback to defaults.
+
+    Caches the file read at module level. Returns dict with keys:
+    close_to_close, intraday, max_move — each with put/call int values.
+    """
+    import json as _json
+    ticker_upper = ticker.upper()
+
+    # Check cache first
+    if ticker_upper in _CALIBRATION_CACHE:
+        return _CALIBRATION_CACHE[ticker_upper]
+
+    # Try to load from calibration file
+    try:
+        if _CALIBRATION_FILE.exists():
+            # Check staleness (>7 days = stale, fall back to defaults)
+            import os
+            mtime = os.path.getmtime(_CALIBRATION_FILE)
+            age_days = (datetime.now(timezone.utc).timestamp() - mtime) / 86400
+            if age_days <= 7:
+                with open(_CALIBRATION_FILE) as f:
+                    cal = _json.load(f)
+                tickers_data = cal.get("tickers", {})
+                if ticker_upper in tickers_data:
+                    rec = tickers_data[ticker_upper]
+                    result = {
+                        "close_to_close": rec.get("close_to_close", _DEFAULT_RECOMMENDED.get(ticker_upper, {}).get("close_to_close", {"put": 95, "call": 95})),
+                        "intraday": rec.get("intraday", _DEFAULT_RECOMMENDED.get(ticker_upper, {}).get("intraday", {"put": 90, "call": 90})),
+                        "max_move": rec.get("max_move", _DEFAULT_RECOMMENDED.get(ticker_upper, {}).get("max_move", {"put": 90, "call": 90})),
+                    }
+                    _CALIBRATION_CACHE[ticker_upper] = result
+                    return result
+    except Exception:
+        pass
+
+    # Fallback to hardcoded defaults
+    result = _DEFAULT_RECOMMENDED.get(ticker_upper, {
+        "close_to_close": {"put": 95, "call": 95},
+        "intraday": {"put": 90, "call": 90},
+        "max_move": {"put": 90, "call": 90},
+    })
+    _CALIBRATION_CACHE[ticker_upper] = result
+    return result
+
+
 def _winsorize_iqr(values, factor=1.5):
     """Winsorize values using IQR fences: cap at Q1 - factor*IQR and Q3 + factor*IQR.
 
@@ -909,21 +966,12 @@ async def compute_hourly_moves_to_close(
             "when_down_day_count": n_down,
         }
 
-    # Recommended percentiles per ticker for credit spread strike selection
-    ticker_upper = display_ticker.upper()
+    # Recommended percentiles per ticker (from auto-calibration or defaults)
+    rec = _load_recommended(display_ticker)
     recommended = {
-        "close_to_close": {
-            "put": {"NDX": 98, "SPX": 95, "RUT": 98}.get(ticker_upper, 95),
-            "call": {"NDX": 95, "SPX": 95, "RUT": 95}.get(ticker_upper, 95),
-        },
-        "intraday": {
-            "put": {"NDX": 95, "SPX": 90, "RUT": 95}.get(ticker_upper, 90),
-            "call": {"NDX": 90, "SPX": 90, "RUT": 90}.get(ticker_upper, 90),
-        },
-        "max_move": {
-            "put": {"NDX": 90, "SPX": 90, "RUT": 90}.get(ticker_upper, 90),
-            "call": {"NDX": 90, "SPX": 90, "RUT": 90}.get(ticker_upper, 90),
-        },
+        "close_to_close": rec["close_to_close"],
+        "intraday": rec["intraday"],
+        "max_move": rec["max_move"],
     }
 
     return {
@@ -1264,13 +1312,10 @@ async def compute_range_percentiles_multi_window(
         if momentum_filter:
             metadata["momentum_filter"] = momentum_filter
 
-        # Recommended percentiles for credit spread strike selection
-        t_upper = display_ticker.upper()
+        # Recommended percentiles (from auto-calibration or defaults)
+        rec = _load_recommended(display_ticker)
         recommended = {
-            "close_to_close": {
-                "put": {"NDX": 98, "SPX": 95, "RUT": 98}.get(t_upper, 95),
-                "call": {"NDX": 95, "SPX": 95, "RUT": 95}.get(t_upper, 95),
-            },
+            "close_to_close": rec["close_to_close"],
         }
 
         result = {
