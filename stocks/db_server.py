@@ -7046,6 +7046,9 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
 </html>
 '''
 
+    # Inject methodology documentation before </body>
+    html = html.replace("</body>", _predictions_methodology_html() + "\n</body>", 1)
+
     return html
 
 
@@ -9818,7 +9821,6 @@ def generate_stock_info_html(symbol: str, data: Dict[str, Any], earnings_date: s
             }});
         }}
     </script>
-{_predictions_methodology_html()}
 </body>
 </html>"""
 
@@ -14829,6 +14831,27 @@ def _predictions_methodology_html() -> str:
         <td style="padding:3px 8px;">82%</td><td style="padding:3px 8px;">85%</td>
         <td style="padding:3px 8px;">88%</td><td style="padding:3px 8px;">98%</td>
         <td style="padding:3px 8px;">0.88%</td></tr>
+  </table>
+
+  <p><strong>Credit Spread Guidance:</strong> Place short strikes outside the band boundary of your target
+  percentile. Use the Combined bands (recommended). Suggested levels by ticker:</p>
+  <table style="font-size:12px;border-collapse:collapse;margin:8px 0;">
+    <tr style="border-bottom:1px solid var(--border-color,#30363d);">
+      <th style="text-align:left;padding:4px 12px 4px 0;">Ticker</th>
+      <th style="padding:4px 12px;">Band</th>
+      <th style="padding:4px 12px;">Hit Rate</th>
+      <th style="padding:4px 12px;">Width</th>
+      <th style="padding:4px 12px;">Mid Error</th>
+    </tr>
+    <tr><td style="padding:3px 12px 3px 0;">SPX</td><td style="padding:3px 12px;">P98</td>
+        <td style="padding:3px 12px;">93%</td><td style="padding:3px 12px;">~2.7%</td>
+        <td style="padding:3px 12px;">0.57%</td></tr>
+    <tr><td style="padding:3px 12px 3px 0;">NDX</td><td style="padding:3px 12px;">P99</td>
+        <td style="padding:3px 12px;">95%</td><td style="padding:3px 12px;">~3.6%</td>
+        <td style="padding:3px 12px;">0.82%</td></tr>
+    <tr><td style="padding:3px 12px 3px 0;">RUT</td><td style="padding:3px 12px;">P100</td>
+        <td style="padding:3px 12px;">98%</td><td style="padding:3px 12px;">~4.8%</td>
+        <td style="padding:3px 12px;">0.88%</td></tr>
   </table>
 
   <p><strong>Parameters:</strong> <code>?lookback=N</code> (training days, default 150, range 30–1260),
