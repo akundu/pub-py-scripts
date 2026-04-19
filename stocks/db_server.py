@@ -5838,6 +5838,29 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
             updateFutureBandTable();
         }}
 
+        // Three-tier risk indicators for band rows
+        const _TIER_CONFIG = {{
+            'NDX': {{aggressive: {{put:'P95',call:'P97'}}, moderate: {{put:'P98',call:'P99'}}, conservative: {{put:'P99',call:'P100'}}}},
+            'SPX': {{aggressive: {{put:'P95',call:'P97'}}, moderate: {{put:'P97',call:'P98'}}, conservative: {{put:'P99',call:'P100'}}}},
+            'RUT': {{aggressive: {{put:'P95',call:'P98'}}, moderate: {{put:'P99',call:'P99'}}, conservative: {{put:'P100',call:'P100'}}}},
+        }};
+        const _TIER_STYLES = {{
+            aggressive:   {{bg: 'rgba(218,54,51,0.12)', dot: '🔴'}},
+            moderate:     {{bg: 'rgba(210,153,34,0.12)', dot: '🟡'}},
+            conservative: {{bg: 'rgba(35,134,54,0.15)', dot: '🟢'}},
+        }};
+        function getBandTier(bandName) {{
+            // Returns {{tier, style}} or null — checks both put and call for combined bands
+            const ticker = currentTicker;
+            const cfg = _TIER_CONFIG[ticker] || _TIER_CONFIG['SPX'];
+            for (const [tier, sides] of Object.entries(cfg)) {{
+                if (sides.put === bandName || sides.call === bandName) {{
+                    return {{tier, ..._TIER_STYLES[tier]}};
+                }}
+            }}
+            return null;
+        }}
+
         // Update bands table for today's prediction
         function updateBandTable() {{
             if (!predictionData) return;
@@ -5867,9 +5890,12 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                 if (!bands[name]) continue;
 
                 const band = bands[name];
+                const tier = getBandTier(name);
+                const rowStyle = tier ? `background:${{tier.bg}};font-weight:bold;` : '';
+                const tierDot = tier ? ` ${{tier.dot}}` : '';
                 tableHTML += `
-                    <tr>
-                        <td><strong>${{name}}</strong></td>
+                    <tr style="${{rowStyle}}">
+                        <td><strong>${{name}}${{tierDot}}</strong></td>
                         <td>$${{fmtPrice(band.lo_price)}} <span style="color: #8b949e;">(${{band.lo_pct >= 0 ? '+' : ''}}${{band.lo_pct.toFixed(2)}}%)</span></td>
                         <td>$${{fmtPrice(band.hi_price)}} <span style="color: #8b949e;">(${{band.hi_pct >= 0 ? '+' : ''}}${{band.hi_pct.toFixed(2)}}%)</span></td>
                         <td>$${{fmtPrice(band.width_pts)}}</td>
@@ -6384,9 +6410,12 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
                 ['P75', 'P80', 'P85', 'P90', 'P95', 'P97', 'P98', 'P99', 'P100'].forEach(bandName => {{
                     if (data.statistical_bands[bandName]) {{
                         const band = data.statistical_bands[bandName];
+                        const t = getBandTier(bandName);
+                        const liStyle = t ? `background:${{t.bg}};font-weight:bold;border-radius:4px;padding:2px 6px;` : '';
+                        const dot = t ? ` ${{t.dot}}` : '';
                         html += `
-                            <li>
-                                <span class="band-name">${{bandName}}:</span>
+                            <li style="${{liStyle}}">
+                                <span class="band-name">${{bandName}}${{dot}}:</span>
                                 <span class="price-range">
                                     $${{fmtPrice(band.lo_price)}} - $${{fmtPrice(band.hi_price)}}
                                 </span>
@@ -15022,40 +15051,38 @@ def _predictions_methodology_html() -> str:
         <td style="padding:3px 8px;">0.88%</td><td style="padding:3px 8px;">2.90%</td></tr>
   </table>
 
-  <h4 style="font-size:13px;color:var(--text-primary,#c9d1d9);margin:18px 0 6px;">Credit Spread Strike Selection (0DTE)</h4>
-  <p>Place short strikes outside the Combined band boundary. Empirical data shows UP days have wider
-  tails than DOWN days (consistent across 120 and 250-day windows), so CALL spreads need wider bands.</p>
-  <table style="font-size:12px;border-collapse:collapse;margin:8px 0;">
+  <h4 style="font-size:13px;color:var(--text-primary,#c9d1d9);margin:18px 0 6px;">Three Risk Tiers for Strike Selection</h4>
+  <p>The prediction band tables above use three colored risk tiers. Choose based on your risk appetite:</p>
+  <table style="font-size:11px;border-collapse:collapse;margin:8px 0;">
     <tr style="border-bottom:1px solid var(--border-color,#30363d);">
-      <th style="text-align:left;padding:4px 12px 4px 0;">Ticker</th>
-      <th style="padding:4px 10px;">Put (Short)</th>
-      <th style="padding:4px 10px;">Typical OTM</th>
-      <th style="padding:4px 10px;">Call (Short)</th>
-      <th style="padding:4px 10px;">Typical OTM</th>
+      <th style="text-align:left;padding:3px 10px 3px 0;">Tier</th>
+      <th style="padding:3px 10px;">Indicator</th>
+      <th style="padding:3px 10px;">Target Hit Rate</th>
+      <th style="padding:3px 10px;">Strikes</th>
+      <th style="padding:3px 10px;">Premium</th>
+      <th style="padding:3px 10px;">Best For</th>
     </tr>
-    <tr><td style="padding:3px 12px 3px 0;">SPX</td>
-        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~2.0%</td>
-        <td style="padding:3px 10px;color:#d29922;">P97</td><td style="padding:3px 10px;">~2.5%</td></tr>
-    <tr><td style="padding:3px 12px 3px 0;">NDX</td>
-        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~2.8%</td>
-        <td style="padding:3px 10px;color:#d29922;">P97</td><td style="padding:3px 10px;">~3.2%</td></tr>
-    <tr><td style="padding:3px 12px 3px 0;">RUT</td>
-        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~3.1%</td>
-        <td style="padding:3px 10px;color:#d29922;">P98</td><td style="padding:3px 10px;">~4.3%</td></tr>
+    <tr style="background:rgba(218,54,51,0.08);"><td style="padding:2px 10px 2px 0;">Aggressive</td>
+        <td style="padding:2px 10px;">&#128308;</td><td style="padding:2px 10px;">~90%</td>
+        <td style="padding:2px 10px;">Tightest</td><td style="padding:2px 10px;">Most</td>
+        <td style="padding:2px 10px;">High-conviction, small size, stop-loss in place</td></tr>
+    <tr style="background:rgba(210,153,34,0.08);"><td style="padding:2px 10px 2px 0;">Moderate</td>
+        <td style="padding:2px 10px;">&#128993;</td><td style="padding:2px 10px;">~93%</td>
+        <td style="padding:2px 10px;">Balanced</td><td style="padding:2px 10px;">Good</td>
+        <td style="padding:2px 10px;">Default choice, balanced risk/reward</td></tr>
+    <tr style="background:rgba(35,134,54,0.08);"><td style="padding:2px 10px 2px 0;">Conservative</td>
+        <td style="padding:2px 10px;">&#128994;</td><td style="padding:2px 10px;">~95%</td>
+        <td style="padding:2px 10px;">Widest</td><td style="padding:2px 10px;">Least</td>
+        <td style="padding:2px 10px;">Larger positions, no stop-loss, capital preservation</td></tr>
   </table>
   <ul style="margin:4px 0 8px 20px;font-size:11px;">
-    <li><strong>Why asymmetric:</strong> Empirical data (120 and 250-day windows) consistently shows UP
-    days have wider tails than DOWN days — up rallies extend further than down drops at P95-P100.
-    Calls need wider bands (15-30% more room depending on ticker).</li>
-    <li><strong>Hit Rate</strong> = % of days the actual close landed inside the Combined band (60-day
-    backtest, no lookahead, model trained fresh each day).</li>
-    <li><strong>Edge pruning:</strong> Using P95 vs P100 prunes ~2.5% from each tail. For NDX, this
-    tightens bands from ~4.3% to ~2.8% — short strike moves ~0.7% closer, collecting more premium
-    but with ~15% more breach risk.</li>
-    <li><strong>European settlement:</strong> SPX, NDX, RUT are European-style &mdash; settle at
-    expiration only. Intraday breach does <em>not</em> cause assignment. The close-to-close
-    prediction determines P&amp;L. Max-move data (in <code>/range_percentiles</code>) is useful for
-    risk monitoring and stop-loss decisions, but the settlement price is what counts.</li>
+    <li>Tiers are auto-calibrated nightly from a 90-day rolling backtest.</li>
+    <li><strong>Asymmetry:</strong> Call (up) side uses wider bands because UP days have 15&ndash;30%
+    wider tails than DOWN days (empirically validated across 120 and 250-day windows).</li>
+    <li><strong>European settlement:</strong> SPX/NDX/RUT settle at expiration only. Intraday breach
+    does not cause assignment. Close-to-close prediction determines P&amp;L.</li>
+    <li>See <code>/range_percentiles</code> for intraday move-to-close and max-move excursion tables
+    with the same three-tier indicators.</li>
   </ul>
 
   <p><strong>Parameters:</strong> <code>?lookback=N</code> (training days, default 250, range 30–1260),
