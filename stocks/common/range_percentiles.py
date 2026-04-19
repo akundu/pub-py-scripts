@@ -24,9 +24,9 @@ try:
 except ImportError:
     DB_AVAILABLE = False
 
-# Constants — default 120 trading days
+# Constants
 DEFAULT_LOOKBACK = 250  # trading days (~1 year)
-DEFAULT_PERCENTILES = [75, 80, 85, 90, 95, 98, 99, 100]
+DEFAULT_PERCENTILES = [75, 80, 85, 90, 95, 97, 98, 99, 100]
 MIN_DAYS_DEFAULT = 30
 MIN_DIRECTION_DAYS_DEFAULT = 5
 DEFAULT_WINDOW = 0  # window=0 represents today (0DTE)
