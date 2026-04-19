@@ -36,7 +36,7 @@ _CALIBRATION_CACHE = {}  # module-level cache for recommended percentiles
 _CALIBRATION_FILE = SCRIPT_DIR.parent / "results" / "calibration" / "recommended_percentiles.json"
 
 # Hardcoded fallback defaults (used when calibration file is missing or stale).
-# Based on 94% target hit rate with directional asymmetry (UP tails wider than DOWN).
+# Based on 95% target hit rate with directional asymmetry (UP tails wider than DOWN).
 _DEFAULT_RECOMMENDED = {
     "NDX": {"close_to_close": {"put": 99, "call": 100}, "intraday": {"put": 98, "call": 99}, "max_move": {"put": 97, "call": 98}},
     "SPX": {"close_to_close": {"put": 99, "call": 100}, "intraday": {"put": 98, "call": 99}, "max_move": {"put": 97, "call": 98}},

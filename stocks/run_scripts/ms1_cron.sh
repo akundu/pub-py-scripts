@@ -44,7 +44,7 @@ rm /tmp/close_model.log /tmp/rebuild_prediction_data.log
 # Calibrate recommended percentiles (skip weekends — only run before trading days)
 DOW=$(date +%u)  # 1=Mon ... 7=Sun
 if [ "$DOW" -le 5 ]; then
-    python3 -W ignore -m scripts.calibrate_recommendations --days 90 --target 94.0 \
+    python3 -W ignore -m scripts.calibrate_recommendations --days 90 --target 95.0 \
         --tickers NDX,SPX,RUT --output results/calibration/recommended_percentiles.json \
         > /tmp/calibrate_recommendations.log 2>&1
 fi

@@ -40,7 +40,7 @@ if str(PROJECT_ROOT) not in sys.path:
 DEFAULT_OUTPUT = str(PROJECT_ROOT / "results" / "calibration" / "recommended_percentiles.json")
 DEFAULT_TICKERS = ["NDX", "SPX", "RUT"]
 DEFAULT_DAYS = 90
-DEFAULT_TARGET = 94.0
+DEFAULT_TARGET = 95.0
 # Band levels tested by backtest_band_accuracy.py
 BAND_LEVELS = [95, 97, 98, 99, 100]
 # All percentile levels (including derived for intraday/max-move)
