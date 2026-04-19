@@ -5227,7 +5227,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
 
                 <div class="control-group">
                     <label for="lookbackInput" style="color:var(--text-secondary);font-size:13px;">Training days:</label>
-                    <input type="number" id="lookbackInput" min="30" max="1260" value="150"
+                    <input type="number" id="lookbackInput" min="30" max="1260" value="250"
                         style="width:60px;padding:3px 6px;border-radius:4px;border:1px solid #444;background:#1a1f2e;color:#e6edf3;font-size:13px;"
                         onchange="onLookbackChange()">
                 </div>
@@ -5326,7 +5326,7 @@ def generate_predictions_html(ticker: str, params: dict) -> str:
         // State
         let currentTicker = '{ticker}';
         let currentDays = 0;  // 0 = today, any positive int = N days ahead
-        let currentLookback = 150;  // training days (30-1260)
+        let currentLookback = 250;  // training days (30-1260)
         let currentStrategy = 'combined';  // used for band table display
         let predictionData = null;
         let bandChart = null;
@@ -9881,10 +9881,10 @@ async def handle_predictions_page(request: web.Request) -> web.Response:
         if not cache:
             return web.json_response({'error': 'Prediction cache not initialized'}, status=500)
         try:
-            lookback = int(request.query.get('lookback', '150'))
+            lookback = int(request.query.get('lookback', '250'))
             lookback = max(30, min(1260, lookback))
         except (ValueError, TypeError):
-            lookback = 150
+            lookback = 250
         force_refresh = not params['cache']
         today_result = await fetch_today_prediction(
             ticker,
@@ -10000,15 +10000,15 @@ async def handle_predictions_api_index(request: web.Request) -> web.Response:
                 "path": "/predictions/api/lazy/today/{ticker}",
                 "method": "GET",
                 "description": "Today's prediction bands and current price.",
-                "query": "?lookback=150&cache=true",
-                "example": f"{base.rstrip('/')}/predictions/api/lazy/today/NDX?lookback=150",
+                "query": "?lookback=250&cache=true",
+                "example": f"{base.rstrip('/')}/predictions/api/lazy/today/NDX?lookback=250",
             },
             {
                 "path": "/predictions/api/lazy/future/{ticker}/{days}",
                 "method": "GET",
                 "description": "N-day-ahead forecast prediction data.",
-                "query": "?lookback=150&cache=true",
-                "example": f"{base.rstrip('/')}/predictions/api/lazy/future/NDX/3?lookback=150",
+                "query": "?lookback=250&cache=true",
+                "example": f"{base.rstrip('/')}/predictions/api/lazy/future/NDX/3?lookback=250",
             },
             {
                 "path": "/predictions/api/lazy/band_history/{ticker}",
@@ -10021,14 +10021,14 @@ async def handle_predictions_api_index(request: web.Request) -> web.Response:
                 "path": "/predictions/api/lazy/historical/{ticker}/{date}",
                 "method": "GET",
                 "description": "Historical prediction bands for a past date (backtest shape).",
-                "query": "?lookback=150",
+                "query": "?lookback=250",
                 "example": f"{base.rstrip('/')}/predictions/api/lazy/historical/NDX/2025-03-01",
             },
             {
                 "path": "/predictions/api/prewarm",
                 "method": "GET",
                 "description": "Pre-warm cache (e.g. cron). Tickers run in parallel (max 5 subprocess workers when disk cache is enabled).",
-                "query": "?ticker=NDX,SPX&days=1,3,5&lookback=150",
+                "query": "?ticker=NDX,SPX&days=1,3,5&lookback=250",
                 "example": f"{base.rstrip('/')}/predictions/api/prewarm?ticker=NDX,SPX",
             },
         ],
@@ -10057,10 +10057,10 @@ async def handle_lazy_load_today_prediction(request: web.Request) -> web.Respons
     force_refresh = request.query.get('cache', 'true').lower() == 'false'
 
     try:
-        lookback = int(request.query.get('lookback', '150'))
+        lookback = int(request.query.get('lookback', '250'))
         lookback = max(30, min(1260, lookback))
     except (ValueError, TypeError):
-        lookback = 150
+        lookback = 250
 
     # Always use fetch_today_prediction so cache TTL is enforced (stale entries
     # are regenerated; the old handler fast-path returned disk cache regardless of age).
@@ -10131,10 +10131,10 @@ async def handle_lazy_load_future_prediction(request: web.Request) -> web.Respon
     force_refresh = request.query.get('cache', 'true').lower() == 'false'
 
     try:
-        lookback = int(request.query.get('lookback', '150'))
+        lookback = int(request.query.get('lookback', '250'))
         lookback = max(30, min(1260, lookback))
     except (ValueError, TypeError):
-        lookback = 150
+        lookback = 250
 
     # Fast path: serve from cache immediately (regardless of age) to avoid
     # expensive recomputation. Prewarm cron handles keeping cache fresh.
@@ -10310,10 +10310,10 @@ async def handle_lazy_load_historical_prediction(request: web.Request) -> web.Re
         return web.json_response({'error': 'Prediction cache not initialized'}, status=500)
 
     try:
-        lookback = int(request.query.get('lookback', '150'))
+        lookback = int(request.query.get('lookback', '250'))
         lookback = max(30, min(1260, lookback))
     except (ValueError, TypeError):
-        lookback = 150
+        lookback = 250
 
     if fetch_historical_prediction is None:
         return web.json_response({'error': 'Historical predictions not available'}, status=500)
@@ -10352,10 +10352,10 @@ async def handle_prewarm_predictions(request: web.Request) -> web.Response:
         prewarm_days = compute_default_prediction_days()
 
     try:
-        lookback = int(request.query.get('lookback', '150'))
+        lookback = int(request.query.get('lookback', '250'))
         lookback = max(30, min(1260, lookback))
     except (ValueError, TypeError):
-        lookback = 150
+        lookback = 250
 
     cache = request.app.get('prediction_cache')
     history = request.app.get('prediction_history')
@@ -14840,7 +14840,8 @@ A &minus;3.5% day becomes &minus;2.55%. The day still counts in sample size.</pr
   <h4 style="font-size:13px;color:var(--text-primary,#c9d1d9);margin:18px 0 6px;">Credit Spread Strike Selection</h4>
 
   <p><strong>Close-to-Close (0DTE):</strong> Place short strikes outside the band boundary for your ticker.
-  Puts need wider bands than calls because down moves are faster and gappier.</p>
+  Empirical analysis (120-day and 250-day windows) consistently shows UP days have wider tails than
+  DOWN days — so CALL credit spreads need wider bands than PUT credit spreads.</p>
   <table style="font-size:12px;border-collapse:collapse;margin:8px 0;">
     <tr style="border-bottom:1px solid var(--border-color,#30363d);">
       <th style="text-align:left;padding:4px 12px 4px 0;">Ticker</th>
@@ -14851,17 +14852,17 @@ A &minus;3.5% day becomes &minus;2.55%. The day still counts in sample size.</pr
       <th style="padding:4px 10px;">Why Asymmetric</th>
     </tr>
     <tr><td style="padding:3px 12px 3px 0;">SPX</td>
-        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~1.7% OTM</td>
-        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~1.6% OTM</td>
-        <td style="padding:3px 10px;font-size:11px;">Most liquid, symmetric moves</td></tr>
+        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~2.0% OTM</td>
+        <td style="padding:3px 10px;color:#d29922;">P97</td><td style="padding:3px 10px;">~2.5% OTM</td>
+        <td style="padding:3px 10px;font-size:11px;">Up tails 20% wider than down</td></tr>
     <tr><td style="padding:3px 12px 3px 0;">NDX</td>
-        <td style="padding:3px 10px;color:#d29922;">P98</td><td style="padding:3px 10px;">~2.4% OTM</td>
-        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~2.2% OTM</td>
-        <td style="padding:3px 10px;font-size:11px;">Down gaps harder than rallies</td></tr>
+        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~2.8% OTM</td>
+        <td style="padding:3px 10px;color:#d29922;">P97</td><td style="padding:3px 10px;">~3.2% OTM</td>
+        <td style="padding:3px 10px;font-size:11px;">Up tails 15% wider than down</td></tr>
     <tr><td style="padding:3px 12px 3px 0;">RUT</td>
-        <td style="padding:3px 10px;color:#d29922;">P98</td><td style="padding:3px 10px;">~2.3% OTM</td>
-        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~2.7% OTM</td>
-        <td style="padding:3px 10px;font-size:11px;">Spiky on both sides, puts gap</td></tr>
+        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~3.1% OTM</td>
+        <td style="padding:3px 10px;color:#d29922;">P98</td><td style="padding:3px 10px;">~4.3% OTM</td>
+        <td style="padding:3px 10px;font-size:11px;">Up tails 30% wider than down</td></tr>
   </table>
 
   <p style="margin-top:12px;"><strong>Intraday (Point-to-Close):</strong> The intraday section shows how
@@ -14921,7 +14922,7 @@ A &minus;3.5% day becomes &minus;2.55%. The day still counts in sample size.</pr
   periods). 15-min intervals for 11:00 AM – 3:15 PM ET. 5-min intervals for the last 10 minutes (3:50–3:55 PM ET).
   All times shown in your browser's local timezone with ET reference below.</p>
 
-  <p><strong>Parameters:</strong> <code>?lookback=N</code> (trading days, default 120),
+  <p><strong>Parameters:</strong> <code>?lookback=N</code> (trading days, default 250),
   <code>?start_date=YYYY-MM-DD&amp;end_date=YYYY-MM-DD</code> (overrides lookback),
   <code>?outliers=1</code> (show raw data), <code>?format=json</code> (JSON output),
   <code>?min_days=N</code> (minimum sample count, default 30).</p>
@@ -15006,8 +15007,8 @@ def _predictions_methodology_html() -> str:
   </table>
 
   <h4 style="font-size:13px;color:var(--text-primary,#c9d1d9);margin:18px 0 6px;">Credit Spread Strike Selection (0DTE)</h4>
-  <p>Place short strikes outside the Combined band boundary. Puts need wider bands than calls because
-  down moves are faster and gappier.</p>
+  <p>Place short strikes outside the Combined band boundary. Empirical data shows UP days have wider
+  tails than DOWN days (consistent across 120 and 250-day windows), so CALL spreads need wider bands.</p>
   <table style="font-size:12px;border-collapse:collapse;margin:8px 0;">
     <tr style="border-bottom:1px solid var(--border-color,#30363d);">
       <th style="text-align:left;padding:4px 12px 4px 0;">Ticker</th>
@@ -15017,18 +15018,19 @@ def _predictions_methodology_html() -> str:
       <th style="padding:4px 10px;">Typical OTM</th>
     </tr>
     <tr><td style="padding:3px 12px 3px 0;">SPX</td>
-        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~1.7%</td>
-        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~1.6%</td></tr>
+        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~2.0%</td>
+        <td style="padding:3px 10px;color:#d29922;">P97</td><td style="padding:3px 10px;">~2.5%</td></tr>
     <tr><td style="padding:3px 12px 3px 0;">NDX</td>
-        <td style="padding:3px 10px;color:#d29922;">P98</td><td style="padding:3px 10px;">~2.4%</td>
-        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~2.2%</td></tr>
+        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~2.8%</td>
+        <td style="padding:3px 10px;color:#d29922;">P97</td><td style="padding:3px 10px;">~3.2%</td></tr>
     <tr><td style="padding:3px 12px 3px 0;">RUT</td>
-        <td style="padding:3px 10px;color:#d29922;">P98</td><td style="padding:3px 10px;">~2.3%</td>
-        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~2.7%</td></tr>
+        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~3.1%</td>
+        <td style="padding:3px 10px;color:#d29922;">P98</td><td style="padding:3px 10px;">~4.3%</td></tr>
   </table>
   <ul style="margin:4px 0 8px 20px;font-size:11px;">
-    <li><strong>Why asymmetric:</strong> Down moves are faster (panic selling, overnight gaps) — a &minus;2.5%
-    crash happens in minutes; a +2.5% rally takes hours. Puts need more room.</li>
+    <li><strong>Why asymmetric:</strong> Empirical data (120 and 250-day windows) consistently shows UP
+    days have wider tails than DOWN days — up rallies extend further than down drops at P95-P100.
+    Calls need wider bands (15-30% more room depending on ticker).</li>
     <li><strong>Hit Rate</strong> = % of days the actual close landed inside the Combined band (60-day
     backtest, no lookahead, model trained fresh each day).</li>
     <li><strong>Edge pruning:</strong> Using P95 vs P100 prunes ~2.5% from each tail. For NDX, this
@@ -15040,7 +15042,7 @@ def _predictions_methodology_html() -> str:
     risk monitoring and stop-loss decisions, but the settlement price is what counts.</li>
   </ul>
 
-  <p><strong>Parameters:</strong> <code>?lookback=N</code> (training days, default 150, range 30–1260),
+  <p><strong>Parameters:</strong> <code>?lookback=N</code> (training days, default 250, range 30–1260),
   <code>?cache=false</code> (force refresh).</p>
 
   <p><strong>Consecutive-Day Streaks:</strong> Tested for 0DTE but showed no predictive value (42–50%
@@ -15112,7 +15114,7 @@ async def handle_range_percentiles_api(request: web.Request) -> web.Response:
     Query params:
         ?tickers=NDX,SPX,AAPL (comma-separated, default: NDX)
         ?window=5 (trading days window, default: 1)
-        ?lookback=120 (trading days lookback, default: 120)
+        ?lookback=250 (trading days lookback, default: 250)
         ?percentiles=75,90,95,98,99,100 (comma-separated, default: 75,90,95,98,99,100)
         ?min_days=30 (minimum days required, default: 30)
         ?min_direction_days=5 (minimum days per direction, default: 5)
@@ -15852,7 +15854,7 @@ async def handle_range_percentiles_multi_window_api(request: web.Request) -> web
     Query params:
         ?ticker=NDX (single ticker only)
         ?windows=* or ?windows=1,5,10,20
-        ?lookback=120
+        ?lookback=250
         ?percentiles=75,90,95,98,99,100
         ?min_days=30
         ?min_direction_days=5

@@ -25,7 +25,7 @@ except ImportError:
     DB_AVAILABLE = False
 
 # Constants — default 120 trading days
-DEFAULT_LOOKBACK = 120  # trading days (~6 months)
+DEFAULT_LOOKBACK = 250  # trading days (~1 year)
 DEFAULT_PERCENTILES = [75, 80, 85, 90, 95, 98, 99, 100]
 MIN_DAYS_DEFAULT = 30
 MIN_DIRECTION_DAYS_DEFAULT = 5
@@ -35,11 +35,13 @@ DEFAULT_WINDOW = 0  # window=0 represents today (0DTE)
 _CALIBRATION_CACHE = {}  # module-level cache for recommended percentiles
 _CALIBRATION_FILE = SCRIPT_DIR.parent / "results" / "calibration" / "recommended_percentiles.json"
 
-# Hardcoded fallback defaults (used when calibration file is missing or stale)
+# Hardcoded fallback defaults (used when calibration file is missing or stale).
+# Based on 250-day directional analysis: UP days have wider tails than DOWN days
+# across all tickers, so call (up) side needs wider bands than put (down) side.
 _DEFAULT_RECOMMENDED = {
-    "NDX": {"close_to_close": {"put": 98, "call": 95}, "intraday": {"put": 95, "call": 90}, "max_move": {"put": 90, "call": 90}},
-    "SPX": {"close_to_close": {"put": 95, "call": 95}, "intraday": {"put": 90, "call": 90}, "max_move": {"put": 90, "call": 90}},
-    "RUT": {"close_to_close": {"put": 98, "call": 95}, "intraday": {"put": 95, "call": 90}, "max_move": {"put": 90, "call": 90}},
+    "NDX": {"close_to_close": {"put": 95, "call": 97}, "intraday": {"put": 90, "call": 95}, "max_move": {"put": 90, "call": 90}},
+    "SPX": {"close_to_close": {"put": 95, "call": 97}, "intraday": {"put": 90, "call": 95}, "max_move": {"put": 90, "call": 90}},
+    "RUT": {"close_to_close": {"put": 95, "call": 98}, "intraday": {"put": 90, "call": 95}, "max_move": {"put": 90, "call": 90}},
 }
 
 
@@ -1061,7 +1063,7 @@ async def compute_range_percentiles_multi_window(
             "metadata": {
                 "last_trading_day": "2026-02-15",
                 "previous_close": 21500.0,
-                "lookback_trading_days": 120,
+                "lookback_trading_days": 250,
                 "percentiles": [75, 80, 85, 90, 95, 98, 99, 100],
                 "window_list": [1, 3, 5, 10, 15, 20],
                 "skipped_windows": [...]  # windows with insufficient data

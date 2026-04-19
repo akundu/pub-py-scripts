@@ -930,7 +930,7 @@ async def fetch_today_prediction(
     cache: PredictionCache,
     force_refresh: bool = False,
     history: Optional[PredictionHistory] = None,
-    lookback: int = 150,
+    lookback: int = 250,
     stock_db: Optional[Any] = None,
 ):
     """Fetch today's prediction, using cache if available and not stale.
@@ -1037,7 +1037,7 @@ async def fetch_today_prediction(
         return {'error': str(e)}
 
 
-async def fetch_future_prediction(ticker: str, days_ahead: int, cache: PredictionCache, force_refresh: bool = False, lookback: int = 150):
+async def fetch_future_prediction(ticker: str, days_ahead: int, cache: PredictionCache, force_refresh: bool = False, lookback: int = 250):
     """Fetch future prediction for N days ahead, using cache if available."""
     if not PREDICTIONS_AVAILABLE:
         return {'error': 'Predictions module not available'}
@@ -1529,7 +1529,7 @@ def _compute_historical_predictions_sync(ticker: str, date_str: str, lookback: i
 
 
 async def fetch_historical_prediction(
-    ticker: str, date_str: str, cache: 'PredictionCache', lookback: int = 150
+    ticker: str, date_str: str, cache: 'PredictionCache', lookback: int = 250
 ) -> dict:
     """Fetch historical prediction for a past trading day.
 

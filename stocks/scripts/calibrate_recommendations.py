@@ -142,21 +142,22 @@ def calibrate(tickers: list, num_days: int, target: float, lookback: int = 250,
         hr = data["hit_rates"]
 
         # Close-to-close: use the backtest results directly
-        # The backtest uses combined bands which are the same for puts and calls,
-        # but puts typically need wider bands. We select one level wider for puts.
+        # The backtest tests symmetric Combined bands. Empirical analysis (120-day
+        # and 250-day windows) consistently shows UP days have wider tails than
+        # DOWN days across SPX/NDX/RUT — so CALL side needs wider bands.
         c2c_base = select_recommended(hr, target)
-        # Put = one step wider than base (down moves are faster/gappier)
+        c2c_put = c2c_base  # put (down) side: use base
+        # Call (up) side: one step wider (up tails are 15-30% fatter than down)
         wider = [p for p in BAND_LEVELS if p > c2c_base]
-        c2c_put = wider[0] if wider else c2c_base
-        c2c_call = c2c_base
+        c2c_call = wider[0] if wider else c2c_base
 
-        # Intraday: one level tighter (less time remaining = less risk, European settlement)
+        # Intraday: one level tighter (less time remaining, European settlement)
         tighter = [p for p in ALL_PERCENTILE_LEVELS if p < c2c_put]
         intra_put = tighter[-1] if tighter else c2c_put
         tighter = [p for p in ALL_PERCENTILE_LEVELS if p < c2c_call]
         intra_call = tighter[-1] if tighter else c2c_call
 
-        # Max-move: two levels tighter (European = close determines P&L, not intraday spike)
+        # Max-move: one more level tighter (close determines P&L, not excursion)
         tighter = [p for p in ALL_PERCENTILE_LEVELS if p < intra_put]
         mm_put = tighter[-1] if tighter else intra_put
         tighter = [p for p in ALL_PERCENTILE_LEVELS if p < intra_call]
