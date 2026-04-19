@@ -8127,3 +8127,343 @@ class TestTradeReplay:
             )
         assert subcmd is None
         assert result_args is None
+
+
+# ── Roll Service ──────────────────────────────────────────────────────────────
+
+
+class TestRollService:
+    """Tests for the roll management service."""
+
+    def _make_position(
+        self,
+        position_id="pos-1",
+        symbol="SPX",
+        short_strike=5600,
+        long_strike=5575,
+        option_type="PUT",
+        expiration=None,
+        quantity=1,
+    ):
+        """Helper: create a multi-leg credit spread position dict."""
+        if expiration is None:
+            expiration = datetime.now(UTC).strftime("%Y%m%d")
+        return {
+            "position_id": position_id,
+            "symbol": symbol,
+            "order_type": "multi_leg",
+            "quantity": quantity,
+            "expiration": expiration,
+            "status": "open",
+            "legs": [
+                {"strike": short_strike, "option_type": option_type, "action": "SELL_TO_OPEN", "quantity": 1},
+                {"strike": long_strike, "option_type": option_type, "action": "BUY_TO_OPEN", "quantity": 1},
+            ],
+        }
+
+    def test_roll_config_defaults(self):
+        """Verify default config values."""
+        from app.services.roll_service import RollConfig
+
+        cfg = RollConfig()
+        assert cfg.check_interval == 30.0
+        assert cfg.mirror_enabled is True
+        assert cfg.mirror_trigger_severity == "warning"
+        assert cfg.mirror_time_window_utc == ("18:00", "20:00")
+        assert cfg.mirror_max_cost_pct == 1.0
+        assert cfg.forward_enabled is True
+        assert cfg.forward_trigger_severity == "watch"
+        assert cfg.forward_min_dte == 1
+        assert cfg.forward_max_dte == 5
+        assert cfg.forward_max_width_multiplier == 2.0
+        assert cfg.auto_execute is False
+
+        # Round-trip serialization
+        d = cfg.to_dict()
+        cfg2 = RollConfig.from_dict(d)
+        assert cfg2.check_interval == cfg.check_interval
+        assert cfg2.mirror_time_window_utc == cfg.mirror_time_window_utc
+
+    def test_roll_service_init(self):
+        """Test init/get/reset module accessors."""
+        from app.services.roll_service import (
+            RollConfig,
+            init_roll_service,
+            get_roll_service,
+            reset_roll_service,
+        )
+
+        reset_roll_service()
+        assert get_roll_service() is None
+
+        svc = init_roll_service(RollConfig(check_interval=10))
+        assert svc is not None
+        assert get_roll_service() is svc
+        assert svc.config.check_interval == 10
+
+        reset_roll_service()
+        assert get_roll_service() is None
+
+    @pytest.mark.asyncio
+    async def test_mirror_suggestion_put_threatened(self, tmp_path):
+        """PUT near breach should suggest CALL mirror."""
+        from app.services.roll_service import RollConfig, RollService, _calc_breach_status
+
+        today = datetime.now(UTC).strftime("%Y%m%d")
+        pos = self._make_position(
+            short_strike=5600, long_strike=5575, option_type="PUT", expiration=today
+        )
+
+        # Price at 5603 = 0.05% from short = critical severity
+        breach = _calc_breach_status(5603, pos)
+        assert breach is not None
+        assert breach["severity"] == "critical"
+
+        cfg = RollConfig(
+            mirror_trigger_severity="critical",
+            mirror_time_window_utc=("00:00", "23:59"),
+        )
+        svc = RollService(cfg)
+
+        suggestion = svc._build_mirror_suggestion(pos, breach, 5603)
+        assert suggestion is not None
+        assert suggestion.roll_type == "mirror"
+        assert suggestion.new_option_type == "CALL"  # Opposite of PUT
+        assert suggestion.new_width == 25  # Same width as original
+        assert suggestion.symbol == "SPX"
+        assert suggestion.current_option_type == "PUT"
+
+    @pytest.mark.asyncio
+    async def test_mirror_suggestion_call_threatened(self, tmp_path):
+        """CALL near breach should suggest PUT mirror."""
+        from app.services.roll_service import RollConfig, RollService, _calc_breach_status
+
+        today = datetime.now(UTC).strftime("%Y%m%d")
+        pos = self._make_position(
+            short_strike=5600, long_strike=5625, option_type="CALL", expiration=today
+        )
+
+        # Price at 5597 = 0.05% from short = critical
+        breach = _calc_breach_status(5597, pos)
+        assert breach is not None
+        assert breach["severity"] == "critical"
+
+        cfg = RollConfig(mirror_time_window_utc=("00:00", "23:59"))
+        svc = RollService(cfg)
+
+        suggestion = svc._build_mirror_suggestion(pos, breach, 5597)
+        assert suggestion is not None
+        assert suggestion.new_option_type == "PUT"  # Opposite of CALL
+        assert suggestion.new_width == 25
+
+    @pytest.mark.asyncio
+    async def test_mirror_only_on_expiration_day(self):
+        """Mirror should not be suggested for DTE > 0."""
+        from app.services.roll_service import RollConfig, RollService
+
+        # Position expiring tomorrow
+        future = (datetime.now(UTC) + timedelta(days=3)).strftime("%Y%m%d")
+        pos = self._make_position(
+            short_strike=5600, long_strike=5575, option_type="PUT", expiration=future
+        )
+
+        cfg = RollConfig(
+            mirror_trigger_severity="watch",
+            mirror_time_window_utc=("00:00", "23:59"),
+            forward_enabled=False,
+        )
+        svc = RollService(cfg)
+
+        # Mock quote and position store
+        mock_quote = MagicMock()
+        mock_quote.last = 5610  # 0.18% from short = critical
+        mock_quote.bid = 5610
+
+        mock_store = MagicMock()
+        mock_store.get_open_positions.return_value = [pos]
+
+        with patch("app.services.market_data.get_quote", new_callable=AsyncMock, return_value=mock_quote):
+            with patch("app.services.position_store.get_position_store", return_value=mock_store):
+                suggestions = await svc.scan_positions()
+
+        # No mirror suggestion (not expiration day), and forward disabled
+        assert len(suggestions) == 0
+
+    @pytest.mark.asyncio
+    async def test_forward_suggestion(self):
+        """Position at watch severity should get forward roll suggestion."""
+        from app.services.roll_service import RollConfig, RollService, _calc_breach_status
+
+        today = datetime.now(UTC).strftime("%Y%m%d")
+        pos = self._make_position(
+            short_strike=5600, long_strike=5575, option_type="PUT", expiration=today
+        )
+
+        # Price at 5680 = 1.4% from short = watch
+        breach = _calc_breach_status(5680, pos)
+        assert breach is not None
+        assert breach["severity"] == "watch"
+
+        cfg = RollConfig(forward_trigger_severity="watch", forward_min_dte=2)
+        svc = RollService(cfg)
+
+        suggestion = svc._build_forward_suggestion(pos, breach, 5680)
+        assert suggestion is not None
+        assert suggestion.roll_type == "forward"
+        assert suggestion.new_option_type == "PUT"  # Same type
+        assert suggestion.new_short_strike < 5680  # Further OTM
+        assert suggestion.new_width == 25  # Same width
+        # Check DTE
+        exp_date = datetime.strptime(suggestion.new_expiration, "%Y%m%d").date()
+        today_date = datetime.now(UTC).date()
+        assert (exp_date - today_date).days >= 1
+
+    def test_suggestion_expiry(self):
+        """Suggestions should expire after TTL."""
+        from app.services.roll_service import RollConfig, RollService, RollSuggestion
+
+        svc = RollService(RollConfig())
+
+        # Create a suggestion with old timestamp
+        old = RollSuggestion(
+            suggestion_id="old-001",
+            position_id="pos-1",
+            symbol="SPX",
+            roll_type="mirror",
+            severity="warning",
+            distance_pct=0.8,
+            current_short_strike=5600,
+            current_long_strike=5575,
+            current_option_type="PUT",
+            current_expiration="20260414",
+            current_quantity=1,
+            current_max_loss=2500,
+            new_short_strike=5600,
+            new_long_strike=5625,
+            new_option_type="CALL",
+            new_expiration="20260414",
+            new_width=25,
+            estimated_credit=0,
+            estimated_close_cost=0,
+            net_cost=0,
+            new_max_loss=2500,
+            covers_close=False,
+            created_at=datetime.now(UTC) - timedelta(minutes=10),
+            status="pending",
+            reason="test",
+        )
+        svc._suggestions["old-001"] = old
+
+        # Should not appear in pending suggestions
+        pending = svc.get_suggestions()
+        assert len(pending) == 0
+        assert svc._suggestions["old-001"].status == "expired"
+
+    def test_dismiss_suggestion(self):
+        """Dismiss should mark suggestion as rejected."""
+        from app.services.roll_service import RollConfig, RollService, RollSuggestion
+
+        svc = RollService(RollConfig())
+
+        s = RollSuggestion(
+            suggestion_id="test-001",
+            position_id="pos-1",
+            symbol="SPX",
+            roll_type="mirror",
+            severity="warning",
+            distance_pct=0.8,
+            current_short_strike=5600,
+            current_long_strike=5575,
+            current_option_type="PUT",
+            current_expiration="20260414",
+            current_quantity=1,
+            current_max_loss=2500,
+            new_short_strike=5600,
+            new_long_strike=5625,
+            new_option_type="CALL",
+            new_expiration="20260414",
+            new_width=25,
+            estimated_credit=0,
+            estimated_close_cost=0,
+            net_cost=0,
+            new_max_loss=2500,
+            covers_close=False,
+            reason="test",
+        )
+        svc._suggestions["test-001"] = s
+
+        assert svc.dismiss_suggestion("test-001") is True
+        assert s.status == "rejected"
+        assert svc.dismiss_suggestion("test-001") is False  # Already rejected
+
+    @pytest.mark.asyncio
+    async def test_suggestions_endpoint(self, client, api_key_headers):
+        """GET /roll/suggestions should return list."""
+        from app.services.roll_service import init_roll_service, RollConfig
+
+        init_roll_service(RollConfig())
+
+        resp = await client.get("/roll/suggestions", headers=api_key_headers)
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
+
+    @pytest.mark.asyncio
+    async def test_execute_endpoint_stub(self, client, api_key_headers):
+        """POST /roll/execute should return 501 not-implemented."""
+        from app.services.roll_service import init_roll_service, RollConfig, RollSuggestion
+
+        svc = init_roll_service(RollConfig())
+        s = RollSuggestion(
+            suggestion_id="exec-001",
+            position_id="pos-1",
+            symbol="SPX",
+            roll_type="mirror",
+            severity="warning",
+            distance_pct=0.8,
+            current_short_strike=5600,
+            current_long_strike=5575,
+            current_option_type="PUT",
+            current_expiration="20260414",
+            current_quantity=1,
+            current_max_loss=2500,
+            new_short_strike=5600,
+            new_long_strike=5625,
+            new_option_type="CALL",
+            new_expiration="20260414",
+            new_width=25,
+            estimated_credit=0,
+            estimated_close_cost=0,
+            net_cost=0,
+            new_max_loss=2500,
+            covers_close=False,
+            reason="test",
+        )
+        svc._suggestions["exec-001"] = s
+
+        resp = await client.post("/roll/execute/exec-001", headers=api_key_headers)
+        assert resp.status_code == 501
+
+    @pytest.mark.asyncio
+    async def test_config_endpoint(self, client, api_key_headers):
+        """GET/POST /roll/config should work."""
+        from app.services.roll_service import init_roll_service, RollConfig
+
+        init_roll_service(RollConfig())
+
+        # GET
+        resp = await client.get("/roll/config", headers=api_key_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["check_interval"] == 30.0
+        assert data["mirror_trigger_severity"] == "warning"
+
+        # POST update
+        resp = await client.post(
+            "/roll/config",
+            headers=api_key_headers,
+            json={"mirror_trigger_severity": "critical", "auto_execute": True},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["mirror_trigger_severity"] == "critical"
+        assert data["auto_execute"] is True

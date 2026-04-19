@@ -30,10 +30,12 @@ from app.routes import ledger as ledger_routes
 from app.routes import dashboard as dashboard_routes
 from app.routes import import_routes
 from app.routes import playbook as playbook_routes
+from app.routes import roll as roll_routes
 from app.services.dashboard_service import DashboardService
 from app.services.ledger import init_ledger, get_ledger
 from app.services.live_data_service import init_live_data_service, reset_live_data_service
 from app.services.position_store import init_position_store, get_position_store
+from app.services.roll_service import init_roll_service, get_roll_service, reset_roll_service
 from app.websocket import ws_manager
 
 _log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -66,6 +68,26 @@ async def _expiration_loop(interval: int) -> None:
                 await exp_service.check_eod_exits(datetime.now(UTC))
         except Exception as e:
             logger.error("Expiration loop error: %s", e)
+
+
+async def _roll_scan_loop(interval: float) -> None:
+    """Background loop: scan positions for roll suggestions during market hours."""
+    while True:
+        await asyncio.sleep(interval)
+        svc = get_roll_service()
+        if not svc:
+            continue
+        # Only scan during market hours (13:30-20:00 UTC, Mon-Fri)
+        now = datetime.now(UTC)
+        if now.weekday() >= 5:
+            continue
+        hour_min = now.hour * 100 + now.minute
+        if hour_min < 1330 or hour_min > 2000:
+            continue
+        try:
+            await svc.scan_positions()
+        except Exception as e:
+            logger.error("Roll scan loop error: %s", e)
 
 
 async def _position_sync_loop(interval: int) -> None:
@@ -142,6 +164,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         ibkr_for_live = ibkr_provider if settings.ibkr_account_id else None
         init_live_data_service(store, dashboard_svc, ibkr_for_live)
 
+    # Initialize roll service
+    roll_svc = init_roll_service()
+
     # Start background tasks
     tasks: list[asyncio.Task] = []
     tasks.append(
@@ -151,6 +176,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         tasks.append(
             asyncio.create_task(_position_sync_loop(settings.position_sync_interval_seconds))
         )
+    tasks.append(
+        asyncio.create_task(_roll_scan_loop(roll_svc.config.check_interval))
+    )
 
     yield
 
@@ -166,6 +194,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await p.disconnect()
     ProviderRegistry.clear()
     reset_live_data_service()
+    reset_roll_service()
 
 
 PRIVATE_NETWORKS = [
@@ -299,6 +328,7 @@ app.include_router(ledger_routes.router)
 app.include_router(dashboard_routes.router)
 app.include_router(import_routes.router)
 app.include_router(playbook_routes.router)
+app.include_router(roll_routes.router)
 
 
 @app.get("/health")

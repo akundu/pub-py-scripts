@@ -5891,6 +5891,216 @@ async def _cmd_executions(args) -> int:
     return 0
 
 
+# ── roll ──────────────────────────────────────────────────────────────────────
+
+
+async def _cmd_roll_http(args, server: str) -> int:
+    """Roll commands via HTTP daemon."""
+    import httpx
+
+    action = getattr(args, "roll_action", None)
+
+    async with httpx.AsyncClient(base_url=server, timeout=30.0) as client:
+        if action in ("suggestions", "suggest", "sg", None):
+            resp = await client.get("/roll/suggestions")
+            if resp.status_code != 200:
+                print(f"  Error: {resp.status_code} {resp.text}")
+                return 1
+            suggestions = resp.json()
+            _print_roll_suggestions(suggestions)
+            return 0
+
+        elif action in ("execute", "ex"):
+            sid = getattr(args, "suggestion_id", "")
+            resp = await client.post(f"/roll/execute/{sid}")
+            if resp.status_code == 501:
+                print("  Roll execution not yet implemented (Phase 2)")
+                return 0
+            if resp.status_code != 200:
+                print(f"  Error: {resp.status_code} {resp.text}")
+                return 1
+            print(f"  Roll executed: {resp.json()}")
+            return 0
+
+        elif action in ("dismiss", "dm"):
+            sid = getattr(args, "suggestion_id", "")
+            resp = await client.post(f"/roll/dismiss/{sid}")
+            if resp.status_code != 200:
+                print(f"  Error: {resp.status_code} {resp.text}")
+                return 1
+            print(f"  Suggestion {sid} dismissed")
+            return 0
+
+        elif action == "config":
+            # Check if any updates
+            updates = {}
+            mt = getattr(args, "mirror_trigger", None)
+            ft = getattr(args, "forward_trigger", None)
+            ae = getattr(args, "auto_execute", None)
+            nae = getattr(args, "no_auto_execute", None)
+            if mt:
+                updates["mirror_trigger_severity"] = mt
+            if ft:
+                updates["forward_trigger_severity"] = ft
+            if ae:
+                updates["auto_execute"] = True
+            if nae:
+                updates["auto_execute"] = False
+
+            if updates:
+                resp = await client.post("/roll/config", json=updates)
+            else:
+                resp = await client.get("/roll/config")
+            if resp.status_code != 200:
+                print(f"  Error: {resp.status_code} {resp.text}")
+                return 1
+            config = resp.json()
+            _print_roll_config(config)
+            return 0
+
+        else:
+            print("  Unknown roll action. Use: suggestions, execute, dismiss, config")
+            return 1
+
+
+def _print_roll_suggestions(suggestions: list[dict]) -> None:
+    """Display roll suggestions in a formatted table."""
+    _print_header("Roll Suggestions")
+    if not suggestions:
+        print("    (no pending suggestions)")
+        return
+
+    print(f"  {'ID':<8} {'Sym':>5} {'Type':>8} {'Severity':>9} {'Dist':>7} "
+          f"{'Action':<40} {'Est Credit':>11} {'Close Cost':>11} {'Net':>11}")
+    print(f"  {'─' * 8} {'─' * 5} {'─' * 8} {'─' * 9} {'─' * 7} "
+          f"{'─' * 40} {'─' * 11} {'─' * 11} {'─' * 11}")
+
+    for s in suggestions:
+        sid = s.get("suggestion_id", "")[:8]
+        sym = s.get("symbol", "")
+        rtype = s.get("roll_type", "")
+        sev = s.get("severity", "")
+        dist = s.get("distance_pct", 0)
+        new_type = s.get("new_option_type", "")
+        new_short = s.get("new_short_strike", 0)
+        new_long = s.get("new_long_strike", 0)
+        new_exp = s.get("new_expiration", "")
+        credit = s.get("estimated_credit", 0)
+        close_cost = s.get("estimated_close_cost", 0)
+        net = s.get("net_cost", 0)
+
+        # Format expiration for display
+        if len(new_exp) == 8:
+            exp_display = f"{new_exp[4:6]}-{new_exp[6:]}"
+        else:
+            exp_display = new_exp[-5:] if len(new_exp) >= 5 else new_exp
+
+        action = f"SELL {new_type} {new_short:.0f}/{new_long:.0f} exp {exp_display}"
+
+        # Severity coloring
+        sev_color = {"breached": "91", "critical": "91", "warning": "93", "watch": "33"}.get(sev, "0")
+        sev_str = _color(f"{sev:>9}", sev_color)
+
+        credit_str = f"${credit:>9,.0f}" if credit else "       ---"
+        close_str = f"${close_cost:>9,.0f}" if close_cost else "       ---"
+        net_str = f"${net:>9,.0f}" if net else "       ---"
+
+        print(f"  {sid:<8} {sym:>5} {rtype:>8} {sev_str} {dist:>6.1f}% "
+              f"{action:<40} {credit_str} {close_str} {net_str}")
+
+    print()
+
+
+def _print_roll_config(config: dict) -> None:
+    """Display roll configuration."""
+    _print_header("Roll Configuration")
+    print(f"  Check interval:              {config.get('check_interval', 30)}s")
+    print(f"  Auto-execute:                {config.get('auto_execute', False)}")
+    print()
+    print(f"  Mirror rolls:")
+    print(f"    Enabled:                   {config.get('mirror_enabled', True)}")
+    print(f"    Trigger severity:          {config.get('mirror_trigger_severity', 'warning')}")
+    tw = config.get("mirror_time_window_utc", ["18:00", "20:00"])
+    print(f"    Time window (UTC):         {tw[0]} - {tw[1]}")
+    print(f"    Max cost (% of max loss):  {config.get('mirror_max_cost_pct', 1.0) * 100:.0f}%")
+    print()
+    print(f"  Forward rolls:")
+    print(f"    Enabled:                   {config.get('forward_enabled', True)}")
+    print(f"    Trigger severity:          {config.get('forward_trigger_severity', 'watch')}")
+    print(f"    DTE range:                 {config.get('forward_min_dte', 1)}-{config.get('forward_max_dte', 5)}")
+    print(f"    Max width multiplier:      {config.get('forward_max_width_multiplier', 2.0)}x")
+    print()
+
+
+async def _cmd_roll(args) -> int:
+    """Roll management — suggestions, execute, dismiss, config."""
+    server = _detect_server(args)
+    if server:
+        rc = await _try_daemon(server, _cmd_roll_http, args)
+        if rc is not None:
+            return rc
+
+    # Direct mode (no daemon) — use service directly
+    from app.services.roll_service import get_roll_service, init_roll_service
+
+    svc = get_roll_service()
+    if not svc:
+        svc = init_roll_service()
+
+    action = getattr(args, "roll_action", None)
+
+    if action in ("suggestions", "suggest", "sg", None):
+        # Trigger a scan first
+        await svc.scan_positions()
+        suggestions = svc.get_suggestions()
+        _print_roll_suggestions(suggestions)
+        return 0
+
+    elif action in ("execute", "ex"):
+        sid = getattr(args, "suggestion_id", "")
+        result = await svc.execute_roll(sid)
+        if "error" in result:
+            if "not implemented" in result["error"]:
+                print("  Roll execution not yet implemented (Phase 2)")
+                return 0
+            print(f"  Error: {result['error']}")
+            return 1
+        print(f"  Roll executed: {result}")
+        return 0
+
+    elif action in ("dismiss", "dm"):
+        sid = getattr(args, "suggestion_id", "")
+        if svc.dismiss_suggestion(sid):
+            print(f"  Suggestion {sid} dismissed")
+        else:
+            print(f"  Suggestion {sid} not found or not pending")
+            return 1
+        return 0
+
+    elif action == "config":
+        updates = {}
+        mt = getattr(args, "mirror_trigger", None)
+        ft = getattr(args, "forward_trigger", None)
+        ae = getattr(args, "auto_execute", None)
+        nae = getattr(args, "no_auto_execute", None)
+        if mt:
+            updates["mirror_trigger_severity"] = mt
+        if ft:
+            updates["forward_trigger_severity"] = ft
+        if ae:
+            updates["auto_execute"] = True
+        if nae:
+            updates["auto_execute"] = False
+        if updates:
+            svc.update_config(updates)
+        _print_roll_config(svc.config.to_dict())
+        return 0
+
+    else:
+        print("  Unknown roll action. Use: suggestions, execute, dismiss, config")
+        return 1
+
+
 # ── daemon ───────────────────────────────────────────────────────────────────
 
 
@@ -8397,6 +8607,58 @@ Aliases: exec
                          help="Filter to a specific symbol")
     _add_connection_args(p_exec)
 
+    # ── roll ──
+    p_roll = subparsers.add_parser("roll",
+                                    help="Roll management — view, execute, or dismiss roll suggestions",
+                                    aliases=["rl"],
+                                    description='''
+Roll management for threatened credit spread positions. The roll service
+runs in the background during market hours, scanning positions for breach
+risk and generating roll suggestions (mirror or forward).
+
+Mirror rolls open an opposite-side spread on the same expiration day.
+Forward rolls move the same-side spread to a further DTE.
+                                    ''',
+                                    epilog='''
+Examples:
+  %(prog)s suggestions              Show pending roll suggestions
+  %(prog)s execute abc123           Execute a roll suggestion
+  %(prog)s dismiss abc123           Dismiss a suggestion
+  %(prog)s config                   Show roll configuration
+  %(prog)s config --mirror-trigger critical  Change mirror trigger level
+
+Aliases: rl
+                                    ''',
+                                    formatter_class=argparse.RawDescriptionHelpFormatter)
+    roll_sub = p_roll.add_subparsers(dest="roll_action")
+
+    # roll suggestions
+    roll_sub.add_parser("suggestions", aliases=["suggest", "sg"],
+                        help="Show pending roll suggestions")
+
+    # roll execute <suggestion-id>
+    roll_exec_p = roll_sub.add_parser("execute", aliases=["ex"],
+                                       help="Execute a roll suggestion")
+    roll_exec_p.add_argument("suggestion_id", help="Suggestion ID (or prefix)")
+
+    # roll dismiss <suggestion-id>
+    roll_dismiss_p = roll_sub.add_parser("dismiss", aliases=["dm"],
+                                          help="Dismiss a roll suggestion")
+    roll_dismiss_p.add_argument("suggestion_id", help="Suggestion ID (or prefix)")
+
+    # roll config
+    roll_config_p = roll_sub.add_parser("config", help="View or update roll configuration")
+    roll_config_p.add_argument("--mirror-trigger",
+                                choices=["breached", "critical", "warning", "watch"],
+                                help="Mirror roll trigger severity level")
+    roll_config_p.add_argument("--forward-trigger",
+                                choices=["breached", "critical", "warning", "watch"],
+                                help="Forward roll trigger severity level")
+    roll_config_p.add_argument("--auto-execute", action="store_true", default=None,
+                                help="Enable auto-execution of roll suggestions")
+    roll_config_p.add_argument("--no-auto-execute", action="store_true", default=None,
+                                help="Disable auto-execution")
+
     # Parse
     args = parser.parse_args()
 
@@ -8428,6 +8690,7 @@ Aliases: exec
         "cl": "close",
         "activity": "trades",
         "exec": "executions",
+        "rl": "roll",
     }
     cmd = alias_map.get(cmd, cmd)
 
@@ -8499,6 +8762,8 @@ Aliases: exec
         rc = asyncio.run(_cmd_close(args))
     elif cmd == "executions":
         rc = asyncio.run(_cmd_executions(args))
+    elif cmd == "roll":
+        rc = asyncio.run(_cmd_roll(args))
     elif cmd == "etrade-auth":
         rc = _cmd_etrade_auth(args)
     else:
