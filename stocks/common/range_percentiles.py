@@ -413,17 +413,22 @@ QUARTER_HOUR_SLOTS = [
     "15:00", "15:15", "15:30", "15:45",
 ]
 
-# Primary display slots: 10-min from 9:30-11:00 ET (incl 9:35), 15-min from 11:00 onward
+# Primary display slots:
+#   10-min from 9:30-11:00 ET (6:30-8:00 AM PT) incl 9:35
+#   15-min from 11:00-15:30 ET (8:00 AM-12:30 PM PT)
+#   10-min from 15:30-15:50 ET (12:30-12:50 PM PT)
 PRIMARY_SLOTS = [
     # 10-min intervals: 9:30 AM - 11:00 AM ET (6:30 - 8:00 AM PT)
     "9:30", "9:35", "9:40", "9:50",
     "10:00", "10:10", "10:20", "10:30", "10:40", "10:50",
-    # 15-min intervals: 11:00 AM - 3:45 PM ET (8:00 AM - 12:45 PM PT)
+    # 15-min intervals: 11:00 AM - 3:15 PM ET (8:00 AM - 12:15 PM PT)
     "11:00", "11:15", "11:30", "11:45",
     "12:00", "12:15", "12:30", "12:45",
     "13:00", "13:15", "13:30", "13:45",
     "14:00", "14:15", "14:30", "14:45",
-    "15:00", "15:15", "15:30", "15:45",
+    "15:00", "15:15",
+    # 10-min intervals: 3:30 PM - 3:50 PM ET (12:30 - 12:50 PM PT)
+    "15:30", "15:40", "15:50",
 ]
 
 # 10-min slots for last 30 min (3:30 PM - 4:00 PM ET)
@@ -616,8 +621,10 @@ async def compute_hourly_moves_to_close(
         m15 = (m // 15) * 15
         qh_slot = f"{h}:{m15:02d}"
 
-        # Primary display bucket: 10-min for 9:30-10:59 ET, 15-min for 11:00+ ET
-        # Special case: 9:35 is a 5-min slot (captures the 9:35 bar specifically)
+        # Primary display bucket:
+        #   10-min for 9:30-10:59 ET (early) and 15:30+ ET (late)
+        #   15-min for 11:00-15:29 ET (midday)
+        #   Special: 9:35 is a 5-min slot
         if h <= 10:
             # 10-min intervals (plus 9:35 special)
             if h == 9 and 35 <= m < 40:
@@ -625,8 +632,12 @@ async def compute_hourly_moves_to_close(
             else:
                 m10 = (m // 10) * 10
                 primary_slot = f"{h}:{m10:02d}"
+        elif h == 15 and m >= 30:
+            # 10-min intervals for 3:30 PM+ ET (12:30 PM+ PT)
+            m10 = (m // 10) * 10
+            primary_slot = f"15:{m10:02d}"
         else:
-            # 15-min intervals for 11:00+ ET
+            # 15-min intervals for 11:00 AM - 3:15 PM ET
             primary_slot = qh_slot
 
         # 10-min bucket (only for 15:30-15:59)
