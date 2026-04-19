@@ -15094,6 +15094,58 @@ def _predictions_methodology_html() -> str:
 """
 
 
+_TIER_DEFINITIONS = {
+    "aggressive": {
+        "label": "Aggressive",
+        "indicator": "red_circle",
+        "emoji": "🔴",
+        "target_hit_rate": "~90%",
+        "description": "Tightest strikes, most premium collected. Use with small position size and stop-loss.",
+        "use_when": "High conviction on direction, willing to accept ~10% breach rate for maximum premium.",
+    },
+    "moderate": {
+        "label": "Moderate",
+        "indicator": "yellow_circle",
+        "emoji": "🟡",
+        "target_hit_rate": "~93%",
+        "description": "Balanced risk/reward. Default choice for most trades.",
+        "use_when": "Standard entries, moderate position size, balanced premium vs safety.",
+    },
+    "conservative": {
+        "label": "Conservative",
+        "indicator": "green_circle",
+        "emoji": "🟢",
+        "target_hit_rate": "~95%",
+        "description": "Widest strikes, least premium but highest safety. Fewest breaches.",
+        "use_when": "Larger positions, no stop-loss, capital preservation priority.",
+    },
+}
+
+_CONTEXT_DEFINITIONS = {
+    "close_to_close": {
+        "label": "Close-to-Close",
+        "description": "Previous close to today's close. Determines P&L at expiration for European-settled options (SPX/NDX/RUT).",
+        "use_for": "0DTE and multi-day credit spread strike selection based on where the day will close.",
+    },
+    "intraday": {
+        "label": "Intraday Move-to-Close",
+        "description": "From a specific time of day to the close. Bands narrow as you approach close.",
+        "use_for": "Entering trades later in the day with tighter strikes. Less time = less uncertainty.",
+    },
+    "max_move": {
+        "label": "Max Intraday Excursion",
+        "description": "Furthest the price travels (high/low) from a time slot through close. Wider than move-to-close because price overshoots before reverting.",
+        "use_for": "Risk monitoring and stop-loss levels. Shows worst-case intraday spike, not just where the day closes.",
+    },
+}
+
+_ASYMMETRY_NOTE = (
+    "Call (up) side uses wider bands than put (down) side because empirical data "
+    "(120 and 250-day windows) consistently shows UP days have 15-30% wider tails "
+    "than DOWN days across SPX/NDX/RUT."
+)
+
+
 def _outlier_toggle_html(exclude_outliers: bool) -> str:
     """Generate outlier toggle button + AJAX reload script.
 
@@ -15632,6 +15684,9 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                     "params": params,
                     "tickers": results,
                     "hourly": hourly,
+                    "tier_definitions": _TIER_DEFINITIONS,
+                    "context_definitions": _CONTEXT_DEFINITIONS,
+                    "asymmetry_note": _ASYMMETRY_NOTE,
                 })
 
             html = format_multi_window_as_html(
@@ -15825,6 +15880,9 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                 },
                 "data": data_list,
                 "hourly": hourly,
+                "tier_definitions": _TIER_DEFINITIONS,
+                "context_definitions": _CONTEXT_DEFINITIONS,
+                "asymmetry_note": _ASYMMETRY_NOTE,
             })
 
         html = format_as_html(
