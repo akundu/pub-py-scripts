@@ -12,8 +12,30 @@ A unified multi-broker trading API (FastAPI) supporting Robinhood, E\*TRADE, and
 |------|---------|
 | `utp.py` | ALL CLI operations + API server |
 | `tests/test_utp.py` | ALL tests (654 tests) |
+| `spread_scanner.py` | Live spread ROI scanner dashboard (standalone tool) |
+| `sim_trader.py` | Auto-trader CLI client (standalone tool) |
 
 There are no standalone scripts. Do not create new top-level scripts unless explicitly asked.
+
+## Spread Scanner
+
+Live terminal dashboard showing credit spread ROI opportunities. Polls the UTP daemon for option chains and renders a matrix of spreads at various OTM percentages.
+
+```bash
+# Default: all tickers, 0DTE, 30s refresh
+python spread_scanner.py
+
+# Custom OTM pcts + tickers
+python spread_scanner.py --otm-pcts 1,1.5,2,3 --tickers SPX,RUT
+
+# Multiple DTEs with risk tiers and iron condors
+python spread_scanner.py --dte 0,1,2 --tiers --types put,call,iron-condor
+
+# Single scan
+python spread_scanner.py --once --tickers SPX --otm-pcts 1,1.5,2
+```
+
+**Prerequisites:** IBKR daemon running (`python utp.py daemon --live`). For `--tiers`: db_server on port 9102.
 
 ## Mandatory Rules
 

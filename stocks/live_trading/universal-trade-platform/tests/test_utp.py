@@ -6398,11 +6398,15 @@ class TestOptionQuoteStreaming:
     """Tests for background option quote streaming cache."""
 
     def test_streaming_config_defaults(self):
-        """StreamingConfig has option quote fields with correct defaults."""
+        """StreamingConfig has option quote fields with correct defaults.
+
+        Defaults updated: poll_interval 15→5s (so the IBKR-overlay gate fires
+        close to the 25s greeks_interval rather than being stuck on 15s ticks).
+        """
         from app.services.streaming_config import StreamingConfig
         cfg = StreamingConfig()
         assert cfg.option_quotes_enabled is False
-        assert cfg.option_quotes_poll_interval == 15.0  # CSV read interval
+        assert cfg.option_quotes_poll_interval == 5.0   # was 15.0
         assert cfg.option_quotes_strike_range_pct == 3.0
         assert cfg.option_quotes_num_expirations == 6  # Cover DTE 0-5
 
@@ -6837,12 +6841,16 @@ option_quotes_num_expirations: 2
     # ── CSV primary mode tests ────────────────────────────────────────────
 
     def test_streaming_config_csv_primary_defaults(self):
-        """StreamingConfig has CSV primary fields with correct defaults."""
+        """StreamingConfig has CSV primary fields with correct defaults.
+
+        IBKR overlay interval default tightened from 60s to 25s — see
+        TestIbkrFetchParallel for the per-call latency math.
+        """
         from app.services.streaming_config import StreamingConfig
         cfg = StreamingConfig()
         assert cfg.option_quotes_csv_primary is True
         assert cfg.option_quotes_csv_dir == ""
-        assert cfg.option_quotes_greeks_interval == 60.0  # IBKR overlay interval
+        assert cfg.option_quotes_greeks_interval == 25.0  # was 60.0
 
     def test_streaming_config_csv_primary_yaml(self, tmp_path):
         """load_streaming_config parses CSV primary fields from YAML."""
@@ -7187,11 +7195,16 @@ option_quotes_greeks_interval: 30.0
             assert d2 in data["expirations"]
             mock_chain.assert_called_once_with("SPX", Broker.IBKR)
 
-    def test_greeks_interval_default_is_45(self):
-        """StreamingConfig greeks interval default changed from 30 to 45."""
+    def test_greeks_interval_default_is_25(self):
+        """StreamingConfig greeks interval tightened to 25s (was 60s).
+
+        Paired with option_quotes_ibkr_max_parallel=6 this fits the typical
+        p50 IBKR latency (5s × ceil(18/6) = 15s) inside the 22.5s wait_for
+        budget (0.9 × 25s).
+        """
         from app.services.streaming_config import StreamingConfig
         cfg = StreamingConfig()
-        assert cfg.option_quotes_greeks_interval == 60.0  # IBKR overlay interval
+        assert cfg.option_quotes_greeks_interval == 25.0
 
 
 class TestEtradeProvider:
@@ -7834,6 +7847,227 @@ class TestPctStrikeResolution:
         assert err is not None
         assert "required" in err
 
+    # ── Risk-tier auto-resolution ──────────────────────────────────────
+
+    def test_validate_risk_tier_intraday_alone_passes(self):
+        """--risk-tier-intraday alone (no strikes, no pct) is valid — strikes
+        get auto-resolved by _resolve_risk_tier_strikes from percentile data."""
+        from utp import _validate_strike_args
+        args = argparse.Namespace(
+            otm_pct=None, close_pct=None,
+            short_strike=None, long_strike=None, width=None,
+            risk_tier=None, risk_tier_intraday="moderate", risk_tier_pred=None,
+        )
+        assert _validate_strike_args("credit-spread", args) is None
+
+    def test_validate_risk_tier_alone_passes(self):
+        from utp import _validate_strike_args
+        args = argparse.Namespace(
+            otm_pct=None, close_pct=None,
+            short_strike=None, long_strike=None, width=None,
+            risk_tier="aggressive", risk_tier_intraday=None, risk_tier_pred=None,
+        )
+        assert _validate_strike_args("credit-spread", args) is None
+
+    def test_validate_risk_tier_pred_alone_passes(self):
+        from utp import _validate_strike_args
+        args = argparse.Namespace(
+            otm_pct=None, close_pct=None,
+            short_strike=None, long_strike=None, width=None,
+            risk_tier=None, risk_tier_intraday=None, risk_tier_pred="conservative",
+        )
+        assert _validate_strike_args("credit-spread", args) is None
+
+    def test_validate_risk_tier_with_explicit_strikes_rejects(self):
+        from utp import _validate_strike_args
+        args = argparse.Namespace(
+            otm_pct=None, close_pct=None,
+            short_strike=6740.0, long_strike=6720.0, width=None,
+            risk_tier=None, risk_tier_intraday="moderate", risk_tier_pred=None,
+        )
+        err = _validate_strike_args("credit-spread", args)
+        assert err is not None
+        assert "risk-tier" in err.lower()
+
+    def test_validate_risk_tier_with_otm_pct_rejects(self):
+        from utp import _validate_strike_args
+        args = argparse.Namespace(
+            otm_pct="2", close_pct=None,
+            short_strike=None, long_strike=None, width=None,
+            risk_tier=None, risk_tier_intraday="moderate", risk_tier_pred=None,
+        )
+        err = _validate_strike_args("credit-spread", args)
+        assert err is not None
+        assert "risk-tier" in err.lower() or "Cannot use" in err
+
+    def test_validate_missing_strikes_error_mentions_risk_tier(self):
+        """The error message lists risk-tier as a third valid option."""
+        from utp import _validate_strike_args
+        args = argparse.Namespace(otm_pct=None, close_pct=None,
+                                  short_strike=None, long_strike=None, width=None)
+        err = _validate_strike_args("credit-spread", args)
+        assert err is not None
+        assert "risk-tier" in err
+
+    def test_validate_iron_condor_risk_tier_alone_passes(self):
+        from utp import _validate_strike_args
+        args = argparse.Namespace(
+            otm_pct=None, close_pct=None,
+            put_short=None, put_long=None, call_short=None, call_long=None,
+            width=None,
+            risk_tier=None, risk_tier_intraday="moderate", risk_tier_pred=None,
+        )
+        assert _validate_strike_args("iron-condor", args) is None
+
+    def test_dispatcher_calls_risk_tier_resolver_without_pct_flags(self):
+        """Bug fix: risk-tier resolution must run even when --otm-pct/--close-pct are NOT set.
+
+        Source-level check on _cmd_trade dispatcher to confirm the gate
+        widened from 'pct_set' to 'pct_set or risk_tier_set'.
+        """
+        import utp
+        with open(utp.__file__) as f:
+            src = f.read()
+        # The dispatcher derives a risk_tier_set bool and uses it in the gate
+        assert 'risk_tier_set = any(' in src
+        assert "if subcommand in (\"credit-spread\", \"iron-condor\") and (pct_set or risk_tier_set):" in src
+
+    def test_iron_condor_argparse_has_risk_tier_flags(self):
+        """Iron-condor parser declares all three --risk-tier* flags."""
+        import utp
+        with open(utp.__file__) as f:
+            src = f.read()
+        # Locate the iron-condor parser block (`t_ic = ...` through end)
+        ic_start = src.index("t_ic = trade_sub.add_parser(\"iron-condor\"")
+        ic_end = src.index("_add_connection_args(t_ic)", ic_start)
+        ic_block = src[ic_start:ic_end]
+        assert 't_ic.add_argument("--risk-tier"' in ic_block
+        assert 't_ic.add_argument("--risk-tier-intraday"' in ic_block
+        assert 't_ic.add_argument("--risk-tier-pred"' in ic_block
+
+    @pytest.mark.asyncio
+    async def test_resolve_risk_tier_iron_condor_sets_all_four_strikes(self, monkeypatch):
+        """Iron-condor risk-tier path resolves BOTH put and call sides and sets
+        put_short / put_long / call_short / call_long on args."""
+        import utp
+        # Stub the per-side resolver so we don't need a live db_server
+        async def fake_resolve_side(*, sym, side, active_tier, tier_pred, tier_intra, db_url):
+            # PUT lands below spot, CALL lands above
+            return (5400.0, 95, "intraday") if side == "put" else (5600.0, 95, "intraday")
+        monkeypatch.setattr(utp, "_resolve_one_tier_side", fake_resolve_side)
+
+        # Stub chain snap to no-op
+        async def no_snap(client, sym, exp, strikes, opt_type, is_ic):
+            return strikes
+        monkeypatch.setattr(utp, "_snap_strikes_to_chain_http", no_snap)
+
+        args = argparse.Namespace(
+            symbol="SPX", expiration="2026-04-30",
+            risk_tier=None, risk_tier_intraday="moderate", risk_tier_pred=None,
+            width=20.0,
+            put_short=None, put_long=None, call_short=None, call_long=None,
+        )
+        rc = await utp._resolve_risk_tier_strikes(args, "iron-condor", client=None)
+        assert rc is None
+        # Put: short=5400, long=5400-20=5380
+        assert args.put_short == 5400.0
+        assert args.put_long == 5380.0
+        # Call: short=5600, long=5600+20=5620
+        assert args.call_short == 5600.0
+        assert args.call_long == 5620.0
+
+    @pytest.mark.asyncio
+    async def test_resolve_risk_tier_credit_spread_sets_short_long(self, monkeypatch):
+        """Credit-spread risk-tier path resolves the option_type side only."""
+        import utp
+        async def fake_resolve_side(*, sym, side, active_tier, tier_pred, tier_intra, db_url):
+            assert side == "put"  # only one side resolved for credit-spread PUT
+            return 7230.0, 95, "intraday"
+        monkeypatch.setattr(utp, "_resolve_one_tier_side", fake_resolve_side)
+
+        async def no_snap(client, sym, exp, strikes, opt_type, is_ic):
+            return strikes
+        monkeypatch.setattr(utp, "_snap_strikes_to_chain_http", no_snap)
+
+        args = argparse.Namespace(
+            symbol="SPX", expiration="2026-04-30",
+            option_type="PUT",
+            risk_tier=None, risk_tier_intraday="moderate", risk_tier_pred=None,
+            width=25.0,
+            short_strike=None, long_strike=None,
+        )
+        rc = await utp._resolve_risk_tier_strikes(args, "credit-spread", client=None)
+        assert rc is None
+        assert args.short_strike == 7230.0
+        assert args.long_strike == 7205.0  # 7230 - 25
+
+    @pytest.mark.asyncio
+    async def test_resolve_risk_tier_call_credit_spread(self, monkeypatch):
+        """Credit-spread CALL: long is short + width."""
+        import utp
+        async def fake_resolve_side(*, sym, side, active_tier, tier_pred, tier_intra, db_url):
+            return 7400.0, 90, "historical"
+        monkeypatch.setattr(utp, "_resolve_one_tier_side", fake_resolve_side)
+
+        async def no_snap(client, sym, exp, strikes, opt_type, is_ic):
+            return strikes
+        monkeypatch.setattr(utp, "_snap_strikes_to_chain_http", no_snap)
+
+        args = argparse.Namespace(
+            symbol="SPX", expiration="2026-04-30",
+            option_type="CALL",
+            risk_tier="aggressive", risk_tier_intraday=None, risk_tier_pred=None,
+            width=20.0,
+            short_strike=None, long_strike=None,
+        )
+        rc = await utp._resolve_risk_tier_strikes(args, "credit-spread", client=None)
+        assert rc is None
+        assert args.short_strike == 7400.0
+        assert args.long_strike == 7420.0  # 7400 + 20
+
+    @pytest.mark.asyncio
+    async def test_resolve_risk_tier_pred_iron_condor(self, monkeypatch):
+        """--risk-tier-pred for iron-condor invokes the pred path on both sides."""
+        import utp
+        calls = []
+        async def fake_resolve_side(*, sym, side, active_tier, tier_pred, tier_intra, db_url):
+            calls.append((side, tier_pred, tier_intra))
+            return (5400.0 if side == "put" else 5600.0), 99, "prediction"
+        monkeypatch.setattr(utp, "_resolve_one_tier_side", fake_resolve_side)
+        async def no_snap(c, s, e, st, ot, ic):
+            return st
+        monkeypatch.setattr(utp, "_snap_strikes_to_chain_http", no_snap)
+
+        args = argparse.Namespace(
+            symbol="NDX", expiration="2026-04-30",
+            risk_tier=None, risk_tier_intraday=None, risk_tier_pred="conservative",
+            width=50.0,
+            put_short=None, put_long=None, call_short=None, call_long=None,
+        )
+        rc = await utp._resolve_risk_tier_strikes(args, "iron-condor", client=None)
+        assert rc is None
+        assert len(calls) == 2
+        sides_called = sorted(c[0] for c in calls)
+        assert sides_called == ["call", "put"]
+        # All calls should pass through tier_pred="conservative"
+        for _, tp, ti in calls:
+            assert tp == "conservative"
+            assert ti is None
+        assert args.put_short == 5400.0 and args.put_long == 5350.0
+        assert args.call_short == 5600.0 and args.call_long == 5650.0
+
+    @pytest.mark.asyncio
+    async def test_resolve_risk_tier_no_tier_set_returns_none(self, monkeypatch):
+        """When no risk-tier flag is set, the resolver short-circuits to None."""
+        import utp
+        args = argparse.Namespace(
+            symbol="SPX", expiration="2026-04-30",
+            risk_tier=None, risk_tier_intraday=None, risk_tier_pred=None,
+            width=20.0,
+        )
+        rc = await utp._resolve_risk_tier_strikes(args, "credit-spread", client=None)
+        assert rc is None
+
     def test_iron_condor_default_width(self):
         """Iron condor uses symbol default width."""
         from utp import _resolve_pct_strikes
@@ -8113,12 +8347,12 @@ class TestClosePctResolution:
 
         rc = asyncio.run(utp_mod._resolve_close_pct_strikes_http(args, "iron-condor", client=None))
         assert rc is None
-        # Put: 6900 * 0.985 = 6796.5 → 6795 (SPX 5pt incr, banker's rounding)
+        # Put: 6900 * 0.985 = 6796.5 → floor to 6795 (round away from money)
         assert args.put_short == 6795.0
         assert args.put_long == 6775.0  # 6795 - 20
-        # Call: 6900 * 1.025 = 7072.5 → 7070 (banker's rounding rounds .5 to even)
-        assert args.call_short == 7070.0
-        assert args.call_long == 7090.0  # 7070 + 20
+        # Call: 6900 * 1.025 = 7072.5 → ceil to 7075 (round away from money)
+        assert args.call_short == 7075.0
+        assert args.call_long == 7095.0  # 7075 + 20
 
     def test_resolve_close_pct_strikes_http_no_prev_close(self, monkeypatch, capsys):
         """When db_server returns nothing, returns error code."""
@@ -11818,3 +12052,793 @@ class TestMarketWindow:
         assert 'os.environ["UTP_POSTMARKET_MINUTES"]' in src
         assert "stream_cfg.option_quotes_premarket_minutes" in src
         assert "stream_cfg.option_quotes_postmarket_minutes" in src
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# IBKR fetch parallelism + cycle interval tuning
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestIbkrFetchParallel:
+    def test_default_max_parallel_is_six(self):
+        """Default StreamingConfig sets ibkr_max_parallel=6 (was hardcoded 3)."""
+        from app.services.streaming_config import StreamingConfig
+        cfg = StreamingConfig()
+        assert cfg.option_quotes_ibkr_max_parallel == 6
+
+    def test_default_intervals_target_25s_cycles(self):
+        """Defaults set greeks_interval=25s and poll_interval=5s."""
+        from app.services.streaming_config import StreamingConfig
+        cfg = StreamingConfig()
+        assert cfg.option_quotes_greeks_interval == 25.0
+        assert cfg.option_quotes_poll_interval == 5.0
+
+    def test_yaml_loader_honors_max_parallel(self, tmp_path):
+        from app.services.streaming_config import load_streaming_config
+        cfg_yaml = tmp_path / "streaming.yaml"
+        cfg_yaml.write_text(
+            "symbols:\n  - SPX\n"
+            "option_quotes_enabled: true\n"
+            "option_quotes_ibkr_max_parallel: 12\n"
+            "option_quotes_greeks_interval: 20\n"
+            "option_quotes_poll_interval: 3\n"
+        )
+        cfg = load_streaming_config(cfg_yaml)
+        assert cfg.option_quotes_ibkr_max_parallel == 12
+        assert cfg.option_quotes_greeks_interval == 20.0
+        assert cfg.option_quotes_poll_interval == 3.0
+
+    def test_default_yaml_uses_new_intervals(self):
+        """The shipped streaming_default.yaml uses the new 25s/5s/parallel=6 defaults."""
+        from app.services.streaming_config import load_streaming_config
+        from pathlib import Path
+        cfg_path = (Path(__file__).resolve().parent.parent
+                    / "configs" / "streaming_default.yaml")
+        cfg = load_streaming_config(cfg_path)
+        assert cfg.option_quotes_greeks_interval == 25.0
+        assert cfg.option_quotes_poll_interval == 5.0
+        assert cfg.option_quotes_ibkr_max_parallel == 6
+
+    def test_stats_exposes_parallel_and_overlay_interval(self):
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from unittest.mock import MagicMock
+        cfg = _make_streaming_config(
+            option_quotes_ibkr_max_parallel=8,
+            option_quotes_greeks_interval=20.0,
+        )
+        svc = OptionQuoteStreamingService(cfg, MagicMock())
+        block = svc.stats["config"]
+        # MagicMock provider has no cap entry → effective == configured
+        assert block["ibkr_max_parallel_configured"] == 8
+        assert block["ibkr_max_parallel_effective"] == 8
+        assert block["ibkr_overlay_interval"] == 20.0
+
+    @pytest.mark.asyncio
+    async def test_fetch_uses_configured_parallelism(self):
+        """`_fetch_from_ibkr` honors option_quotes_ibkr_max_parallel: at any
+        instant no more than N tasks are in flight."""
+        import asyncio as _aio
+        from unittest.mock import MagicMock
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+
+        cfg = _make_streaming_config(option_quotes_ibkr_max_parallel=4)
+        provider = MagicMock()
+
+        in_flight = 0
+        peak = 0
+        completed = 0
+
+        async def fake_get_option_quotes(sym, exp, opt_type, strike_min=None, strike_max=None):
+            nonlocal in_flight, peak, completed
+            in_flight += 1
+            peak = max(peak, in_flight)
+            try:
+                # Hold long enough to overlap with sibling tasks
+                await _aio.sleep(0.05)
+                return [{"strike": 100.0, "bid": 1.0, "ask": 1.1}]
+            finally:
+                in_flight -= 1
+                completed += 1
+
+        # AsyncMock-like behavior — the real provider returns a coroutine
+        async def aw(*a, **kw):
+            return await fake_get_option_quotes(*a, **kw)
+        provider.get_option_quotes = aw
+
+        svc = OptionQuoteStreamingService(cfg, provider)
+        # Build 12 jobs to exceed the parallel cap
+        jobs = [
+            (f"SYM{i // 4}", "2026-04-22", "PUT" if i % 2 else "CALL", 90.0, 110.0, "test")
+            for i in range(12)
+        ]
+        await svc._fetch_from_ibkr(jobs)
+        assert completed == 12, "all jobs must complete"
+        assert peak <= 4, f"max in-flight {peak} exceeded the configured cap (4)"
+        # And we did parallelize: peak should be > 1 with so many jobs
+        assert peak > 1, "parallelism should have engaged across jobs"
+
+    def test_provider_cap_table_present(self):
+        """The provider-specific safe-cap table covers TWS and CPG."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        caps = OptionQuoteStreamingService._PROVIDER_PARALLEL_CAP
+        assert caps["IBKRLiveProvider"] == 3   # TWS — line-limited
+        assert caps["IBKRRestProvider"] == 12  # CPG — rate-limited
+
+    def test_effective_parallel_caps_tws(self):
+        """If user sets parallel=10 with TWS, runtime caps to 3."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from unittest.mock import MagicMock
+
+        # Mock TWS provider by class name
+        class IBKRLiveProvider:
+            pass
+        provider = IBKRLiveProvider()
+
+        cfg = _make_streaming_config(option_quotes_ibkr_max_parallel=10)
+        svc = OptionQuoteStreamingService(cfg, provider)
+        assert svc._effective_max_parallel() == 3
+
+    def test_effective_parallel_caps_cpg(self):
+        """User can run up to 12 on CPG; 15 gets capped to 12."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+
+        class IBKRRestProvider:
+            pass
+        provider = IBKRRestProvider()
+
+        cfg = _make_streaming_config(option_quotes_ibkr_max_parallel=15)
+        svc = OptionQuoteStreamingService(cfg, provider)
+        assert svc._effective_max_parallel() == 12
+
+    def test_effective_parallel_respects_user_under_cap(self):
+        """If user sets parallel=2 with TWS (under cap=3), use 2."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+
+        class IBKRLiveProvider:
+            pass
+        provider = IBKRLiveProvider()
+
+        cfg = _make_streaming_config(option_quotes_ibkr_max_parallel=2)
+        svc = OptionQuoteStreamingService(cfg, provider)
+        assert svc._effective_max_parallel() == 2
+
+    def test_effective_parallel_unknown_provider_uses_config(self):
+        """For mocks/stubs not in the cap table, honor the config value as-is."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from unittest.mock import MagicMock
+
+        cfg = _make_streaming_config(option_quotes_ibkr_max_parallel=8)
+        svc = OptionQuoteStreamingService(cfg, MagicMock())
+        # MagicMock isn't in the cap table → use configured value
+        assert svc._effective_max_parallel() == 8
+
+    @pytest.mark.asyncio
+    async def test_default_parallelism_three_when_no_config(self):
+        """If a custom config object lacks the new attribute, fall back to
+        the legacy class-level default of 3 (no crash)."""
+        import asyncio as _aio
+        from unittest.mock import MagicMock
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+
+        class _LegacyConfig:
+            # Mimics a config object that pre-dates ibkr_max_parallel
+            option_quotes_csv_strike_range_pct = 10.0
+            option_quotes_ibkr_strike_range_pct = 2.5
+            option_quotes_ibkr_dte_list = None
+            option_quotes_ibkr_max_age_sec = 90.0
+            option_quotes_csv_max_age_market_sec = 900.0
+            option_quotes_premarket_minutes = 10
+            option_quotes_postmarket_minutes = 10
+            option_quotes_csv_primary = True
+            option_quotes_csv_dir = ""
+            option_quotes_greeks_interval = 60.0
+            option_quotes_poll_interval = 5.0
+            option_quotes_strike_range_pct = 10.0
+            option_quotes_num_expirations = 6
+            option_quotes_enabled = True
+            symbols = []
+            redis_url = ""
+            redis_enabled = False
+
+        in_flight = 0
+        peak = 0
+
+        async def aw(*a, **kw):
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            try:
+                await _aio.sleep(0.05)
+                return []
+            finally:
+                in_flight -= 1
+
+        provider = MagicMock()
+        provider.get_option_quotes = aw
+
+        svc = OptionQuoteStreamingService(_LegacyConfig(), provider)
+        jobs = [
+            (f"SYM{i}", "2026-04-22", "PUT", 90.0, 110.0, "test")
+            for i in range(8)
+        ]
+        await svc._fetch_from_ibkr(jobs)
+        # Falls back to legacy class-level _IBKR_FETCH_CONCURRENCY = 3
+        assert peak <= 3
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# IBKR overlay no-overlap guarantee
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestIbkrOverlayNoOverlap:
+    @pytest.mark.asyncio
+    async def test_skip_when_overlay_in_flight(self):
+        """A second overlay firing while the first is in flight is skipped."""
+        import asyncio as _aio
+        from unittest.mock import MagicMock
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+
+        cfg = _make_streaming_config()
+        svc = OptionQuoteStreamingService(cfg, MagicMock())
+        svc._csv_primary = True
+        svc._csv_dir = "/tmp/no-csv-dir"
+        svc._load_csv_latest_snapshot = MagicMock(return_value=([], None))
+        svc._last_greeks_fetch = _aio.get_event_loop().time() - 9999  # always due
+
+        # Pretend a previous overlay is still draining
+        svc._ibkr_overlay_in_flight = True
+        svc._ibkr_overlay_started_at = svc._last_greeks_fetch
+
+        called = []
+
+        async def _fake_fetch(jobs):
+            called.append(jobs)
+
+        svc._fetch_from_ibkr = _fake_fetch
+
+        from datetime import date
+        csv_jobs, ibkr_jobs = svc._build_fetch_jobs(
+            "SPX", 5000.0, [date.today().isoformat()], "quote",
+        )
+        await svc._run_csv_primary_cycle(csv_jobs, ibkr_jobs)
+        assert called == [], "overlay should be skipped while previous in flight"
+        assert svc._ibkr_overlay_skipped == 1
+
+    @pytest.mark.asyncio
+    async def test_overlay_clears_in_flight_flag_on_success(self):
+        """After a successful overlay, the in_flight flag is cleared."""
+        from unittest.mock import MagicMock
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        import time as _time
+
+        cfg = _make_streaming_config()
+        svc = OptionQuoteStreamingService(cfg, MagicMock())
+        svc._csv_primary = True
+        svc._csv_dir = "/tmp/no-csv-dir"
+        svc._load_csv_latest_snapshot = MagicMock(return_value=([], None))
+        svc._last_greeks_fetch = _time.monotonic() - 9999  # always due
+
+        async def _fake_fetch(jobs):
+            return None
+
+        svc._fetch_from_ibkr = _fake_fetch
+
+        from datetime import date
+        csv_jobs, ibkr_jobs = svc._build_fetch_jobs(
+            "SPX", 5000.0, [date.today().isoformat()], "quote",
+        )
+        await svc._run_csv_primary_cycle(csv_jobs, ibkr_jobs)
+        assert svc._ibkr_overlay_in_flight is False
+        assert svc._ibkr_overlay_started_at is None
+        assert svc._ibkr_overlay_skipped == 0
+
+    @pytest.mark.asyncio
+    async def test_overlay_clears_in_flight_flag_on_timeout(self):
+        """If the overlay times out, the in_flight flag is still cleared."""
+        import asyncio as _aio
+        from unittest.mock import MagicMock
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        import time as _time
+
+        # Tight timeout so the test runs fast
+        cfg = _make_streaming_config(option_quotes_greeks_interval=0.5)
+        svc = OptionQuoteStreamingService(cfg, MagicMock())
+        svc._csv_primary = True
+        svc._csv_dir = "/tmp/no-csv-dir"
+        svc._load_csv_latest_snapshot = MagicMock(return_value=([], None))
+        svc._last_greeks_fetch = _time.monotonic() - 9999
+
+        async def _slow_fetch(jobs):
+            await _aio.sleep(5.0)  # way past the 0.45s timeout
+
+        svc._fetch_from_ibkr = _slow_fetch
+
+        from datetime import date
+        csv_jobs, ibkr_jobs = svc._build_fetch_jobs(
+            "SPX", 5000.0, [date.today().isoformat()], "quote",
+        )
+        await svc._run_csv_primary_cycle(csv_jobs, ibkr_jobs)
+        # Even after timeout, flag must be reset
+        assert svc._ibkr_overlay_in_flight is False
+        assert svc._ibkr_overlay_started_at is None
+
+    @pytest.mark.asyncio
+    async def test_drain_pending_tasks_cancels_unfinished(self):
+        """_drain_ibkr_pending_tasks cancels lingering tasks within timeout."""
+        import asyncio as _aio
+        from unittest.mock import MagicMock
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+
+        cfg = _make_streaming_config()
+        svc = OptionQuoteStreamingService(cfg, MagicMock())
+
+        async def _hang():
+            try:
+                await _aio.sleep(60)
+            except _aio.CancelledError:
+                raise
+
+        t = _aio.create_task(_hang())
+        svc._ibkr_pending_tasks.add(t)
+        # Drain — should cancel and reap quickly
+        await svc._drain_ibkr_pending_tasks(timeout=1.0)
+        assert t.cancelled() or t.done()
+        assert t not in svc._ibkr_pending_tasks
+
+    def test_stats_exposes_overlay_state(self):
+        from unittest.mock import MagicMock
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+
+        cfg = _make_streaming_config()
+        svc = OptionQuoteStreamingService(cfg, MagicMock())
+        block = svc.stats["ibkr_overlay"]
+        assert block["in_flight"] is False
+        assert block["started_at_age_sec"] is None
+        assert block["skipped_overlapping"] == 0
+        assert block["pending_tasks"] == 0
+
+    def test_stats_exposes_effective_parallel_and_provider_kind(self):
+        from unittest.mock import MagicMock
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+
+        class IBKRLiveProvider:
+            pass
+
+        cfg = _make_streaming_config(option_quotes_ibkr_max_parallel=10)
+        svc = OptionQuoteStreamingService(cfg, IBKRLiveProvider())
+        block = svc.stats["config"]
+        assert block["ibkr_max_parallel_configured"] == 10
+        # TWS cap is 3
+        assert block["ibkr_max_parallel_effective"] == 3
+        assert block["ibkr_provider_kind"] == "IBKRLiveProvider"
+
+
+# ── Spread Scanner Tests ──────────────────────────────────────────────────────
+
+
+class TestSpreadScanner:
+    """Tests for spread_scanner.py functionality."""
+
+    def test_parse_args_defaults(self):
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from spread_scanner import parse_args
+
+        args = parse_args([])
+        assert args.tickers == ["SPX", "RUT", "NDX"]
+        assert args.otm_pcts == [0.5, 1.0, 1.25, 1.5, 2.0, 2.5]
+        assert args.interval == 30
+        assert args.dte == [0]
+        assert args.types == ["put", "call", "iron-condor"]
+        assert args.once is False
+        assert args.tiers is False
+
+    def test_parse_args_custom_otm(self):
+        from spread_scanner import parse_args
+
+        args = parse_args(["--otm-pcts", "1,2,3"])
+        assert args.otm_pcts == [1.0, 2.0, 3.0]
+
+    def test_parse_args_dte(self):
+        from spread_scanner import parse_args
+
+        args = parse_args(["--dte", "0,1,2"])
+        assert args.dte == [0, 1, 2]
+
+    def test_find_best_spread_at_otm(self):
+        from spread_scanner import find_best_spread_at_otm
+
+        spreads = [
+            {"option_type": "PUT", "short_strike": 7000, "otm_pct": 1.5, "credit": 1.0, "roi_pct": 5.0},
+            {"option_type": "PUT", "short_strike": 6950, "otm_pct": 2.2, "credit": 0.5, "roi_pct": 2.5},
+            {"option_type": "CALL", "short_strike": 7200, "otm_pct": 1.0, "credit": 1.2, "roi_pct": 6.0},
+        ]
+        result = find_best_spread_at_otm(spreads, 2.0, "PUT")
+        assert result is not None
+        assert result["short_strike"] == 6950  # closest to 2.0%
+
+    def test_find_best_spread_no_data(self):
+        from spread_scanner import find_best_spread_at_otm
+
+        assert find_best_spread_at_otm([], 1.0, "PUT") is None
+        assert find_best_spread_at_otm(
+            [{"option_type": "CALL", "otm_pct": 1.0}], 1.0, "PUT"
+        ) is None
+
+    def test_compute_iron_condor(self):
+        from spread_scanner import compute_iron_condor
+
+        put = {"credit": 1.50, "width": 20, "short_strike": 7000, "long_strike": 6980}
+        call = {"credit": 1.20, "width": 20, "short_strike": 7200, "long_strike": 7220}
+        ic = compute_iron_condor(put, call)
+        assert ic is not None
+        assert ic["credit"] == 2.70
+        assert ic["put_short"] == 7000
+        assert ic["call_short"] == 7200
+        assert ic["roi_pct"] > 0
+
+    def test_compute_iron_condor_none_input(self):
+        from spread_scanner import compute_iron_condor
+
+        assert compute_iron_condor(None, None) is None
+        assert compute_iron_condor({"credit": 1.0, "width": 20}, None) is None
+
+    def test_render_price_line(self):
+        from spread_scanner import render_price_line
+
+        quotes = {
+            "SPX": {"last": 7103.60},
+            "RUT": None,
+        }
+        prev_closes = {"SPX": 7000.0}
+        line = render_price_line(quotes, prev_closes)
+        assert "7,103.60" in line
+        assert "---" in line
+        assert "+" in line  # shows positive change
+
+    def test_render_spread_cell(self):
+        from spread_scanner import render_spread_cell
+
+        spread = {
+            "short_strike": 7065.0,
+            "long_strike": 7045.0,
+            "credit": 2.10,
+            "roi_pct": 11.7,
+            "otm_pct": 0.5,
+        }
+        cell = render_spread_cell(spread, prev_close=7100.0)
+        assert "7065/7045" in cell
+        assert "$2.10" in cell
+        assert "ot0.5" in cell  # actual OTM%
+        assert "cl" in cell  # % from close
+
+    def test_render_spread_cell_none(self):
+        from spread_scanner import render_spread_cell
+
+        cell = render_spread_cell(None)
+        assert "---" in cell
+
+    def test_color_roi_thresholds(self):
+        from spread_scanner import color_roi, GREEN, YELLOW, DIM
+
+        high = color_roi(5.5)
+        assert GREEN in high
+
+        mid = color_roi(3.0)
+        assert YELLOW in mid
+
+        low = color_roi(1.5)
+        assert DIM in low
+
+    def test_compute_spreads_basic(self):
+        from spread_scanner import compute_spreads
+
+        chain = {
+            "put": [
+                {"strike": 7000, "bid": 2.50, "ask": 2.80},
+                {"strike": 6980, "bid": 1.50, "ask": 1.80},
+            ],
+            "call": [
+                {"strike": 7200, "bid": 2.00, "ask": 2.30},
+                {"strike": 7220, "bid": 1.00, "ask": 1.30},
+            ],
+        }
+        spreads = compute_spreads(chain, "SPX", 7100.0, 20)
+        put_spreads = [s for s in spreads if s["option_type"] == "PUT"]
+        call_spreads = [s for s in spreads if s["option_type"] == "CALL"]
+        assert len(put_spreads) == 1
+        assert put_spreads[0]["short_strike"] == 7000
+        assert put_spreads[0]["long_strike"] == 6980
+        assert put_spreads[0]["credit"] == 0.70  # 2.50 - 1.80
+        assert len(call_spreads) == 1
+        assert call_spreads[0]["short_strike"] == 7200
+
+    def test_dte_expiration_mapping(self):
+        from spread_scanner import map_dte_to_expirations
+        from datetime import date
+
+        today = date.today().isoformat()
+        tomorrow = "2099-01-02"  # far future to ensure it's after today
+        expirations = [today, tomorrow]
+
+        result = map_dte_to_expirations([0, 1], expirations)
+        assert 0 in result
+        assert result[0] == today
+
+    def test_once_flag_exits(self):
+        from spread_scanner import parse_args
+
+        args = parse_args(["--once"])
+        assert args.once is True
+
+    def test_width_defaults(self):
+        from spread_scanner import DEFAULT_WIDTHS, parse_args
+
+        assert DEFAULT_WIDTHS["SPX"] == 20
+        assert DEFAULT_WIDTHS["NDX"] == 50
+        assert DEFAULT_WIDTHS["RUT"] == 20
+
+        # CLI override
+        args = parse_args(["--widths", "SPX=25,RUT=10,NDX=100"])
+        assert args.widths["SPX"] == 25
+        assert args.widths["RUT"] == 10
+        assert args.widths["NDX"] == 100
+
+    def test_top_picks_default(self):
+        from spread_scanner import parse_args
+
+        args = parse_args([])
+        assert args.top == 3
+
+    def test_top_picks_rendering(self):
+        from spread_scanner import _render_top_picks, parse_args
+
+        args = parse_args(["--tickers", "SPX", "--top", "2"])
+        scan_data = {
+            "prev_closes": {"SPX": 7100.0},
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-04-20",
+                    "spreads": {
+                        "SPX": [
+                            {"option_type": "PUT", "short_strike": 7050, "long_strike": 7030,
+                             "credit": 1.5, "roi_pct": 8.1, "otm_pct": 0.7, "width": 20},
+                            {"option_type": "PUT", "short_strike": 7000, "long_strike": 6980,
+                             "credit": 0.5, "roi_pct": 2.6, "otm_pct": 1.4, "width": 20},
+                            {"option_type": "CALL", "short_strike": 7200, "long_strike": 7220,
+                             "credit": 2.0, "roi_pct": 11.1, "otm_pct": 1.4, "width": 20},
+                        ],
+                    },
+                }
+            },
+        }
+        lines = _render_top_picks(scan_data, args)
+        assert len(lines) > 0
+        # Should contain the top 2 by ROI: CALL 11.1% and PUT 8.1%
+        text = "\n".join(lines)
+        assert "7200" in text  # highest ROI
+        assert "7050" in text  # second highest
+        assert "7000" not in text  # third, excluded
+
+    def test_top_picks_filters(self):
+        from spread_scanner import _render_top_picks, parse_args
+
+        args = parse_args(["--tickers", "SPX", "--top", "5",
+                           "--min-credit", "1.0", "--min-otm", "0.5", "--max-otm", "2.0"])
+        scan_data = {
+            "prev_closes": {"SPX": 7100.0},
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-04-20",
+                    "spreads": {
+                        "SPX": [
+                            # Excluded: credit too low
+                            {"option_type": "PUT", "short_strike": 7050, "long_strike": 7030,
+                             "credit": 0.50, "roi_pct": 2.6, "otm_pct": 0.7, "width": 20},
+                            # Excluded: OTM too low
+                            {"option_type": "PUT", "short_strike": 7090, "long_strike": 7070,
+                             "credit": 3.00, "roi_pct": 17.6, "otm_pct": 0.1, "width": 20},
+                            # Excluded: OTM too high
+                            {"option_type": "PUT", "short_strike": 6900, "long_strike": 6880,
+                             "credit": 1.20, "roi_pct": 6.4, "otm_pct": 2.8, "width": 20},
+                            # Passes all filters
+                            {"option_type": "CALL", "short_strike": 7200, "long_strike": 7220,
+                             "credit": 2.00, "roi_pct": 11.1, "otm_pct": 1.4, "width": 20},
+                        ],
+                    },
+                }
+            },
+        }
+        lines = _render_top_picks(scan_data, args)
+        text = "\n".join(lines)
+        assert "7200" in text  # only one that passes all filters
+        assert "7050" not in text  # credit too low
+        assert "7090" not in text  # OTM too low
+        assert "6900" not in text  # OTM too high
+        assert "cr≥$1.00" in text  # filter shown in header
+        assert "otm≥0.5%" in text
+
+    def test_offline_ticker_graceful(self):
+        """Connection errors should produce empty data, not crash."""
+        from spread_scanner import compute_spreads
+
+        # Empty chain
+        spreads = compute_spreads({}, "SPX", 7100.0, 20)
+        assert spreads == []
+
+        # Chain with no valid spreads
+        spreads = compute_spreads({"put": [], "call": []}, "SPX", 7100.0, 20)
+        assert spreads == []
+
+    @pytest.mark.asyncio
+    async def test_scan_all_tickers_mock(self):
+        """End-to-end scan with mocked HTTP responses."""
+        from unittest.mock import AsyncMock, patch
+        from spread_scanner import scan_all_tickers, parse_args
+
+        args = parse_args(["--tickers", "SPX", "--dte", "0", "--once"])
+
+        mock_client = AsyncMock()
+
+        # Mock quote response
+        quote_resp = AsyncMock()
+        quote_resp.status_code = 200
+        quote_resp.json.return_value = {"last": 7100.0, "bid": 7099.0, "ask": 7101.0}
+
+        # Mock expirations response
+        exp_resp = AsyncMock()
+        exp_resp.status_code = 200
+        from datetime import date
+        today = date.today().isoformat()
+        exp_resp.json.return_value = {"expirations": [today]}
+
+        # Mock option chain response
+        chain_resp = AsyncMock()
+        chain_resp.status_code = 200
+        chain_resp.json.return_value = {
+            "quotes": {
+                "put": [
+                    {"strike": 7050, "bid": 1.50, "ask": 1.80},
+                    {"strike": 7030, "bid": 0.80, "ask": 1.10},
+                ],
+                "call": [],
+            }
+        }
+
+        # Route different URL patterns
+        async def mock_get(url, **kwargs):
+            if "list_expirations" in str(kwargs.get("params", {})):
+                return exp_resp
+            elif "/market/options/" in url:
+                return chain_resp
+            else:
+                return quote_resp
+
+        mock_client.get = mock_get
+
+        result = await scan_all_tickers(mock_client, args)
+        assert "quotes" in result
+        assert "dte_sections" in result
+        assert "SPX" in result["quotes"]
+
+    def test_tier_intraday_resolution(self):
+        """Test that resolve_tier_strike uses pct applied to current price."""
+        from spread_scanner import resolve_tier_strike
+
+        tier_data = {
+            "hourly": {
+                "SPX": {
+                    "previous_close": 7100.0,
+                    "recommended": {
+                        "intraday": {
+                            "aggressive": {"put": 90, "call": 90},
+                            "moderate": {"put": 95, "call": 95},
+                            "conservative": {"put": 98, "call": 98},
+                        },
+                        "close_to_close": {
+                            "aggressive": {"put": 90, "call": 90},
+                            "moderate": {"put": 95, "call": 95},
+                            "conservative": {"put": 98, "call": 98},
+                        },
+                    },
+                    "slots": {
+                        "10:00": {
+                            "when_down": {
+                                "pct": {"p90": -1.0, "p95": -1.5, "p98": -2.0},
+                                "price": {"p90": 7050.0, "p95": 7020.0, "p98": 6990.0},
+                            },
+                            "when_up": {
+                                "pct": {"p90": 1.0, "p95": 1.5, "p98": 2.0},
+                                "price": {"p90": 7150.0, "p95": 7180.0, "p98": 7210.0},
+                            },
+                        },
+                    },
+                }
+            }
+        }
+        # Mock current time to be in the 10:00 slot
+        from unittest.mock import patch
+        import spread_scanner
+
+        with patch.object(spread_scanner, "_find_current_slot", return_value="10:00"):
+            # Current price = 7050 (below prev close)
+            # Aggressive p90 pct = -1.0% → 7050 * 0.99 = 6979.5 → round to 6975
+            result = resolve_tier_strike(
+                tier_data, "SPX", "put", "aggressive", "intraday", 7100.0, 7050.0,
+            )
+            assert result is not None
+            strike, raw_price, pctl, pct_val = result
+            assert pctl == 90
+            assert pct_val == -1.0
+            # 7050 * (1 + (-1.0/100)) = 7050 * 0.99 = 6979.5
+            assert abs(raw_price - 6979.5) < 0.1
+            # Rounded to SPX 5-point increment: int(6979.5/5)*5 = 6975
+            assert strike == 6975.0
+
+    def test_tier_close_to_close_resolution(self):
+        """Test close-to-close tier uses tickers data with prev_close."""
+        from spread_scanner import resolve_tier_strike
+        from unittest.mock import patch
+        import spread_scanner
+
+        tier_data = {
+            "hourly": {
+                "RUT": {
+                    "previous_close": 2150.0,
+                    "recommended": {
+                        "close_to_close": {
+                            "aggressive": {"put": 90, "call": 90},
+                            "moderate": {"put": 95, "call": 95},
+                            "conservative": {"put": 98, "call": 98},
+                        },
+                        "intraday": {
+                            "aggressive": {"put": 90, "call": 90},
+                        },
+                    },
+                    "slots": {
+                        "11:00": {
+                            "when_down": {
+                                "pct": {"p95": -1.4},
+                                "price": {"p95": 2120.0},
+                            },
+                            "when_up": {
+                                "pct": {"p95": 1.4},
+                                "price": {"p95": 2180.0},
+                            },
+                        },
+                    },
+                }
+            },
+            # Close-to-close data from tickers field
+            "tickers": [
+                {
+                    "ticker": "RUT",
+                    "windows": {
+                        "0": {
+                            "when_down": {
+                                "pct": {"p90": -1.5, "p95": -2.0, "p98": -2.5},
+                            },
+                            "when_up": {
+                                "pct": {"p90": 1.5, "p95": 2.0, "p98": 2.5},
+                            },
+                        }
+                    }
+                }
+            ]
+        }
+
+        with patch.object(spread_scanner, "_find_current_slot", return_value="11:00"):
+            # Moderate c2c put = p95, c2c window 0 pct p95 = -2.0%
+            # Applied to prev_close 2150: 2150 * 0.98 = 2107
+            result = resolve_tier_strike(
+                tier_data, "RUT", "put", "moderate", "close_to_close", 2150.0, 2140.0,
+            )
+            assert result is not None
+            strike, raw_price, pctl, pct_val = result
+            assert pctl == 95
+            assert pct_val == -2.0
+            # 2150 * (1 + (-2.0/100)) = 2150 * 0.98 = 2107
+            assert abs(raw_price - 2107.0) < 0.1
+            # Rounded to RUT 5-point: int(2107/5)*5 = 2105
+            assert strike == 2105.0
