@@ -2309,6 +2309,60 @@ def format_hourly_moves_as_html(hourly_data: dict) -> str:
         });
     })();
     </script>
+
+    <script>
+    // Auto-scroll intraday tables to the current time slot (0 to -15 min from now).
+    // Repeats every 60 seconds so it stays current as the day progresses.
+    (function() {
+        function scrollToCurrentTime() {
+            // Get current ET time
+            var nowET = new Date().toLocaleString('en-US', {timeZone: 'America/New_York',
+                hour12: false, hour: '2-digit', minute: '2-digit'});
+            var parts = nowET.match(/(\\d+):(\\d+)/);
+            if (!parts) return;
+            var nowMinutes = parseInt(parts[1]) * 60 + parseInt(parts[2]);
+
+            // Find all table-wrap containers in the hourly section
+            document.querySelectorAll('.hourly-section .table-wrap').forEach(function(wrap) {
+                var bestCol = null;
+                var bestDiff = Infinity;
+                var headers = wrap.querySelectorAll('th .local-time-slot');
+
+                headers.forEach(function(el) {
+                    var h = parseInt(el.dataset.etHour, 10);
+                    var m = parseInt(el.dataset.etMin, 10);
+                    var slotMinutes = h * 60 + m;
+                    // Target: 0 to -15 min from now (slot <= now, and within 15 min)
+                    var diff = nowMinutes - slotMinutes;
+                    if (diff >= 0 && diff < bestDiff) {
+                        bestDiff = diff;
+                        bestCol = el.closest('th');
+                    }
+                });
+
+                // If no slot is <= now (before market open), use the first column
+                if (!bestCol && headers.length > 0) {
+                    bestCol = headers[0].closest('th');
+                }
+
+                if (bestCol) {
+                    // Scroll so the target column is roughly centered
+                    var colLeft = bestCol.offsetLeft;
+                    var colWidth = bestCol.offsetWidth;
+                    var wrapWidth = wrap.clientWidth;
+                    var scrollTarget = colLeft - (wrapWidth / 2) + (colWidth / 2);
+                    wrap.scrollTo({left: Math.max(0, scrollTarget), behavior: 'smooth'});
+                }
+            });
+        }
+
+        // Scroll on page load (slight delay for rendering)
+        setTimeout(scrollToCurrentTime, 500);
+
+        // Re-scroll every 60 seconds
+        setInterval(scrollToCurrentTime, 60000);
+    })();
+    </script>
 """)
 
     return "".join(html_parts)
