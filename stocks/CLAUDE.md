@@ -741,3 +741,148 @@ Full docs in `live_trading/universal-trade-platform/docs/`:
 - `websockets.md` — real-time streaming
 
 **HTML docs**: `docs/html/` (dark-themed, 10 pages + index). Rebuild after any `.md` changes: `python3 docs/build_html.py`
+
+## Notification Service (Trade Alerts)
+
+LAN-only notification endpoint for sending SMS (Twilio) and email (SMTP/Gmail) alerts when trades happen. External requests are rejected via IP + X-Forwarded-For validation.
+
+### SMS Providers
+
+Two SMS providers are available:
+
+| Provider | `sms_via` | Requires | Cost | Notes |
+|----------|-----------|----------|------|-------|
+| **Twilio** | `"twilio"` (default) | `TWILIO_*` env vars + `pip install twilio` | ~$1.15/mo + $0.0079/msg | Requires Twilio-purchased phone number |
+| **Gateway** | `"gateway"` | `SMTP_*` env vars only | Free | Email-to-SMS via carrier gateway (T-Mobile/Google Fi: `tmomail.net`) |
+
+The gateway route sends an email to `{phone_digits}@{carrier_domain}` which the carrier delivers as SMS. No Twilio account needed — just Gmail SMTP credentials.
+
+### Configuration
+
+**Required env vars** (export in your shell or `.zshrc`):
+
+```bash
+# Twilio SMS (only needed for sms_via=twilio)
+export TWILIO_ACCOUNT_SID="your_account_sid"
+export TWILIO_AUTH_TOKEN="your_auth_token"
+export TWILIO_FROM_NUMBER="+1xxxxxxxxxx"     # Twilio-purchased number (NOT your personal number)
+
+# SMTP / Gmail (needed for gateway SMS and email channel)
+export SMTP_HOST="smtp.gmail.com"            # default
+export SMTP_PORT="587"                       # default
+export SMTP_USER="you@gmail.com"
+export SMTP_PASSWORD="your_gmail_app_password"
+
+# Default recipients (optional — so callers can omit "to")
+export NOTIFY_DEFAULT_SMS="+1xxxxxxxxxx"     # Your personal phone number (recipient)
+export NOTIFY_DEFAULT_EMAIL="you@gmail.com"
+
+# SMS provider default (optional — "twilio" or "gateway", default: twilio)
+export NOTIFY_SMS_PROVIDER="twilio"
+
+# Carrier gateway domain (optional — default: tmomail.net for T-Mobile/Google Fi)
+export NOTIFY_SMS_GATEWAY="tmomail.net"
+```
+
+**Common carrier gateways**: `tmomail.net` (T-Mobile/Google Fi), `vtext.com` (Verizon), `txt.att.net` (AT&T), `messaging.sprintpcs.com` (Sprint)
+
+**Dependency**: `pip install twilio` (only for Twilio provider; gateway uses stdlib only)
+
+### HTTP API — `POST /api/notify`
+
+LAN-only (192.168.x.x, 10.x.x.x, 172.16-31.x.x, 127.0.0.1). Returns 403 from external networks.
+
+**Request body:**
+```json
+{
+    "channel": "sms",                    // "sms", "email", or "both"
+    "sms_via": "twilio",                 // "twilio" (default) or "gateway"
+    "message": "Sold 5x SPX 5500P/5475P @ $1.20",
+    "to": "+1234567890",                 // optional if NOTIFY_DEFAULT_SMS set
+    "subject": "Trade Alert"             // optional, email only
+}
+```
+
+**Response (200):**
+```json
+{
+    "status": "sent",
+    "channels": {"sms": {"status": "sent", "sid": "SM..."}},
+    "timestamp": "2026-04-20T17:30:00+00:00"
+}
+```
+
+**Status codes:** 200 = all sent, 207 = partial (one channel failed), 400 = bad request, 403 = not LAN, 503 = all channels failed
+
+### Sample Use Cases
+
+```bash
+# 1. SMS via Twilio (default)
+curl -X POST http://localhost:9102/api/notify \
+  -H 'Content-Type: application/json' \
+  -d '{"message": "NDX credit spread filled: 5x 21000P/20950P @ $1.40"}'
+
+# 2. SMS via carrier email gateway (free, no Twilio number needed)
+curl -X POST http://localhost:9102/api/notify \
+  -H 'Content-Type: application/json' \
+  -d '{"sms_via": "gateway", "message": "STOP LOSS triggered: RUT 2420P spread, loss $850"}'
+
+# 3. Both SMS + email
+curl -X POST http://localhost:9102/api/notify \
+  -H 'Content-Type: application/json' \
+  -d '{"channel": "both", "sms_via": "gateway", "message": "EOD: 3 trades, net +$1,200"}'
+
+# 4. Send to a specific number (override default)
+curl -X POST http://localhost:9102/api/notify \
+  -H 'Content-Type: application/json' \
+  -d '{"message": "Market close: P&L today +$2,340", "to": "+15559876543"}'
+
+# 5. Email-only with subject
+curl -X POST http://localhost:9102/api/notify \
+  -H 'Content-Type: application/json' \
+  -d '{"channel": "email", "subject": "EOD Report", "message": "3 trades, 2 wins, net +$1,200"}'
+```
+
+### Direct Python Usage (no HTTP)
+
+Other modules (live trading, backtesting, cron jobs) can import directly:
+
+```python
+from common.notify import send_notification
+
+# SMS via Twilio (default)
+await send_notification(channel="sms", message="SPX put spread filled @ $1.20")
+
+# SMS via carrier gateway (free, no Twilio number needed)
+await send_notification(channel="sms", message="SPX filled", sms_via="gateway")
+
+# Both channels via gateway
+await send_notification(
+    channel="both",
+    message="ROLL ALERT: RUT 2420P ITM, rolled to DTE+1 @ credit $0.15",
+    subject="Roll Executed",
+    sms_via="gateway",
+)
+
+# Override recipient
+await send_notification(channel="sms", message="test", to="+15559999999")
+```
+
+### Integration Points
+
+| Caller | When | Example Message |
+|--------|------|-----------------|
+| Live Advisor (`run_live_advisor.py`) | Trade filled | "NDX 5x 21000P/20950P filled @ $1.40" |
+| Live Advisor | Stop loss triggered | "STOP LOSS: RUT 2420P spread, loss -$850" |
+| Live Advisor | Profit target hit | "PROFIT TARGET: SPX 5600C spread closed +$340" |
+| Live Advisor | EOD roll | "ROLL: 3 positions rolled to DTE+1" |
+| vMaxMin (`run_vmaxmin_live.py`) | Layer added | "New HOD layer: NDX call spread @ 21200" |
+| Cron (`ms1_cron.sh`) | Download failure | "Data download failed for NDX" |
+| UTP daemon | Order filled | "IBKR: BTO 10x SPX 5500P @ $3.20" |
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `common/notify.py` | Notification module (IP check, Twilio SMS, gateway SMS, email, handler) |
+| `tests/test_notify.py` | 48 tests (IP validation, both SMS providers, email, handler) |

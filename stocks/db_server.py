@@ -1015,7 +1015,11 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
 
         # Add stock info HTML page endpoint (parameterized route must be after specific routes)
         app.router.add_get("/stock_info/{symbol}", handle_stock_info_html)
-        
+
+        # Notification endpoint (LAN-only, SMS/email)
+        from common.notify import handle_notify
+        app.router.add_post("/api/notify", handle_notify)
+
         # Add catch-all handler for unknown routes (must be last)
         app.router.add_get("/{path:.*}", handle_catch_all)
         app.router.add_post("/{path:.*}", handle_catch_all)

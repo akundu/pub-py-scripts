@@ -138,6 +138,10 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/api/range_percentiles_multi_window", handle_range_percentiles_multi_window_api)
     app.router.add_get("/range_percentiles", handle_range_percentiles_html)
 
+    # Notification endpoint (LAN-only, SMS/email)
+    from common.notify import handle_notify
+    app.router.add_post("/api/notify", handle_notify)
+
     # Catch-all handler for unknown routes (must be last)
     app.router.add_get("/{path:.*}", handle_catch_all)
     app.router.add_post("/{path:.*}", handle_catch_all)
