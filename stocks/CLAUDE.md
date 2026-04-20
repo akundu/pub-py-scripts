@@ -782,6 +782,10 @@ export NOTIFY_SMS_PROVIDER="twilio"
 
 # Carrier gateway domain (optional — default: tmomail.net for T-Mobile/Google Fi)
 export NOTIFY_SMS_GATEWAY="tmomail.net"
+
+# Email subject prefix tag (optional — default: [UTP-ALERT])
+# Use for Gmail filtering / phone priority notifications
+export NOTIFY_SUBJECT_TAG="[UTP-ALERT]"
 ```
 
 **Common carrier gateways**: `tmomail.net` (T-Mobile/Google Fi), `vtext.com` (Verizon), `txt.att.net` (AT&T), `messaging.sprintpcs.com` (Sprint)
@@ -799,7 +803,8 @@ LAN-only (192.168.x.x, 10.x.x.x, 172.16-31.x.x, 127.0.0.1). Returns 403 from ext
     "sms_via": "twilio",                 // "twilio" (default) or "gateway"
     "message": "Sold 5x SPX 5500P/5475P @ $1.20",
     "to": "+1234567890",                 // optional if NOTIFY_DEFAULT_SMS set
-    "subject": "Trade Alert"             // optional, email only
+    "subject": "Trade Alert",            // optional, email only
+    "tag": "[UTP-ALERT]"                 // optional, subject prefix for Gmail filtering
 }
 ```
 
@@ -885,4 +890,4 @@ await send_notification(channel="sms", message="test", to="+15559999999")
 | File | Purpose |
 |------|---------|
 | `common/notify.py` | Notification module (IP check, Twilio SMS, gateway SMS, email, handler) |
-| `tests/test_notify.py` | 48 tests (IP validation, both SMS providers, email, handler) |
+| `tests/test_notify.py` | 56 tests (IP validation, both SMS providers, email, tag config, handler) |

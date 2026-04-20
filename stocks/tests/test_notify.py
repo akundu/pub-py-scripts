@@ -149,7 +149,7 @@ class TestSendNotification:
         with patch.dict("os.environ", {"NOTIFY_DEFAULT_SMS": "+10000000000"}), \
              patch("common.notify.send_sms", new_callable=AsyncMock, return_value={"status": "sent", "sid": "SM2"}) as mock_sms:
             await send_notification(channel="sms", message="test", to="+19999999999")
-            mock_sms.assert_called_once_with("+19999999999", "test", via="twilio")
+            mock_sms.assert_called_once_with("+19999999999", "test", via="twilio", tag=None)
 
     @pytest.mark.asyncio
     async def test_sms_via_gateway(self):
@@ -157,7 +157,7 @@ class TestSendNotification:
         with patch.dict("os.environ", {"NOTIFY_DEFAULT_SMS": "+15551234567"}), \
              patch("common.notify.send_sms", new_callable=AsyncMock, return_value={"status": "sent", "provider": "gateway"}) as mock_sms:
             result = await send_notification(channel="sms", message="test", sms_via="gateway")
-            mock_sms.assert_called_once_with("+15551234567", "test", via="gateway")
+            mock_sms.assert_called_once_with("+15551234567", "test", via="gateway", tag=None)
             assert result["status"] == "sent"
 
     @pytest.mark.asyncio
@@ -166,7 +166,7 @@ class TestSendNotification:
         with patch.dict("os.environ", {"NOTIFY_DEFAULT_SMS": "+15551234567", "NOTIFY_SMS_PROVIDER": "gateway"}), \
              patch("common.notify.send_sms", new_callable=AsyncMock, return_value={"status": "sent", "provider": "gateway"}) as mock_sms:
             result = await send_notification(channel="sms", message="test")
-            mock_sms.assert_called_once_with("+15551234567", "test", via="gateway")
+            mock_sms.assert_called_once_with("+15551234567", "test", via="gateway", tag=None)
 
     @pytest.mark.asyncio
     async def test_partial_failure(self):
@@ -315,6 +315,44 @@ class TestSMSGatewaySync:
             assert result["status"] == "error"
             assert "Connection refused" in result["error"]
 
+    def test_gateway_custom_tag(self):
+        with patch.dict("os.environ", {
+            "SMTP_USER": "me@gmail.com",
+            "SMTP_PASSWORD": "app-password",
+        }), patch("common.notify.smtplib.SMTP") as mock_smtp:
+            mock_server = MagicMock()
+            mock_smtp.return_value.__enter__ = MagicMock(return_value=mock_server)
+            mock_smtp.return_value.__exit__ = MagicMock(return_value=False)
+            result = _send_sms_gateway_sync("+14085551234", "hi", tag="[TRADE]")
+            assert result["status"] == "sent"
+            sent_msg = mock_server.send_message.call_args[0][0]
+            assert sent_msg['Subject'] == "[TRADE]"
+
+    def test_gateway_default_tag(self):
+        with patch.dict("os.environ", {
+            "SMTP_USER": "me@gmail.com",
+            "SMTP_PASSWORD": "app-password",
+        }), patch("common.notify.smtplib.SMTP") as mock_smtp:
+            mock_server = MagicMock()
+            mock_smtp.return_value.__enter__ = MagicMock(return_value=mock_server)
+            mock_smtp.return_value.__exit__ = MagicMock(return_value=False)
+            _send_sms_gateway_sync("+14085551234", "hi")
+            sent_msg = mock_server.send_message.call_args[0][0]
+            assert sent_msg['Subject'] == "[UTP-ALERT]"
+
+    def test_gateway_env_tag(self):
+        with patch.dict("os.environ", {
+            "SMTP_USER": "me@gmail.com",
+            "SMTP_PASSWORD": "app-password",
+            "NOTIFY_SUBJECT_TAG": "[MY-TAG]",
+        }), patch("common.notify.smtplib.SMTP") as mock_smtp:
+            mock_server = MagicMock()
+            mock_smtp.return_value.__enter__ = MagicMock(return_value=mock_server)
+            mock_smtp.return_value.__exit__ = MagicMock(return_value=False)
+            _send_sms_gateway_sync("+14085551234", "hi")
+            sent_msg = mock_server.send_message.call_args[0][0]
+            assert sent_msg['Subject'] == "[MY-TAG]"
+
 
 # ---------------------------------------------------------------------------
 # Email internals
@@ -353,6 +391,57 @@ class TestEmailSync:
             result = _send_email_sync("to@example.com", "Alert", "msg")
             assert result["status"] == "error"
             assert "Connection refused" in result["error"]
+
+    def test_default_tag_in_subject(self):
+        with patch.dict("os.environ", {
+            "SMTP_USER": "me@gmail.com",
+            "SMTP_PASSWORD": "app-password",
+        }), patch("common.notify.smtplib.SMTP") as mock_smtp:
+            mock_server = MagicMock()
+            mock_smtp.return_value.__enter__ = MagicMock(return_value=mock_server)
+            mock_smtp.return_value.__exit__ = MagicMock(return_value=False)
+            _send_email_sync("to@example.com", "Trade Alert", "msg")
+            sent_msg = mock_server.send_message.call_args[0][0]
+            assert sent_msg['Subject'] == "[UTP-ALERT] Trade Alert"
+
+    def test_custom_tag_in_subject(self):
+        with patch.dict("os.environ", {
+            "SMTP_USER": "me@gmail.com",
+            "SMTP_PASSWORD": "app-password",
+        }), patch("common.notify.smtplib.SMTP") as mock_smtp:
+            mock_server = MagicMock()
+            mock_smtp.return_value.__enter__ = MagicMock(return_value=mock_server)
+            mock_smtp.return_value.__exit__ = MagicMock(return_value=False)
+            _send_email_sync("to@example.com", "Trade Alert", "msg", tag="[TRADE]")
+            sent_msg = mock_server.send_message.call_args[0][0]
+            assert sent_msg['Subject'] == "[TRADE] Trade Alert"
+
+    def test_env_tag_in_subject(self):
+        with patch.dict("os.environ", {
+            "SMTP_USER": "me@gmail.com",
+            "SMTP_PASSWORD": "app-password",
+            "NOTIFY_SUBJECT_TAG": "[STOCK-BOT]",
+        }), patch("common.notify.smtplib.SMTP") as mock_smtp:
+            mock_server = MagicMock()
+            mock_smtp.return_value.__enter__ = MagicMock(return_value=mock_server)
+            mock_smtp.return_value.__exit__ = MagicMock(return_value=False)
+            _send_email_sync("to@example.com", "Trade Alert", "msg")
+            sent_msg = mock_server.send_message.call_args[0][0]
+            assert sent_msg['Subject'] == "[STOCK-BOT] Trade Alert"
+
+    def test_custom_tag_overrides_env(self):
+        """Per-request tag takes precedence over env var."""
+        with patch.dict("os.environ", {
+            "SMTP_USER": "me@gmail.com",
+            "SMTP_PASSWORD": "app-password",
+            "NOTIFY_SUBJECT_TAG": "[STOCK-BOT]",
+        }), patch("common.notify.smtplib.SMTP") as mock_smtp:
+            mock_server = MagicMock()
+            mock_smtp.return_value.__enter__ = MagicMock(return_value=mock_server)
+            mock_smtp.return_value.__exit__ = MagicMock(return_value=False)
+            _send_email_sync("to@example.com", "Trade Alert", "msg", tag="[URGENT]")
+            sent_msg = mock_server.send_message.call_args[0][0]
+            assert sent_msg['Subject'] == "[URGENT] Trade Alert"
 
 
 # ---------------------------------------------------------------------------
@@ -448,7 +537,22 @@ class TestHandleNotify:
             assert resp.status == 200
             mock_send.assert_called_once_with(
                 channel="sms", message="Trade filled", to="+15551234567",
-                subject="Trade Alert", sms_via="gateway",
+                subject="Trade Alert", sms_via="gateway", tag=None,
+            )
+
+    @pytest.mark.asyncio
+    async def test_custom_tag_passthrough(self):
+        req = self._make_request({"channel": "email", "message": "test", "to": "a@b.com", "tag": "[TRADE]"})
+        with patch("common.notify.send_notification", new_callable=AsyncMock, return_value={
+            "status": "sent",
+            "channels": {"email": {"status": "sent"}},
+            "timestamp": "2026-04-20T10:30:00+00:00",
+        }) as mock_send:
+            resp = await handle_notify(req)
+            assert resp.status == 200
+            mock_send.assert_called_once_with(
+                channel="email", message="test", to="a@b.com",
+                subject="Trade Alert", sms_via=None, tag="[TRADE]",
             )
 
     @pytest.mark.asyncio

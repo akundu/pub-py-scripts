@@ -30,6 +30,7 @@ Environment variables:
         NOTIFY_DEFAULT_SMS    — Default SMS recipient phone number
         NOTIFY_DEFAULT_EMAIL  — Default email recipient address
         NOTIFY_SMS_PROVIDER   — Default SMS provider: "twilio" or "gateway" (default: twilio)
+        NOTIFY_SUBJECT_TAG    — Default email subject prefix tag (default: [UTP-ALERT])
 
 Usage from other modules:
     from common.notify import send_notification, is_private_ip
@@ -70,9 +71,10 @@ CARRIER_GATEWAYS = {
     "sms.cricketwireless.net": "Cricket",
 }
 
-# Prefix tag on all email subjects — use this to create a Gmail filter
+# Default prefix tag on all email subjects — use this to create a Gmail filter
 # that forces priority/notification on your phone.
-SUBJECT_TAG = "[UTP-ALERT]"
+# Override per-request via "tag" in the POST body, or globally via NOTIFY_SUBJECT_TAG env var.
+DEFAULT_SUBJECT_TAG = "[UTP-ALERT]"
 
 # ---------------------------------------------------------------------------
 # IP restriction
@@ -144,7 +146,7 @@ def _send_sms_twilio_sync(to: str, message: str) -> dict:
 # SMS via carrier email-to-SMS gateway
 # ---------------------------------------------------------------------------
 
-def _send_sms_gateway_sync(to: str, message: str) -> dict:
+def _send_sms_gateway_sync(to: str, message: str, tag: Optional[str] = None) -> dict:
     """Send SMS via email-to-SMS carrier gateway (blocking).  Called in an executor.
 
     Sends an email to {digits}@{gateway} using SMTP.  The carrier delivers
@@ -163,10 +165,12 @@ def _send_sms_gateway_sync(to: str, message: str) -> dict:
     digits = _phone_to_digits(to)
     gateway_email = f"{digits}@{gateway}"
 
+    subject_tag = tag or os.environ.get('NOTIFY_SUBJECT_TAG', DEFAULT_SUBJECT_TAG)
+
     msg = MIMEText(message, 'plain')
     msg['From'] = user
     msg['To'] = gateway_email
-    msg['Subject'] = SUBJECT_TAG
+    msg['Subject'] = subject_tag
 
     try:
         with smtplib.SMTP(host, port, timeout=15) as server:
@@ -184,17 +188,18 @@ def _send_sms_gateway_sync(to: str, message: str) -> dict:
 # Unified SMS dispatcher
 # ---------------------------------------------------------------------------
 
-async def send_sms(to: str, message: str, via: str = "twilio") -> dict:
+async def send_sms(to: str, message: str, via: str = "twilio", tag: Optional[str] = None) -> dict:
     """Send SMS via the chosen provider.
 
     Args:
         to:  Recipient phone number (e.g. +14085551234)
         message: Text body
         via: "twilio" or "gateway"
+        tag: Subject tag for gateway emails (ignored for Twilio)
     """
     loop = asyncio.get_running_loop()
     if via == "gateway":
-        return await loop.run_in_executor(None, _send_sms_gateway_sync, to, message)
+        return await loop.run_in_executor(None, _send_sms_gateway_sync, to, message, tag)
     return await loop.run_in_executor(None, _send_sms_twilio_sync, to, message)
 
 
@@ -202,7 +207,7 @@ async def send_sms(to: str, message: str, via: str = "twilio") -> dict:
 # Email via SMTP
 # ---------------------------------------------------------------------------
 
-def _send_email_sync(to: str, subject: str, message: str) -> dict:
+def _send_email_sync(to: str, subject: str, message: str, tag: Optional[str] = None) -> dict:
     """Send an email via SMTP (blocking).  Called in an executor."""
     host = os.environ.get('SMTP_HOST', 'smtp.gmail.com')
     port = int(os.environ.get('SMTP_PORT', '587'))
@@ -213,7 +218,8 @@ def _send_email_sync(to: str, subject: str, message: str) -> dict:
         missing = [v for v in ('SMTP_USER', 'SMTP_PASSWORD') if not os.environ.get(v)]
         return {"status": "error", "error": f"Missing env vars: {', '.join(missing)}"}
 
-    tagged_subject = f"{SUBJECT_TAG} {subject}" if not subject.startswith(SUBJECT_TAG) else subject
+    subject_tag = tag or os.environ.get('NOTIFY_SUBJECT_TAG', DEFAULT_SUBJECT_TAG)
+    tagged_subject = f"{subject_tag} {subject}" if not subject.startswith(subject_tag) else subject
 
     msg = MIMEMultipart()
     msg['From'] = user
@@ -233,10 +239,10 @@ def _send_email_sync(to: str, subject: str, message: str) -> dict:
         return {"status": "error", "error": str(exc)}
 
 
-async def send_email(to: str, subject: str, message: str) -> dict:
+async def send_email(to: str, subject: str, message: str, tag: Optional[str] = None) -> dict:
     """Async wrapper — runs SMTP call in the default executor."""
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, _send_email_sync, to, subject, message)
+    return await loop.run_in_executor(None, _send_email_sync, to, subject, message, tag)
 
 
 # ---------------------------------------------------------------------------
@@ -250,6 +256,7 @@ async def send_notification(
     to: Optional[str] = None,
     subject: str = "Trade Alert",
     sms_via: Optional[str] = None,
+    tag: Optional[str] = None,
 ) -> dict:
     """Send a notification via the specified channel(s).
 
@@ -261,6 +268,8 @@ async def send_notification(
         subject:  Email subject line (ignored for SMS-only)
         sms_via:  SMS provider — "twilio" or "gateway".
                   Falls back to NOTIFY_SMS_PROVIDER env var, then "twilio".
+        tag:      Subject prefix tag (default: "[UTP-ALERT]" or NOTIFY_SUBJECT_TAG env var).
+                  Used for Gmail filtering / phone priority notifications.
 
     Returns:
         dict with per-channel results and overall status.
@@ -275,14 +284,14 @@ async def send_notification(
             if not recipient:
                 results["sms"] = {"status": "error", "error": "No recipient — set 'to' or NOTIFY_DEFAULT_SMS"}
                 continue
-            results["sms"] = await send_sms(recipient, message, via=provider)
+            results["sms"] = await send_sms(recipient, message, via=provider, tag=tag)
 
         elif ch == "email":
             recipient = to or os.environ.get('NOTIFY_DEFAULT_EMAIL')
             if not recipient:
                 results["email"] = {"status": "error", "error": "No recipient — set 'to' or NOTIFY_DEFAULT_EMAIL"}
                 continue
-            results["email"] = await send_email(recipient, subject, message)
+            results["email"] = await send_email(recipient, subject, message, tag=tag)
 
         else:
             results[ch] = {"status": "error", "error": f"Unknown channel: {ch}"}
@@ -308,6 +317,7 @@ async def handle_notify(request: web.Request) -> web.Response:
             "sms_via":  "twilio" | "gateway",        // default: "twilio" (or NOTIFY_SMS_PROVIDER)
             "to":       "+1234567890" | "a@b.com",   // optional if env default set
             "subject":  "Trade Alert",               // optional, email only
+            "tag":      "[UTP-ALERT]",               // optional, subject prefix for filtering
             "message":  "Sold 5x SPX 5500P ..."      // required
         }
     """
@@ -337,6 +347,7 @@ async def handle_notify(request: web.Request) -> web.Response:
         to=body.get("to"),
         subject=body.get("subject", "Trade Alert"),
         sms_via=sms_via,
+        tag=body.get("tag"),
     )
 
     status_code = 200 if result["status"] == "sent" else 207 if result["status"] == "partial" else 503
