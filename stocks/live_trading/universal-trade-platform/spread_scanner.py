@@ -978,22 +978,23 @@ def _render_spread_section(
                         )
                         if result:
                             strike, raw_price, pctl, pct_val = result
+                            width = args.widths.get(sym, 20)
+                            long = (strike - width) if opt_type == "PUT" else (strike + width)
                             spread = find_spread_at_strike(spreads, strike, opt_type)
                             if not spread:
                                 # Try building from raw chain
                                 chain = dte_data.get("chains", {}).get(sym)
                                 if chain and price > 0:
-                                    width = args.widths.get(sym, 20)
                                     spread = build_spread_from_chain(
                                         chain, strike, opt_type, width, price,
                                     )
                             if spread:
                                 cell = render_spread_cell(spread, pc, dte)
                             else:
-                                # Strike not in chain — show strike + pctl, dash for credit/nROI
-                                strikes = f"{int(strike)}"
+                                # Strike not in chain — show short/long + pctl, dash for credit/nROI
+                                pair = f"{int(strike)}/{int(long)}"
                                 meta = f"{DIM}p{pctl} {pct_val:+.1f}%{RESET}"
-                                cell = _pad(f"{strikes:<12}{'-':<7}{'-':<6}{meta}")
+                                cell = _pad(f"{pair:<12}{'-':<7}{'-':<6}{meta}")
                             row += f" {cell}│"
                         else:
                             row += f" {_pad('─'):}│"
