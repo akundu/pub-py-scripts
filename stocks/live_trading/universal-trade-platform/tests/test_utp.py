@@ -12755,7 +12755,7 @@ class TestSpreadScanner:
         from spread_scanner import render_spread_cell
 
         cell = render_spread_cell(None)
-        assert "---" in cell
+        assert "─" in cell
 
     def test_color_roi_thresholds(self):
         from spread_scanner import color_roi, GREEN, YELLOW, DIM
@@ -13080,3 +13080,234 @@ class TestSpreadScanner:
             assert abs(raw_price - 2107.0) < 0.1
             # Rounded to RUT 5-point: int(2107/5)*5 = 2105
             assert strike == 2105.0
+
+    def test_compute_norm_roi(self):
+        from spread_scanner import _compute_norm_roi
+        # DTE 0: norm = ROI / 1
+        assert _compute_norm_roi(10.0, 0) == 10.0
+        # DTE 1: norm = ROI / 2
+        assert _compute_norm_roi(10.0, 1) == 5.0
+        # DTE 2: norm = ROI / 3
+        assert _compute_norm_roi(9.0, 2) == 3.0
+
+    def test_filter_by_norm_roi(self):
+        from spread_scanner import _filter_by_norm_roi
+
+        candidates = [
+            {"roi_pct": 8.1, "dte": 0, "symbol": "SPX", "option_type": "PUT",
+             "short_strike": 5700, "long_strike": 5680, "credit": 1.50, "otm_pct": 1.72},
+            {"roi_pct": 1.5, "dte": 0, "symbol": "SPX", "option_type": "PUT",
+             "short_strike": 5750, "long_strike": 5730, "credit": 0.30, "otm_pct": 0.86},
+            {"roi_pct": 11.1, "dte": 1, "symbol": "SPX", "option_type": "CALL",
+             "short_strike": 5900, "long_strike": 5920, "credit": 2.00, "otm_pct": 1.72},
+        ]
+
+        qualifying = _filter_by_norm_roi(candidates, 4.0)
+        # DTE 0 PUT 8.1%: norm = 8.1/1 = 8.1 >= 4 ✓
+        # DTE 0 PUT 1.5%: norm = 1.5/1 = 1.5 < 4 ✗
+        # DTE 1 CALL 11.1%: norm = 11.1/2 = 5.55 >= 4 ✓
+        assert len(qualifying) == 2
+        assert qualifying[0]["norm_roi"] == 8.1
+        assert qualifying[1]["norm_roi"] == 5.55
+
+    def test_filter_by_norm_roi_disabled(self):
+        from spread_scanner import _filter_by_norm_roi
+
+        assert _filter_by_norm_roi([], 5.0) == []
+        assert _filter_by_norm_roi([{"roi_pct": 10, "dte": 0}], 0) == []
+
+    def test_log_qualifying_spreads(self, tmp_path):
+        from spread_scanner import _log_qualifying_spreads
+        import json
+
+        log_file = str(tmp_path / "test_spreads.jsonl")
+        spreads = [
+            {"symbol": "SPX", "option_type": "PUT", "norm_roi": 8.1, "credit": 1.50},
+            {"symbol": "RUT", "option_type": "CALL", "norm_roi": 5.5, "credit": 2.00},
+        ]
+        _log_qualifying_spreads(spreads, log_file)
+
+        with open(log_file) as f:
+            lines = f.readlines()
+        assert len(lines) == 2
+        assert json.loads(lines[0])["symbol"] == "SPX"
+        assert json.loads(lines[1])["norm_roi"] == 5.5
+
+        # Append more
+        _log_qualifying_spreads([{"symbol": "NDX", "norm_roi": 12.0}], log_file)
+        with open(log_file) as f:
+            lines = f.readlines()
+        assert len(lines) == 3
+
+    def test_log_empty_list_noop(self, tmp_path):
+        from spread_scanner import _log_qualifying_spreads
+
+        log_file = str(tmp_path / "empty.jsonl")
+        _log_qualifying_spreads([], log_file)
+        assert not (tmp_path / "empty.jsonl").exists()
+
+    def test_parse_args_log_and_notify(self):
+        from spread_scanner import parse_args
+
+        args = parse_args([
+            "--min-norm-roi", "3.5",
+            "--log", "3:spreads.jsonl",
+            "--notify", "4:ak@gmail.com",
+        ])
+        assert args.min_norm_roi == 3.5
+        assert args.log_threshold == 3.0
+        assert args.log_file == "spreads.jsonl"
+        assert args.notify_threshold == 4.0
+        assert args.notify_email == "ak@gmail.com"
+
+    def test_parse_args_defaults(self):
+        from spread_scanner import parse_args
+
+        args = parse_args([])
+        assert args.min_norm_roi == 0
+        assert args.log_threshold == 0
+        assert args.log_file is None
+        assert args.notify_threshold == 0
+        assert args.notify_email is None
+
+    @pytest.mark.asyncio
+    async def test_notify_qualifying_spreads(self):
+        from spread_scanner import _notify_qualifying_spreads
+        import httpx
+
+        calls = []
+
+        async def mock_post(url, **kwargs):
+            calls.append((url, kwargs))
+            resp = httpx.Response(200, json={"status": "sent"})
+            return resp
+
+        client = httpx.AsyncClient()
+        client.post = mock_post
+
+        spreads = [
+            {"symbol": "SPX", "option_type": "PUT", "dte": 0,
+             "short_strike": 5700, "long_strike": 5680,
+             "credit": 1.50, "roi_pct": 8.1, "norm_roi": 8.1, "otm_pct": 1.72},
+        ]
+        await _notify_qualifying_spreads(
+            client, spreads, "http://localhost:9102", "ak@gmail.com",
+        )
+        assert len(calls) == 1
+        assert "/api/notify" in calls[0][0]
+        body = calls[0][1]["json"]
+        assert body["channel"] == "email"
+        assert body["to"] == "ak@gmail.com"
+        assert "nROI=8.1%" in body["message"]
+
+    @pytest.mark.asyncio
+    async def test_notify_empty_list_noop(self):
+        from spread_scanner import _notify_qualifying_spreads
+        import httpx
+
+        calls = []
+        client = httpx.AsyncClient()
+        client.post = lambda *a, **kw: calls.append(1)
+
+        await _notify_qualifying_spreads(
+            client, [], "http://localhost:9102", "ak@gmail.com",
+        )
+        assert len(calls) == 0
+
+    def test_top_picks_shows_norm_roi(self):
+        """Top picks table includes nROI column."""
+        from spread_scanner import _render_top_picks, parse_args
+
+        args = parse_args(["--tickers", "SPX", "--top", "1"])
+        scan_data = {
+            "quotes": {"SPX": {"last": 5800}},
+            "prev_closes": {"SPX": 5790},
+            "dte_sections": {
+                1: {
+                    "expiration": "2026-04-22",
+                    "spreads": {
+                        "SPX": [
+                            {"option_type": "PUT", "short_strike": 5700, "long_strike": 5680,
+                             "width": 20, "credit": 1.50, "roi_pct": 8.1, "otm_pct": 1.72},
+                        ],
+                    },
+                },
+            },
+        }
+        lines = _render_top_picks(scan_data, args)
+        text = "\n".join(lines)
+        assert "nROI" in text  # header has nROI column
+
+    def test_min_norm_roi_filters_top_picks(self):
+        """--min-norm-roi filters low nROI spreads from top picks."""
+        from spread_scanner import _render_top_picks, parse_args
+
+        # nROI filter = 5 → DTE1 spread with ROI 8.1% has nROI 4.05 → excluded
+        args = parse_args(["--tickers", "SPX", "--top", "5", "--min-norm-roi", "5"])
+        scan_data = {
+            "quotes": {"SPX": {"last": 5800}},
+            "prev_closes": {"SPX": 5790},
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-04-21",
+                    "spreads": {
+                        "SPX": [
+                            {"option_type": "PUT", "short_strike": 5700, "long_strike": 5680,
+                             "width": 20, "credit": 1.50, "roi_pct": 8.1, "otm_pct": 1.72},
+                        ],
+                    },
+                },
+                1: {
+                    "expiration": "2026-04-22",
+                    "spreads": {
+                        "SPX": [
+                            {"option_type": "PUT", "short_strike": 5700, "long_strike": 5680,
+                             "width": 20, "credit": 1.50, "roi_pct": 8.1, "otm_pct": 1.72},
+                        ],
+                    },
+                },
+            },
+        }
+        lines = _render_top_picks(scan_data, args)
+        text = "\n".join(lines)
+        # DTE 0: nROI = 8.1/1 = 8.1 >= 5 ✓ (included)
+        # DTE 1: nROI = 8.1/2 = 4.05 < 5 ✗ (excluded)
+        assert "D0" in text
+        assert "D1" not in text
+
+    def test_notify_gated_by_market_hours(self):
+        """Verify spread_scanner imports is_market_hours for notification gating."""
+        import spread_scanner
+        assert hasattr(spread_scanner, "is_market_hours")
+        assert callable(spread_scanner.is_market_hours)
+
+    def test_build_spread_from_chain(self):
+        from spread_scanner import build_spread_from_chain
+
+        chain = {
+            "put": [
+                {"strike": 2735, "bid": 1.20, "ask": 1.40},
+                {"strike": 2710, "bid": 0.30, "ask": 0.50},
+            ],
+            "call": [
+                {"strike": 2850, "bid": 1.50, "ask": 1.70},
+                {"strike": 2875, "bid": 0.40, "ask": 0.60},
+            ],
+        }
+        # PUT: short 2735 bid=1.20, long 2710 ask=0.50 → credit=0.70
+        spread = build_spread_from_chain(chain, 2735, "PUT", 25, 2800)
+        assert spread is not None
+        assert spread["credit"] == 0.70
+        assert spread["short_strike"] == 2735
+        assert spread["long_strike"] == 2710
+
+        # CALL: short 2850 bid=1.50, long 2875 ask=0.60 → credit=0.90
+        spread = build_spread_from_chain(chain, 2850, "CALL", 25, 2800)
+        assert spread is not None
+        assert spread["credit"] == 0.90
+
+        # Missing long leg → None
+        assert build_spread_from_chain(chain, 2735, "PUT", 30, 2800) is None
+
+        # Missing strike entirely → None
+        assert build_spread_from_chain(chain, 2700, "PUT", 25, 2800) is None

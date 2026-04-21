@@ -37,6 +37,15 @@ Usage:
     # Custom contracts for dollar display
     python spread_scanner.py --contracts 20
 
+    # Log spreads with normalized ROI >= 3% to file
+    python spread_scanner.py --log 3:spreads.jsonl
+
+    # Log + email notification when qualifying spreads appear
+    python spread_scanner.py --log 3:spreads.jsonl --notify 4:ak@gmail.com
+
+    # Filter top picks to nROI >= 2%
+    python spread_scanner.py --min-norm-roi 2
+
     # Full kitchen sink
     python spread_scanner.py --tickers SPX,RUT,NDX --dte 0,1,2 --tiers \\
         --types put,call,iron-condor --otm-pcts 0.5,1,1.25,1.5,2,2.5 --interval 20
@@ -51,11 +60,21 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
+import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import httpx
+
+# Add stocks/ root to path so we can import common.market_hours
+_STOCKS_ROOT = str(Path(__file__).resolve().parent.parent.parent)
+if _STOCKS_ROOT not in sys.path:
+    sys.path.insert(0, _STOCKS_ROOT)
+
+from common.market_hours import is_market_hours  # noqa: E402
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -272,6 +291,57 @@ def find_spread_at_strike(
         if s["option_type"] == option_type and s["short_strike"] == strike:
             return s
     return None
+
+
+def build_spread_from_chain(
+    chain: dict, short_strike: float, option_type: str,
+    width: int, current_price: float,
+) -> dict | None:
+    """Build a single spread from raw chain data at a specific short strike.
+
+    Used when the pre-computed spread list doesn't have this strike (e.g., the
+    tier strike is beyond the normal OTM range).
+    """
+    opt_key = option_type.lower()
+    quotes = chain.get(opt_key, [])
+    by_strike = {q["strike"]: q for q in quotes if q.get("strike")}
+
+    long_strike = (short_strike - width) if option_type == "PUT" else (short_strike + width)
+    sq = by_strike.get(short_strike)
+    lq = by_strike.get(long_strike)
+    if not sq or not lq:
+        return None
+
+    short_bid = sq.get("bid", 0) or 0
+    long_ask = lq.get("ask", 0) or 0
+    if short_bid <= 0 or long_ask <= 0:
+        return None
+
+    credit = round(short_bid - long_ask, 2)
+    if credit <= 0:
+        return None
+
+    credit_pc = credit * 100
+    max_loss_pc = width * 100 - credit_pc
+    if max_loss_pc <= 0:
+        return None
+
+    roi = round(credit_pc / max_loss_pc * 100, 1)
+    otm = round(
+        ((current_price - short_strike) / current_price * 100)
+        if option_type == "PUT"
+        else ((short_strike - current_price) / current_price * 100),
+        2,
+    )
+    return {
+        "option_type": option_type,
+        "short_strike": short_strike,
+        "long_strike": long_strike,
+        "width": width,
+        "credit": credit,
+        "roi_pct": roi,
+        "otm_pct": otm,
+    }
 
 
 def compute_iron_condor(put_spread: dict | None, call_spread: dict | None) -> dict | None:
@@ -532,45 +602,46 @@ def _fmt_pct(val: float) -> str:
     return f"{val:.1f}"
 
 
-def render_spread_cell(spread: dict | None, prev_close: float = 0) -> str:
-    """Render a spread cell: 'Short/Long $Cr ROI ot:X cl:Y'.
+def render_spread_cell(spread: dict | None, prev_close: float = 0, dte: int = 0) -> str:
+    """Render a spread cell with fixed-width fields.
 
-    Shows actual OTM% from current price and % distance from previous close.
-    Fixed-width output (COL_WIDTH visible chars).
+    Format: 'Short/Long  $Cr   nROI  ot:X cl:Y'
+    Each field is individually fixed width for column alignment.
     """
     if not spread:
-        return _pad(f"{'---':^{COL_WIDTH}}")
+        return _pad(f"{'─':^{COL_WIDTH}}")
     short = int(spread["short_strike"])
     long = int(spread["long_strike"])
     credit = spread["credit"]
-    roi = spread["roi_pct"]
+    norm_roi = _compute_norm_roi(spread["roi_pct"], dte)
     otm = spread.get("otm_pct", 0)
-    # % from previous close
     if prev_close > 0:
         chg_pct = (spread["short_strike"] - prev_close) / prev_close * 100
     else:
         chg_pct = 0
 
-    text = f"{short}/{long} ${credit:.2f} "
-    roi_str = color_roi(roi)
-    meta = f" {DIM}ot{otm:.1f} cl{_fmt_pct(chg_pct)}{RESET}"
-    return _pad(text + roi_str + meta)
+    strikes = f"{short}/{long}"
+    cr_str = f"${credit:.2f}"
+    nroi_str = color_roi(norm_roi)
+    meta = f"{DIM}ot{otm:.1f} cl{_fmt_pct(chg_pct)}{RESET}"
+    return _pad(f"{strikes:<12}{cr_str:<7}{nroi_str} {meta}")
 
 
-def render_ic_cell(ic: dict | None, prev_close: float = 0) -> str:
-    """Render an iron condor cell. Fixed-width output."""
+def render_ic_cell(ic: dict | None, prev_close: float = 0, dte: int = 0) -> str:
+    """Render an iron condor cell with fixed-width fields."""
     if not ic:
-        return _pad(f"{'---':^{COL_WIDTH}}")
+        return _pad(f"{'─':^{COL_WIDTH}}")
     credit = ic["credit"]
-    roi = ic["roi_pct"]
+    norm_roi = _compute_norm_roi(ic["roi_pct"], dte)
     ps = int(ic["put_short"])
     cs = int(ic["call_short"])
     put_otm = ic.get("put_otm_pct", 0)
     call_otm = ic.get("call_otm_pct", 0)
-    text = f"P{ps}/C{cs} ${credit:.2f} "
-    roi_str = color_roi(roi)
-    meta = f" {DIM}p{put_otm:.1f}/c{call_otm:.1f}{RESET}"
-    return _pad(text + roi_str + meta)
+    strikes = f"P{ps}/C{cs}"
+    cr_str = f"${credit:.2f}"
+    nroi_str = color_roi(norm_roi)
+    meta = f"{DIM}p{put_otm:.1f}/c{call_otm:.1f}{RESET}"
+    return _pad(f"{strikes:<14}{cr_str:<7}{nroi_str} {meta}")
 
 
 def render_price_line(quotes: dict[str, dict], prev_closes: dict[str, float]) -> str:
@@ -638,18 +709,16 @@ def _resolve_tier_boundaries(
     return boundaries
 
 
-def _render_top_picks(scan_data: dict, args) -> list[str]:
-    """Render the top N best spreads across all tickers/DTEs/types by ROI.
+def _collect_filtered_candidates(scan_data: dict, args) -> list[dict]:
+    """Collect all spreads that pass the configured filters.
 
-    Applies filters: --min-credit, --min-roi, --min-otm, --max-otm, --min-tier.
+    Applies: --min-credit, --min-roi, --min-norm-roi, --min-otm, --max-otm,
+    --min-tier, --min-tier-close.  Returns sorted by ROI descending.
     """
-    top_n = args.top
-    if top_n <= 0:
-        return []
-
     prev_closes = scan_data.get("prev_closes", {})
     min_credit = args.min_credit
     min_roi = args.min_roi
+    min_norm_roi = args.min_norm_roi
     min_otm = args.min_otm
     max_otm = args.max_otm
     min_tier = args.min_tier
@@ -666,7 +735,6 @@ def _render_top_picks(scan_data: dict, args) -> list[str]:
                 scan_data, args, "close_to_close", dte=dte_val,
             )
 
-    # Collect all spreads with metadata
     all_candidates = []
     for dte, dte_data in scan_data.get("dte_sections", {}).items():
         exp = dte_data.get("expiration", "?")
@@ -674,10 +742,11 @@ def _render_top_picks(scan_data: dict, args) -> list[str]:
             spreads = dte_data.get("spreads", {}).get(sym, [])
             pc = prev_closes.get(sym, 0)
             for s in spreads:
-                # Apply filters
                 if min_credit > 0 and s.get("credit", 0) < min_credit:
                     continue
                 if min_roi > 0 and s.get("roi_pct", 0) < min_roi:
+                    continue
+                if min_norm_roi > 0 and _compute_norm_roi(s.get("roi_pct", 0), dte) < min_norm_roi:
                     continue
                 otm = abs(s.get("otm_pct", 0))
                 if min_otm > 0 and otm < min_otm:
@@ -685,7 +754,7 @@ def _render_top_picks(scan_data: dict, args) -> list[str]:
                 if max_otm > 0 and otm > max_otm:
                     continue
 
-                # Tier filter (intraday): short strike must be at or beyond boundary
+                # Tier filter (intraday)
                 if min_tier and sym in tier_boundaries:
                     tier_sides = tier_boundaries[sym].get(min_tier, {})
                     if s["option_type"] == "PUT":
@@ -697,7 +766,7 @@ def _render_top_picks(scan_data: dict, args) -> list[str]:
                         if boundary is not None and s["short_strike"] < boundary:
                             continue
 
-                # Tier filter (close-to-close) — uses per-DTE boundaries
+                # Tier filter (close-to-close)
                 if min_tier_close:
                     dte_bounds = tier_boundaries_c2c.get(dte, {})
                     if sym in dte_bounds:
@@ -719,50 +788,64 @@ def _render_top_picks(scan_data: dict, args) -> list[str]:
                     "prev_close": pc,
                 })
 
+    all_candidates.sort(key=lambda x: x["roi_pct"], reverse=True)
+    return all_candidates
+
+
+def _render_top_picks(scan_data: dict, args) -> list[str]:
+    """Render the top N best spreads across all tickers/DTEs/types by ROI.
+
+    Uses _collect_filtered_candidates() for all filter logic.
+    """
+    top_n = args.top
+    if top_n <= 0:
+        return []
+
+    all_candidates = _collect_filtered_candidates(scan_data, args)
     if not all_candidates:
         return []
 
-    # Sort by ROI descending, take top N
-    all_candidates.sort(key=lambda x: x["roi_pct"], reverse=True)
     picks = all_candidates[:top_n]
 
     lines = []
     # Build filter description
     filters = []
-    if min_credit > 0:
-        filters.append(f"cr≥${min_credit:.2f}")
-    if min_roi > 0:
-        filters.append(f"roi≥{min_roi:.1f}%")
-    if min_otm > 0:
-        filters.append(f"otm≥{min_otm:.1f}%")
-    if max_otm > 0:
-        filters.append(f"otm≤{max_otm:.1f}%")
-    if min_tier:
-        filters.append(f"intra≥{min_tier[:4]}")
-    if min_tier_close:
-        filters.append(f"c2c≥{min_tier_close[:4]}")
+    if args.min_credit > 0:
+        filters.append(f"cr≥${args.min_credit:.2f}")
+    if args.min_roi > 0:
+        filters.append(f"roi≥{args.min_roi:.1f}%")
+    if args.min_norm_roi > 0:
+        filters.append(f"nroi≥{args.min_norm_roi:.1f}%")
+    if args.min_otm > 0:
+        filters.append(f"otm≥{args.min_otm:.1f}%")
+    if args.max_otm > 0:
+        filters.append(f"otm≤{args.max_otm:.1f}%")
+    if args.min_tier:
+        filters.append(f"intra≥{args.min_tier[:4]}")
+    if args.min_tier_close:
+        filters.append(f"c2c≥{args.min_tier_close[:4]}")
     filter_str = f"  {DIM}[{', '.join(filters)}]{RESET}" if filters else ""
 
-    lines.append(f" {BOLD}{GREEN}── TOP {top_n} BY ROI {'─' * 60}{RESET}{filter_str}")
-    lines.append(f"  {'#':<3}{'Sym':<5}{'Type':<5}{'DTE':<4}{'Short/Long':<14}{'Credit':<9}{'ROI':<8}{'OTM%':<7}{'Cl%':<7}")
+    lines.append(f" {BOLD}{GREEN}── TOP {top_n} {'─' * 65}{RESET}{filter_str}")
+    lines.append(f"  {'#':<3}{'Sym':<5}{'Type':<5}{'DTE':<4}{'Short/Long':<14}{'Credit':<9}{'nROI':<8}{'OTM%':<7}{'Cl%':<7}")
     lines.append(f"  {'─'*3}{'─'*5}{'─'*5}{'─'*4}{'─'*14}{'─'*9}{'─'*8}{'─'*7}{'─'*7}")
 
     for i, p in enumerate(picks, 1):
         short = int(p["short_strike"])
         long = int(p["long_strike"])
         credit = p["credit"]
-        roi = p["roi_pct"]
+        norm_roi = _compute_norm_roi(p["roi_pct"], p["dte"])
         otm = p.get("otm_pct", 0)
         pc = p.get("prev_close", 0)
         chg = (p["short_strike"] - pc) / pc * 100 if pc > 0 else 0
-        roi_str = color_roi(roi)
+        nroi_str = color_roi(norm_roi)
 
         lines.append(
             f"  {i:<3}{p['symbol']:<5}{p['option_type']:<5}"
             f"{'D' + str(p['dte']):<4}"
             f"{short}/{long:<13}"
             f"${credit:<8.2f}"
-            f"{roi_str} "
+            f"{nroi_str} "
             f"{DIM}ot{otm:.1f} cl{_fmt_pct(chg)}{RESET}"
         )
 
@@ -813,12 +896,20 @@ def render_dashboard(scan_data: dict, args) -> str:
             ))
 
         if "iron-condor" in types:
-            lines.extend(_render_ic_section(tickers, dte_data, args))
+            lines.extend(_render_ic_section(tickers, dte_data, args, dte=dte))
 
     # Footer
     updated = datetime.now().strftime("%H:%M:%S ET")
     next_t = f"Next: +{args.interval}s"
-    lines.append(f" Updated: {updated} | {next_t} | Ctrl+C to exit")
+    extras = []
+    if args.min_norm_roi > 0:
+        extras.append(f"nROI≥{args.min_norm_roi:.1f}%")
+    if args.log_threshold > 0:
+        extras.append(f"log:nROI≥{args.log_threshold:.0f}→{args.log_file}")
+    if args.notify_threshold > 0:
+        extras.append(f"notify:nROI≥{args.notify_threshold:.0f}→{args.notify_email}")
+    extra_str = f" | {' '.join(extras)}" if extras else ""
+    lines.append(f" Updated: {updated} | {next_t}{extra_str} | Ctrl+C to exit")
 
     return "\n".join(lines)
 
@@ -842,7 +933,7 @@ def _render_spread_section(
         w = args.widths.get(sym, 20)
         label = f"{sym} (w={w})"
         hdr += f" {label:<{COL_WIDTH}}│"
-        sub += f" {DIM}{'Short/Long $Cr ROI  otm%  cl%':<{COL_WIDTH}}{RESET}│"
+        sub += f" {DIM}{'Strike      Credit nROI  otm  cl':<{COL_WIDTH}}{RESET}│"
     lines.append(hdr)
     lines.append(sub)
 
@@ -859,7 +950,7 @@ def _render_spread_section(
             for sym in tickers:
                 spreads = dte_data.get("spreads", {}).get(sym, [])
                 best = find_best_spread_at_otm(spreads, otm, opt_type)
-                row += f" {render_spread_cell(best, prev_closes.get(sym, 0))}│"
+                row += f" {render_spread_cell(best, prev_closes.get(sym, 0), dte)}│"
             lines.append(row)
 
     # Tier rows (if enabled)
@@ -888,22 +979,31 @@ def _render_spread_section(
                         if result:
                             strike, raw_price, pctl, pct_val = result
                             spread = find_spread_at_strike(spreads, strike, opt_type)
+                            if not spread:
+                                # Try building from raw chain
+                                chain = dte_data.get("chains", {}).get(sym)
+                                if chain and price > 0:
+                                    width = args.widths.get(sym, 20)
+                                    spread = build_spread_from_chain(
+                                        chain, strike, opt_type, width, price,
+                                    )
                             if spread:
-                                cell = render_spread_cell(spread, pc)
+                                cell = render_spread_cell(spread, pc, dte)
                             else:
-                                # No chain at that strike — show target info
-                                raw = f"{int(strike)}? p{pctl} {pct_val:+.1f}% tgt={int(raw_price)}"
-                                cell = _pad(f"{DIM}{raw}{RESET}")
+                                # Strike not in chain — show strike + pctl, dash for credit/nROI
+                                strikes = f"{int(strike)}"
+                                meta = f"{DIM}p{pctl} {pct_val:+.1f}%{RESET}"
+                                cell = _pad(f"{strikes:<12}{'-':<7}{'-':<6}{meta}")
                             row += f" {cell}│"
                         else:
-                            row += f" {_pad('---'):}│"
+                            row += f" {_pad('─'):}│"
                     lines.append(row)
 
     lines.append("")
     return lines
 
 
-def _render_ic_section(tickers: list[str], dte_data: dict, args) -> list[str]:
+def _render_ic_section(tickers: list[str], dte_data: dict, args, dte: int = 0) -> list[str]:
     """Render iron condor section (only when --show-otm is active)."""
     if not args.show_otm:
         return []
@@ -917,7 +1017,7 @@ def _render_ic_section(tickers: list[str], dte_data: dict, args) -> list[str]:
         w = args.widths.get(sym, 20)
         label = f"{sym} (w={w})"
         hdr += f" {label:<{COL_WIDTH}}│"
-        sub += f" {DIM}{'Pshort/Cshort $Cr ROI p%/c%':<{COL_WIDTH}}{RESET}│"
+        sub += f" {DIM}{'Strike        Credit nROI  otm':<{COL_WIDTH}}{RESET}│"
     lines.append(hdr)
     lines.append(sub)
 
@@ -934,7 +1034,7 @@ def _render_ic_section(tickers: list[str], dte_data: dict, args) -> list[str]:
             put_spread = find_best_spread_at_otm(spreads, otm, "PUT")
             call_spread = find_best_spread_at_otm(spreads, otm, "CALL")
             ic = compute_iron_condor(put_spread, call_spread)
-            row += f" {render_ic_cell(ic, prev_closes.get(sym, 0))}│"
+            row += f" {render_ic_cell(ic, prev_closes.get(sym, 0), dte)}│"
         lines.append(row)
 
     lines.append("")
@@ -946,6 +1046,86 @@ def _get_prev_close(tier_data: dict, symbol: str) -> float:
     hourly = tier_data.get("hourly", {})
     sym_data = hourly.get(symbol, {})
     return sym_data.get("previous_close", 0)
+
+
+# ── Normalized ROI Logging & Notification ─────────────────────────────────────
+
+
+def _compute_norm_roi(roi_pct: float, dte: int) -> float:
+    """Normalized ROI = ROI / (DTE + 1).  Higher = better risk-adjusted return."""
+    return round(roi_pct / (dte + 1), 2)
+
+
+def _filter_by_norm_roi(
+    candidates: list[dict], threshold: float,
+) -> list[dict]:
+    """Filter already-filtered candidates by normalized ROI threshold.
+
+    Adds timestamp and norm_roi fields for logging/notification.
+    Returns sorted by norm_roi descending.
+    """
+    if threshold <= 0 or not candidates:
+        return []
+
+    qualifying = []
+    ts = datetime.now().isoformat()
+    for c in candidates:
+        norm_roi = _compute_norm_roi(c["roi_pct"], c["dte"])
+        if norm_roi >= threshold:
+            qualifying.append({
+                **c,
+                "timestamp": ts,
+                "norm_roi": norm_roi,
+            })
+
+    qualifying.sort(key=lambda x: x["norm_roi"], reverse=True)
+    return qualifying
+
+
+def _log_qualifying_spreads(spreads: list[dict], log_file: str) -> None:
+    """Append qualifying spreads to a JSONL log file."""
+    if not spreads:
+        return
+    with open(log_file, "a") as f:
+        for s in spreads:
+            f.write(json.dumps(s) + "\n")
+
+
+async def _notify_qualifying_spreads(
+    client: httpx.AsyncClient, spreads: list[dict],
+    notify_url: str, to_email: str, top_n: int = 5,
+) -> None:
+    """Send email notification for top qualifying spreads via db_server /api/notify."""
+    if not spreads:
+        return
+
+    picks = spreads[:top_n]
+    lines = [f"Spread Scanner: {len(spreads)} spread(s) hit nROI threshold"]
+    lines.append("")
+    for p in picks:
+        lines.append(
+            f"  {p['symbol']} {p['option_type']} D{p['dte']} "
+            f"{int(p['short_strike'])}/{int(p['long_strike'])} "
+            f"${p['credit']:.2f} ROI={p['roi_pct']:.1f}% "
+            f"nROI={p['norm_roi']:.1f}% OTM={p['otm_pct']:.1f}%"
+        )
+    if len(spreads) > top_n:
+        lines.append(f"  ... and {len(spreads) - top_n} more")
+
+    message = "\n".join(lines)
+    try:
+        await client.post(
+            f"{notify_url}/api/notify",
+            json={
+                "channel": "email",
+                "to": to_email,
+                "message": message,
+                "subject": f"Spread Scanner: {len(spreads)} qualifying spread(s)",
+            },
+            timeout=5,
+        )
+    except Exception:
+        pass  # best-effort
 
 
 # ── Main Scan Logic ────────────────────────────────────────────────────────────
@@ -993,8 +1173,10 @@ async def scan_all_tickers(client: httpx.AsyncClient, args) -> dict:
             if price > 0:
                 chain_tasks.append((dte, sym, expiration))
 
+    # Wider strike range when tiers are enabled (tier strikes can be 3%+ OTM)
+    strike_range = 8.0 if needs_tiers else 5.0
     chain_coros = [
-        fetch_option_chain(client, args.daemon_url, sym, exp, strike_range_pct=5.0)
+        fetch_option_chain(client, args.daemon_url, sym, exp, strike_range_pct=strike_range)
         for (_, sym, exp) in chain_tasks
     ]
     chain_results = await asyncio.gather(*chain_coros, return_exceptions=True) if chain_coros else []
@@ -1009,6 +1191,7 @@ async def scan_all_tickers(client: httpx.AsyncClient, args) -> dict:
         dte_section: dict[str, Any] = {
             "expiration": expiration,
             "spreads": {},
+            "chains": {},
             "quotes": quotes,
             "tier_data": tier_data,
             "prev_closes": prev_closes,
@@ -1023,6 +1206,7 @@ async def scan_all_tickers(client: httpx.AsyncClient, args) -> dict:
             width = args.widths.get(sym, 20)
             chain = chain_map.get((dte, sym))
             if chain:
+                dte_section["chains"][sym] = chain
                 spreads = compute_spreads(chain, sym, price, width)
                 dte_section["spreads"][sym] = spreads
             else:
@@ -1035,6 +1219,9 @@ async def scan_all_tickers(client: httpx.AsyncClient, args) -> dict:
 
 async def scan_loop(args):
     """Main scan loop."""
+    # Track already-notified spreads to avoid spamming (key: sym+type+short+dte)
+    _notified_keys: set[str] = set()
+
     async with httpx.AsyncClient(timeout=15) as client:
         while True:
             try:
@@ -1042,6 +1229,33 @@ async def scan_loop(args):
                 output = render_dashboard(data, args)
                 # Clear screen and render
                 print("\033[2J\033[H" + output, end="", flush=True)
+
+                # Log/notify use the same filtered candidate list as top picks
+                needs_log = args.log_threshold > 0 and args.log_file
+                needs_notify = args.notify_threshold > 0 and args.notify_email and is_market_hours()
+                if needs_log or needs_notify:
+                    candidates = _collect_filtered_candidates(data, args)
+
+                    if needs_log:
+                        log_qualifying = _filter_by_norm_roi(candidates, args.log_threshold)
+                        if log_qualifying:
+                            _log_qualifying_spreads(log_qualifying, args.log_file)
+
+                    if needs_notify:
+                        notify_qualifying = _filter_by_norm_roi(candidates, args.notify_threshold)
+                        if notify_qualifying:
+                            new_spreads = []
+                            for s in notify_qualifying:
+                                key = f"{s['symbol']}_{s['option_type']}_{s['short_strike']}_{s['dte']}"
+                                if key not in _notified_keys:
+                                    _notified_keys.add(key)
+                                    new_spreads.append(s)
+                            if new_spreads:
+                                await _notify_qualifying_spreads(
+                                    client, new_spreads, args.notify_url,
+                                    args.notify_email,
+                                )
+
             except httpx.ConnectError:
                 print("\033[2J\033[H")
                 print(f" {BOLD}SPREAD SCANNER{RESET} — Cannot connect to daemon at {args.daemon_url}")
@@ -1078,6 +1292,15 @@ Examples:
 
   %(prog)s --once --tickers SPX --otm-pcts 1,1.5,2
       Single scan and exit
+
+  %(prog)s --log 3:spreads.jsonl
+      Log spreads with normalized ROI (ROI/(DTE+1)) >= 3%% to JSONL file
+
+  %(prog)s --log 3:spreads.jsonl --notify 4:ak@gmail.com
+      Log nROI >= 3%% + email nROI >= 4%% to ak@gmail.com
+
+  %(prog)s --min-norm-roi 2
+      Filter top picks to only show spreads with nROI >= 2%%
         """,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -1157,6 +1380,18 @@ Examples:
         "--contracts", type=int, default=1,
         help="Number of contracts for dollar display (default: 1)",
     )
+    parser.add_argument(
+        "--min-norm-roi", type=float, default=0,
+        help="Minimum normalized ROI = ROI/(DTE+1) to show in top picks (default: 0 = no filter)",
+    )
+    parser.add_argument(
+        "--log", default=None, metavar="THRESHOLD:FILE",
+        help="Log spreads with nROI >= THRESHOLD to FILE (JSONL). E.g. --log 3:spreads.jsonl",
+    )
+    parser.add_argument(
+        "--notify", default=None, metavar="THRESHOLD:EMAIL",
+        help="Email when spreads with nROI >= THRESHOLD appear. E.g. --notify 4:user@gmail.com",
+    )
 
     args = parser.parse_args(argv)
 
@@ -1194,6 +1429,33 @@ Examples:
                     f"Valid options: aggr (a), mod (m), cons (c)"
                 )
             setattr(args, flag, normalized)
+
+    # Parse --log THRESHOLD:FILE
+    args.log_threshold = 0.0
+    args.log_file = None
+    if args.log:
+        parts = args.log.split(":", 1)
+        if len(parts) != 2 or not parts[1]:
+            parser.error("--log must be THRESHOLD:FILE, e.g. --log 3:spreads.jsonl")
+        try:
+            args.log_threshold = float(parts[0])
+        except ValueError:
+            parser.error(f"--log threshold must be a number, got '{parts[0]}'")
+        args.log_file = parts[1]
+
+    # Parse --notify THRESHOLD:EMAIL
+    args.notify_threshold = 0.0
+    args.notify_email = None
+    args.notify_url = os.environ.get("NOTIFY_URL", "http://localhost:9102")
+    if args.notify:
+        parts = args.notify.split(":", 1)
+        if len(parts) != 2 or not parts[1]:
+            parser.error("--notify must be THRESHOLD:EMAIL, e.g. --notify 4:user@gmail.com")
+        try:
+            args.notify_threshold = float(parts[0])
+        except ValueError:
+            parser.error(f"--notify threshold must be a number, got '{parts[0]}'")
+        args.notify_email = parts[1]
 
     return args
 
