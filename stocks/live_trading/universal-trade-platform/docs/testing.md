@@ -135,6 +135,8 @@ All tests live in `tests/test_utp.py`, organized into classes by functional area
 | `TestIBKRRestProvider` | 10 | CPG REST provider: connect, auth, quote, positions, orders, option chains, margin |
 | `TestOptionQuoteStreaming` | 25 | Option quote cache, Redis persistence, streaming lifecycle, market hours TTL, route integration |
 | `TestMarketDataStreaming` | 24 | CPG polling/WS modes, snapshot parsing, tick ingestion, close-band price gate |
+| `TestTradeNotifications` | 8 | Trade fill notifications: config, equity/multi-leg, multiple recipients, close, failure isolation |
+| `TestSpreadScanner` | 22 | Spread scanner: arg parsing, spread computation, tier resolution, top picks, filters |
 
 ## Testing Approach
 

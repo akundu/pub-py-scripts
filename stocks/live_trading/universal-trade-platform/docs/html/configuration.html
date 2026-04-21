@@ -582,6 +582,68 @@ dd {
 </tr>
 </tbody>
 </table>
+<h3 id="trade-fill-notifications">Trade Fill Notifications</h3>
+<p>Send email or SMS alerts when trades fill. Uses the db_server notification endpoint (<code>/api/notify</code>) which supports Twilio SMS, carrier gateway SMS, and SMTP email.</p>
+<table>
+<thead>
+<tr>
+<th>Variable</th>
+<th>Default</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>NOTIFY_ON_FILL</code></td>
+<td><code>false</code></td>
+<td>Enable notifications on live trade fills</td>
+</tr>
+<tr>
+<td><code>NOTIFY_CHANNEL</code></td>
+<td><code>email</code></td>
+<td>Notification channel: <code>"sms"</code>, <code>"email"</code>, or <code>"both"</code></td>
+</tr>
+<tr>
+<td><code>NOTIFY_RECIPIENTS</code></td>
+<td>(empty)</td>
+<td>Comma-separated recipient list (emails and/or phone numbers)</td>
+</tr>
+<tr>
+<td><code>NOTIFY_TAG</code></td>
+<td><code>[UTP-ALERT]</code></td>
+<td>Email subject prefix — use for Gmail filtering/priority rules</td>
+</tr>
+<tr>
+<td><code>NOTIFY_ON_PAPER</code></td>
+<td><code>false</code></td>
+<td>Also send notifications for paper/dry-run trades</td>
+</tr>
+<tr>
+<td><code>NOTIFY_URL</code></td>
+<td><code>http://localhost:9102</code></td>
+<td>URL of the db_server hosting the <code>/api/notify</code> endpoint</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Prerequisites:</strong>
+- db_server running on port 9102 with SMTP configured (<code>SMTP_HOST</code>, <code>SMTP_USER</code>, <code>SMTP_PASSWORD</code>)
+- For SMS: Twilio credentials (<code>TWILIO_*</code> env vars) or carrier gateway (<code>NOTIFY_SMS_GATEWAY</code>)</p>
+<p><strong>Example <code>.env</code> configuration:</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="nv">NOTIFY_ON_FILL</span><span class="o">=</span><span class="nb">true</span>
+<span class="nv">NOTIFY_CHANNEL</span><span class="o">=</span>email
+<span class="nv">NOTIFY_RECIPIENTS</span><span class="o">=</span>you@gmail.com,teammate@gmail.com
+<span class="nv">NOTIFY_TAG</span><span class="o">=[</span>UTP-ALERT<span class="o">]</span>
+</code></pre></div>
+
+<p><strong>How it works:</strong>
+1. When a trade reaches FILLED status (in <code>await_order_fill()</code> for live, or <code>execute_trade()</code> for paper), a fire-and-forget notification is dispatched
+2. For each recipient in <code>NOTIFY_RECIPIENTS</code>, an HTTP POST is sent to <code>{NOTIFY_URL}/api/notify</code>
+3. The message includes: mode (LIVE/PAPER), action (FILLED/CLOSED), symbol, quantity, strikes, fill price
+4. Notification failures are logged but never block or delay trading</p>
+<p><strong>Message format examples:</strong>
+- <code>LIVE FILLED: 5x SPX 7000/6980P @ $1.50</code>
+- <code>LIVE CLOSED: SELL 10x SPY @ $455.00</code>
+- <code>PAPER FILLED: BUY 100x AAPL @ $185.50</code></p>
 <h2 id="env-file">.env File</h2>
 <p>Copy the template and edit:</p>
 <div class="codehilite"><pre><span></span><code>cp<span class="w"> </span>.env.example<span class="w"> </span>.env
@@ -621,6 +683,12 @@ dd {
 <span class="nv">EOD_AUTO_CLOSE</span><span class="o">=</span><span class="nb">false</span>
 <span class="nv">POSITION_SYNC_ENABLED</span><span class="o">=</span><span class="nb">true</span>
 <span class="nv">POSITION_SYNC_INTERVAL_SECONDS</span><span class="o">=</span><span class="m">120</span>
+
+<span class="c1"># Trade fill notifications</span>
+<span class="nv">NOTIFY_ON_FILL</span><span class="o">=</span><span class="nb">true</span>
+<span class="nv">NOTIFY_CHANNEL</span><span class="o">=</span>email
+<span class="nv">NOTIFY_RECIPIENTS</span><span class="o">=</span>you@gmail.com
+<span class="nv">NOTIFY_TAG</span><span class="o">=[</span>UTP-ALERT<span class="o">]</span>
 </code></pre></div>
 
 <p>The <code>.env</code> file is loaded automatically by <code>pydantic-settings</code> at import time. It should be listed in <code>.gitignore</code> to prevent accidental commits.</p>

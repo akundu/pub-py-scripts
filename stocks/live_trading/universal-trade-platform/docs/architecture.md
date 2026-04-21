@@ -419,7 +419,7 @@ Background Task            SyncService              Providers           Store/Le
 | `providers/*` | provider, symbology, config | ProviderRegistry |
 | `ledger.py` | models | trade_service, expiration, sync, csv_importer, routes |
 | `position_store.py` | models | trade_service, dashboard, expiration, sync, csv_importer, routes |
-| `trade_service.py` | provider, models, websocket, ledger, position_store | Routes |
+| `trade_service.py` | provider, models, websocket, ledger, position_store, httpx (notifications) | Routes |
 | `dashboard_service.py` | position_store, metrics | Routes |
 | `metrics.py` | (standalone) | dashboard_service |
 | `expiration_service.py` | position_store, ledger, websocket | main.py background task |

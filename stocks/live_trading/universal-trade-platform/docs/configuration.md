@@ -93,6 +93,42 @@ All configuration is managed through environment variables, loaded via `pydantic
 | `ORDER_POLL_INTERVAL_SECONDS` | `1.0` | Seconds between fill status checks when tracking orders |
 | `ORDER_POLL_TIMEOUT_SECONDS` | `30.0` | Max seconds to wait for an order to reach terminal state |
 
+### Trade Fill Notifications
+
+Send email or SMS alerts when trades fill. Uses the db\_server notification endpoint (`/api/notify`) which supports Twilio SMS, carrier gateway SMS, and SMTP email.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NOTIFY_ON_FILL` | `false` | Enable notifications on live trade fills |
+| `NOTIFY_CHANNEL` | `email` | Notification channel: `"sms"`, `"email"`, or `"both"` |
+| `NOTIFY_RECIPIENTS` | (empty) | Comma-separated recipient list (emails and/or phone numbers) |
+| `NOTIFY_TAG` | `[UTP-ALERT]` | Email subject prefix — use for Gmail filtering/priority rules |
+| `NOTIFY_ON_PAPER` | `false` | Also send notifications for paper/dry-run trades |
+| `NOTIFY_URL` | `http://localhost:9102` | URL of the db\_server hosting the `/api/notify` endpoint |
+
+**Prerequisites:**
+- db\_server running on port 9102 with SMTP configured (`SMTP_HOST`, `SMTP_USER`, `SMTP_PASSWORD`)
+- For SMS: Twilio credentials (`TWILIO_*` env vars) or carrier gateway (`NOTIFY_SMS_GATEWAY`)
+
+**Example `.env` configuration:**
+```bash
+NOTIFY_ON_FILL=true
+NOTIFY_CHANNEL=email
+NOTIFY_RECIPIENTS=you@gmail.com,teammate@gmail.com
+NOTIFY_TAG=[UTP-ALERT]
+```
+
+**How it works:**
+1. When a trade reaches FILLED status (in `await_order_fill()` for live, or `execute_trade()` for paper), a fire-and-forget notification is dispatched
+2. For each recipient in `NOTIFY_RECIPIENTS`, an HTTP POST is sent to `{NOTIFY_URL}/api/notify`
+3. The message includes: mode (LIVE/PAPER), action (FILLED/CLOSED), symbol, quantity, strikes, fill price
+4. Notification failures are logged but never block or delay trading
+
+**Message format examples:**
+- `LIVE FILLED: 5x SPX 7000/6980P @ $1.50`
+- `LIVE CLOSED: SELL 10x SPY @ $455.00`
+- `PAPER FILLED: BUY 100x AAPL @ $185.50`
+
 ## .env File
 
 Copy the template and edit:
@@ -137,6 +173,12 @@ TRUST_LOCAL_NETWORK=true
 EOD_AUTO_CLOSE=false
 POSITION_SYNC_ENABLED=true
 POSITION_SYNC_INTERVAL_SECONDS=120
+
+# Trade fill notifications
+NOTIFY_ON_FILL=true
+NOTIFY_CHANNEL=email
+NOTIFY_RECIPIENTS=you@gmail.com
+NOTIFY_TAG=[UTP-ALERT]
 ```
 
 The `.env` file is loaded automatically by `pydantic-settings` at import time. It should be listed in `.gitignore` to prevent accidental commits.
