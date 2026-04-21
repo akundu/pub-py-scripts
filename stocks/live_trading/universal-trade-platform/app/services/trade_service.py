@@ -8,6 +8,8 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Optional
 
+import httpx
+
 from app.core.provider import ProviderRegistry
 from app.models import (
     Broker,
@@ -64,6 +66,63 @@ def _handle_close_position(request: TradeRequest, exit_price: float) -> str:
     return pos_id
 
 
+async def _notify_trade_fill(request: TradeRequest, result: OrderResult, is_close: bool = False) -> None:
+    """Send trade fill notification to configured recipients.
+
+    Uses the db_server /api/notify endpoint via HTTP POST.  Sends one
+    request per recipient in notify_recipients.  Failures are logged
+    but never propagate — notifications must not block trading.
+    """
+    from app.config import settings
+
+    if not settings.notify_on_fill:
+        return
+    if not settings.notify_recipients:
+        return
+
+    # Build human-readable trade description
+    action = "CLOSED" if is_close else "FILLED"
+    price_str = f"${result.filled_price:.2f}" if result.filled_price else "market"
+    mode = "PAPER" if result.dry_run else "LIVE"
+
+    if request.equity_order:
+        eq = request.equity_order
+        desc = f"{eq.side.value} {eq.quantity}x {eq.symbol}"
+    elif request.multi_leg_order:
+        ml = request.multi_leg_order
+        sym = ml.legs[0].symbol if ml.legs else "?"
+        qty = ml.quantity
+        strikes = "/".join(str(int(l.strike)) for l in ml.legs[:2])
+        opt_type = ml.legs[0].option_type.value[0] if ml.legs else ""
+        desc = f"{qty}x {sym} {strikes}{opt_type}"
+    else:
+        desc = "unknown trade"
+
+    message = f"{mode} {action}: {desc} @ {price_str}"
+
+    recipients = [r.strip() for r in settings.notify_recipients.split(",") if r.strip()]
+    channel = settings.notify_channel
+    tag = settings.notify_tag
+    notify_url = settings.notify_url
+
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            for recipient in recipients:
+                try:
+                    payload = {
+                        "channel": channel,
+                        "to": recipient,
+                        "message": message,
+                        "subject": f"UTP Trade {action}",
+                        "tag": tag,
+                    }
+                    await client.post(f"{notify_url}/api/notify", json=payload)
+                except Exception as e:
+                    logger.warning("Trade notification failed for %s: %s", recipient, e)
+    except Exception as e:
+        logger.warning("Trade notification HTTP client error: %s", e)
+
+
 async def execute_trade(request: TradeRequest, dry_run: bool = False) -> OrderResult:
     """Execute a trade through the appropriate broker provider."""
     from app.services.ledger import get_ledger
@@ -105,6 +164,10 @@ async def execute_trade(request: TradeRequest, dry_run: bool = False) -> OrderRe
                             source=PositionSource.PAPER, dry_run=True,
                             data={"symbol": request.equity_order.symbol, "order_id": result.order_id},
                         )
+            from app.config import settings as _cfg
+            if _cfg.notify_on_paper:
+                is_close = bool(request.closing_position_id)
+                asyncio.ensure_future(_notify_trade_fill(request, result, is_close=is_close))
             return result
         provider = ProviderRegistry.get(broker)
         result = await provider.execute_equity_order(request.equity_order)
@@ -160,6 +223,10 @@ async def execute_trade(request: TradeRequest, dry_run: bool = False) -> OrderRe
                         source=PositionSource.PAPER, dry_run=True,
                         data={"symbol": order.legs[0].symbol, "order_id": result.order_id},
                     )
+        from app.config import settings as _cfg
+        if _cfg.notify_on_paper:
+            is_close = bool(request.closing_position_id)
+            asyncio.ensure_future(_notify_trade_fill(request, result, is_close=is_close))
         return result
     provider = ProviderRegistry.get(broker)
     result = await provider.execute_multi_leg_order(order)
@@ -249,6 +316,7 @@ async def await_order_fill(
             if result.status == OrderStatus.FILLED and order_id in _pending_orders:
                 request = _pending_orders.pop(order_id)
                 store = get_position_store()
+                is_close = bool(request.closing_position_id)
                 if store:
                     if request.closing_position_id:
                         exit_price = result.filled_price or 0
@@ -267,6 +335,8 @@ async def await_order_fill(
                                 source=PositionSource.LIVE_API,
                                 data={"order_id": order_id},
                             )
+                # Notify on live fill (fire-and-forget)
+                asyncio.ensure_future(_notify_trade_fill(request, result, is_close=is_close))
             else:
                 _pending_orders.pop(order_id, None)
 

@@ -865,6 +865,12 @@ All from env vars / `.env`:
 | `TRUST_LOCAL_NETWORK` | `true` | Skip auth for private/LAN IPs (127.*, 10.*, 172.16-31.*, 192.168.*) |
 | `ORDER_POLL_INTERVAL_SECONDS` | `1.0` | Seconds between fill status checks |
 | `ORDER_POLL_TIMEOUT_SECONDS` | `30.0` | Max seconds to wait for order fill |
+| `NOTIFY_ON_FILL` | `false` | Send email/SMS on trade fill |
+| `NOTIFY_CHANNEL` | `email` | `"sms"`, `"email"`, or `"both"` |
+| `NOTIFY_RECIPIENTS` | (empty) | Comma-separated emails/phones (e.g. `user@gmail.com,other@gmail.com`) |
+| `NOTIFY_TAG` | `[UTP-ALERT]` | Email subject prefix for Gmail filtering |
+| `NOTIFY_ON_PAPER` | `false` | Also notify on paper/dry-run trades |
+| `NOTIFY_URL` | `http://localhost:9102` | db_server URL for `/api/notify` endpoint |
 
 ## Testing
 

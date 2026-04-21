@@ -12414,6 +12414,244 @@ class TestIbkrOverlayNoOverlap:
         assert block["ibkr_provider_kind"] == "IBKRLiveProvider"
 
 
+# ── Trade Notification Tests ──────────────────────────────────────────────────
+
+
+class TestTradeNotifications:
+    """Tests for trade fill notification system."""
+
+    def test_notify_config_defaults(self):
+        from app.config import Settings
+        s = Settings()
+        assert s.notify_on_fill is False
+        assert s.notify_channel == "email"
+        assert s.notify_recipients == ""
+        assert s.notify_tag == "[UTP-ALERT]"
+        assert s.notify_on_paper is False
+
+    @pytest.mark.asyncio
+    async def test_notify_skipped_when_disabled(self):
+        from app.services.trade_service import _notify_trade_fill
+        from app.models import OrderResult, OrderStatus, TradeRequest, EquityOrder, Broker
+        from unittest.mock import patch, AsyncMock
+
+        req = TradeRequest(equity_order=EquityOrder(
+            symbol="SPY", side="BUY", quantity=1, broker=Broker.IBKR,
+        ))
+        result = OrderResult(
+            order_id="test-123", broker=Broker.IBKR,
+            status=OrderStatus.FILLED, filled_price=450.0,
+        )
+
+        with patch("app.config.settings") as mock_settings:
+            mock_settings.notify_on_fill = False
+            # Should return immediately without sending
+            await _notify_trade_fill(req, result)
+            # No error = success (nothing sent)
+
+    @pytest.mark.asyncio
+    async def test_notify_skipped_when_no_recipients(self):
+        from app.services.trade_service import _notify_trade_fill
+        from app.models import OrderResult, OrderStatus, TradeRequest, EquityOrder, Broker
+        from unittest.mock import patch
+
+        req = TradeRequest(equity_order=EquityOrder(
+            symbol="SPY", side="BUY", quantity=1, broker=Broker.IBKR,
+        ))
+        result = OrderResult(
+            order_id="test-123", broker=Broker.IBKR,
+            status=OrderStatus.FILLED, filled_price=450.0,
+        )
+
+        with patch("app.config.settings") as mock_settings:
+            mock_settings.notify_on_fill = True
+            mock_settings.notify_recipients = ""
+            await _notify_trade_fill(req, result)
+
+    @pytest.mark.asyncio
+    async def test_notify_sends_for_equity(self):
+        from app.services.trade_service import _notify_trade_fill
+        from app.models import OrderResult, OrderStatus, TradeRequest, EquityOrder, Broker
+        from unittest.mock import patch, AsyncMock, MagicMock
+
+        req = TradeRequest(equity_order=EquityOrder(
+            symbol="SPY", side="BUY", quantity=10, broker=Broker.IBKR,
+        ))
+        result = OrderResult(
+            order_id="test-123", broker=Broker.IBKR,
+            status=OrderStatus.FILLED, filled_price=450.0,
+        )
+
+        mock_resp = MagicMock()
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.config.settings") as mock_settings, \
+             patch("app.services.trade_service.httpx.AsyncClient", return_value=mock_client):
+            mock_settings.notify_on_fill = True
+            mock_settings.notify_recipients = "test@example.com"
+            mock_settings.notify_channel = "email"
+            mock_settings.notify_tag = "[UTP-ALERT]"
+            mock_settings.notify_url = "http://localhost:9102"
+
+            await _notify_trade_fill(req, result)
+
+            mock_client.post.assert_called_once()
+            call_args = mock_client.post.call_args
+            assert "/api/notify" in call_args[0][0]
+            payload = call_args[1]["json"]
+            assert payload["channel"] == "email"
+            assert payload["to"] == "test@example.com"
+            assert "BUY 10x SPY" in payload["message"]
+            assert "$450.00" in payload["message"]
+            assert payload["tag"] == "[UTP-ALERT]"
+
+    @pytest.mark.asyncio
+    async def test_notify_sends_for_multi_leg(self):
+        from app.services.trade_service import _notify_trade_fill
+        from app.models import (
+            OrderResult, OrderStatus, TradeRequest, MultiLegOrder,
+            OptionLeg, Broker, OptionType, OptionAction,
+        )
+        from unittest.mock import patch, AsyncMock, MagicMock
+
+        req = TradeRequest(multi_leg_order=MultiLegOrder(
+            broker=Broker.IBKR, quantity=5,
+            legs=[
+                OptionLeg(symbol="SPX", strike=7000, option_type=OptionType.PUT,
+                          action=OptionAction.SELL_TO_OPEN, quantity=5, expiration="2026-04-20"),
+                OptionLeg(symbol="SPX", strike=6980, option_type=OptionType.PUT,
+                          action=OptionAction.BUY_TO_OPEN, quantity=5, expiration="2026-04-20"),
+            ],
+        ))
+        result = OrderResult(
+            order_id="test-456", broker=Broker.IBKR,
+            status=OrderStatus.FILLED, filled_price=1.50,
+        )
+
+        mock_resp = MagicMock()
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.config.settings") as mock_settings, \
+             patch("app.services.trade_service.httpx.AsyncClient", return_value=mock_client):
+            mock_settings.notify_on_fill = True
+            mock_settings.notify_recipients = "user@example.com"
+            mock_settings.notify_channel = "email"
+            mock_settings.notify_tag = "[UTP-ALERT]"
+            mock_settings.notify_url = "http://localhost:9102"
+
+            await _notify_trade_fill(req, result)
+
+            payload = mock_client.post.call_args[1]["json"]
+            assert "5x SPX 7000/6980P" in payload["message"]
+            assert "$1.50" in payload["message"]
+            assert "FILLED" in payload["message"]
+
+    @pytest.mark.asyncio
+    async def test_notify_multiple_recipients(self):
+        from app.services.trade_service import _notify_trade_fill
+        from app.models import OrderResult, OrderStatus, TradeRequest, EquityOrder, Broker
+        from unittest.mock import patch, AsyncMock, MagicMock
+
+        req = TradeRequest(equity_order=EquityOrder(
+            symbol="SPY", side="BUY", quantity=1, broker=Broker.IBKR,
+        ))
+        result = OrderResult(
+            order_id="test-789", broker=Broker.IBKR,
+            status=OrderStatus.FILLED, filled_price=450.0,
+        )
+
+        mock_resp = MagicMock()
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.config.settings") as mock_settings, \
+             patch("app.services.trade_service.httpx.AsyncClient", return_value=mock_client):
+            mock_settings.notify_on_fill = True
+            mock_settings.notify_recipients = "a@test.com, b@test.com"
+            mock_settings.notify_channel = "email"
+            mock_settings.notify_tag = "[UTP-ALERT]"
+            mock_settings.notify_url = "http://localhost:9102"
+
+            await _notify_trade_fill(req, result)
+
+            assert mock_client.post.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_notify_close_action(self):
+        from app.services.trade_service import _notify_trade_fill
+        from app.models import OrderResult, OrderStatus, TradeRequest, EquityOrder, Broker
+        from unittest.mock import patch, AsyncMock, MagicMock
+
+        req = TradeRequest(
+            equity_order=EquityOrder(
+                symbol="SPY", side="SELL", quantity=10, broker=Broker.IBKR,
+            ),
+            closing_position_id="pos-abc",
+        )
+        result = OrderResult(
+            order_id="test-close", broker=Broker.IBKR,
+            status=OrderStatus.FILLED, filled_price=455.0,
+        )
+
+        mock_resp = MagicMock()
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.config.settings") as mock_settings, \
+             patch("app.services.trade_service.httpx.AsyncClient", return_value=mock_client):
+            mock_settings.notify_on_fill = True
+            mock_settings.notify_recipients = "test@example.com"
+            mock_settings.notify_channel = "email"
+            mock_settings.notify_tag = "[UTP-ALERT]"
+            mock_settings.notify_url = "http://localhost:9102"
+
+            await _notify_trade_fill(req, result, is_close=True)
+
+            payload = mock_client.post.call_args[1]["json"]
+            assert "CLOSED" in payload["message"]
+
+    @pytest.mark.asyncio
+    async def test_notify_failure_does_not_propagate(self):
+        """Notification errors must never block trading."""
+        from app.services.trade_service import _notify_trade_fill
+        from app.models import OrderResult, OrderStatus, TradeRequest, EquityOrder, Broker
+        from unittest.mock import patch, AsyncMock
+
+        req = TradeRequest(equity_order=EquityOrder(
+            symbol="SPY", side="BUY", quantity=1, broker=Broker.IBKR,
+        ))
+        result = OrderResult(
+            order_id="test-err", broker=Broker.IBKR,
+            status=OrderStatus.FILLED, filled_price=450.0,
+        )
+
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=Exception("connection refused"))
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.config.settings") as mock_settings, \
+             patch("app.services.trade_service.httpx.AsyncClient", return_value=mock_client):
+            mock_settings.notify_on_fill = True
+            mock_settings.notify_recipients = "test@example.com"
+            mock_settings.notify_channel = "email"
+            mock_settings.notify_tag = "[UTP-ALERT]"
+            mock_settings.notify_url = "http://localhost:9102"
+
+            # Should not raise
+            await _notify_trade_fill(req, result)
+
+
 # ── Spread Scanner Tests ──────────────────────────────────────────────────────
 
 
