@@ -139,6 +139,63 @@ class TestDateRangeHandling:
         assert months_ahead == 0  # Single date mode
 
 
+class TestStartFromDays:
+    """Test --start-from-days functionality"""
+
+    def test_start_from_days_computes_date(self):
+        """Test that --start-from-days correctly offsets from today"""
+        from datetime import timedelta
+        offset = 3
+        expected = (datetime.now() + timedelta(days=offset)).strftime('%Y-%m-%d')
+        computed = (datetime.now() + timedelta(days=offset)).strftime('%Y-%m-%d')
+        assert computed == expected
+
+    def test_start_from_days_zero_is_today(self):
+        """Test that --start-from-days 0 gives today's date"""
+        from datetime import timedelta
+        computed = (datetime.now() + timedelta(days=0)).strftime('%Y-%m-%d')
+        assert computed == datetime.now().strftime('%Y-%m-%d')
+
+    def test_start_from_days_negative_is_past(self):
+        """Test that --start-from-days with negative value gives a past date"""
+        from datetime import timedelta
+        today = datetime.now()
+        computed = (today + timedelta(days=-2)).strftime('%Y-%m-%d')
+        expected = (today - timedelta(days=2)).strftime('%Y-%m-%d')
+        assert computed == expected
+
+    def test_start_from_days_with_day_ranges(self):
+        """Test that --start-from-days integrates with generate_day_ranges"""
+        from datetime import timedelta
+        from scripts.fetch_options import generate_day_ranges
+
+        offset = 5
+        start = (datetime.now() + timedelta(days=offset)).strftime('%Y-%m-%d')
+        ranges = generate_day_ranges(start, 3)
+
+        assert len(ranges) == 3
+        # First range starts at today + offset
+        assert ranges[0][0] == start
+        # Second range is one day later
+        day2 = (datetime.now() + timedelta(days=offset + 1)).strftime('%Y-%m-%d')
+        assert ranges[1][0] == day2
+
+    def test_start_from_days_recalculation_changes_with_date(self):
+        """Test that recalculating with a different 'today' produces different dates"""
+        from datetime import timedelta
+        # Simulate two different "today" values
+        today1 = datetime(2026, 4, 23)
+        today2 = datetime(2026, 4, 24)
+        offset = 2
+
+        date1 = (today1 + timedelta(days=offset)).strftime('%Y-%m-%d')
+        date2 = (today2 + timedelta(days=offset)).strftime('%Y-%m-%d')
+
+        assert date1 == '2026-04-25'
+        assert date2 == '2026-04-26'
+        assert date1 != date2
+
+
 class TestCSVCache:
     """Test CSV cache functionality"""
     

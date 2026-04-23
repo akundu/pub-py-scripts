@@ -2877,6 +2877,12 @@ Examples:
 
   # Fetch once before waiting for market open (useful since option prices don't change during non-market hours)
   python historical_stock_options.py AAPL --fetch-once-before-wait --continuous
+
+  # Start fetching from 2 days from now (e.g., today is 2026-04-23, fetches from 2026-04-25)
+  python historical_stock_options.py AAPL --start-from-days 2
+
+  # Continuously fetch starting 1 day ahead with 3 days of data — date recalculates each iteration
+  python historical_stock_options.py AAPL --start-from-days 1 --days-ahead 3 --continuous
 """
     )
     
@@ -2911,6 +2917,14 @@ Examples:
         type=int,
         default=None,
         help="Number of days to fetch ahead from start date. If provided, this takes precedence over --months-ahead. Ignored if --end-date is provided."
+    )
+    parser.add_argument(
+        '--start-from-days',
+        type=int,
+        default=None,
+        help="Start fetching from N days from today (e.g., --start-from-days 2 starts from today+2). "
+             "Overrides --date and --start-date. In --continuous mode, the start date is recalculated "
+             "each iteration based on the current date + N, so the window always stays N days ahead."
     )
     parser.add_argument(
         '--ticker-chunk-size',
@@ -3114,6 +3128,13 @@ Examples:
     if hasattr(args, 'types') and args.types:
         from common.symbol_loader import post_process_types_argument
         post_process_types_argument(args, parser, unknown)
+
+    # Handle --start-from-days: compute start date as today + N days
+    if getattr(args, 'start_from_days', None) is not None:
+        computed_start = (datetime.now() + timedelta(days=args.start_from_days)).strftime('%Y-%m-%d')
+        print(f"--start-from-days {args.start_from_days} specified, setting start date to {computed_start}", file=sys.stderr)
+        args.date = computed_start
+        args.start_date = computed_start
 
     # Handle start_date: if provided, override date
     if getattr(args, 'start_date', None):
@@ -3424,10 +3445,27 @@ Examples:
                     
                     # Market is open and at least 2 minutes have passed - proceed with fetch
                     run_num += 1
+
+                    # If --start-from-days is set, recalculate period_start/period_end
+                    # based on today's date so the window always stays N days ahead
+                    start_from_days_offset = getattr(args, 'start_from_days', None)
+                    if start_from_days_offset is not None:
+                        new_base = (datetime.now() + timedelta(days=start_from_days_offset)).strftime('%Y-%m-%d')
+                        new_end_date = getattr(args, 'end_date', None)
+                        if use_days_mode:
+                            new_ranges = generate_day_ranges(new_base, days_ahead if days_ahead else 1, new_end_date)
+                        else:
+                            new_ranges = generate_month_ranges(new_base, months_ahead, new_end_date)
+                        if period_idx < len(new_ranges):
+                            period_start, period_end = new_ranges[period_idx]
+                        if getattr(args, 'verbose', False):
+                            period_name = f"{period_label.capitalize()} {period_idx + 1}" if num_periods > 1 else period_label.capitalize()
+                            print(f"[{period_name}] Recalculated dates: {period_start} to {period_end} (start-from-days={start_from_days_offset})")
+
                     if getattr(args, 'verbose', False):
                         period_name = f"{period_label.capitalize()} {period_idx + 1}" if num_periods > 1 else period_label.capitalize()
                         print(f"\n[{period_name}] Continuous run #{run_num} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-                    
+
                     try:
                         # Create period-specific args
                         period_args = argparse.Namespace(**vars(args))
@@ -3528,6 +3566,15 @@ Examples:
                         print(f"\n--- MARKET TRANSITION DETECTED: OPEN → CLOSED at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
                         print(f"Performing final fetch after market close to capture EOD data...")
                 
+                # If --start-from-days is set, recalculate the date based on today
+                start_from_days_offset = getattr(args, 'start_from_days', None)
+                if start_from_days_offset is not None:
+                    new_date = (datetime.now() + timedelta(days=start_from_days_offset)).strftime('%Y-%m-%d')
+                    if new_date != args.date:
+                        if getattr(args, 'verbose', False):
+                            print(f"Recalculated date: {args.date} → {new_date} (start-from-days={start_from_days_offset})")
+                        args.date = new_date
+
                 if getattr(args, 'verbose', False):
                     print(f"\n--- Continuous run #{run_num} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ---")
 
