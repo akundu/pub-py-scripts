@@ -306,6 +306,234 @@ class TradingClient:
         resp.raise_for_status()
         return resp.json()
 
+    async def get_option_quotes(
+        self,
+        symbol: str,
+        expiration: str,
+        option_type: str,
+        *,
+        max_age: float | None = None,
+        strike_min: float | None = None,
+        strike_max: float | None = None,
+        force_refresh: bool | None = None,
+    ) -> dict:
+        """Fetch option quotes from the daemon with optional freshness bounds.
+
+        Wraps `GET /market/options/{symbol}`. When `max_age` is given, the
+        daemon honors its centralized freshness logic: returns cached quotes
+        if they're within `max_age` seconds, else triggers a provider refresh.
+
+        Response includes `quotes.{put|call}` and `meta.{age_seconds, source}`
+        (source ∈ "fresh_cache" / "stale_cache" / "provider" / "empty").
+        """
+        params: dict = {"expiration": expiration, "option_type": option_type.upper()}
+        if max_age is not None:
+            params["max_age"] = max_age
+        if strike_min is not None:
+            params["strike_min"] = strike_min
+        if strike_max is not None:
+            params["strike_max"] = strike_max
+        if force_refresh is not None:
+            params["force_refresh"] = "true" if force_refresh else "false"
+        self._ensure_connected()
+        resp = await self._client.get(f"/market/options/{symbol}", params=params)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def get_trade_defaults(self) -> dict:
+        """Fetch the daemon's configured trade defaults.
+
+        Returns: {default_order_type, limit_slippage_pct, limit_quote_max_age_sec}
+
+        These are server-configured via env vars (app/config.py) so LIMIT
+        slippage and the default order type are consistent across every caller
+        — CLI, playbook, spread_scanner, and ad-hoc integrations.
+        """
+        self._ensure_connected()
+        resp = await self._client.get("/trade/defaults")
+        resp.raise_for_status()
+        return resp.json()
+
+    async def _resolve_trade_defaults(
+        self, slippage_pct: float | None, max_age: float | None,
+    ) -> tuple[float, float]:
+        """Fill in None values from the daemon's /trade/defaults."""
+        if slippage_pct is not None and max_age is not None:
+            return float(slippage_pct), float(max_age)
+        defaults: dict
+        try:
+            defaults = await self.get_trade_defaults()
+        except Exception:
+            # If the daemon is unreachable for defaults, fall back to zero
+            # slippage + 10s max age — the same hardcoded defaults this
+            # method had before the daemon config existed.
+            defaults = {"limit_slippage_pct": 0.0, "limit_quote_max_age_sec": 10.0}
+        sp = float(slippage_pct) if slippage_pct is not None else float(defaults.get("limit_slippage_pct", 0.0))
+        ma = float(max_age) if max_age is not None else float(defaults.get("limit_quote_max_age_sec", 10.0))
+        return sp, ma
+
+    async def compute_credit_spread_net_price(
+        self,
+        symbol: str,
+        short_strike: float,
+        long_strike: float,
+        option_type: str,
+        expiration: str,
+        *,
+        slippage_pct: float | None = None,
+        max_age: float | None = None,
+        fallback_credit: float | None = None,
+    ) -> tuple[float | None, dict]:
+        """Compute the LIMIT `net_price` for a credit spread at submission time.
+
+        Canonical LIMIT pricing path used by BOTH the CLI trade flow and the
+        spread_scanner TradeHandler. Keeps the policy in one place so there
+        aren't two flavors of limit-pricing math in the codebase.
+
+        Process:
+            1. Fetch fresh option quotes for the two legs via `get_option_quotes`,
+               passing `max_age` so the daemon refreshes from the provider if its
+               cache is staler than that threshold.
+            2. Recompute credit = short_leg_bid − long_leg_ask from the fresh quotes.
+            3. Apply slippage: `net_price = credit * (1 − slippage_pct / 100)`.
+            4. On any failure (refresh error, missing leg, non-positive credit),
+               fall back to `fallback_credit` (with slippage applied) and tag the
+               metadata with a `fallback_reason`.
+
+        Args:
+            slippage_pct: Percent concession from the fresh credit (e.g., 1.0 →
+                net_price = credit * 0.99). If None, the daemon's configured
+                `limit_slippage_pct` is used (GET /trade/defaults). Fallback
+                if daemon unreachable: 0.0.
+            max_age: Seconds; daemon returns cached if fresher than this, else
+                forces a provider refresh. If None, the daemon's configured
+                `limit_quote_max_age_sec` is used. Fallback: 10.0.
+            fallback_credit: Used when the refresh fails. Typically the credit
+                observed at scan time. If None and refresh fails, the first value
+                in the returned tuple is None (caller should decide what to do).
+
+        Returns:
+            (net_price, metadata). `net_price` is the rounded dollar price to
+            submit, or None if there's no fallback and the refresh failed.
+            `metadata` always contains enough to audit the decision:
+                scan_credit, refreshed_credit, age_seconds, quote_source,
+                slippage_pct, submitted_net_price, fallback_reason (if any).
+        """
+        # If the caller didn't specify slippage/max_age, pull from the daemon's
+        # /trade/defaults so every LIMIT caller benefits from one config point.
+        slippage_pct, max_age = await self._resolve_trade_defaults(slippage_pct, max_age)
+
+        def _apply_slip(cr: float) -> float:
+            return round(cr * (1.0 - slippage_pct / 100.0), 2)
+
+        def _fallback(reason: str, age=None, src="error", refreshed=None) -> tuple[float | None, dict]:
+            price = _apply_slip(fallback_credit) if fallback_credit is not None else None
+            return price, {
+                "scan_credit": fallback_credit,
+                "refreshed_credit": refreshed,
+                "age_seconds": age,
+                "quote_source": src,
+                "slippage_pct": slippage_pct,
+                "submitted_net_price": price,
+                "fallback_reason": reason,
+            }
+
+        try:
+            quotes_resp = await self.get_option_quotes(
+                symbol=symbol,
+                expiration=expiration,
+                option_type=option_type,
+                max_age=max_age,
+                strike_min=min(short_strike, long_strike) - 0.01,
+                strike_max=max(short_strike, long_strike) + 0.01,
+            )
+        except Exception as e:
+            return _fallback(f"quote_refresh_failed: {e.__class__.__name__}: {e}")
+
+        ot = option_type.lower()
+        quotes_by_strike = {
+            float(q["strike"]): q
+            for q in (quotes_resp.get("quotes", {}).get(ot, []) or [])
+            if q.get("strike") is not None
+        }
+        short_q = quotes_by_strike.get(float(short_strike))
+        long_q  = quotes_by_strike.get(float(long_strike))
+
+        meta = quotes_resp.get("meta", {}) or {}
+        age = meta.get("age_seconds")
+        src = meta.get("source") or "unknown"
+
+        if not short_q or not long_q:
+            return _fallback("missing_leg_in_refreshed_quotes", age=age, src=src)
+
+        short_bid = float(short_q.get("bid") or 0)
+        long_ask  = float(long_q.get("ask") or 0)
+        if short_bid <= 0 or long_ask <= 0:
+            return _fallback("non_positive_bid_or_ask", age=age, src=src)
+
+        refreshed_credit = round(short_bid - long_ask, 2)
+        if refreshed_credit <= 0:
+            return _fallback(
+                "refreshed_credit_non_positive", age=age, src=src,
+                refreshed=refreshed_credit,
+            )
+
+        price = _apply_slip(refreshed_credit)
+        return price, {
+            "scan_credit": fallback_credit,
+            "refreshed_credit": refreshed_credit,
+            "age_seconds": age,
+            "quote_source": src,
+            "slippage_pct": slippage_pct,
+            "submitted_net_price": price,
+        }
+
+    async def check_margin_credit_spread(
+        self,
+        symbol: str,
+        short_strike: float,
+        long_strike: float,
+        option_type: str,
+        expiration: str,
+        quantity: int = 1,
+    ) -> dict:
+        """Margin-check a credit spread without submitting the order.
+
+        Returns the daemon's /market/margin response:
+            {"init_margin": float, "maint_margin": float, "commission": float,
+             "equity_with_loan": float, "error": str | None}
+
+        Callers must submit real orders via `trade_credit_spread()` — this
+        method never touches the broker's order pad. It exists so scripts
+        (spread_scanner simulate handler, etc.) can reuse the same margin
+        code path that `utp trade --simulate` uses.
+        """
+        legs = [
+            {
+                "symbol": symbol, "expiration": expiration, "strike": short_strike,
+                "option_type": option_type.upper(), "action": "SELL_TO_OPEN",
+                "quantity": 1,
+            },
+            {
+                "symbol": symbol, "expiration": expiration, "strike": long_strike,
+                "option_type": option_type.upper(), "action": "BUY_TO_OPEN",
+                "quantity": 1,
+            },
+        ]
+        payload = {
+            "order": {
+                "broker": "ibkr",
+                "legs": legs,
+                "order_type": "MARKET",
+                "quantity": quantity,
+            },
+            "timeout": 10.0,
+        }
+        self._ensure_connected()
+        resp = await self._client.post("/market/margin", json=payload)
+        resp.raise_for_status()
+        return resp.json()
+
     async def trade_iron_condor(
         self,
         symbol: str,
@@ -1126,8 +1354,19 @@ _DEFAULT_WIDTHS: dict[str, float] = {
 _DEFAULT_WIDTH = 5.0  # equities
 
 
-def _round_strike(value: float, increment: float) -> float:
-    """Round a strike price to the nearest valid increment."""
+def _round_strike(value: float, increment: float, direction: str = "nearest") -> float:
+    """Round a strike price to a valid increment.
+
+    direction:
+      "nearest" — standard rounding (default, backward compatible)
+      "floor"   — round down (away from money for puts)
+      "ceil"    — round up (away from money for calls)
+    """
+    import math
+    if direction == "floor":
+        return round(math.floor(value / increment) * increment, 2)
+    elif direction == "ceil":
+        return round(math.ceil(value / increment) * increment, 2)
     return round(round(value / increment) * increment, 2)
 
 
@@ -1203,10 +1442,12 @@ def _resolve_pct_strikes(
     w = width if width is not None else _DEFAULT_WIDTHS.get(symbol.upper(), _DEFAULT_WIDTH)
 
     if is_iron_condor:
-        put_short = _round_strike(anchor_price * (1 - put_pct / 100), inc)
-        put_long = _round_strike(put_short - w, inc)
-        call_short = _round_strike(anchor_price * (1 + call_pct / 100), inc)
-        call_long = _round_strike(call_short + w, inc)
+        # Put short: round DOWN (further OTM = lower strike)
+        put_short = _round_strike(anchor_price * (1 - put_pct / 100), inc, "floor")
+        put_long = _round_strike(put_short - w, inc, "floor")
+        # Call short: round UP (further OTM = higher strike)
+        call_short = _round_strike(anchor_price * (1 + call_pct / 100), inc, "ceil")
+        call_long = _round_strike(call_short + w, inc, "ceil")
         return {
             "put_short": put_short, "put_long": put_long,
             "call_short": call_short, "call_long": call_long,
@@ -1214,11 +1455,13 @@ def _resolve_pct_strikes(
 
     otype = (option_type or "").upper()
     if otype == "PUT":
-        short_strike = _round_strike(anchor_price * (1 - put_pct / 100), inc)
-        long_strike = _round_strike(short_strike - w, inc)
+        # Round DOWN: ensures short strike is at least otm_pct away
+        short_strike = _round_strike(anchor_price * (1 - put_pct / 100), inc, "floor")
+        long_strike = _round_strike(short_strike - w, inc, "floor")
     elif otype == "CALL":
-        short_strike = _round_strike(anchor_price * (1 + call_pct / 100), inc)
-        long_strike = _round_strike(short_strike + w, inc)
+        # Round UP: ensures short strike is at least otm_pct away
+        short_strike = _round_strike(anchor_price * (1 + call_pct / 100), inc, "ceil")
+        long_strike = _round_strike(short_strike + w, inc, "ceil")
     else:
         raise ValueError(f"--option-type must be PUT or CALL, got: {option_type}")
     return {"short_strike": short_strike, "long_strike": long_strike}
@@ -1405,6 +1648,16 @@ def _validate_strike_args(subcommand: str, args) -> str | None:
         return "Cannot use both --otm-pct and --close-pct (pick one anchor)"
 
     pct_set = otm_pct is not None or close_pct is not None
+    # Risk-tier flags trigger auto-strike resolution from percentile data
+    # (see _resolve_risk_tier_strikes).  Treat them as a third valid path
+    # alongside explicit strikes and --otm-pct/--close-pct.
+    risk_tier_set = any(
+        getattr(args, f, None)
+        for f in ("risk_tier", "risk_tier_intraday", "risk_tier_pred")
+    )
+
+    if risk_tier_set and pct_set:
+        return "Cannot use --risk-tier* together with --otm-pct/--close-pct (pick one)"
 
     # If a pct flag is set, validate its split-form for credit-spread
     # (single-sided spreads cannot use a put:call split — pick the side via --option-type).
@@ -1435,17 +1688,29 @@ def _validate_strike_args(subcommand: str, args) -> str | None:
         has_explicit = args.short_strike is not None or args.long_strike is not None
         if pct_set and has_explicit:
             return "Cannot use --otm-pct/--close-pct with explicit --short-strike/--long-strike"
-        if not pct_set and (args.short_strike is None or args.long_strike is None):
-            return "--short-strike and --long-strike are required (or use --otm-pct/--close-pct)"
+        if risk_tier_set and has_explicit:
+            return "Cannot use --risk-tier* with explicit --short-strike/--long-strike"
+        if not pct_set and not risk_tier_set and (
+            args.short_strike is None or args.long_strike is None
+        ):
+            return ("--short-strike and --long-strike are required "
+                    "(or use --otm-pct/--close-pct, or --risk-tier-intraday/"
+                    "--risk-tier/--risk-tier-pred)")
 
     elif subcommand == "iron-condor":
         has_explicit = any(getattr(args, a, None) is not None
                           for a in ("put_short", "put_long", "call_short", "call_long"))
         if pct_set and has_explicit:
             return "Cannot use --otm-pct/--close-pct with explicit strike arguments"
-        if not pct_set and any(getattr(args, a, None) is None
-                                for a in ("put_short", "put_long", "call_short", "call_long")):
-            return "--put-short/--put-long/--call-short/--call-long are required (or use --otm-pct/--close-pct)"
+        if risk_tier_set and has_explicit:
+            return "Cannot use --risk-tier* with explicit strike arguments"
+        if not pct_set and not risk_tier_set and any(
+            getattr(args, a, None) is None
+            for a in ("put_short", "put_long", "call_short", "call_long")
+        ):
+            return ("--put-short/--put-long/--call-short/--call-long are required "
+                    "(or use --otm-pct/--close-pct, or --risk-tier-intraday/"
+                    "--risk-tier/--risk-tier-pred)")
 
     return None
 
@@ -1568,6 +1833,225 @@ async def _resolve_otm_strikes_http(args, subcommand: str, client) -> int | None
               f"— resolved from ${price:,.2f}{snap_note}")
 
     return None
+
+
+async def _resolve_one_tier_side(
+    *,
+    sym: str,
+    side: str,                    # "put" or "call"
+    active_tier: str,             # "aggressive" | "moderate" | "conservative"
+    tier_pred: str | None,
+    tier_intra: str | None,
+    db_url: str,
+) -> tuple[float | None, int | None, str]:
+    """Resolve the percentile-based strike price for ONE side (put or call).
+
+    Returns ``(strike_price, pctl_level, context_label)`` — strike_price is
+    None on lookup failure.  Errors are printed to stdout for CLI feedback.
+
+    Used by both the credit-spread (one call) and iron-condor (two calls,
+    one per side) paths.
+    """
+    import httpx as _hx
+    option_type = "PUT" if side == "put" else "CALL"
+
+    if tier_pred:
+        context_label = "prediction"
+        async with _hx.AsyncClient(timeout=10.0) as hc:
+            pr = await hc.get(
+                f"{db_url}/range_percentiles",
+                params={"ticker": sym, "windows": "0,1", "format": "json"},
+            )
+            if pr.status_code != 200:
+                print(f"  Error: percentiles server returned {pr.status_code}")
+                return None, None, context_label
+            pdata = pr.json()
+            tickers = pdata.get("tickers", [pdata] if "ticker" in pdata else [])
+            hourly = pdata.get("hourly", {})
+            rec = hourly.get(sym, {}).get("recommended", {}).get("close_to_close", {})
+            if not rec:
+                for t in tickers:
+                    if t.get("ticker") == sym:
+                        rec = t.get("recommended", {}).get("close_to_close", {})
+                        break
+            pctl_level = rec.get(active_tier, {}).get(side)
+            if not pctl_level:
+                print(f"  Error: no {active_tier} tier for {sym} {side}")
+                return None, None, context_label
+
+            pred_r = await hc.get(f"{db_url}/predictions/{sym}")
+            if pred_r.status_code != 200:
+                print(f"  Error: predictions unavailable for {sym}")
+                return None, pctl_level, context_label
+            pred = pred_r.json()
+            bands = pred.get("combined_bands") or pred.get("statistical_bands") or {}
+            band_key = f"P{pctl_level}"
+            band = bands.get(band_key)
+            if not band:
+                print(f"  Error: no {band_key} band in predictions for {sym}")
+                return None, pctl_level, context_label
+            strike_price = band["lo_price"] if option_type == "PUT" else band["hi_price"]
+            return strike_price, pctl_level, context_label
+
+    # Historical or intraday percentiles
+    context = "intraday" if tier_intra else "close_to_close"
+    context_label = "intraday" if tier_intra else "historical"
+    async with _hx.AsyncClient(timeout=10.0) as hc:
+        pr = await hc.get(
+            f"{db_url}/range_percentiles",
+            params={"ticker": sym, "windows": "0,1", "format": "json"},
+        )
+        if pr.status_code != 200:
+            print(f"  Error: percentiles server returned {pr.status_code}")
+            return None, None, context_label
+        pdata = pr.json()
+        tickers = pdata.get("tickers", [pdata] if "ticker" in pdata else [])
+        hourly = pdata.get("hourly", {})
+        rec = hourly.get(sym, {}).get("recommended", {}).get(context, {})
+        if not rec:
+            for t in tickers:
+                if t.get("ticker") == sym:
+                    rec = t.get("recommended", {}).get(context, {})
+                    break
+        pctl_level = rec.get(active_tier, {}).get(side)
+        if not pctl_level:
+            print(f"  Error: no {active_tier} {context} tier for {sym} {side}")
+            return None, None, context_label
+
+        if tier_intra:
+            hdata = hourly.get(sym, {})
+            slots = hdata.get("slots", {})
+            if not slots:
+                print(f"  Error: no intraday slot data for {sym}")
+                return None, pctl_level, context_label
+            first_slot = slots[sorted(slots.keys())[0]]
+            pct_key = f"p{pctl_level}"
+            pct_data = first_slot.get(
+                "when_down" if option_type == "PUT" else "when_up", {}
+            ).get("pct", {})
+            move_pct = pct_data.get(pct_key)
+            if move_pct is None:
+                print(f"  Error: no {pct_key} in intraday data for {sym}")
+                return None, pctl_level, context_label
+            prev_close = hdata.get("previous_close", 0)
+            if not prev_close:
+                print(f"  Error: no previous close for {sym}")
+                return None, pctl_level, context_label
+            return prev_close * (1 + move_pct / 100.0), pctl_level, context_label
+
+        # close_to_close window data
+        for t in tickers:
+            if t.get("ticker") == sym:
+                w1 = t.get("windows", {}).get("1", {})
+                pct_key = f"p{pctl_level}"
+                if option_type == "PUT":
+                    price_data = w1.get("when_down", {}).get("price", {})
+                else:
+                    price_data = w1.get("when_up", {}).get("price", {})
+                return price_data.get(pct_key), pctl_level, context_label
+        print(f"  Error: no window data for {sym}")
+        return None, pctl_level, context_label
+
+
+async def _resolve_risk_tier_strikes(args, subcommand: str, client) -> int | None:
+    """If --risk-tier, --risk-tier-intraday, or --risk-tier-pred is set,
+    fetch percentile data and resolve strikes onto args.
+
+    - credit-spread: resolves the single side picked by --option-type and
+      sets ``args.short_strike`` / ``args.long_strike``.
+    - iron-condor:  resolves BOTH put and call sides at the same tier and
+      sets ``args.put_short`` / ``args.put_long`` / ``args.call_short``
+      / ``args.call_long``.
+
+    Returns an exit code on error, ``None`` on success.
+    """
+    tier = getattr(args, "risk_tier", None)
+    tier_intra = getattr(args, "risk_tier_intraday", None)
+    tier_pred = getattr(args, "risk_tier_pred", None)
+    active_tier = tier or tier_intra or tier_pred
+    if not active_tier:
+        return None
+
+    sym = args.symbol.upper()
+    width = getattr(args, "width", None) or _DEFAULT_WIDTHS.get(sym, _DEFAULT_WIDTH)
+    db_url = os.environ.get("DB_SERVER_URL", "http://localhost:9102")
+    expiration = getattr(args, "expiration", None)
+    is_iron_condor = subcommand == "iron-condor"
+    tier_emoji = {"aggressive": "🔴", "moderate": "🟡", "conservative": "🟢"}.get(active_tier, "")
+
+    try:
+        # Sides to resolve depend on the subcommand.
+        if is_iron_condor:
+            sides_to_resolve = ["put", "call"]
+        else:
+            option_type = getattr(args, "option_type", "PUT")
+            sides_to_resolve = ["put" if option_type == "PUT" else "call"]
+
+        resolved: dict[str, dict] = {}
+        for side in sides_to_resolve:
+            strike_price, pctl_level, context_label = await _resolve_one_tier_side(
+                sym=sym, side=side,
+                active_tier=active_tier,
+                tier_pred=tier_pred, tier_intra=tier_intra,
+                db_url=db_url,
+            )
+            if not strike_price or strike_price <= 0:
+                print(f"  Error: could not resolve {side} strike for {active_tier} "
+                      f"{context_label}")
+                return 1
+            # Round AWAY from money: floor for puts, ceil for calls
+            inc = _STRIKE_INCREMENTS.get(sym, _DEFAULT_STRIKE_INCREMENT)
+            rnd_dir = "floor" if side == "put" else "ceil"
+            short_strike = _round_strike(strike_price, inc, rnd_dir)
+            long_strike = short_strike - width if side == "put" else short_strike + width
+            resolved[side] = {
+                "short_strike": short_strike,
+                "long_strike": long_strike,
+                "pctl_level": pctl_level,
+                "context_label": context_label,
+            }
+
+        # Snap each side to the actual chain (one snap per side — uses the
+        # side's option_type so the chain lookup matches).
+        if expiration:
+            for side, info in resolved.items():
+                opt_type = "PUT" if side == "put" else "CALL"
+                strikes = {
+                    "short_strike": info["short_strike"],
+                    "long_strike": info["long_strike"],
+                }
+                snapped = await _snap_strikes_to_chain_http(
+                    client, sym, expiration, strikes, opt_type, False,
+                )
+                resolved[side]["short_strike"] = snapped["short_strike"]
+                resolved[side]["long_strike"] = snapped["long_strike"]
+
+        # Write back to args + log
+        if is_iron_condor:
+            args.put_short = resolved["put"]["short_strike"]
+            args.put_long = resolved["put"]["long_strike"]
+            args.call_short = resolved["call"]["short_strike"]
+            args.call_long = resolved["call"]["long_strike"]
+            ctx = resolved["put"]["context_label"]
+            print(f"  {tier_emoji} Risk tier: {active_tier} ({ctx}) — iron-condor")
+            print(f"  Strikes: put {args.put_short}/{args.put_long} "
+                  f"(P{resolved['put']['pctl_level']}) | "
+                  f"call {args.call_short}/{args.call_long} "
+                  f"(P{resolved['call']['pctl_level']}), {width:.0f}pt width")
+        else:
+            side = sides_to_resolve[0]
+            args.short_strike = resolved[side]["short_strike"]
+            args.long_strike = resolved[side]["long_strike"]
+            ctx = resolved[side]["context_label"]
+            print(f"  {tier_emoji} Risk tier: {active_tier} ({ctx}) → "
+                  f"P{resolved[side]['pctl_level']} {side}")
+            print(f"  Strikes: {args.short_strike}/{args.long_strike} "
+                  f"(P{resolved[side]['pctl_level']} boundary, {width:.0f}pt width)")
+        return None
+
+    except Exception as e:
+        print(f"  Error resolving risk tier: {e}")
+        return 1
 
 
 async def _resolve_otm_strikes_direct(args, subcommand: str) -> int | None:
@@ -4129,14 +4613,24 @@ async def _cmd_trade_http(args, server: str) -> int:
             print(f"  Error: {err}")
             return 1
 
-    # Resolve --otm-pct (spot anchor) or --close-pct (prev close anchor)
-    if subcommand in ("credit-spread", "iron-condor") and (
+    # Resolve auto-strike inputs in priority order:
+    #   1. --risk-tier* — calibrated percentile boundaries from db_server
+    #   2. --close-pct — previous close anchor
+    #   3. --otm-pct  — current spot anchor
+    risk_tier_set = any(
+        getattr(args, f, None)
+        for f in ("risk_tier", "risk_tier_intraday", "risk_tier_pred")
+    )
+    pct_set = (
         getattr(args, "otm_pct", None) is not None
         or getattr(args, "close_pct", None) is not None
-    ):
+    )
+    if subcommand in ("credit-spread", "iron-condor") and (pct_set or risk_tier_set):
         import httpx
         async with httpx.AsyncClient(base_url=server, timeout=30.0) as quote_client:
-            if getattr(args, "close_pct", None) is not None:
+            if risk_tier_set:
+                rc = await _resolve_risk_tier_strikes(args, subcommand, quote_client)
+            elif getattr(args, "close_pct", None) is not None:
                 rc = await _resolve_close_pct_strikes_http(args, subcommand, quote_client)
             else:
                 rc = await _resolve_otm_strikes_http(args, subcommand, quote_client)
@@ -7245,14 +7739,32 @@ async def _cmd_daemon(args) -> int:
 
     bg_tasks.append(asyncio.create_task(_profit_monitor_bg()))
 
-    # Market data streaming loop (if --streaming-config provided)
-    streaming_config_path = getattr(args, "streaming_config", None)
+    # Daemon config (formerly "streaming config") — same YAML, expanded to
+    # hold trade defaults on top of streaming targets. --config is primary;
+    # --streaming-config is kept as a deprecated alias.
+    streaming_config_path = (
+        getattr(args, "config", None) or getattr(args, "streaming_config", None)
+    )
     _streaming_svc = None
     if streaming_config_path:
         try:
             from app.services.streaming_config import load_streaming_config
             from app.services.market_data_streaming import init_streaming_service
             stream_cfg = load_streaming_config(streaming_config_path)
+
+            # Apply YAML trade defaults to the global settings so GET /trade/defaults
+            # (and every LIMIT-pricing caller) reflects the daemon's one source of
+            # truth. None = leave the env-var-backed default in place.
+            from app.config import settings
+            if stream_cfg.default_order_type is not None:
+                settings.default_order_type = stream_cfg.default_order_type.upper()
+                print(f"  Trade default: order_type = {settings.default_order_type} (from YAML)")
+            if stream_cfg.limit_slippage_pct is not None:
+                settings.limit_slippage_pct = float(stream_cfg.limit_slippage_pct)
+                print(f"  Trade default: limit_slippage_pct = {settings.limit_slippage_pct} (from YAML)")
+            if stream_cfg.limit_quote_max_age_sec is not None:
+                settings.limit_quote_max_age_sec = float(stream_cfg.limit_quote_max_age_sec)
+                print(f"  Trade default: limit_quote_max_age_sec = {settings.limit_quote_max_age_sec} (from YAML)")
 
             # Export pre/post-market window into env vars so the gating helpers
             # in market_data and option_quote_streaming honor the YAML setting.
@@ -8707,6 +9219,16 @@ Examples:
   %(prog)s --symbol SPX --close-pct 2 --option-type PUT \\
     --expiration 2026-03-20 --quantity 25 --live
 
+  Risk-tier based (uses calibrated percentile boundaries):
+  %(prog)s --symbol SPX --risk-tier conservative --option-type PUT \\
+    --expiration 2026-04-21 --quantity 5 --live
+  %(prog)s --symbol NDX --risk-tier aggressive --option-type CALL \\
+    --expiration 2026-04-21 --quantity 10 --live
+  %(prog)s --symbol RUT --risk-tier-intraday moderate --option-type PUT \\
+    --expiration 2026-04-21 --quantity 5 --live
+  %(prog)s --symbol SPX --risk-tier-pred conservative --option-type PUT \\
+    --expiration 2026-04-21 --quantity 5 --live
+
 P&L: credit_received - cost_to_close (max profit = full credit, max loss = width - credit)
                                 ''',
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -8719,6 +9241,16 @@ P&L: credit_received - cost_to_close (max profit = full credit, max loss = width
     t_cs.add_argument("--otm-pct", type=str, default=None,
                       help="Place short strike this %% OTM from current spot price "
                            "(single-sided spread — pick side via --option-type)")
+    t_cs.add_argument("--risk-tier", type=str, default=None,
+                      choices=["aggressive", "moderate", "conservative"],
+                      help="Place short strike at the historical percentile boundary for this risk tier "
+                           "(fetched from db_server /api/range_percentiles recommended field)")
+    t_cs.add_argument("--risk-tier-intraday", type=str, default=None,
+                      choices=["aggressive", "moderate", "conservative"],
+                      help="Like --risk-tier but uses intraday move-to-close percentile (better for 0DTE)")
+    t_cs.add_argument("--risk-tier-pred", type=str, default=None,
+                      choices=["aggressive", "moderate", "conservative"],
+                      help="Like --risk-tier but uses ML prediction percentile boundary")
     t_cs.add_argument("--close-pct", type=str, default=None,
                       help="Place short strike this %% from PREVIOUS trading day's close "
                            "(fetched from db_server /api/range_percentiles). "
@@ -8814,6 +9346,18 @@ P&L: combined credit - cost_to_close (max profit = total credit, max loss = wide
                       help="Same as --otm-pct but anchored to PREVIOUS trading day's close "
                            "(fetched from db_server /api/range_percentiles). "
                            "Single value or split 'put:call'.")
+    t_ic.add_argument("--risk-tier", type=str, default=None,
+                      choices=["aggressive", "moderate", "conservative"],
+                      help="Place short strikes (both put and call) at the historical "
+                           "percentile boundary for this risk tier "
+                           "(fetched from db_server /api/range_percentiles recommended field).")
+    t_ic.add_argument("--risk-tier-intraday", type=str, default=None,
+                      choices=["aggressive", "moderate", "conservative"],
+                      help="Like --risk-tier but uses intraday move-to-close percentile "
+                           "(better for 0DTE).")
+    t_ic.add_argument("--risk-tier-pred", type=str, default=None,
+                      choices=["aggressive", "moderate", "conservative"],
+                      help="Like --risk-tier but uses ML prediction percentile boundary.")
     t_ic.add_argument("--width", type=float, default=None,
                       help="Wing width in points (default: SPX=20, NDX=50, RUT=20, equities=5)")
     t_ic.add_argument("--quantity", type=int, default=1)
@@ -9196,8 +9740,11 @@ Aliases: d
     p_daemon.add_argument("--auto-execute", action="store_true", help="Auto-execute advisor recommendations")
     p_daemon.add_argument("--no-restart", action="store_true",
                           help="Disable auto-restart on crash (exit immediately on failure)")
+    p_daemon.add_argument("--config", default=None, metavar="YAML",
+                          help="Daemon YAML config (streaming targets, trade defaults, market data). "
+                               "See configs/daemon_default.yaml. Use this instead of --streaming-config.")
     p_daemon.add_argument("--streaming-config", default=None, metavar="YAML",
-                          help="YAML config for real-time market data streaming (IBKR → Redis/QuestDB/WS)")
+                          help="[DEPRECATED — use --config] Daemon YAML config. Kept for back-compat.")
     p_daemon.add_argument("--log-level", default="INFO",
                           choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                           help="Log level (default: INFO)")

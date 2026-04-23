@@ -19,6 +19,28 @@ from app.services.trade_service import (
 router = APIRouter(prefix="/trade", tags=["trading"])
 
 
+@router.get("/defaults")
+async def get_trade_defaults() -> dict:
+    """Return the daemon's configured trade defaults.
+
+    Any caller that omits `order_type` or `slippage_pct` should consult this
+    endpoint so LIMIT behavior is uniform across CLI, playbook, scanner, and
+    any other integration. Overriding per-call is always allowed.
+
+    Response:
+        {
+          "default_order_type": "MARKET" | "LIMIT",
+          "limit_slippage_pct": float,          # 0..100
+          "limit_quote_max_age_sec": float,     # seconds; forces provider refresh if older
+        }
+    """
+    return {
+        "default_order_type": settings.default_order_type.upper(),
+        "limit_slippage_pct": float(settings.limit_slippage_pct),
+        "limit_quote_max_age_sec": float(settings.limit_quote_max_age_sec),
+    }
+
+
 async def _close_by_con_id(position: dict, quantity: int | None, net_price: float | None) -> OrderResult | None:
     """Close a multi-leg position using stored conIds — bypasses contract qualification.
 

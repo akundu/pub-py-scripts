@@ -478,6 +478,9 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
           <label style="color:var(--muted);font-size:11px">Min Pctl</label>
           <select id="rec-min-pctl" class="select-styled" onchange="filterRecs()">
             <option value="0">All</option>
+            <option value="aggressive">🔴 Aggressive</option>
+            <option value="moderate">🟡 Moderate</option>
+            <option value="conservative">🟢 Conservative</option>
             <option value="75">&gt;P75</option>
             <option value="80">&gt;P80</option>
             <option value="85">&gt;P85</option>
@@ -489,6 +492,9 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
           <label style="color:var(--muted);font-size:11px">Min Pred</label>
           <select id="rec-min-pred" class="select-styled" onchange="filterRecs()">
             <option value="0">All</option>
+            <option value="aggressive">🔴 Aggressive</option>
+            <option value="moderate">🟡 Moderate</option>
+            <option value="conservative">🟢 Conservative</option>
             <option value="80">&gt;P80</option>
             <option value="85">&gt;P85</option>
             <option value="90" selected>&gt;P90</option>
@@ -499,6 +505,9 @@ html, body { height:100%; background:var(--bg); color:var(--text); font-family:v
           <label style="color:var(--muted);font-size:11px" title="Intraday move-to-close percentile (0DTE only)">Min Intra</label>
           <select id="rec-min-intraday" class="select-styled" onchange="filterRecs()">
             <option value="0" selected>All</option>
+            <option value="aggressive">🔴 Aggressive</option>
+            <option value="moderate">🟡 Moderate</option>
+            <option value="conservative">🟢 Conservative</option>
             <option value="75">&gt;P75</option>
             <option value="80">&gt;P80</option>
             <option value="85">&gt;P85</option>
@@ -981,6 +990,7 @@ function stopChainRefresh() {
 // ── Percentile Data ───────────────────────────────────────────────────────────
 let percentileData = null;  // Raw response from /api/percentiles
 let _pctlByTicker = {};     // Processed: {SPX: {lastDay, close, windows: {0: {up:{p75,p90,...}, down:{...}}, ...}}}
+let _recommendedByTicker = {};  // {SPX: {close_to_close: {aggressive: {put:95,call:97}, ...}, intraday: {...}}}
 let _pctlFetchedAt = null;  // ISO string: when percentile data was last fetched from server
 let _intradayByTicker = {};  // {SPX: {slots: [...], slots_10min: [...], slots_5min: [...]}}
 
@@ -1010,9 +1020,22 @@ async function fetchPercentiles() {
         };
       }
     }
+    // Store recommended risk tiers per ticker (from both ticker-level and hourly)
+    _recommendedByTicker = {};
+    for (const t of d.tickers || []) {
+      if (t.recommended) _recommendedByTicker[t.ticker] = {...t.recommended};
+    }
+    // Merge hourly recommended (has intraday + max_move contexts) into per-ticker
+    for (const [sym, hData] of Object.entries(d.hourly || {})) {
+      if (hData.recommended) {
+        if (!_recommendedByTicker[sym]) _recommendedByTicker[sym] = {};
+        for (const [ctx, tiers] of Object.entries(hData.recommended)) {
+          if (!_recommendedByTicker[sym][ctx]) _recommendedByTicker[sym][ctx] = tiers;
+        }
+      }
+    }
+
     // Store intraday move-to-close data (0DTE hourly slots)
-    // Structure: slots={time_key: {when_up, when_down, ...}}, slots_15min={...}, slots_5min={...}
-    // All are dicts keyed by time string (e.g., "10:00", "15:30"), NOT arrays
     _intradayByTicker = {};
     const hourlyKeys = Object.keys(d.hourly || {});
     if (hourlyKeys.length) {
@@ -1252,7 +1275,19 @@ function _findBestSlotDict(slotDict, etMinutes, useLastIfPast) {
   return [bestKey, bestSlot];
 }
 
-function pctlBadge(bracket) {
+// Look up which tier (aggressive/moderate/conservative) a percentile matches for a given ticker+type+context
+function _tierForPctl(p, sym, optionType, context) {
+  const side = optionType === 'PUT' ? 'put' : 'call';
+  const rec = _recommendedByTicker[sym]?.[context];
+  if (!rec) return '';
+  // Check from tightest to widest
+  for (const [tier, abbr] of [['aggressive','agg'],['moderate','mod'],['conservative','con']]) {
+    if (rec[tier]?.[side] === p) return abbr;
+  }
+  return '';
+}
+
+function pctlBadge(bracket, sym, optionType, context) {
   if (!bracket) return '<span style="color:var(--muted);font-size:9px">--</span>';
   const p = bracket.pctl;
   let cls = 'badge-critical';  // <P75 = red
@@ -1262,12 +1297,14 @@ function pctlBadge(bracket) {
   else if (p >= 85) cls = 'badge-watch';
   else if (p >= 80) cls = 'badge-warning';
   else if (p >= 75) cls = 'badge-warning';
-  return `<span class="badge ${cls}">${bracket.label}</span>`;
+  const tier = sym && context ? _tierForPctl(p, sym, optionType, context) : '';
+  const tierLabel = tier ? ` <span style="font-size:7px;opacity:0.7">${tier}</span>` : '';
+  return `<span class="badge ${cls}">${bracket.label}${tierLabel}</span>`;
 }
 
-function intraBadge(bracket) {
+function intraBadge(bracket, sym, optionType) {
   if (!bracket) return '<span style="color:var(--muted);font-size:9px">--</span>';
-  return pctlBadge(bracket);  // Same styling as hist/pred badges
+  return pctlBadge(bracket, sym, optionType, 'intraday');
 }
 
 // ── Previous Close Prices (from QuestDB daily_prices) ────────────────────────
@@ -3377,8 +3414,8 @@ function renderRecs() {
   const minOtm = parseFloat(document.getElementById('rec-min-otm')?.value) || 0;
   const typeFilter = document.getElementById('rec-type-filter')?.value || 'ALL';
   const customWidth = parseInt(document.getElementById('rec-width')?.value) || 0;
-  const minPctl = parseInt(document.getElementById('rec-min-pctl')?.value) || 0;
-  const minPred = parseInt(document.getElementById('rec-min-pred')?.value) || 0;
+  const minPctlRaw = document.getElementById('rec-min-pctl')?.value || '0';
+  const minPredRaw = document.getElementById('rec-min-pred')?.value || '0';
   const recQty = parseInt(document.getElementById('rec-qty')?.value) || 25;
   const minTotalCredit = parseInt(document.getElementById('rec-min-total-credit')?.value) || 0;
   const maxTotalLoss = parseInt(document.getElementById('rec-max-total-loss')?.value) || Infinity;
@@ -3400,7 +3437,17 @@ function renderRecs() {
   }
 
   const minOtmPc = parseFloat(document.getElementById('rec-min-otm-pc')?.value) || 0;
-  const minIntraday = parseInt(document.getElementById('rec-min-intraday')?.value) || 0;
+  const minIntradayRaw = document.getElementById('rec-min-intraday')?.value || '0';
+
+  // Resolve semantic tier names (aggressive/moderate/conservative) to percentile values
+  const _SEMANTIC_TIERS = ['aggressive','moderate','conservative'];
+  function _resolveMinPctl(rawVal, sym, optionType, context) {
+    if (_SEMANTIC_TIERS.includes(rawVal)) {
+      const side = optionType === 'PUT' ? 'put' : 'call';
+      return _recommendedByTicker[sym]?.[context]?.[rawVal]?.[side] || 0;
+    }
+    return parseInt(rawVal) || 0;
+  }
 
   // Shared filter function. dteIdx = DTE index (0,1,2,5). D/ROI = ROI / (dteIdx+1).
   function checkFilters(s, dteIdx) {
@@ -3412,6 +3459,10 @@ function renderRecs() {
     if (minOtm > 0 && Math.abs(s.otm_pct) < minOtm) fails.push('OTM');
     if (minOtmPc > 0 && Math.abs(s.otm_pct_pc) < minOtmPc) fails.push('OTM-pc');
     if (typeFilter !== 'ALL' && s.option_type !== typeFilter) fails.push('Type');
+    const sym = s._sym || tickerFilter;
+    const minPctl = _resolveMinPctl(minPctlRaw, sym, s.option_type, 'close_to_close');
+    const minPred = _resolveMinPctl(minPredRaw, sym, s.option_type, 'close_to_close');
+    const minIntraday = _resolveMinPctl(minIntradayRaw, sym, s.option_type, 'intraday');
     if (minPctl > 0 && (!s._pctl || s._pctl.pctl < minPctl)) fails.push('Hist');
     if (minPred > 0 && (!s._pred || s._pred.pctl < minPred)) fails.push('Pred');
     if (minIntraday > 0 && dte === 0 && (!s._intraday || s._intraday.pctl < minIntraday)) fails.push('Intra');
@@ -3572,9 +3623,9 @@ function renderRecs() {
       html += `<td class="num">${s.otm_pct}%</td>`;
       html += `<td class="num hide-sm" style="color:var(--yellow)">${s.otm_pct_pc}%</td>`;
       html += `<td class="num hide-sm">${deltaStr}</td>`;
-      html += `<td class="hide-sm">${pctlBadge(s._pctl)}</td>`;
+      html += `<td class="hide-sm">${pctlBadge(s._pctl, s._sym||sym, s.option_type, 'close_to_close')}</td>`;
       html += `<td class="hide-sm">${predBadge(s._pred)}</td>`;
-      html += `<td class="hide-sm">${intraBadge(s._intraday)}</td>`;
+      html += `<td class="hide-sm">${intraBadge(s._intraday, s._sym||sym, s.option_type)}</td>`;
       html += `<td><button class="btn btn-green btn-sm" onclick="tradeRec('${s._sym}','${s.option_type}',${s.short_strike},${s.long_strike},'${s._exp}')">Trade</button><button class="btn btn-muted btn-sm" style="margin-left:2px;padding:2px 5px;font-size:10px" onclick="addToCart('${s._sym}','${s.option_type}',${s.short_strike},${s.long_strike},'${s._exp}')" title="Add to cart for iron condor">+</button></td>`;
       html += '</tr>';
     }
@@ -3699,9 +3750,9 @@ function renderRecs() {
       html += `<td class="num">${s.otm_pct}%</td>`;
       html += `<td class="num hide-sm" style="color:var(--yellow)">${s.otm_pct_pc}%</td>`;
       html += `<td class="num hide-sm">${deltaStr}</td>`;
-      html += `<td class="hide-sm">${pctlBadge(s._pctl)}</td>`;
+      html += `<td class="hide-sm">${pctlBadge(s._pctl, s._sym||sym, s.option_type, 'close_to_close')}</td>`;
       html += `<td class="hide-sm">${predBadge(s._pred)}</td>`;
-      html += `<td class="hide-sm">${intraBadge(s._intraday)}</td>`;
+      html += `<td class="hide-sm">${intraBadge(s._intraday, s._sym||sym, s.option_type)}</td>`;
       html += `<td><button class="btn btn-green btn-sm" onclick="tradeRec('${sym}','${s.option_type}',${s.short_strike},${s.long_strike},'${exp}')">Trade</button><button class="btn btn-muted btn-sm" style="margin-left:2px;padding:2px 5px;font-size:10px" onclick="addToCart('${sym}','${s.option_type}',${s.short_strike},${s.long_strike},'${exp}')" title="Add to cart for iron condor">+</button></td>`;
       html += '</tr>';
     }

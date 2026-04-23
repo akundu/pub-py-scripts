@@ -12864,6 +12864,184 @@ class TestSpreadScanner:
         assert best["width"] == 30  # highest ROI among the three
         assert best["roi_pct"] == 4.3
 
+    @pytest.mark.asyncio
+    async def test_resolve_percentile_url_custom_bypasses_probe(self):
+        """A caller-supplied URL (not the baked-in lin1 default) is used as-is,
+        no reachability probe, no fallback."""
+        import spread_scanner as sp
+        sp._percentile_url_cache.clear()
+
+        class NeverCalled:
+            async def get(self, *a, **kw):
+                raise AssertionError("probe should not fire for custom URLs")
+
+        resolved = await sp._resolve_percentile_url(
+            NeverCalled(), "http://my.custom.host:9100",
+        )
+        assert resolved == "http://my.custom.host:9100"
+
+    @pytest.mark.asyncio
+    async def test_resolve_percentile_url_falls_back_when_primary_down(self):
+        """When the lin1 default is unreachable, fall back to localhost."""
+        import spread_scanner as sp
+        import httpx
+        sp._percentile_url_cache.clear()
+
+        class PrimaryDown:
+            def __init__(self):
+                self.calls = []
+            async def get(self, url, *a, **kw):
+                self.calls.append(url)
+                if url.startswith(sp.DEFAULT_PERCENTILE_URL):
+                    raise httpx.ConnectError("simulated: lin1 offline")
+                # Fallback (localhost) answers
+                class R: status_code = 200
+                return R()
+
+        stub = PrimaryDown()
+        resolved = await sp._resolve_percentile_url(stub, sp.DEFAULT_PERCENTILE_URL)
+        assert resolved == sp._PERCENTILE_FALLBACK_URL
+        # Probe order must be primary first, then fallback.
+        assert sp.DEFAULT_PERCENTILE_URL in stub.calls[0]
+        assert sp._PERCENTILE_FALLBACK_URL in stub.calls[1]
+
+    @pytest.mark.asyncio
+    async def test_resolve_percentile_url_prefers_primary_and_caches(self):
+        """When lin1 answers, use lin1 and cache the decision."""
+        import spread_scanner as sp
+        sp._percentile_url_cache.clear()
+
+        call_count = {"n": 0}
+        class PrimaryUp:
+            async def get(self, url, *a, **kw):
+                call_count["n"] += 1
+                class R: status_code = 200
+                return R()
+
+        stub = PrimaryUp()
+        first = await sp._resolve_percentile_url(stub, sp.DEFAULT_PERCENTILE_URL)
+        second = await sp._resolve_percentile_url(stub, sp.DEFAULT_PERCENTILE_URL)
+        assert first == sp.DEFAULT_PERCENTILE_URL
+        assert second == sp.DEFAULT_PERCENTILE_URL
+        # Only probed once — second call hit the cache.
+        assert call_count["n"] == 1
+
+    def test_render_footer_uses_countdown(self):
+        """render_footer's `seconds_remaining` should override the interval
+        so the scan loop can tick the displayed countdown each second."""
+        from spread_scanner import render_footer, parse_args
+
+        args = parse_args(["--tickers", "SPX", "--interval", "30"])
+        # Default: uses configured interval.
+        default_footer = render_footer(args)
+        assert "Next: +30s" in default_footer
+
+        # Countdown override: reflects the live remaining time.
+        countdown_footer = render_footer(args, seconds_remaining=7)
+        assert "Next: +7s" in countdown_footer
+        assert "+30s" not in countdown_footer
+
+        # Clamped at 0 (never shows negative).
+        assert "Next: +0s" in render_footer(args, seconds_remaining=-5)
+
+    def test_render_footer_shows_local_timezone(self):
+        """Footer's timestamp should include the local timezone abbreviation
+        (PDT/PST/EDT/EST/…), never a hardcoded 'ET'."""
+        from spread_scanner import render_footer, parse_args
+
+        args = parse_args(["--tickers", "SPX", "--interval", "30"])
+        footer = render_footer(args)
+        # Hardcoded 'ET' must not leak into output.
+        assert " ET " not in footer
+        # Local tz abbreviation is present (non-empty after the time).
+        import re
+        # matches "HH:MM:SS TZ" where TZ is 1+ letters
+        assert re.search(r"\d{2}:\d{2}:\d{2} [A-Z]+", footer) is not None
+
+    def test_build_spread_from_chain_snaps_to_available_grid(self):
+        """If the configured width lands on a non-listed strike (e.g. NDX
+        jumps from 10-pt to 50-pt grid at far-OTM), snap the long leg to the
+        widest listed OTM strike within max width."""
+        from spread_scanner import build_spread_from_chain
+
+        # NDX-style chain: 10-pt grid up to 27700, then 50-pt grid.
+        # (Credit economics — short_bid > long_ask — so snap yields a real spread.)
+        chain = {
+            "call": [
+                {"strike": 27650, "bid": 0.40, "ask": 0.55},
+                {"strike": 27700, "bid": 0.10, "ask": 0.25},
+                # 27710, 27720, 27730, 27740 — NOT LISTED
+                {"strike": 27750, "bid": 0.00, "ask": 0.15},
+            ],
+            "put": [],
+        }
+        # Width=60 would target 27710 (non-existent). Should snap to 27700 (w=50).
+        # credit = 0.40 - 0.25 = 0.15 (> 0, tradeable).
+        s = build_spread_from_chain(
+            chain, 27650, "CALL", 60, 26900.0,
+        )
+        assert s is not None
+        assert s["long_strike"] == 27700
+        assert s["width"] == 50  # actual width reflects what was used
+        assert s["credit"] == 0.15
+
+    def test_build_spread_from_chain_no_snap_when_too_far(self):
+        """Snap only up to max width — if every listed strike is wider than
+        the configured width, return None."""
+        from spread_scanner import build_spread_from_chain
+
+        # Only strikes are short=100 and a long at 200 (width=100).
+        chain = {
+            "call": [
+                {"strike": 100, "bid": 1.00, "ask": 1.20},
+                {"strike": 200, "bid": 0.10, "ask": 0.20},
+            ],
+            "put": [],
+        }
+        # Width=50 requested — nearest OTM long is 100 wider. Should fail.
+        s = build_spread_from_chain(chain, 100, "CALL", 50, 90.0)
+        assert s is None
+
+    def test_top_picks_dedupes_by_short_strike(self):
+        """When the same short strike appears with multiple widths (from
+        multi-width enumeration), top-N should show only the best-ROI variant
+        per short — no duplicate rows for the same short leg."""
+        from spread_scanner import _render_top_picks, parse_args
+
+        args = parse_args(["--tickers", "SPX", "--top", "5"])
+        scan_data = {
+            "prev_closes": {"SPX": 7100.0},
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-04-20",
+                    "spreads": {
+                        "SPX": [
+                            # Same short=7050, three widths — only the best (width=30, roi=6.0) should show.
+                            {"option_type": "PUT", "short_strike": 7050, "long_strike": 7040,
+                             "credit": 0.20, "roi_pct": 2.0, "otm_pct": 0.7, "width": 10},
+                            {"option_type": "PUT", "short_strike": 7050, "long_strike": 7030,
+                             "credit": 0.70, "roi_pct": 3.6, "otm_pct": 0.7, "width": 20},
+                            {"option_type": "PUT", "short_strike": 7050, "long_strike": 7020,
+                             "credit": 1.20, "roi_pct": 6.0, "otm_pct": 0.7, "width": 30},
+                            # Distinct short=7000 — should also show.
+                            {"option_type": "PUT", "short_strike": 7000, "long_strike": 6980,
+                             "credit": 0.50, "roi_pct": 2.6, "otm_pct": 1.4, "width": 20},
+                        ],
+                    },
+                }
+            },
+        }
+        lines = _render_top_picks(scan_data, args)
+        text = "\n".join(lines)
+        # Only the best variant at 7050 (long=7020) appears; 7040 and 7030 are suppressed.
+        assert "7050/7020" in text
+        assert "7050/7040" not in text
+        assert "7050/7030" not in text
+        # Different short still appears.
+        assert "7000/6980" in text
+        # Exactly one data row mentions 7050.
+        assert sum(1 for ln in lines if "7050/" in ln) == 1
+
     def test_dte_expiration_mapping(self):
         from spread_scanner import map_dte_to_expirations
         from datetime import date
@@ -13378,10 +13556,15 @@ class TestSpreadScanner:
         assert spread is not None
         assert spread["credit"] == 0.90
 
-        # Missing long leg → None
-        assert build_spread_from_chain(chain, 2735, "PUT", 30, 2800) is None
+        # Width exceeds what the exchange lists → snap to the widest listed
+        # long within the max width. width=30 on short=2735 targets 2705
+        # (not listed); 2710 is the widest listed OTM long within 30 → used.
+        snapped = build_spread_from_chain(chain, 2735, "PUT", 30, 2800)
+        assert snapped is not None
+        assert snapped["long_strike"] == 2710
+        assert snapped["width"] == 25  # actual width, not the configured max
 
-        # Missing strike entirely → None
+        # Short strike not in chain → None (can't price at all).
         assert build_spread_from_chain(chain, 2700, "PUT", 25, 2800) is None
 
     def test_build_spread_from_chain_no_edge_returns_none_by_default(self):

@@ -19,13 +19,19 @@ There are no standalone scripts. Do not create new top-level scripts unless expl
 
 ## Spread Scanner
 
-Live terminal dashboard showing credit spread ROI opportunities. Polls the UTP daemon for option chains and renders a matrix of spreads at various OTM percentages.
+Live terminal dashboard showing credit spread ROI opportunities. Polls the UTP daemon for option chains and renders a matrix of spreads at various OTM percentages, plus a bottom ACTIVITY panel with recent simulated/live trades and quiet-scan heartbeats.
+
+### Quick start
 
 ```bash
 # Default: all tickers, 0DTE, 30s refresh
 python spread_scanner.py
 
-# Custom OTM pcts + tickers
+# Risk-controlled YAML (recommended — encodes tier + credit + risk gates)
+python spread_scanner.py --config configs/spread_scanner_risk_controlled.dte0.yaml
+python spread_scanner.py --config configs/spread_scanner_risk_controlled.dte1.yaml
+
+# Ad-hoc CLI: custom OTM pcts + tickers
 python spread_scanner.py --otm-pcts 1,1.5,2,3 --tickers SPX,RUT
 
 # Multiple DTEs with risk tiers and iron condors
@@ -36,6 +42,47 @@ python spread_scanner.py --once --tickers SPX --otm-pcts 1,1.5,2
 ```
 
 **Prerequisites:** IBKR daemon running (`python utp.py daemon --live`). For `--tiers`: db_server on port 9102.
+
+### OTM floors & ceilings — how to control
+
+The scanner has two independent levers for "keep my short strike at least N% OTM":
+
+**Scanner-level** (top-picks + dashboard grid + downstream handlers): `min_otm` + `min_otm_per_ticker`
+
+```yaml
+# In your YAML config
+min_otm: 1.5                     # baseline across all tickers
+min_otm_per_ticker:              # per-ticker overrides (stack ON TOP of scalar)
+  NDX: 2.5                       # NDX has bigger absolute moves — demand more buffer
+  RUT: 1.75
+# max_otm_per_ticker: {SPX: 5.0}  # optional upper bound per ticker
+```
+
+Effective floor per symbol = **`max(min_otm, min_otm_per_ticker[sym])`**. If a ticker isn't in the map, it falls back to the scalar.
+
+CLI equivalent (no YAML edit needed):
+```bash
+python spread_scanner.py --config cfg.yaml \
+    --min-otm 1.5 \
+    --min-otm-per-ticker NDX=2.5,RUT=1.75
+```
+
+**Trade-handler-level** (gates actual trade/simulate-trade actions, not display): `policy.min_otm_pct: dict` (already per-ticker). See the `trade_defaults` / handler policy sections below.
+
+**Tier filter vs absolute floor — they stack, not replace.** `min_tier: conservative` (or `pN`) is dynamic to today's IV — on a calm day it may report that 1% OTM already covers the 98th percentile intraday move. That's mathematically correct but may be less conservative than you want. An absolute `min_otm_per_ticker` is a hard guardrail that doesn't budge when IV compresses. Run both — tier for IV-adaptive safety, absolute floor for the hard line.
+
+### Reference YAML configs
+
+| File | What it encodes |
+|------|-----------------|
+| `configs/spread_scanner_risk_controlled.yaml`      | Canonical risk-controlled template. |
+| `configs/spread_scanner_risk_controlled.dte0.yaml` | 0DTE variant — widths, OTM floors, credit floors tuned for same-day. |
+| `configs/spread_scanner_risk_controlled.dte1.yaml` | 1DTE variant — slightly deeper OTM, wider credit targets. |
+| `configs/spread_scanner_risk_controlled.dte2.yaml` | 2DTE variant — more time-value, less sensitive to intraday moves. |
+
+### ACTIVITY panel
+
+The bottom panel shows the last N (default 3; `--recent-actions N`) trade / simulate actions, each with a timestamp, outcome icon, spread identity, credit, risk, nROI, and OTM. Colors: TRADE rows bold-green, SIM rows cyan, risk auto-color by magnitude. When a scan cycle doesn't produce any trade, a dim "QUIET" heartbeat line appears with a diagnosed reason (e.g. `166 rejected by gates: below_min_norm_roi (128), below_otm_floor (25), roi_outside_band (13)`) so you can tell at a glance that the system is alive and which gate is binding.
 
 ## Mandatory Rules
 

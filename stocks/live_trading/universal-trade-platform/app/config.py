@@ -65,6 +65,13 @@ class Settings(BaseSettings):
     order_poll_interval_seconds: float = 1.0
     order_poll_timeout_seconds: float = 60.0
 
+    # Trade defaults — applied to ANY caller (CLI `utp trade`, playbook,
+    # spread_scanner handlers, future integrations) that doesn't explicitly
+    # override. One place to tune, everyone benefits.
+    default_order_type: str = "MARKET"          # MARKET or LIMIT
+    limit_slippage_pct: float = 0.0             # credit * (1 - N/100) when LIMIT
+    limit_quote_max_age_sec: float = 10.0       # force provider refresh if older
+
     # LAN trust
     trust_local_network: bool = True
 

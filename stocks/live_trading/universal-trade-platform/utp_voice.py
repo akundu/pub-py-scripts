@@ -3827,9 +3827,11 @@ async def api_options_grid(
             raw_exps = exp_data.get("expirations", [])
             expirations = _merge_expirations(raw_exps)
             if not expirations and raw_exps:
-                logger.warning("All %d expirations for %s filtered out by _merge_expirations", len(raw_exps), symbol)
+                logger.warning("All %d expirations for %s filtered out by _merge_expirations: %s", len(raw_exps), symbol, raw_exps[:5])
+            elif not raw_exps:
+                logger.warning("Daemon returned no expirations for %s: %s", symbol, exp_data)
         except Exception as e:
-            logger.warning("Failed to get expirations for %s from daemon: %s", symbol, e)
+            logger.warning("Failed to get expirations for %s from daemon: %s", symbol, e, exc_info=True)
 
         if not expirations:
             return {"symbol": symbol, "error": "No expirations available", "expirations": []}
@@ -4107,7 +4109,41 @@ async def api_performance_summary(
 
 
 DB_SERVER_URL = os.environ.get("DB_SERVER_URL", "http://localhost:9102")
-PERCENTILE_SERVER_URL = os.environ.get("PERCENTILE_SERVER_URL", "http://localhost:9100")
+# Percentile server: default to the LAN-hosted authoritative host. Explicit
+# PERCENTILE_SERVER_URL env var still wins; otherwise we prefer lin1 and fall
+# back to localhost:9100 only if lin1 is unreachable (see `_resolve_percentile_url`).
+_PERCENTILE_DEFAULT = "http://lin1.kundu.dev:9100"
+_PERCENTILE_FALLBACK = "http://localhost:9100"
+PERCENTILE_SERVER_URL = os.environ.get("PERCENTILE_SERVER_URL", _PERCENTILE_DEFAULT)
+_percentile_url_cache: dict[str, str] = {}
+
+
+async def _resolve_percentile_url(client: httpx.AsyncClient, configured: str) -> str:
+    """Return a reachable URL for `/range_percentiles`.
+
+    Applies the primary→fallback fallback only when the caller is using our
+    baked-in default (lin1). Custom URLs (set via PERCENTILE_SERVER_URL) are
+    used verbatim. The winning URL is cached per-process.
+    """
+    if configured in _percentile_url_cache:
+        return _percentile_url_cache[configured]
+    if configured != _PERCENTILE_DEFAULT:
+        _percentile_url_cache[configured] = configured
+        return configured
+    for candidate in (_PERCENTILE_DEFAULT, _PERCENTILE_FALLBACK):
+        try:
+            r = await client.get(
+                f"{candidate}/range_percentiles",
+                params={"ticker": "SPX", "windows": "0", "format": "json"},
+                timeout=2.0,
+            )
+            if r.status_code < 500:
+                _percentile_url_cache[configured] = candidate
+                return candidate
+        except Exception:
+            continue
+    _percentile_url_cache[configured] = _PERCENTILE_FALLBACK
+    return _PERCENTILE_FALLBACK
 
 # Redis TTLs for prev-close, percentile, and prediction caches
 PREV_CLOSE_TTL_MARKET = 300   # 5 min during market hours
@@ -4260,8 +4296,9 @@ async def api_percentiles(_u: str | None = Depends(optional_session)):
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
+            percentile_url = await _resolve_percentile_url(client, PERCENTILE_SERVER_URL)
             resp = await client.get(
-                f"{PERCENTILE_SERVER_URL}/range_percentiles",
+                f"{percentile_url}/range_percentiles",
                 params={"ticker": "SPX,NDX,RUT", "windows": "0,1,2,3,5", "format": "json"},
             )
             if resp.status_code == 200:
