@@ -6407,7 +6407,7 @@ class TestOptionQuoteStreaming:
         cfg = StreamingConfig()
         assert cfg.option_quotes_enabled is False
         assert cfg.option_quotes_poll_interval == 5.0   # was 15.0
-        assert cfg.option_quotes_strike_range_pct == 5.0
+        assert cfg.option_quotes_strike_range_pct == 15.0
         assert cfg.option_quotes_num_expirations == 12
         assert cfg.option_quotes_csv_dte_max == 10
 
@@ -11568,8 +11568,8 @@ def _make_streaming_config(**overrides):
             StreamingSymbolConfig(symbol="RUT", sec_type="IND", exchange="RUSSELL"),
         ],
         option_quotes_enabled=True,
-        option_quotes_ibkr_strike_range_pct=5.0,
-        option_quotes_csv_strike_range_pct=5.0,
+        option_quotes_ibkr_strike_range_pct=3.0,
+        option_quotes_csv_strike_range_pct=15.0,
         option_quotes_ibkr_dte_list=[0, 1, 2],
         option_quotes_csv_dte_max=10,
     )
@@ -11613,13 +11613,13 @@ class TestTieredOptionStreaming:
         # IBKR: only DTE 0/1/2 × CALL/PUT = 3 × 2 = 6
         assert len(ibkr_jobs) == 6
 
-        # Strike range checks: both ±5% of 5000 = [4750, 5250]
+        # Strike range checks: IBKR ±3% of 5000 = [4850, 5150], CSV ±15% = [4250, 5750]
         for _, _, _, smin, smax, _ in csv_jobs:
-            assert smin == 4750.0
-            assert smax == 5250.0
+            assert smin == 4250.0
+            assert smax == 5750.0
         for _, _, _, smin, smax, _ in ibkr_jobs:
-            assert smin == 4750.0
-            assert smax == 5250.0
+            assert smin == 4850.0
+            assert smax == 5150.0
 
         # IBKR jobs only include DTE 0/1/2 expirations
         ibkr_exps = {j[1] for j in ibkr_jobs}
@@ -11686,9 +11686,9 @@ class TestTieredOptionStreaming:
             "option_quotes_strike_range_pct: 5.0\n"  # legacy field only
         )
         cfg = load_streaming_config(cfg_yaml)
-        # Both fall back to legacy field value
+        # Both fall back to legacy field value (5.0)
         assert cfg.option_quotes_ibkr_strike_range_pct == 5.0
-        assert cfg.option_quotes_csv_strike_range_pct == 5.0
+        assert cfg.option_quotes_csv_strike_range_pct == 5.0  # legacy fallback, not default 15
         # No DTE filter unless explicitly set
         assert cfg.option_quotes_ibkr_dte_list is None
         assert cfg.option_quotes_csv_dte_max == 10
@@ -11702,9 +11702,9 @@ class TestTieredOptionStreaming:
         # SPX/NDX/RUT all enabled by default
         names = {s.symbol for s in cfg.symbols}
         assert {"SPX", "NDX", "RUT"} <= names
-        # Unified strike range, split DTE depth
-        assert cfg.option_quotes_ibkr_strike_range_pct == 5.0
-        assert cfg.option_quotes_csv_strike_range_pct == 5.0
+        # IBKR ±3%, CSV ±15%, split DTE depth
+        assert cfg.option_quotes_ibkr_strike_range_pct == 3.0
+        assert cfg.option_quotes_csv_strike_range_pct == 15.0
         assert cfg.option_quotes_ibkr_dte_list == [0, 1, 2]
         assert cfg.option_quotes_csv_dte_max == 10
 
@@ -11716,8 +11716,8 @@ class TestTieredOptionStreaming:
         svc = OptionQuoteStreamingService(cfg, MagicMock())
         stats = svc.stats
         config_block = stats["config"]
-        assert config_block["ibkr_strike_range_pct"] == 5.0
-        assert config_block["csv_strike_range_pct"] == 5.0
+        assert config_block["ibkr_strike_range_pct"] == 3.0
+        assert config_block["csv_strike_range_pct"] == 15.0
         assert config_block["ibkr_dte_list"] == [0, 1, 2]
 
     @pytest.mark.asyncio
@@ -11759,9 +11759,9 @@ class TestTieredOptionStreaming:
         # Verify the overlay received the (smaller) ibkr_jobs list, not csv_jobs
         assert len(captured[0]) == len(ibkr_jobs)
         for _, _, _, smin, smax, _ in captured[0]:
-            # Same strike range as CSV (unified at ±5%)
-            assert smin == 4750.0
-            assert smax == 5250.0
+            # IBKR tier: ±3% of 5000
+            assert smin == 4850.0
+            assert smax == 5150.0
 
     @pytest.mark.asyncio
     async def test_csv_primary_cycle_skips_overlay_when_no_ibkr_jobs(self):

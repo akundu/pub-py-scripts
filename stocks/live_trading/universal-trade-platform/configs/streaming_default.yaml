@@ -88,11 +88,11 @@ cpg_poll_interval: 2.0
 # symbols and caches them for instant serving via CLI and REST endpoints.
 #
 # Two-tier fetch (same strike range, split DTE depth):
-#   IBKR tier — ±5% strike range, DTE 0-2 only, every greeks_interval seconds.
+#   IBKR tier — ±3% strike range, DTE 0-2 only, every greeks_interval seconds.
 #               Freshness-critical near-term zone.  Realistic floor cycle is
 #               ~60s given measured IBKR latency of ~5s p50 / ~10s p95 per call.
-#   CSV tier  — ±5% strike range, up to 10 DTE, every poll_interval seconds.
-#               File I/O — cheap.  Covers longer-dated expirations.
+#   CSV tier  — ±15% strike range, up to 10 DTE, every poll_interval seconds.
+#               File I/O — cheap.  Wide coverage for tier strikes and longer DTEs.
 #
 # Read merge (in app/services/market_data.py): IBKR data wins when fresher than
 # the CSV warm cache; CSV fills in longer DTEs and stale windows.
@@ -148,12 +148,14 @@ option_quotes_ibkr_max_parallel: 6
 # means your broker latency is exceeding the overlay interval.
 
 # ── Strike ranges (unified) ───────────────────────────────────────────────
-# Both tiers use the same strike range (±5% of spot).
-option_quotes_ibkr_strike_range_pct: 5.0
-option_quotes_csv_strike_range_pct: 5.0
+# IBKR tier: ±3% of spot (fresh quotes for near-ATM strikes)
+option_quotes_ibkr_strike_range_pct: 3.0
+
+# CSV tier: ±15% of spot (wide coverage from file reads)
+option_quotes_csv_strike_range_pct: 15.0
 
 # Legacy: fallback if the ibkr_/csv_-specific ranges above aren't set.
-option_quotes_strike_range_pct: 5.0
+option_quotes_strike_range_pct: 15.0
 
 # ── DTE depth (split) ────────────────────────────────────────────────────
 # IBKR: only fetch DTE 0–2 (near-term where freshness matters most)

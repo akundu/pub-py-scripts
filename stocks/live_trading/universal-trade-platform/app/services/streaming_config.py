@@ -80,7 +80,7 @@ class StreamingConfig:
     # so the gate can fire close to its scheduled time.  Default 5s gives the
     # 25s greeks_interval ±2.5s of jitter at most.
     option_quotes_poll_interval: float = 5.0
-    option_quotes_strike_range_pct: float = 5.0    # Legacy — used as fallback if
+    option_quotes_strike_range_pct: float = 15.0   # Legacy — used as fallback if
                                                    # ibkr_/csv_ specific ranges aren't set.
     option_quotes_num_expirations: int = 12        # Resolve enough expirations to cover up to 10 DTE
 
@@ -109,8 +109,8 @@ class StreamingConfig:
     # broad).  IBKR option quote latency is ~5s p50 / ~10s p95 per call, so a
     # realistic IBKR cycle floor is ~60s for 3 symbols × 3 DTEs × 2 types at
     # concurrency 3.  CSV is file I/O — cheap and fast.
-    option_quotes_ibkr_strike_range_pct: float = 5.0   # ±% of spot, IBKR tier
-    option_quotes_csv_strike_range_pct: float = 5.0    # ±% of spot, CSV tier
+    option_quotes_ibkr_strike_range_pct: float = 3.0   # ±% of spot, IBKR tier
+    option_quotes_csv_strike_range_pct: float = 15.0   # ±% of spot, CSV tier
     # Which DTEs to fetch from IBKR.  None = all expirations (legacy behavior).
     # Default [0, 1, 2] keeps IBKR focused on near-term where freshness matters
     # most; longer DTEs are served from CSV.
@@ -261,13 +261,13 @@ def load_streaming_config(path: str | Path) -> StreamingConfig:
         option_quotes_ibkr_strike_range_pct=float(
             raw.get(
                 "option_quotes_ibkr_strike_range_pct",
-                float(raw.get("option_quotes_strike_range_pct", 5.0)),
+                float(raw.get("option_quotes_strike_range_pct", 3.0)),
             )
         ),
         option_quotes_csv_strike_range_pct=float(
             raw.get(
                 "option_quotes_csv_strike_range_pct",
-                float(raw.get("option_quotes_strike_range_pct", 5.0)),
+                float(raw.get("option_quotes_strike_range_pct", 15.0)),
             )
         ),
         option_quotes_ibkr_dte_list=raw.get("option_quotes_ibkr_dte_list", None),
