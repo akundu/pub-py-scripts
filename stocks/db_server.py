@@ -16124,7 +16124,7 @@ async def handle_catch_all(request: web.Request) -> web.Response:
     }, status=404)
 
 # Allowed script names for /run_script (must exist in run_scripts/ and be in this list)
-RUN_SCRIPT_ALLOWLIST = frozenset({"ms1_cron.sh", "ms1_run.sh", "prediction_setup.sh"})
+RUN_SCRIPT_ALLOWLIST = frozenset({"ms1_cron.sh", "ms1_run.sh", "prediction_setup.sh", "lin1_cron.sh"})
 
 
 async def handle_run_script(request: web.Request) -> web.Response:
