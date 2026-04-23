@@ -6407,8 +6407,9 @@ class TestOptionQuoteStreaming:
         cfg = StreamingConfig()
         assert cfg.option_quotes_enabled is False
         assert cfg.option_quotes_poll_interval == 5.0   # was 15.0
-        assert cfg.option_quotes_strike_range_pct == 3.0
-        assert cfg.option_quotes_num_expirations == 6  # Cover DTE 0-5
+        assert cfg.option_quotes_strike_range_pct == 5.0
+        assert cfg.option_quotes_num_expirations == 12
+        assert cfg.option_quotes_csv_dte_max == 10
 
     def test_streaming_config_loads_from_yaml(self, tmp_path):
         """load_streaming_config parses option quote fields from YAML."""
@@ -11567,9 +11568,10 @@ def _make_streaming_config(**overrides):
             StreamingSymbolConfig(symbol="RUT", sec_type="IND", exchange="RUSSELL"),
         ],
         option_quotes_enabled=True,
-        option_quotes_ibkr_strike_range_pct=2.5,
-        option_quotes_csv_strike_range_pct=10.0,
+        option_quotes_ibkr_strike_range_pct=5.0,
+        option_quotes_csv_strike_range_pct=5.0,
         option_quotes_ibkr_dte_list=[0, 1, 2],
+        option_quotes_csv_dte_max=10,
     )
     base.update(overrides)
     return StreamingConfig(**base)
@@ -11596,28 +11598,28 @@ class TestTieredOptionStreaming:
 
         today = date.today()
         exps = [
-            today.isoformat(),                             # DTE 0  → IBKR
-            (today + timedelta(days=1)).isoformat(),       # DTE 1  → IBKR
-            (today + timedelta(days=2)).isoformat(),       # DTE 2  → IBKR
+            today.isoformat(),                             # DTE 0  → IBKR + CSV
+            (today + timedelta(days=1)).isoformat(),       # DTE 1  → IBKR + CSV
+            (today + timedelta(days=2)).isoformat(),       # DTE 2  → IBKR + CSV
             (today + timedelta(days=5)).isoformat(),       # DTE 5  → CSV only
-            (today + timedelta(days=14)).isoformat(),      # DTE 14 → CSV only
+            (today + timedelta(days=14)).isoformat(),      # DTE 14 → excluded (> csv_dte_max=10)
         ]
 
         csv_jobs, ibkr_jobs = svc._build_fetch_jobs(
             symbol="SPX", price=5000.0, expirations=exps, price_source="quote",
         )
-        # CSV: every exp × CALL/PUT = 5 × 2 = 10
-        assert len(csv_jobs) == 10
+        # CSV: DTE 0,1,2,5 (DTE 14 excluded) × CALL/PUT = 4 × 2 = 8
+        assert len(csv_jobs) == 8
         # IBKR: only DTE 0/1/2 × CALL/PUT = 3 × 2 = 6
         assert len(ibkr_jobs) == 6
 
-        # Strike range checks: IBKR ±2.5% of 5000 = [4875, 5125], CSV ±10% = [4500, 5500]
+        # Strike range checks: both ±5% of 5000 = [4750, 5250]
         for _, _, _, smin, smax, _ in csv_jobs:
-            assert smin == 4500.0
-            assert smax == 5500.0
+            assert smin == 4750.0
+            assert smax == 5250.0
         for _, _, _, smin, smax, _ in ibkr_jobs:
-            assert smin == 4875.0
-            assert smax == 5125.0
+            assert smin == 4750.0
+            assert smax == 5250.0
 
         # IBKR jobs only include DTE 0/1/2 expirations
         ibkr_exps = {j[1] for j in ibkr_jobs}
@@ -11634,10 +11636,11 @@ class TestTieredOptionStreaming:
         svc = OptionQuoteStreamingService(cfg, MagicMock())
 
         today = date.today()
-        exps = [today.isoformat(), (today + timedelta(days=14)).isoformat()]
+        # Use DTE 0 and DTE 5 (both within csv_dte_max=10)
+        exps = [today.isoformat(), (today + timedelta(days=5)).isoformat()]
         csv_jobs, ibkr_jobs = svc._build_fetch_jobs("SPX", 5000.0, exps, "quote")
-        assert len(csv_jobs) == 4
-        assert len(ibkr_jobs) == 4  # everything
+        assert len(csv_jobs) == 4   # both exps × 2 types
+        assert len(ibkr_jobs) == 4  # everything (no DTE filter)
 
     def test_build_fetch_jobs_dte_list_empty_skips_ibkr(self):
         """ibkr_dte_list=[] means CSV only (IBKR tier disabled)."""
@@ -11683,12 +11686,12 @@ class TestTieredOptionStreaming:
             "option_quotes_strike_range_pct: 5.0\n"  # legacy field only
         )
         cfg = load_streaming_config(cfg_yaml)
-        # IBKR clamps to min(2.5, 5.0) = 2.5
-        assert cfg.option_quotes_ibkr_strike_range_pct == 2.5
-        # CSV uses max(10.0, 5.0) = 10.0
-        assert cfg.option_quotes_csv_strike_range_pct == 10.0
+        # Both fall back to legacy field value
+        assert cfg.option_quotes_ibkr_strike_range_pct == 5.0
+        assert cfg.option_quotes_csv_strike_range_pct == 5.0
         # No DTE filter unless explicitly set
         assert cfg.option_quotes_ibkr_dte_list is None
+        assert cfg.option_quotes_csv_dte_max == 10
 
     def test_default_yaml_has_tickers_and_tiered_fields(self):
         """The shipped streaming_default.yaml uses the new tiered defaults."""
@@ -11699,10 +11702,11 @@ class TestTieredOptionStreaming:
         # SPX/NDX/RUT all enabled by default
         names = {s.symbol for s in cfg.symbols}
         assert {"SPX", "NDX", "RUT"} <= names
-        # Tiered defaults aligned with the latency-driven sizing
-        assert cfg.option_quotes_ibkr_strike_range_pct == 2.5
-        assert cfg.option_quotes_csv_strike_range_pct == 10.0
+        # Unified strike range, split DTE depth
+        assert cfg.option_quotes_ibkr_strike_range_pct == 5.0
+        assert cfg.option_quotes_csv_strike_range_pct == 5.0
         assert cfg.option_quotes_ibkr_dte_list == [0, 1, 2]
+        assert cfg.option_quotes_csv_dte_max == 10
 
     def test_stats_exposes_tiered_config(self):
         """Streamer status reports the tiered settings (for visibility)."""
@@ -11712,8 +11716,8 @@ class TestTieredOptionStreaming:
         svc = OptionQuoteStreamingService(cfg, MagicMock())
         stats = svc.stats
         config_block = stats["config"]
-        assert config_block["ibkr_strike_range_pct"] == 2.5
-        assert config_block["csv_strike_range_pct"] == 10.0
+        assert config_block["ibkr_strike_range_pct"] == 5.0
+        assert config_block["csv_strike_range_pct"] == 5.0
         assert config_block["ibkr_dte_list"] == [0, 1, 2]
 
     @pytest.mark.asyncio
@@ -11743,7 +11747,8 @@ class TestTieredOptionStreaming:
         svc._fetch_from_ibkr = _fake_fetch
 
         today = date.today()
-        exps = [today.isoformat(), (today + timedelta(days=14)).isoformat()]
+        # DTE 0 (IBKR + CSV) and DTE 5 (CSV only, within csv_dte_max=10)
+        exps = [today.isoformat(), (today + timedelta(days=5)).isoformat()]
         csv_jobs, ibkr_jobs = svc._build_fetch_jobs("SPX", 5000.0, exps, "quote")
         # csv_jobs covers both DTEs; ibkr_jobs only DTE 0
         assert len(csv_jobs) == 4
@@ -11754,9 +11759,9 @@ class TestTieredOptionStreaming:
         # Verify the overlay received the (smaller) ibkr_jobs list, not csv_jobs
         assert len(captured[0]) == len(ibkr_jobs)
         for _, _, _, smin, smax, _ in captured[0]:
-            # Tight IBKR range
-            assert smin == 4875.0
-            assert smax == 5125.0
+            # Same strike range as CSV (unified at ±5%)
+            assert smin == 4750.0
+            assert smax == 5250.0
 
     @pytest.mark.asyncio
     async def test_csv_primary_cycle_skips_overlay_when_no_ibkr_jobs(self):
@@ -12225,6 +12230,7 @@ class TestIbkrFetchParallel:
             option_quotes_csv_strike_range_pct = 10.0
             option_quotes_ibkr_strike_range_pct = 2.5
             option_quotes_ibkr_dte_list = None
+            option_quotes_csv_dte_max = 10
             option_quotes_ibkr_max_age_sec = 90.0
             option_quotes_csv_max_age_market_sec = 900.0
             option_quotes_premarket_minutes = 10
@@ -12792,6 +12798,72 @@ class TestSpreadScanner:
         assert len(call_spreads) == 1
         assert call_spreads[0]["short_strike"] == 7200
 
+    def test_compute_spreads_enumerates_multiple_widths(self):
+        """For each short strike, every OTM long-leg strike within max_width
+        should produce a distinct spread using the actual chain grid."""
+        from spread_scanner import compute_spreads
+
+        # Puts on a 10-pt grid: shorts at 7050/7040/7030, longs at 7020/7010.
+        # With max_width=30 and short=7050, long candidates are
+        # 7040 (w=10), 7030 (w=20), 7020 (w=30) — all three should appear.
+        chain = {
+            "put": [
+                {"strike": 7050, "bid": 3.00, "ask": 3.30},
+                {"strike": 7040, "bid": 2.50, "ask": 2.80},
+                {"strike": 7030, "bid": 2.00, "ask": 2.30},
+                {"strike": 7020, "bid": 1.50, "ask": 1.80},
+            ],
+            "call": [],
+        }
+        spreads = compute_spreads(chain, "SPX", 7100.0, 30)
+        at_7050 = sorted(
+            [s for s in spreads if s["short_strike"] == 7050 and s["option_type"] == "PUT"],
+            key=lambda s: s["width"],
+        )
+        assert [s["width"] for s in at_7050] == [10, 20, 30]
+        # Credit = short_bid - long_ask: 3.00 - 2.80 = 0.20 (w=10),
+        # 3.00 - 2.30 = 0.70 (w=20), 3.00 - 1.80 = 1.20 (w=30).
+        assert at_7050[0]["credit"] == 0.20
+        assert at_7050[1]["credit"] == 0.70
+        assert at_7050[2]["credit"] == 1.20
+
+    def test_compute_spreads_respects_max_width(self):
+        """Pairs whose width exceeds max_width must be excluded."""
+        from spread_scanner import compute_spreads
+
+        chain = {
+            "put": [
+                {"strike": 7050, "bid": 3.00, "ask": 3.30},
+                {"strike": 7040, "bid": 2.50, "ask": 2.80},  # w=10
+                {"strike": 7020, "bid": 1.50, "ask": 1.80},  # w=30
+                {"strike": 7000, "bid": 1.00, "ask": 1.30},  # w=50 — excluded
+            ],
+            "call": [],
+        }
+        spreads = compute_spreads(chain, "SPX", 7100.0, 30)
+        widths_at_7050 = sorted(
+            s["width"] for s in spreads
+            if s["short_strike"] == 7050 and s["option_type"] == "PUT"
+        )
+        assert widths_at_7050 == [10, 30]  # 50 excluded
+
+    def test_find_spread_at_strike_returns_best_roi(self):
+        """When the same short has multiple widths, return the highest-ROI one."""
+        from spread_scanner import find_spread_at_strike
+
+        spreads = [
+            {"option_type": "PUT", "short_strike": 7050, "long_strike": 7040,
+             "width": 10, "credit": 0.20, "roi_pct": 2.0, "otm_pct": 0.7},
+            {"option_type": "PUT", "short_strike": 7050, "long_strike": 7020,
+             "width": 30, "credit": 1.20, "roi_pct": 4.3, "otm_pct": 0.7},
+            {"option_type": "PUT", "short_strike": 7050, "long_strike": 7030,
+             "width": 20, "credit": 0.70, "roi_pct": 3.6, "otm_pct": 0.7},
+        ]
+        best = find_spread_at_strike(spreads, 7050, "PUT")
+        assert best is not None
+        assert best["width"] == 30  # highest ROI among the three
+        assert best["roi_pct"] == 4.3
+
     def test_dte_expiration_mapping(self):
         from spread_scanner import map_dte_to_expirations
         from datetime import date
@@ -13311,3 +13383,2933 @@ class TestSpreadScanner:
 
         # Missing strike entirely → None
         assert build_spread_from_chain(chain, 2700, "PUT", 25, 2800) is None
+
+    def test_build_spread_from_chain_no_edge_returns_none_by_default(self):
+        """Chain has the strikes but short_bid == long_ask → credit=0 → None."""
+        from spread_scanner import build_spread_from_chain
+        chain = {"put": [
+            {"strike": 6945.0, "bid": 0.20, "ask": 0.25},
+            {"strike": 6920.0, "bid": 0.15, "ask": 0.20},   # ask == short bid
+        ]}
+        assert build_spread_from_chain(chain, 6945.0, "PUT", 25, 7128.0) is None
+
+    def test_build_spread_from_chain_allow_no_edge_returns_probe(self):
+        """allow_no_edge=True returns the pair with credit=0 + note so the
+        dashboard can distinguish 'no chain data' from 'no economic edge'."""
+        from spread_scanner import build_spread_from_chain
+        chain = {"put": [
+            {"strike": 6945.0, "bid": 0.20, "ask": 0.25},
+            {"strike": 6920.0, "bid": 0.15, "ask": 0.20},
+        ]}
+        r = build_spread_from_chain(chain, 6945.0, "PUT", 25, 7128.0, allow_no_edge=True)
+        assert r is not None
+        assert r["credit"] == 0.0
+        assert r["short_bid"] == 0.20
+        assert r["long_ask"] == 0.20
+        assert r["note"] == "no edge"
+
+    def test_build_spread_from_chain_no_bid_flagged(self):
+        from spread_scanner import build_spread_from_chain
+        chain = {"put": [
+            {"strike": 6945.0, "bid": 0, "ask": 0.25},
+            {"strike": 6920.0, "bid": 0.15, "ask": 0.20},
+        ]}
+        r = build_spread_from_chain(chain, 6945.0, "PUT", 25, 7128.0, allow_no_edge=True)
+        assert r["note"] == "no bid"
+
+    def test_build_spread_from_chain_missing_leg_still_returns_none(self):
+        """Even with allow_no_edge, truly missing strike data → None."""
+        from spread_scanner import build_spread_from_chain
+        chain = {"put": [{"strike": 6945.0, "bid": 0.20, "ask": 0.25}]}  # no 6920
+        assert build_spread_from_chain(
+            chain, 6945.0, "PUT", 25, 7128.0, allow_no_edge=True,
+        ) is None
+
+
+class TestPrevCloseCache:
+    """Prev-close cache: fetch at startup + 04:00 PT refresh on trading days."""
+
+    def _cache(self):
+        from spread_scanner import PrevCloseCache
+        return PrevCloseCache(["SPX", "NDX", "RUT"], "http://db")
+
+    def test_should_refresh_first_time(self):
+        """No prior refresh → refresh immediately."""
+        c = self._cache()
+        assert c.should_refresh() is True
+
+    def _complete_cache(self):
+        """Cache with all tickers populated — bypasses the incomplete-retry path."""
+        c = self._cache()
+        c.values = {sym: 100.0 for sym in c.tickers}
+        return c
+
+    def test_should_not_refresh_before_24h(self, monkeypatch):
+        """< 24h since last refresh → don't refresh, regardless of time-of-day."""
+        from spread_scanner import _PT
+        from datetime import datetime
+        c = self._complete_cache()
+        c.last_refreshed_at = datetime(2026, 4, 21, 6, 0, tzinfo=_PT)
+        # Next day 05:00 PT — 23h later, past 04:00 but under 24h
+        assert c.should_refresh(datetime(2026, 4, 22, 5, 0, tzinfo=_PT)) is False
+
+    def test_should_not_refresh_before_04_pt(self):
+        """>= 24h passed but still before 04:00 PT → wait."""
+        from spread_scanner import _PT
+        from datetime import datetime
+        c = self._complete_cache()
+        c.last_refreshed_at = datetime(2026, 4, 21, 3, 0, tzinfo=_PT)
+        # Next day 03:30 PT — 24.5h later, but still before 04:00
+        assert c.should_refresh(datetime(2026, 4, 22, 3, 30, tzinfo=_PT)) is False
+
+    def test_should_not_refresh_on_weekend(self):
+        """After 04:00 PT + >=24h, but it's a Saturday → skip."""
+        from spread_scanner import _PT
+        from datetime import datetime
+        c = self._complete_cache()
+        # Friday 2026-04-17 05:00 PT
+        c.last_refreshed_at = datetime(2026, 4, 17, 5, 0, tzinfo=_PT)
+        # Saturday 2026-04-18 05:00 PT — 24h later, past 04:00, but not a trading day
+        assert c.should_refresh(datetime(2026, 4, 18, 5, 0, tzinfo=_PT)) is False
+
+    def test_should_refresh_next_trading_day_after_04(self):
+        """>=24h passed, past 04:00 PT, on a trading day → refresh."""
+        from spread_scanner import _PT
+        from datetime import datetime
+        c = self._complete_cache()
+        # Monday 04:00 PT
+        c.last_refreshed_at = datetime(2026, 4, 20, 4, 0, tzinfo=_PT)
+        # Tuesday 04:15 PT — trading day, past 04:00, 24.25h later
+        assert c.should_refresh(datetime(2026, 4, 21, 4, 15, tzinfo=_PT)) is True
+
+    @staticmethod
+    def _range_percentiles_fake(closes: dict[str, float | None]):
+        """Return a FakeClient that mimics /api/range_percentiles for the
+        given {ticker: previous_close} map. Missing tickers → row dropped."""
+        class FakeClient:
+            async def get(self_c, url, params=None, timeout=None):
+                req_tickers = [t.strip() for t in (params or {}).get("tickers", "").split(",") if t.strip()]
+                rows = []
+                for t in req_tickers:
+                    pc = closes.get(t)
+                    if pc is not None:
+                        rows.append({"ticker": t, "previous_close": pc})
+                class R:
+                    status_code = 200
+                    def json(self_r): return rows
+                return R()
+        return FakeClient
+
+    def test_refresh_merges_tier_and_db(self):
+        """Tier-data-missing symbols are filled from db_server fallback."""
+        import asyncio
+        from spread_scanner import _PT
+        from datetime import datetime
+
+        FakeClient = self._range_percentiles_fake({"RUT": 2800.0})
+        c = self._cache()
+        tier_data = {"hourly": {
+            "SPX": {"previous_close": 7109.14},
+            "NDX": {"previous_close": 26590.34},
+        }}
+        merged = asyncio.run(c.refresh(
+            FakeClient(), tier_data=tier_data,
+            now_pt=datetime(2026, 4, 21, 6, 0, tzinfo=_PT),
+        ))
+        assert merged["SPX"] == 7109.14
+        assert merged["NDX"] == 26590.34
+        assert merged["RUT"] == 2800.0
+        assert c.last_refreshed_at is not None
+
+    def test_refresh_tier_empty_falls_back_to_db(self):
+        """tier_data=None → fetches all tickers from db_server."""
+        import asyncio
+        FakeClient = self._range_percentiles_fake({
+            "SPX": 7109.0, "NDX": 26590.0, "RUT": 2792.0,
+        })
+        c = self._cache()
+        merged = asyncio.run(c.refresh(FakeClient(), tier_data=None))
+        assert merged == {"SPX": 7109.0, "NDX": 26590.0, "RUT": 2792.0}
+
+    def test_refresh_keeps_prior_value_when_both_sources_fail(self):
+        """If a source fails for a ticker already in cache, retain the old value."""
+        import asyncio
+        class FailClient:
+            async def get(self, url, params=None):
+                raise RuntimeError("db unreachable")
+
+        c = self._cache()
+        c.values = {"SPX": 7000.0, "NDX": 26000.0, "RUT": 2800.0}
+        merged = asyncio.run(c.refresh(FailClient(), tier_data=None))
+        # Prior values preserved
+        assert merged["SPX"] == 7000.0
+        assert merged["NDX"] == 26000.0
+        assert merged["RUT"] == 2800.0
+
+    def test_as_dict_fills_missing_with_zero(self):
+        """Symbols never populated come back as 0 (same shape old callers expect)."""
+        c = self._cache()
+        c.values = {"SPX": 7000.0}
+        d = c.as_dict()
+        assert d == {"SPX": 7000.0, "NDX": 0.0, "RUT": 0.0}
+
+    def test_should_refresh_when_incomplete_after_retry_window(self):
+        """Cache incomplete + >= 60s since last retry → should_refresh True."""
+        from spread_scanner import _PT
+        from datetime import datetime
+        c = self._cache()
+        c.values = {"SPX": 7100.0}        # NDX, RUT missing
+        c.last_refreshed_at = datetime(2026, 4, 22, 7, 0, tzinfo=_PT)
+        c.last_incomplete_attempt_at = datetime(2026, 4, 22, 7, 0, tzinfo=_PT)
+        # 59s after last attempt → still within rate-limit → False
+        now1 = datetime(2026, 4, 22, 7, 0, 59, tzinfo=_PT)
+        assert c.should_refresh(now1) is False
+        # 60s later → True
+        now2 = datetime(2026, 4, 22, 7, 1, 0, tzinfo=_PT)
+        assert c.should_refresh(now2) is True
+
+    def test_refresh_logs_recovery_when_ticker_becomes_populated(self, capsys):
+        """First empty refresh → then tier_data fills NDX → log '[prev_close] NDX: populated'."""
+        import asyncio
+        from spread_scanner import PrevCloseCache
+
+        class EmptyDbClient:
+            async def get(self, url, params=None):
+                class R:
+                    status_code = 200
+                    def json(self_): return {"rows": []}
+                return R()
+
+        c = PrevCloseCache(["SPX", "NDX", "RUT"], "http://db")
+        # First refresh — db empty, no tier data → all missing
+        asyncio.run(c.refresh(EmptyDbClient(), tier_data=None))
+        assert c._missing_tickers() == ["SPX", "NDX", "RUT"]
+        first_err = capsys.readouterr().err
+        assert "WARNING: no prev_close for ['SPX', 'NDX', 'RUT']" in first_err
+
+        # Second refresh — tier data now has NDX; db still empty for others.
+        tier = {"hourly": {"NDX": {"previous_close": 26590.34}}}
+        asyncio.run(c.refresh(EmptyDbClient(), tier_data=tier))
+        err = capsys.readouterr().err
+        # Recovery for NDX should be logged.
+        assert "[prev_close] NDX: populated = 26590.34" in err
+        # SPX and RUT still missing → WARNING still present.
+        assert "no prev_close for ['SPX', 'RUT']" in err
+
+    def test_refresh_clears_incomplete_flag_when_complete(self):
+        """Once every ticker has a positive value, the retry timer stops firing."""
+        import asyncio
+        from spread_scanner import PrevCloseCache
+
+        FullDbClient = self._range_percentiles_fake({
+            "SPX": 7109.14, "NDX": 26590.34, "RUT": 2792.96,
+        })
+        c = PrevCloseCache(["SPX", "NDX", "RUT"], "http://db")
+        asyncio.run(c.refresh(FullDbClient(), tier_data=None))
+        assert c.is_complete()
+        assert c.last_incomplete_attempt_at is None
+        # should_refresh is False (complete + recent) — no retry needed.
+        assert c.should_refresh() is False
+
+    def test_fetch_prev_closes_uses_range_percentiles_endpoint(self):
+        """Canonical path: `/api/range_percentiles` — same endpoint the CLI
+        uses (_fetch_prev_close_from_db_server in utp.py). Returns YESTERDAY's
+        EOD close, not today's intraday `daily_prices` row — which was the bug
+        when querying daily_prices directly after market open on day N+1.
+        """
+        import asyncio
+        from spread_scanner import fetch_prev_closes
+
+        seen: list[dict] = []
+        class Fake:
+            async def get(self_c, url, params=None, timeout=None):
+                seen.append({"url": url, "params": dict(params or {}), "timeout": timeout})
+                class R:
+                    status_code = 200
+                    def json(self_r):
+                        return [
+                            {"ticker": "SPX", "previous_close": 7064.01},
+                            {"ticker": "NDX", "previous_close": 26479.47},
+                            {"ticker": "RUT", "previous_close": 2764.97},
+                        ]
+                return R()
+
+        result = asyncio.run(fetch_prev_closes(Fake(), "http://db", ["SPX", "NDX", "RUT"]))
+        assert result == {"SPX": 7064.01, "NDX": 26479.47, "RUT": 2764.97}
+        # Exactly one batched request
+        assert len(seen) == 1
+        assert seen[0]["url"].endswith("/api/range_percentiles")
+        assert seen[0]["params"]["tickers"] == "SPX,NDX,RUT"
+        # Sanity on the canonical payload parameters (match utp.py)
+        assert seen[0]["params"]["lookback"] == "30"
+        assert seen[0]["params"]["min_days"] == "2"
+        assert seen[0]["params"]["window"] == "1"
+
+    def test_fetch_prev_closes_strips_I_prefix_from_endpoint_ticker(self):
+        """Endpoint may return ticker with 'I:' prefix; map back to plain symbol."""
+        import asyncio
+        from spread_scanner import fetch_prev_closes
+        class Fake:
+            async def get(self_c, url, params=None, timeout=None):
+                class R:
+                    status_code = 200
+                    def json(self_r): return [{"ticker": "I:SPX", "previous_close": 7064.01}]
+                return R()
+        result = asyncio.run(fetch_prev_closes(Fake(), "http://db", ["SPX"]))
+        assert result == {"SPX": 7064.01}
+
+    def test_fetch_prev_closes_single_ticker_accepts_dict_response(self):
+        """Single-ticker request: endpoint returns a dict (not a list). Handle both."""
+        import asyncio
+        from spread_scanner import fetch_prev_closes
+        class Fake:
+            async def get(self_c, url, params=None, timeout=None):
+                class R:
+                    status_code = 200
+                    def json(self_r):
+                        return {"ticker": "SPX", "previous_close": 7064.01}
+                return R()
+        result = asyncio.run(fetch_prev_closes(Fake(), "http://db", ["SPX"]))
+        assert result == {"SPX": 7064.01}
+
+    def test_fetch_prev_closes_skips_zero_values(self):
+        """Endpoint returning previous_close=0 is treated as 'no data'."""
+        import asyncio
+        from spread_scanner import fetch_prev_closes
+        class FakeClient:
+            async def get(self, url, params=None, timeout=None):
+                class R:
+                    status_code = 200
+                    def json(self_inner):
+                        return [{"ticker": "SPX", "previous_close": 0.0}]
+                return R()
+        result = asyncio.run(fetch_prev_closes(FakeClient(), "http://db", ["SPX"]))
+        assert "SPX" not in result
+
+    def test_scan_all_tickers_uses_cache(self):
+        """When prev_close_cache is supplied, its values show up in result."""
+        import asyncio
+        from spread_scanner import PrevCloseCache, scan_all_tickers, parse_args
+
+        class FakeClient:
+            async def get(self, url, params=None):
+                class R:
+                    status_code = 200
+                    def json(self_inner):
+                        # Minimal daemon response
+                        if "/market/quote/" in url:
+                            return {"last": 7100}
+                        if "/market/options/" in url:
+                            return {"expirations": ["2026-04-21"]}
+                        return {"rows": []}
+                return R()
+
+        args = parse_args(["--tickers", "SPX", "--once"])
+        cache = PrevCloseCache(["SPX"], "http://db")
+        cache.values = {"SPX": 7109.14}
+        from datetime import datetime
+        from spread_scanner import _PT
+        cache.last_refreshed_at = datetime(2026, 4, 21, 10, 0, tzinfo=_PT)
+
+        data = asyncio.run(scan_all_tickers(FakeClient(), args, prev_close_cache=cache))
+        assert data["prev_closes"]["SPX"] == 7109.14
+
+
+class TestActionHandlers:
+    """ActionHandler framework: LogHandler, NotifyHandler, YAML config, scan_loop dispatch."""
+
+    @staticmethod
+    def _sample_candidates():
+        return [
+            {"symbol": "SPX", "option_type": "PUT", "short_strike": 5700, "long_strike": 5680,
+             "width": 20, "credit": 1.5, "roi_pct": 8.1, "otm_pct": 1.72, "dte": 0, "prev_close": 5790},
+            {"symbol": "NDX", "option_type": "CALL", "short_strike": 21000, "long_strike": 21050,
+             "width": 50, "credit": 4.0, "roi_pct": 5.0, "otm_pct": 1.0, "dte": 0, "prev_close": 20800},
+        ]
+
+    # ── LogHandler ────────────────────────────────────────────────────────
+
+    def test_log_handler_filter_and_fire_writes_jsonl(self, tmp_path):
+        import asyncio
+        from spread_scanner import LogHandler, HandlerContext
+
+        log_file = tmp_path / "log.jsonl"
+        handler = LogHandler(min_norm_roi=4.0, path=str(log_file))
+        # Both sample candidates have nROI = roi_pct/(0+1) = 8.1 and 5.0 — both pass >= 4.0
+        eligible = handler.filter(self._sample_candidates())
+        assert len(eligible) == 2
+
+        ctx = HandlerContext(client=None, args=None, scan_data={}, is_market_hours=True, now_ts="t")
+        asyncio.run(handler.fire(eligible, ctx))
+
+        lines = log_file.read_text().strip().splitlines()
+        assert len(lines) == 2
+        parsed = [json.loads(l) for l in lines]
+        assert parsed[0]["norm_roi"] >= parsed[1]["norm_roi"]  # sorted desc
+        assert handler.count == 2
+
+    def test_log_handler_filter_applies_threshold(self):
+        from spread_scanner import LogHandler
+        handler = LogHandler(min_norm_roi=6.0, path="/tmp/unused.jsonl")
+        # Only SPX (nROI=8.1) passes; NDX (nROI=5.0) is dropped
+        eligible = handler.filter(self._sample_candidates())
+        assert len(eligible) == 1
+        assert eligible[0]["symbol"] == "SPX"
+
+    # ── NotifyHandler ─────────────────────────────────────────────────────
+
+    def test_notify_handler_dedupes_across_calls(self, monkeypatch):
+        import asyncio
+        from spread_scanner import NotifyHandler, HandlerContext
+        import spread_scanner as ss
+
+        monkeypatch.setattr(ss, "is_market_hours", lambda: True)
+
+        calls = []
+        class FakeClient:
+            async def post(self, url, json=None, timeout=None):
+                calls.append(json)
+                class R: status_code = 200
+                return R()
+
+        h = NotifyHandler(min_norm_roi=4.0, email="x@y.com", url="http://notify")
+        cands = self._sample_candidates()
+
+        first = h.filter(cands)
+        assert len(first) == 2
+        ctx = HandlerContext(client=FakeClient(), args=None, scan_data={},
+                             is_market_hours=True, now_ts="t")
+        asyncio.run(h.fire(first, ctx))
+        assert len(calls) == 1
+
+        # Second scan with the same candidates → dedup filters both out → no POST
+        second = h.filter(cands)
+        assert second == []
+
+    def test_notify_handler_gated_by_market_hours(self, monkeypatch):
+        from spread_scanner import NotifyHandler
+        import spread_scanner as ss
+        monkeypatch.setattr(ss, "is_market_hours", lambda: False)
+
+        h = NotifyHandler(min_norm_roi=4.0, email="x@y.com",
+                          url="http://notify", gate_market_hours=True)
+        assert h.filter(self._sample_candidates()) == []
+
+    def test_notify_handler_gate_can_be_disabled(self, monkeypatch):
+        from spread_scanner import NotifyHandler
+        import spread_scanner as ss
+        monkeypatch.setattr(ss, "is_market_hours", lambda: False)
+
+        h = NotifyHandler(min_norm_roi=4.0, email="x@y.com",
+                          url="http://notify", gate_market_hours=False)
+        assert len(h.filter(self._sample_candidates())) == 2
+
+    # ── build_handler factory ─────────────────────────────────────────────
+
+    def test_build_handler_log(self):
+        from spread_scanner import build_handler, LogHandler
+        h = build_handler({"type": "log", "min_norm_roi": 2.5, "path": "/tmp/x.jsonl"})
+        assert isinstance(h, LogHandler)
+        assert h.min_norm_roi == 2.5
+        assert h.path == "/tmp/x.jsonl"
+
+    def test_build_handler_notify(self):
+        from spread_scanner import build_handler, NotifyHandler
+        h = build_handler({
+            "type": "notify", "min_norm_roi": 3.0,
+            "email": "a@b.com", "url": "http://host",
+            "gate_market_hours": False, "top_n": 3,
+        })
+        assert isinstance(h, NotifyHandler)
+        assert h.email == "a@b.com"
+        assert h.url == "http://host"
+        assert h.gate_market_hours is False
+        assert h.top_n == 3
+
+    def test_build_handler_unknown_type(self):
+        import pytest
+        from spread_scanner import build_handler
+        with pytest.raises(ValueError, match="Unknown handler type"):
+            build_handler({"type": "quantum_flux"})
+
+    def test_build_handler_missing_required(self):
+        import pytest
+        from spread_scanner import build_handler
+        with pytest.raises(ValueError, match="log handler requires 'path'"):
+            build_handler({"type": "log", "min_norm_roi": 2.0})
+        with pytest.raises(ValueError, match="notify handler requires 'email'"):
+            build_handler({"type": "notify", "min_norm_roi": 2.0})
+
+    # ── ScannerConfig / YAML ──────────────────────────────────────────────
+
+    def test_scannerconfig_defaults(self):
+        from spread_scanner import ScannerConfig, DEFAULT_TICKERS, DEFAULT_INTERVAL
+        c = ScannerConfig()
+        assert c.tickers == list(DEFAULT_TICKERS)
+        assert c.interval == DEFAULT_INTERVAL
+        assert c.handlers == []
+
+    def test_scannerconfig_from_yaml_roundtrip(self, tmp_path):
+        from spread_scanner import ScannerConfig
+        path = tmp_path / "cfg.yaml"
+        path.write_text("""
+tickers: [SPX, NDX]
+dte: [0, 1]
+interval: 15
+min_norm_roi: 2.5
+handlers:
+  - type: log
+    min_norm_roi: 1.5
+    path: /tmp/log.jsonl
+""")
+        c = ScannerConfig.from_yaml(str(path))
+        assert c.tickers == ["SPX", "NDX"]
+        assert c.dte == [0, 1]
+        assert c.interval == 15
+        assert c.min_norm_roi == 2.5
+        assert len(c.handlers) == 1
+        assert c.handlers[0]["type"] == "log"
+
+    def test_scannerconfig_unknown_field_raises(self, tmp_path):
+        import pytest
+        from spread_scanner import ScannerConfig
+        path = tmp_path / "cfg.yaml"
+        path.write_text("bogus_field: 42\n")
+        with pytest.raises(ValueError, match="Unknown ScannerConfig fields"):
+            ScannerConfig.from_yaml(str(path))
+
+    def test_scannerconfig_empty_yaml(self, tmp_path):
+        from spread_scanner import ScannerConfig, DEFAULT_TICKERS
+        path = tmp_path / "cfg.yaml"
+        path.write_text("")
+        c = ScannerConfig.from_yaml(str(path))
+        assert c.tickers == list(DEFAULT_TICKERS)
+
+    def test_to_cli_defaults_flattens_lists_to_strings(self):
+        from spread_scanner import ScannerConfig
+        c = ScannerConfig(tickers=["SPX", "RUT"], dte=[0, 1], widths={"SPX": 25, "RUT": 15})
+        d = c.to_cli_defaults()
+        assert d["tickers"] == "SPX,RUT"
+        assert d["dte"] == "0,1"
+        assert d["widths_str"] == "SPX=25,RUT=15"
+
+    # ── CLI + YAML precedence ─────────────────────────────────────────────
+
+    def test_config_yaml_sets_defaults(self, tmp_path, monkeypatch):
+        """YAML config provides default tickers; CLI omitted → YAML value used."""
+        from spread_scanner import _load_config
+        path = tmp_path / "cfg.yaml"
+        path.write_text("tickers: [NDX]\ninterval: 45\n")
+        monkeypatch.setattr("sys.argv", ["spread_scanner.py", "--config", str(path)])
+        args, handlers = _load_config()
+        assert args.tickers == ["NDX"]
+        assert args.interval == 45
+
+    def test_config_cli_overrides_yaml(self, tmp_path, monkeypatch):
+        """YAML has tickers=[SPX]; CLI --tickers NDX,RUT → CLI wins."""
+        from spread_scanner import _load_config
+        path = tmp_path / "cfg.yaml"
+        path.write_text("tickers: [SPX]\ninterval: 10\n")
+        monkeypatch.setattr("sys.argv",
+            ["spread_scanner.py", "--config", str(path), "--tickers", "NDX,RUT"])
+        args, _ = _load_config()
+        assert args.tickers == ["NDX", "RUT"]
+        assert args.interval == 10  # YAML wins (not overridden)
+
+    def test_config_yaml_declares_handlers(self, tmp_path, monkeypatch):
+        from spread_scanner import _load_config, LogHandler, NotifyHandler
+        path = tmp_path / "cfg.yaml"
+        path.write_text("""
+tickers: [SPX]
+handlers:
+  - type: log
+    min_norm_roi: 1.5
+    path: /tmp/log.jsonl
+  - type: notify
+    min_norm_roi: 3.0
+    email: a@b.com
+""")
+        monkeypatch.setattr("sys.argv", ["spread_scanner.py", "--config", str(path)])
+        args, handlers = _load_config()
+        assert len(handlers) == 2
+        assert isinstance(handlers[0], LogHandler)
+        assert isinstance(handlers[1], NotifyHandler)
+
+    def test_cli_legacy_flags_replace_yaml_handler(self, tmp_path, monkeypatch):
+        """If YAML declares a log handler AND CLI --log is passed, CLI wins."""
+        from spread_scanner import _load_config, LogHandler
+        path = tmp_path / "cfg.yaml"
+        path.write_text("""
+handlers:
+  - type: log
+    min_norm_roi: 1.5
+    path: /tmp/yaml.jsonl
+""")
+        monkeypatch.setattr("sys.argv",
+            ["spread_scanner.py", "--config", str(path), "--log", "4.0:/tmp/cli.jsonl"])
+        args, handlers = _load_config()
+        log_handlers = [h for h in handlers if isinstance(h, LogHandler)]
+        assert len(log_handlers) == 1
+        assert log_handlers[0].path == "/tmp/cli.jsonl"
+        assert log_handlers[0].min_norm_roi == 4.0
+
+    def test_yaml_min_tier_flows_through(self, tmp_path, monkeypatch):
+        """YAML `min_tier: cons` must be normalized to 'conservative' on args."""
+        from spread_scanner import _load_config
+        path = tmp_path / "cfg.yaml"
+        path.write_text("tickers: [SPX]\nmin_tier: cons\ntiers: true\n")
+        monkeypatch.setattr("sys.argv", ["spread_scanner.py", "--config", str(path)])
+        args, _ = _load_config()
+        assert args.min_tier == "conservative"
+        assert args.tiers is True
+
+    def test_yaml_min_otm_per_ticker(self, tmp_path, monkeypatch):
+        """Per-ticker OTM floor in YAML → args.min_otm_per_ticker populated."""
+        from spread_scanner import _load_config, _resolve_min_otm
+        path = tmp_path / "cfg.yaml"
+        path.write_text("""
+tickers: [SPX, NDX, RUT]
+min_otm: 1.0
+min_otm_per_ticker:
+  NDX: 2.5
+  RUT: 1.5
+""")
+        monkeypatch.setattr("sys.argv", ["spread_scanner.py", "--config", str(path)])
+        args, _ = _load_config()
+        assert args.min_otm == 1.0
+        assert args.min_otm_per_ticker == {"NDX": 2.5, "RUT": 1.5}
+        # Effective resolution
+        assert _resolve_min_otm(args, "SPX") == 1.0    # scalar only
+        assert _resolve_min_otm(args, "NDX") == 2.5    # per-ticker wins (higher)
+        assert _resolve_min_otm(args, "RUT") == 1.5    # per-ticker wins (higher)
+
+    def test_min_otm_per_ticker_stacks_with_scalar(self, tmp_path, monkeypatch):
+        """Effective floor is max(scalar, per-ticker) — even if per-ticker is lower."""
+        from spread_scanner import _load_config, _resolve_min_otm
+        path = tmp_path / "cfg.yaml"
+        path.write_text("""
+tickers: [SPX]
+min_otm: 2.0
+min_otm_per_ticker: {SPX: 1.0}   # deliberately lower than scalar
+""")
+        monkeypatch.setattr("sys.argv", ["spread_scanner.py", "--config", str(path)])
+        args, _ = _load_config()
+        # max(2.0, 1.0) = 2.0 — the scalar wins
+        assert _resolve_min_otm(args, "SPX") == 2.0
+
+    def test_cli_min_otm_per_ticker_overrides(self, tmp_path, monkeypatch):
+        """CLI flag '--min-otm-per-ticker SYM=N,...' populates the dict."""
+        from spread_scanner import _load_config, _resolve_min_otm
+        monkeypatch.setattr("sys.argv", [
+            "spread_scanner.py", "--tickers", "SPX,NDX",
+            "--min-otm", "1.0",
+            "--min-otm-per-ticker", "NDX=2.5",
+        ])
+        args, _ = _load_config()
+        assert args.min_otm_per_ticker == {"NDX": 2.5}
+        assert _resolve_min_otm(args, "NDX") == 2.5
+
+    def test_max_otm_per_ticker_uses_tighter_of_scalar_or_per_ticker(self, tmp_path, monkeypatch):
+        """For max (upper bound), tighter means LOWER — take min of scalar & per-ticker."""
+        from spread_scanner import _load_config, _resolve_max_otm
+        path = tmp_path / "cfg.yaml"
+        path.write_text("""
+tickers: [SPX, NDX]
+max_otm: 5.0
+max_otm_per_ticker: {NDX: 3.0}
+""")
+        monkeypatch.setattr("sys.argv", ["spread_scanner.py", "--config", str(path)])
+        args, _ = _load_config()
+        assert _resolve_max_otm(args, "SPX") == 5.0   # only scalar
+        assert _resolve_max_otm(args, "NDX") == 3.0   # per-ticker is tighter
+
+    def test_resolve_min_otm_default_zero(self):
+        """No config → effective floor is 0 (no filtering)."""
+        from spread_scanner import _resolve_min_otm, _resolve_max_otm
+        import types
+        args = types.SimpleNamespace(min_otm=0, min_otm_per_ticker={},
+                                      max_otm=0, max_otm_per_ticker={})
+        assert _resolve_min_otm(args, "SPX") == 0.0
+        assert _resolve_max_otm(args, "SPX") == 0.0
+
+    def test_collect_filtered_respects_per_ticker_min_otm(self, tmp_path, monkeypatch):
+        """The top-picks filter honors per-ticker OTM floors."""
+        from spread_scanner import _load_config, _collect_filtered_candidates
+        path = tmp_path / "cfg.yaml"
+        path.write_text("""
+tickers: [SPX, NDX]
+dte: [0]
+min_otm_per_ticker: {NDX: 2.0}
+""")
+        monkeypatch.setattr("sys.argv", ["spread_scanner.py", "--config", str(path)])
+        args, _ = _load_config()
+        scan_data = {
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-04-22",
+                    "spreads": {
+                        "SPX": [
+                            {"option_type": "PUT", "short_strike": 7050, "long_strike": 7025,
+                             "width": 25, "credit": 1.0, "roi_pct": 4.0, "otm_pct": 1.0},
+                        ],
+                        "NDX": [
+                            # OTM 1.1% — SHOULD be dropped by NDX per-ticker 2.0 floor
+                            {"option_type": "PUT", "short_strike": 26550, "long_strike": 26490,
+                             "width": 60, "credit": 7.0, "roi_pct": 13.0, "otm_pct": 1.1},
+                            # OTM 2.5% — passes
+                            {"option_type": "PUT", "short_strike": 26150, "long_strike": 26090,
+                             "width": 60, "credit": 2.0, "roi_pct": 3.5, "otm_pct": 2.5},
+                        ],
+                    },
+                    "quotes": {}, "tier_data": None, "prev_closes": {},
+                },
+            },
+            "quotes": {}, "prev_closes": {},
+        }
+        picks = _collect_filtered_candidates(scan_data, args)
+        # SPX 1.0% OTM passes (no SPX override; scalar min_otm=0)
+        assert any(p["symbol"] == "SPX" and p["otm_pct"] == 1.0 for p in picks)
+        # NDX 1.1% OTM dropped; 2.5% OTM kept
+        ndx = [p for p in picks if p["symbol"] == "NDX"]
+        assert {p["otm_pct"] for p in ndx} == {2.5}
+
+    def test_yaml_min_tier_close_flows_through(self, tmp_path, monkeypatch):
+        from spread_scanner import _load_config
+        path = tmp_path / "cfg.yaml"
+        path.write_text("tickers: [SPX]\nmin_tier_close: aggr\n")
+        monkeypatch.setattr("sys.argv", ["spread_scanner.py", "--config", str(path)])
+        args, _ = _load_config()
+        assert args.min_tier_close == "aggressive"
+
+    def test_no_config_still_works(self, monkeypatch):
+        """Without --config, legacy CLI-only path must still function."""
+        from spread_scanner import _load_config
+        monkeypatch.setattr("sys.argv",
+            ["spread_scanner.py", "--tickers", "SPX", "--log", "3:/tmp/x.jsonl"])
+        args, handlers = _load_config()
+        assert args.tickers == ["SPX"]
+        assert len(handlers) == 1
+        assert handlers[0].name == "log"
+
+    # ── scan_loop handler dispatch ────────────────────────────────────────
+
+    def test_scan_loop_invokes_each_handler(self, monkeypatch):
+        """scan_loop should call filter() + fire() on every configured handler."""
+        import asyncio
+        import spread_scanner as ss
+        from spread_scanner import ActionHandler, HandlerContext, parse_args
+
+        fired = []
+
+        class StubHandler(ActionHandler):
+            def __init__(self, tag):
+                self.name = tag
+                self.tag = tag
+            def filter(self, candidates):
+                return [{"tag": self.tag}]  # always eligible
+            async def fire(self, spreads, ctx):
+                fired.append(self.tag)
+
+        async def fake_scan(client, args, prev_close_cache=None):
+            return {"quotes": {}, "dte_sections": {}, "prev_closes": {}}
+        monkeypatch.setattr(ss, "scan_all_tickers", fake_scan)
+        monkeypatch.setattr(ss, "render_dashboard", lambda data, args: "")
+        monkeypatch.setattr(ss, "_collect_filtered_candidates", lambda data, args: [])
+        # Stub the prev-close cache refresh so the loop starts instantly
+        monkeypatch.setattr(ss.PrevCloseCache, "refresh",
+            lambda self, client, tier_data=None, now_pt=None: asyncio.sleep(0))
+
+        args = parse_args(["--tickers", "SPX", "--once"])
+        args.handlers = [StubHandler("A"), StubHandler("B"), StubHandler("C")]
+
+        asyncio.run(ss.scan_loop(args))
+        assert fired == ["A", "B", "C"]
+
+    def test_scan_loop_handler_error_does_not_stop_pipeline(self, monkeypatch):
+        """If one handler raises, other handlers still fire."""
+        import asyncio
+        import spread_scanner as ss
+        from spread_scanner import ActionHandler, parse_args
+
+        fired = []
+        class OK(ActionHandler):
+            def __init__(self, tag):
+                self.name = tag; self.tag = tag
+            def filter(self, c): return [{"x": 1}]
+            async def fire(self, s, ctx): fired.append(self.tag)
+        class Boom(ActionHandler):
+            name = "boom"
+            def filter(self, c): return [{"x": 1}]
+            async def fire(self, s, ctx): raise RuntimeError("boom")
+
+        async def fake_scan(client, args, prev_close_cache=None):
+            return {"quotes": {}, "dte_sections": {}, "prev_closes": {}}
+        monkeypatch.setattr(ss, "scan_all_tickers", fake_scan)
+        monkeypatch.setattr(ss, "render_dashboard", lambda data, args: "")
+        monkeypatch.setattr(ss, "_collect_filtered_candidates", lambda data, args: [])
+        monkeypatch.setattr(ss.PrevCloseCache, "refresh",
+            lambda self, client, tier_data=None, now_pt=None: asyncio.sleep(0))
+
+        args = parse_args(["--tickers", "SPX", "--once"])
+        args.handlers = [OK("before"), Boom(), OK("after")]
+        asyncio.run(ss.scan_loop(args))
+        assert fired == ["before", "after"]
+
+
+class TestTradePolicy:
+    """TradePolicy dataclass + trading-window helper."""
+
+    def test_defaults(self):
+        from spread_scanner import TradePolicy
+        from datetime import time as dtime
+        p = TradePolicy()
+        assert p.roi_pct == (1.5, 5.0)
+        assert p.max_total_risk == 400_000.0
+        assert p.max_risk_per_trade == {}         # empty → per-candidate default (width*100)
+        assert p.require_prev_close is True
+        # None = "use the daemon's configured default" via GET /trade/defaults.
+        # A handler can still pin explicit values to override the daemon config.
+        assert p.order_type is None
+        assert p.limit_slippage_pct is None
+        assert p.trading_window_pt_start == dtime(6, 31)
+        assert p.trading_window_pt_end == dtime(10, 0)
+        assert not hasattr(p, "max_trades_per_interval_per_ticker")
+        assert not hasattr(p, "quantity")
+
+    def test_from_dict_full(self):
+        from spread_scanner import TradePolicy
+        from datetime import time as dtime
+        p = TradePolicy.from_dict({
+            "roi_pct": [1.0, 6.0],
+            "min_otm_pct": {"spx": 1.0, "ndx": 1.5},
+            "min_credit": {"RUT": 0.40},
+            "max_total_risk": 250000,
+            "max_per_ticker_risk": {"SPX": 100000},
+            "max_risk_per_trade": {"spx": 5000, "NDX": 12000},
+            "cooldown_per_ticker_side_sec": 120,
+            "require_prev_close": False,
+            "order_type": "MARKET",
+            "stop_loss_multiplier": 1.5,
+            "trading_window_pt": {"start": "07:00", "end": "09:30:30"},
+        })
+        assert p.roi_pct == (1.0, 6.0)
+        assert p.min_otm_pct == {"SPX": 1.0, "NDX": 1.5}     # upper-cased keys
+        assert p.min_credit == {"RUT": 0.40}
+        assert p.max_total_risk == 250000
+        assert p.max_per_ticker_risk == {"SPX": 100000}
+        assert p.max_risk_per_trade == {"SPX": 5000, "NDX": 12000}   # keys upper-cased
+        assert p.cooldown_per_ticker_side_sec == 120
+        assert p.require_prev_close is False
+        assert p.order_type == "MARKET"
+        assert p.trading_window_pt_start == dtime(7, 0)
+        assert p.trading_window_pt_end == dtime(9, 30, 30)
+
+    def test_from_dict_empty(self):
+        from spread_scanner import TradePolicy
+        assert TradePolicy.from_dict(None).roi_pct == (1.5, 5.0)
+        assert TradePolicy.from_dict({}).roi_pct == (1.5, 5.0)
+
+    def test_from_dict_unknown_field(self):
+        import pytest
+        from spread_scanner import TradePolicy
+        with pytest.raises(ValueError, match="Unknown TradePolicy field"):
+            TradePolicy.from_dict({"warp_drive": True})
+
+    def test_from_dict_bad_roi(self):
+        import pytest
+        from spread_scanner import TradePolicy
+        with pytest.raises(ValueError, match="roi_pct must be"):
+            TradePolicy.from_dict({"roi_pct": [5.0, 1.0]})
+        with pytest.raises(ValueError, match="roi_pct must be"):
+            TradePolicy.from_dict({"roi_pct": [1.0]})
+
+    def test_from_dict_bad_window(self):
+        import pytest
+        from spread_scanner import TradePolicy
+        with pytest.raises(ValueError, match="end must be >= start"):
+            TradePolicy.from_dict({"trading_window_pt": {"start": "10:00", "end": "09:00"}})
+
+    def test_from_dict_bad_time_format(self):
+        import pytest
+        from spread_scanner import TradePolicy
+        with pytest.raises(ValueError, match="HH:MM"):
+            TradePolicy.from_dict({"trading_window_pt": {"start": "six am", "end": "10:00"}})
+
+    def test_within_trading_window_default(self):
+        from spread_scanner import TradePolicy, _PT
+        from datetime import datetime
+        p = TradePolicy()
+        # 07:00 PT is inside default 06:31 - 10:00 window
+        assert p.within_trading_window(datetime(2026, 4, 21, 7, 0, tzinfo=_PT)) is True
+        # 06:30 PT is 1 min before — outside
+        assert p.within_trading_window(datetime(2026, 4, 21, 6, 30, tzinfo=_PT)) is False
+        # 10:00 PT is the boundary — inclusive
+        assert p.within_trading_window(datetime(2026, 4, 21, 10, 0, tzinfo=_PT)) is True
+        # 10:00:01 PT is just past — outside
+        assert p.within_trading_window(datetime(2026, 4, 21, 10, 0, 1, tzinfo=_PT)) is False
+
+    def test_within_trading_window_custom(self):
+        from spread_scanner import TradePolicy, _PT
+        from datetime import datetime
+        p = TradePolicy.from_dict({"trading_window_pt": {"start": "09:00", "end": "11:00"}})
+        assert p.within_trading_window(datetime(2026, 4, 21, 7, 0, tzinfo=_PT)) is False
+        assert p.within_trading_window(datetime(2026, 4, 21, 9, 30, tzinfo=_PT)) is True
+        assert p.within_trading_window(datetime(2026, 4, 21, 12, 0, tzinfo=_PT)) is False
+
+
+class TestTradeHandlers:
+    """SimulateTradeHandler + TradeHandler — policy gates, concurrency, logging."""
+
+    @staticmethod
+    def _spread(sym, otype="PUT", credit=1.0, otm=1.5, roi=3.0, short=5700, long_=5680,
+                width=20, prev_close=5800.0):
+        return {
+            "symbol": sym, "option_type": otype, "short_strike": short, "long_strike": long_,
+            "width": width, "credit": credit, "roi_pct": roi, "otm_pct": otm,
+            "dte": 0, "expiration": "2026-04-21", "prev_close": prev_close,
+        }
+
+    @staticmethod
+    def _ctx(client=None):
+        from spread_scanner import HandlerContext
+        return HandlerContext(client=client, args=None, scan_data={},
+                              is_market_hours=True, now_ts="2026-04-21T07:00:00")
+
+    def _always_in_window(self, monkeypatch):
+        import spread_scanner as ss
+        monkeypatch.setattr(ss.TradePolicy, "within_trading_window", lambda self, now_pt=None: True)
+
+    @staticmethod
+    def _bind_utp_pricing(fake_cls):
+        """Attach the real LIMIT-pricing + daemon-default methods to a fake.
+
+        The scanner delegates ALL limit-pricing math to utp.py. Tests stub the
+        HTTP layer (get_option_quotes, trade_credit_spread, get_trade_defaults
+        if present) but must share the real pricing implementation so the
+        scanner → utp wiring is exercised.
+        """
+        from utp import TradingClient
+        fake_cls.compute_credit_spread_net_price = TradingClient.compute_credit_spread_net_price
+        fake_cls._resolve_trade_defaults = TradingClient._resolve_trade_defaults
+        # If the fake doesn't define get_trade_defaults, provide a default
+        # that raises so _resolve_trade_defaults falls back to hardcoded values.
+        if not hasattr(fake_cls, "get_trade_defaults"):
+            async def _raise_no_daemon(self):
+                raise RuntimeError("no daemon defaults in fake")
+            fake_cls.get_trade_defaults = _raise_no_daemon
+        return fake_cls
+
+    # --- filter() gates ---------------------------------------------------
+
+    def test_filter_blocks_outside_trading_window(self, monkeypatch):
+        import spread_scanner as ss
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+        monkeypatch.setattr(ss.TradePolicy, "within_trading_window", lambda self, now_pt=None: False)
+        h = SimulateTradeHandler(min_norm_roi=1.0, log_file="/tmp/u.jsonl",
+                                 policy=TradePolicy(), daemon_url="http://d")
+        assert h.filter([self._spread("SPX")]) == []
+
+    def test_filter_skips_missing_prev_close(self, monkeypatch):
+        self._always_in_window(monkeypatch)
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+        h = SimulateTradeHandler(
+            min_norm_roi=1.0, log_file="/tmp/u.jsonl",
+            policy=TradePolicy(roi_pct=(1.0, 10.0)), daemon_url="http://d",
+        )
+        cands = [self._spread("SPX", prev_close=0), self._spread("NDX", prev_close=26000)]
+        out = h.filter(cands)
+        assert [c["symbol"] for c in out] == ["NDX"]
+
+    def test_filter_blocks_below_credit_floor(self, monkeypatch, tmp_path):
+        self._always_in_window(monkeypatch)
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+        pol = TradePolicy.from_dict({"min_credit": {"SPX": 0.50}, "roi_pct": [1.0, 10.0]})
+        h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                                 policy=pol, daemon_url="http://d")
+        out = h.filter([
+            self._spread("SPX", credit=0.30),
+            self._spread("SPX", credit=0.75),
+        ])
+        assert len(out) == 1 and out[0]["credit"] == 0.75
+
+    def test_filter_blocks_below_otm_floor(self, monkeypatch, tmp_path):
+        self._always_in_window(monkeypatch)
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+        pol = TradePolicy.from_dict({"min_otm_pct": {"SPX": 1.0}, "roi_pct": [1.0, 10.0]})
+        h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                                 policy=pol, daemon_url="http://d")
+        out = h.filter([
+            self._spread("SPX", otm=0.5),
+            self._spread("SPX", otm=1.5),
+        ])
+        assert len(out) == 1 and out[0]["otm_pct"] == 1.5
+
+    def test_filter_roi_band(self, monkeypatch, tmp_path):
+        self._always_in_window(monkeypatch)
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+        pol = TradePolicy.from_dict({"roi_pct": [1.5, 5.0]})
+        h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                                 policy=pol, daemon_url="http://d")
+        out = h.filter([
+            self._spread("SPX", roi=1.0),    # below band
+            self._spread("SPX", roi=3.0),    # inside
+            self._spread("SPX", roi=6.0),    # above
+        ])
+        assert [c["roi_pct"] for c in out] == [3.0]
+
+    def test_filter_caps_trades_per_interval_per_ticker_default_1(self, monkeypatch, tmp_path):
+        """Default cap = 1 per ticker per scan: 3 SPX + 2 NDX candidates → 1 SPX + 1 NDX."""
+        self._always_in_window(monkeypatch)
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+
+        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0]})   # default cap=1
+        h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                                 policy=pol, daemon_url="http://d")
+        out = h.filter([
+            self._spread("SPX", credit=1.0, roi=2.0),
+            self._spread("SPX", credit=1.1, roi=3.0),     # highest SPX nROI
+            self._spread("SPX", credit=1.2, roi=2.5),
+            self._spread("NDX", credit=2.0, roi=3.5, prev_close=26000),   # highest NDX
+            self._spread("NDX", credit=2.1, roi=2.8, prev_close=26000),
+        ])
+        symbols = [c["symbol"] for c in out]
+        assert sorted(symbols) == ["NDX", "SPX"]
+        # Within each ticker, the highest-nROI candidate wins.
+        spx = next(c for c in out if c["symbol"] == "SPX")
+        ndx = next(c for c in out if c["symbol"] == "NDX")
+        assert spx["roi_pct"] == 3.0
+        assert ndx["roi_pct"] == 3.5
+
+    def test_filter_collapses_to_one_per_ticker(self, monkeypatch, tmp_path):
+        """Exactly one trade per ticker per scan — sizing is handled by
+        policy.contracts_for(), not by multiplying trades."""
+        self._always_in_window(monkeypatch)
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+
+        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0]})
+        h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                                 policy=pol, daemon_url="http://d")
+        out = h.filter([
+            self._spread("SPX", credit=1.0, roi=2.0),
+            self._spread("SPX", credit=1.1, roi=3.5),     # highest SPX nROI — wins
+            self._spread("SPX", credit=1.2, roi=3.0),
+            self._spread("SPX", credit=1.3, roi=2.5),
+        ])
+        assert len(out) == 1
+        assert out[0]["roi_pct"] == 3.5
+
+    def test_policy_contracts_for_default_width_times_100(self):
+        """No max_risk_per_trade override → default is width*100 → 1 contract."""
+        from spread_scanner import TradePolicy
+        p = TradePolicy()
+        # SPX width 20 credit 1.0 → default cap = 2000, per-contract max = 1900 → 1 contract
+        assert p.contracts_for({"symbol": "SPX", "width": 20, "credit": 1.0}) == 1
+        # NDX width 60 credit 2.0 → default cap = 6000, per-contract max = 5800 → 1 contract
+        assert p.contracts_for({"symbol": "NDX", "width": 60, "credit": 2.0}) == 1
+
+    def test_policy_contracts_for_override_sizes_up(self):
+        from spread_scanner import TradePolicy
+        p = TradePolicy.from_dict({"max_risk_per_trade": {"SPX": 5000}})
+        # SPX width 20 credit 1.0 → per-contract max = 1900 → 5000/1900 = 2
+        assert p.contracts_for({"symbol": "SPX", "width": 20, "credit": 1.0}) == 2
+        # With 10000 → 10000/1900 = 5
+        p2 = TradePolicy.from_dict({"max_risk_per_trade": {"SPX": 10000}})
+        assert p2.contracts_for({"symbol": "SPX", "width": 20, "credit": 1.0}) == 5
+
+    def test_policy_contracts_for_override_does_not_apply_to_other_ticker(self):
+        from spread_scanner import TradePolicy
+        p = TradePolicy.from_dict({"max_risk_per_trade": {"SPX": 10000}})
+        # NDX not in map → uses default width*100 = 6000 → 1 contract
+        assert p.contracts_for({"symbol": "NDX", "width": 60, "credit": 2.0}) == 1
+
+    def test_policy_contracts_for_clamped_to_at_least_1(self):
+        from spread_scanner import TradePolicy
+        # Absurdly small cap: per-contract = 1900, cap = 500 → 500/1900 = 0 → clamp to 1
+        p = TradePolicy.from_dict({"max_risk_per_trade": {"SPX": 500}})
+        assert p.contracts_for({"symbol": "SPX", "width": 20, "credit": 1.0}) == 1
+
+    def test_trade_handler_passes_computed_contracts(self, monkeypatch, tmp_path):
+        """TradeHandler submits policy.contracts_for(spread), not a fixed quantity."""
+        import asyncio
+        from spread_scanner import TradeHandler, TradePolicy
+
+        captured = {}
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def trade_credit_spread(self, **kw):
+                captured.update(kw)
+                return {"order_id": "x", "status": "FILLED"}
+
+        import spread_scanner as ss
+        self._bind_utp_pricing(FakeTClient)
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+
+        # cap 5000, SPX width 20, credit 1.0 → 2 contracts
+        pol = TradePolicy.from_dict({
+            "roi_pct": [1.0, 10.0], "max_risk_per_trade": {"SPX": 5000},
+        })
+        log_file = tmp_path / "t.jsonl"
+        h = TradeHandler(min_norm_roi=0, log_file=str(log_file),
+                        policy=pol, daemon_url="http://d")
+        asyncio.run(h.fire([self._spread("SPX", credit=1.0, width=20)], self._ctx()))
+        assert captured["quantity"] == 2
+        events = [json.loads(l) for l in log_file.read_text().splitlines()]
+        submit = [e for e in events if e["event"] == "submit"][0]
+        assert submit["contracts"] == 2
+
+    # --- concurrency ------------------------------------------------------
+
+    def test_cross_ticker_parallel_within_ticker_serial(self, monkeypatch, tmp_path):
+        """Cross-ticker trades run concurrently; within-ticker trades are serial."""
+        import asyncio, time
+        from spread_scanner import TradeHandler, TradePolicy, HandlerContext
+
+        submit_log: list[tuple[str, float, float]] = []  # (ticker, start, end)
+
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def trade_credit_spread(self, symbol, **kw):
+                start = time.perf_counter()
+                await asyncio.sleep(0.15)
+                end = time.perf_counter()
+                submit_log.append((symbol, start, end))
+                return {"order_id": f"o_{symbol}_{len(submit_log)}", "status": "FILLED"}
+
+        import spread_scanner as ss
+        # Patch `from utp import TradingClient` target
+        import spread_scanner as ss
+        self._bind_utp_pricing(FakeTClient)
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+
+        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0]})
+        h = TradeHandler(min_norm_roi=0, log_file=str(tmp_path / "t.jsonl"),
+                        policy=pol, daemon_url="http://d")
+
+        # 3 spreads per ticker
+        sp = self._spread
+        spreads = [
+            sp("SPX", credit=1.0, short=5700, long_=5680),
+            sp("SPX", credit=1.1, short=5710, long_=5690),
+            sp("SPX", credit=1.2, short=5720, long_=5700),
+            sp("NDX", credit=2.0, prev_close=26000, short=26200, long_=26150),
+            sp("NDX", credit=2.1, prev_close=26000, short=26210, long_=26160),
+            sp("NDX", credit=2.2, prev_close=26000, short=26220, long_=26170),
+            sp("RUT", credit=1.5, prev_close=2800, short=2800, long_=2780),
+            sp("RUT", credit=1.6, prev_close=2800, short=2805, long_=2785),
+            sp("RUT", credit=1.7, prev_close=2800, short=2810, long_=2790),
+        ]
+        ctx = self._ctx()
+        t0 = time.perf_counter()
+        asyncio.run(h.fire(spreads, ctx))
+        total = time.perf_counter() - t0
+
+        # Serial within ticker: each ticker runs its 3 spreads one at a time = 3 * 0.15 = 0.45s.
+        # Parallel across tickers: three tickers start together, so total ~= max ticker time ~= 0.45s.
+        # Accept a generous upper bound (e.g. 1.0s) to absorb scheduler jitter.
+        assert 0.4 < total < 1.0, f"got total={total:.2f}s"
+
+        # Within each ticker, submissions must not overlap in time.
+        for sym in ("SPX", "NDX", "RUT"):
+            ticker_rows = sorted([r for r in submit_log if r[0] == sym], key=lambda r: r[1])
+            assert len(ticker_rows) == 3
+            for i in range(len(ticker_rows) - 1):
+                assert ticker_rows[i][2] <= ticker_rows[i + 1][1] + 1e-6, (
+                    f"{sym} submissions overlap: {ticker_rows[i]} and {ticker_rows[i+1]}")
+
+        # Across tickers, at least one pair of DIFFERENT-ticker submissions must overlap
+        # (proves concurrency).
+        overlap_found = False
+        for i in range(len(submit_log)):
+            for j in range(i + 1, len(submit_log)):
+                a, b = submit_log[i], submit_log[j]
+                if a[0] != b[0]:  # different ticker
+                    if a[1] < b[2] and b[1] < a[2]:
+                        overlap_found = True
+                        break
+            if overlap_found:
+                break
+        assert overlap_found, "no cross-ticker overlap observed — not running in parallel"
+
+    def test_cap_recheck_inside_lock(self, monkeypatch, tmp_path):
+        """Two SPX trades where each alone fits the cap but both together don't.
+        First should go through, second should be skipped with reason=total_risk_cap."""
+        import asyncio
+        from spread_scanner import TradeHandler, TradePolicy
+
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def trade_credit_spread(self, **kw):
+                return {"order_id": "x", "status": "FILLED"}
+
+        import spread_scanner as ss
+        self._bind_utp_pricing(FakeTClient)
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+
+        # width=20, credit=1.0 → max_loss = $1900 per trade. Cap = $2500 → 1 trade fits, 2 don't.
+        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "max_total_risk": 2500})
+        log_file = tmp_path / "t.jsonl"
+        h = TradeHandler(min_norm_roi=0, log_file=str(log_file), policy=pol,
+                        daemon_url="http://d")
+
+        sp = self._spread
+        ctx = self._ctx()
+        asyncio.run(h.fire([sp("SPX", credit=1.0, short=5700, long_=5680),
+                           sp("SPX", credit=1.0, short=5710, long_=5690)], ctx))
+
+        events = [json.loads(l) for l in log_file.read_text().splitlines()]
+        kinds = [e["event"] for e in events]
+        assert kinds.count("submit") == 1
+        assert kinds.count("result") == 1
+        skipped = [e for e in events if e["event"] == "skipped"]
+        assert len(skipped) == 1
+        assert skipped[0]["reason"] == "total_risk_cap"
+
+    def test_per_ticker_cap_blocks_second_trade_same_ticker(self, monkeypatch, tmp_path):
+        """Per-ticker cap prevents NDX from running up total; SPX still goes."""
+        import asyncio
+        import spread_scanner as ss
+        from spread_scanner import TradeHandler, TradePolicy
+
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def trade_credit_spread(self, **kw):
+                return {"order_id": "x", "status": "FILLED"}
+
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+
+        # NDX width=50 credit=1.0 → max_loss=$4900. per-ticker cap for NDX = $5000 → 1 fits, 2nd blocked.
+        pol = TradePolicy.from_dict({
+            "roi_pct": [1.0, 10.0],
+            "max_per_ticker_risk": {"NDX": 5000, "SPX": 100000},
+        })
+        log_file = tmp_path / "t.jsonl"
+        h = TradeHandler(min_norm_roi=0, log_file=str(log_file), policy=pol,
+                        daemon_url="http://d")
+
+        sp = self._spread
+        spreads = [
+            sp("NDX", credit=1.0, prev_close=26000, short=26200, long_=26250, width=50),
+            sp("NDX", credit=1.0, prev_close=26000, short=26210, long_=26260, width=50),
+            sp("SPX", credit=1.0, short=5700, long_=5680, width=20),
+        ]
+        asyncio.run(h.fire(spreads, self._ctx()))
+
+        events = [json.loads(l) for l in log_file.read_text().splitlines()]
+        submits = [e for e in events if e["event"] == "submit"]
+        skipped = [e for e in events if e["event"] == "skipped"]
+        assert len(submits) == 2
+        assert len(skipped) == 1
+        assert skipped[0]["spread"]["symbol"] == "NDX"
+        assert skipped[0]["reason"] == "per_ticker_risk_cap"
+
+    # --- logging + submission ---------------------------------------------
+
+    def test_simulate_handler_calls_margin_not_broker(self, monkeypatch, tmp_path):
+        import asyncio, sys
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+
+        margin_calls = []
+        trade_calls = []
+
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def check_margin_credit_spread(self, **kw):
+                margin_calls.append(kw)
+                return {"init_margin": 1800.0, "maint_margin": 1800.0, "commission": 1.0, "error": None}
+            async def trade_credit_spread(self, **kw):
+                trade_calls.append(kw)
+                return {"order_id": "SHOULD-NOT-SUBMIT"}
+
+        import spread_scanner as ss
+        self._bind_utp_pricing(FakeTClient)
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+
+        log_file = tmp_path / "sim.jsonl"
+        h = SimulateTradeHandler(
+            min_norm_roi=0, log_file=str(log_file),
+            policy=TradePolicy.from_dict({"roi_pct": [1.0, 10.0]}),
+            daemon_url="http://d",
+        )
+        asyncio.run(h.fire([self._spread("SPX", credit=1.0)], self._ctx()))
+
+        assert len(margin_calls) == 1
+        assert margin_calls[0]["symbol"] == "SPX"
+        assert trade_calls == []  # simulate must NEVER call trade
+
+        events = [json.loads(l) for l in log_file.read_text().splitlines()]
+        assert any(e["event"] == "submit" and e["handler"] == "simulate_trade" for e in events)
+        result_ev = [e for e in events if e["event"] == "result"][0]
+        assert result_ev["result"]["simulated"] is True
+
+    def test_trade_handler_logs_submit_and_result(self, monkeypatch, tmp_path):
+        import asyncio, sys
+        from spread_scanner import TradeHandler, TradePolicy
+
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def trade_credit_spread(self, **kw):
+                return {"order_id": "ord123", "status": "FILLED", "filled_price": -1.0}
+
+        import spread_scanner as ss
+        self._bind_utp_pricing(FakeTClient)
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+
+        log_file = tmp_path / "live.jsonl"
+        # Default policy now uses MARKET orders — no net_price sent.
+        h = TradeHandler(min_norm_roi=0, log_file=str(log_file),
+                        policy=TradePolicy.from_dict({"roi_pct": [1.0, 10.0]}),
+                        daemon_url="http://d")
+        asyncio.run(h.fire([self._spread("SPX", credit=1.0)], self._ctx()))
+
+        events = [json.loads(l) for l in log_file.read_text().splitlines()]
+        kinds = [e["event"] for e in events]
+        assert "submit" in kinds and "result" in kinds
+        result_ev = [e for e in events if e["event"] == "result"][0]
+        assert result_ev["result"]["order"]["order_id"] == "ord123"
+        assert result_ev["result"]["order_type"] == "MARKET"
+        assert result_ev["result"]["submitted_net_price"] is None
+
+    def test_trade_handler_limit_refreshes_quotes_and_uses_refreshed_credit(
+        self, monkeypatch, tmp_path,
+    ):
+        """LIMIT orders fetch fresh option quotes and recompute credit from them."""
+        import asyncio
+        from spread_scanner import TradeHandler, TradePolicy
+
+        quote_calls: list[dict] = []
+        trade_calls: list[dict] = []
+
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def get_option_quotes(self, **kw):
+                quote_calls.append(kw)
+                return {
+                    "quotes": {
+                        "put": [
+                            {"strike": 5700.0, "bid": 1.20, "ask": 1.30},   # short leg — fresh bid 1.20
+                            {"strike": 5680.0, "bid": 0.40, "ask": 0.50},   # long leg — fresh ask 0.50
+                        ],
+                    },
+                    "meta": {"age_seconds": 3.0, "source": "fresh_cache"},
+                }
+            async def trade_credit_spread(self, **kw):
+                trade_calls.append(kw)
+                return {"order_id": "ord", "status": "FILLED"}
+
+        import spread_scanner as ss
+        self._bind_utp_pricing(FakeTClient)
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+
+        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "order_type": "LIMIT"})
+        log = tmp_path / "l.jsonl"
+        h = TradeHandler(min_norm_roi=0, log_file=str(log), policy=pol, daemon_url="http://d")
+        # Scan-time credit = 0.85 (stale). Refreshed legs give 1.20 - 0.50 = 0.70.
+        asyncio.run(h.fire([self._spread("SPX", credit=0.85,
+                                          short=5700, long_=5680, width=20)], self._ctx()))
+
+        assert len(quote_calls) == 1
+        assert quote_calls[0]["symbol"] == "SPX"
+        assert quote_calls[0]["option_type"] == "PUT"
+        assert quote_calls[0]["max_age"] == 10.0
+        assert len(trade_calls) == 1
+        assert trade_calls[0]["net_price"] == 0.70      # refreshed credit, not 0.85
+
+        # Result event captures the full audit trail
+        events = [json.loads(l) for l in log.read_text().splitlines()]
+        res = next(e for e in events if e["event"] == "result")
+        lp = res["result"]["limit_pricing"]
+        assert lp["scan_credit"] == 0.85
+        assert lp["refreshed_credit"] == 0.70
+        assert lp["age_seconds"] == 3.0
+        assert lp["quote_source"] == "fresh_cache"
+        assert lp["slippage_pct"] == 0.0
+        assert lp["submitted_net_price"] == 0.70
+
+    def test_trade_handler_limit_applies_slippage(self, monkeypatch, tmp_path):
+        """limit_slippage_pct reduces net_price as a % of fresh credit."""
+        import asyncio
+        from spread_scanner import TradeHandler, TradePolicy
+
+        trade_calls: list[dict] = []
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def get_option_quotes(self, **kw):
+                return {
+                    "quotes": {"put": [
+                        {"strike": 5700.0, "bid": 1.00, "ask": 1.10},
+                        {"strike": 5680.0, "bid": 0.10, "ask": 0.20},
+                    ]},
+                    "meta": {"age_seconds": 2.0, "source": "fresh_cache"},
+                }
+            async def trade_credit_spread(self, **kw):
+                trade_calls.append(kw)
+                return {"order_id": "x", "status": "FILLED"}
+
+        import spread_scanner as ss
+        self._bind_utp_pricing(FakeTClient)
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+
+        # refreshed credit = 1.00 - 0.20 = 0.80; slippage 10% → net_price = 0.72
+        pol = TradePolicy.from_dict({
+            "roi_pct": [1.0, 10.0], "order_type": "LIMIT", "limit_slippage_pct": 10.0,
+        })
+        h = TradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                        policy=pol, daemon_url="http://d")
+        asyncio.run(h.fire([self._spread("SPX", credit=0.80,
+                                          short=5700, long_=5680, width=20)], self._ctx()))
+        assert trade_calls[0]["net_price"] == 0.72
+
+    def test_trade_handler_limit_falls_back_on_refresh_error(self, monkeypatch, tmp_path):
+        """If get_option_quotes raises, fall back to scan-time credit and log reason."""
+        import asyncio
+        from spread_scanner import TradeHandler, TradePolicy
+
+        trade_calls: list[dict] = []
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def get_option_quotes(self, **kw):
+                raise RuntimeError("daemon is down")
+            async def trade_credit_spread(self, **kw):
+                trade_calls.append(kw)
+                return {"order_id": "x", "status": "FILLED"}
+
+        import spread_scanner as ss
+        self._bind_utp_pricing(FakeTClient)
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+
+        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "order_type": "LIMIT"})
+        log = tmp_path / "l.jsonl"
+        h = TradeHandler(min_norm_roi=0, log_file=str(log),
+                        policy=pol, daemon_url="http://d")
+        asyncio.run(h.fire([self._spread("SPX", credit=0.85,
+                                          short=5700, long_=5680, width=20)], self._ctx()))
+
+        # Fallback: submit at scan_credit (0.85), slippage 0%
+        assert trade_calls[0]["net_price"] == 0.85
+        events = [json.loads(l) for l in log.read_text().splitlines()]
+        lp = next(e for e in events if e["event"] == "result")["result"]["limit_pricing"]
+        assert lp["refreshed_credit"] is None
+        assert lp["quote_source"] == "error"
+        assert "fallback_reason" in lp
+        assert "quote_refresh_failed" in lp["fallback_reason"]
+
+    def test_trade_handler_limit_fallback_on_missing_leg(self, monkeypatch, tmp_path):
+        """If fresh quotes don't cover one of the legs, fall back."""
+        import asyncio
+        from spread_scanner import TradeHandler, TradePolicy
+
+        trade_calls: list[dict] = []
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def get_option_quotes(self, **kw):
+                # Only the short leg comes back; long leg absent
+                return {
+                    "quotes": {"put": [
+                        {"strike": 5700.0, "bid": 1.20, "ask": 1.30},
+                    ]},
+                    "meta": {"age_seconds": 5.0, "source": "provider"},
+                }
+            async def trade_credit_spread(self, **kw):
+                trade_calls.append(kw)
+                return {"order_id": "x", "status": "FILLED"}
+
+        import spread_scanner as ss
+        self._bind_utp_pricing(FakeTClient)
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+
+        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "order_type": "LIMIT"})
+        log = tmp_path / "l.jsonl"
+        h = TradeHandler(min_norm_roi=0, log_file=str(log),
+                        policy=pol, daemon_url="http://d")
+        asyncio.run(h.fire([self._spread("SPX", credit=0.90,
+                                          short=5700, long_=5680, width=20)], self._ctx()))
+        assert trade_calls[0]["net_price"] == 0.90
+        events = [json.loads(l) for l in log.read_text().splitlines()]
+        lp = next(e for e in events if e["event"] == "result")["result"]["limit_pricing"]
+        assert lp["fallback_reason"] == "missing_leg_in_refreshed_quotes"
+
+    def test_trade_handler_market_skips_quote_refresh(self, monkeypatch, tmp_path):
+        """MARKET orders don't fetch quotes — net_price stays None."""
+        import asyncio
+        from spread_scanner import TradeHandler, TradePolicy
+
+        quote_calls: list[dict] = []
+        trade_calls: list[dict] = []
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def get_option_quotes(self, **kw):
+                quote_calls.append(kw)
+                return {"quotes": {}, "meta": {}}
+            async def trade_credit_spread(self, **kw):
+                trade_calls.append(kw)
+                return {"order_id": "x", "status": "FILLED"}
+
+        import spread_scanner as ss
+        self._bind_utp_pricing(FakeTClient)
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+
+        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "order_type": "MARKET"})
+        h = TradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                        policy=pol, daemon_url="http://d")
+        asyncio.run(h.fire([self._spread("SPX", credit=0.85)], self._ctx()))
+        assert quote_calls == []
+        assert trade_calls[0]["net_price"] is None
+
+    def test_policy_limit_slippage_defaults_to_none_for_daemon_resolution(self):
+        """Default = None means 'use daemon /trade/defaults'. Explicit float overrides."""
+        from spread_scanner import TradePolicy
+        assert TradePolicy().limit_slippage_pct is None      # → daemon default
+        p = TradePolicy.from_dict({"limit_slippage_pct": 2.5})
+        assert p.limit_slippage_pct == 2.5                   # explicit override
+
+    def test_trade_handler_logs_error_on_exception(self, monkeypatch, tmp_path):
+        import asyncio, sys
+        from spread_scanner import TradeHandler, TradePolicy
+
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def trade_credit_spread(self, **kw):
+                raise RuntimeError("broker rejected")
+
+        import spread_scanner as ss
+        self._bind_utp_pricing(FakeTClient)
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+
+        log_file = tmp_path / "err.jsonl"
+        h = TradeHandler(min_norm_roi=0, log_file=str(log_file),
+                        policy=TradePolicy.from_dict({"roi_pct": [1.0, 10.0]}),
+                        daemon_url="http://d")
+        asyncio.run(h.fire([self._spread("SPX", credit=1.0)], self._ctx()))
+
+        events = [json.loads(l) for l in log_file.read_text().splitlines()]
+        err = [e for e in events if e["event"] == "error"]
+        assert len(err) == 1
+        assert "broker rejected" in err[0]["reason"]
+
+    def test_sim_and_trade_use_separate_log_files(self, monkeypatch, tmp_path):
+        import asyncio, sys
+        from spread_scanner import SimulateTradeHandler, TradeHandler, TradePolicy
+
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def check_margin_credit_spread(self, **kw):
+                return {"init_margin": 1000, "error": None}
+            async def trade_credit_spread(self, **kw):
+                return {"order_id": "real"}
+
+        import spread_scanner as ss
+        self._bind_utp_pricing(FakeTClient)
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+
+        sim_file = tmp_path / "sim.jsonl"
+        live_file = tmp_path / "live.jsonl"
+        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0]})
+        sim = SimulateTradeHandler(min_norm_roi=0, log_file=str(sim_file),
+                                   policy=pol, daemon_url="http://d")
+        live = TradeHandler(min_norm_roi=0, log_file=str(live_file),
+                           policy=pol, daemon_url="http://d")
+
+        spreads = [self._spread("SPX", credit=1.0)]
+        ctx = self._ctx()
+        asyncio.run(sim.fire(spreads, ctx))
+        asyncio.run(live.fire(spreads, ctx))
+
+        assert sim_file.exists() and live_file.exists()
+        sim_events = [json.loads(l) for l in sim_file.read_text().splitlines()]
+        live_events = [json.loads(l) for l in live_file.read_text().splitlines()]
+        assert all(e["handler"] == "simulate_trade" for e in sim_events)
+        assert all(e["handler"] == "trade" for e in live_events)
+
+    # --- activation policy ------------------------------------------------
+
+    def test_trade_handlers_not_activated_by_default(self, monkeypatch):
+        """Without YAML or explicit opt-in, no trade handler must appear in the pipeline."""
+        from spread_scanner import _load_config, TradeHandler, SimulateTradeHandler
+        monkeypatch.setattr("sys.argv", ["spread_scanner.py", "--tickers", "SPX"])
+        args, handlers = _load_config()
+        assert not any(isinstance(h, (TradeHandler, SimulateTradeHandler)) for h in handlers)
+
+    def test_trade_handlers_not_activated_by_log_or_notify_cli(self, monkeypatch):
+        """Legacy --log and --notify flags must NOT produce any trade handler."""
+        from spread_scanner import _load_config, TradeHandler, SimulateTradeHandler
+        monkeypatch.setattr("sys.argv", [
+            "spread_scanner.py", "--tickers", "SPX",
+            "--log", "3:/tmp/l.jsonl", "--notify", "4:me@x.com",
+        ])
+        args, handlers = _load_config()
+        assert not any(isinstance(h, (TradeHandler, SimulateTradeHandler)) for h in handlers)
+        assert len(handlers) == 2  # log + notify only
+
+    def test_trade_handler_activates_only_via_yaml(self, tmp_path, monkeypatch):
+        from spread_scanner import _load_config, TradeHandler, SimulateTradeHandler
+        cfg = tmp_path / "c.yaml"
+        cfg.write_text("""
+tickers: [SPX]
+handlers:
+  - type: simulate_trade
+    min_norm_roi: 1.5
+    log_file: /tmp/sim.jsonl
+    policy:
+      roi_pct: [1.5, 5.0]
+      min_credit: {SPX: 0.50}
+  - type: trade
+    min_norm_roi: 1.5
+    log_file: /tmp/live.jsonl
+    policy:
+      roi_pct: [1.5, 5.0]
+      min_credit: {SPX: 0.50}
+""")
+        monkeypatch.setattr("sys.argv", ["spread_scanner.py", "--config", str(cfg)])
+        args, handlers = _load_config()
+        assert any(isinstance(h, SimulateTradeHandler) for h in handlers)
+        assert any(isinstance(h, TradeHandler) for h in handlers)
+
+    # ── nROI schedule + per-ticker ────────────────────────────────────────
+
+    def test_parse_min_norm_roi_schedule_normalizes_times(self):
+        from spread_scanner import _parse_min_norm_roi_schedule
+        from datetime import time
+        s = _parse_min_norm_roi_schedule([
+            {"until": "07:30", "value": 2.0},
+            {"until": "09:00", "value": 1.75},
+            {"value": 1.5},   # open-ended fallback
+        ])
+        assert s[0]["until"] == time(7, 30) and s[0]["value"] == 2.0
+        assert s[1]["until"] == time(9, 0) and s[1]["value"] == 1.75
+        assert s[2]["until"] is None and s[2]["value"] == 1.5
+
+    def test_parse_min_norm_roi_schedule_rejects_missing_value(self):
+        import pytest
+        from spread_scanner import _parse_min_norm_roi_schedule
+        with pytest.raises(ValueError, match="missing required 'value'"):
+            _parse_min_norm_roi_schedule([{"until": "07:30"}])
+
+    def test_parse_min_norm_roi_schedule_rejects_early_fallback(self):
+        """Only the LAST entry can be open-ended — earlier ones must have 'until'."""
+        import pytest
+        from spread_scanner import _parse_min_norm_roi_schedule
+        with pytest.raises(ValueError, match="only the final entry"):
+            _parse_min_norm_roi_schedule([
+                {"value": 2.0},               # no until, but not last → error
+                {"until": "09:00", "value": 1.5},
+            ])
+
+    def test_eval_schedule_picks_right_bucket(self):
+        from spread_scanner import ActionHandler
+        from datetime import datetime, time
+        from spread_scanner import _PT
+        sched = [{"until": time(7, 30), "value": 2.0},
+                 {"until": None, "value": 1.5}]
+        # Before 07:30 → first entry
+        t1 = datetime(2026, 4, 23, 7, 0, tzinfo=_PT)
+        assert ActionHandler._eval_schedule(sched, t1) == 2.0
+        # Exactly at 07:30 → first entry (inclusive)
+        t2 = datetime(2026, 4, 23, 7, 30, tzinfo=_PT)
+        assert ActionHandler._eval_schedule(sched, t2) == 2.0
+        # After 07:30 → fallback
+        t3 = datetime(2026, 4, 23, 9, 0, tzinfo=_PT)
+        assert ActionHandler._eval_schedule(sched, t3) == 1.5
+
+    def test_build_handler_parses_nroi_schedule(self, tmp_path):
+        from spread_scanner import build_handler
+        h = build_handler({
+            "type": "log", "path": str(tmp_path / "l.jsonl"),
+            "min_norm_roi_schedule": [
+                {"until": "07:30", "value": 2.0},
+                {"value": 1.5},
+            ],
+        })
+        assert h.min_norm_roi_schedule is not None
+        assert len(h.min_norm_roi_schedule) == 2
+
+    def test_build_handler_parses_nroi_per_ticker(self, tmp_path):
+        from spread_scanner import build_handler
+        h = build_handler({
+            "type": "log", "path": str(tmp_path / "l.jsonl"),
+            "min_norm_roi": 3.0,
+            "min_norm_roi_per_ticker": {
+                "RUT": 1.5,
+                "NDX": 2.5,
+            },
+        })
+        assert h.min_norm_roi_per_ticker == {"RUT": 1.5, "NDX": 2.5}
+
+    def test_build_handler_parses_nroi_per_ticker_with_schedule(self, tmp_path):
+        """Per-ticker values can themselves be schedules."""
+        from spread_scanner import build_handler
+        from datetime import time
+        h = build_handler({
+            "type": "log", "path": str(tmp_path / "l.jsonl"),
+            "min_norm_roi": 3.0,
+            "min_norm_roi_per_ticker": {
+                "RUT": [{"until": "07:30", "value": 1.5}, {"value": 1.0}],
+            },
+        })
+        rut_sched = h.min_norm_roi_per_ticker["RUT"]
+        assert rut_sched[0]["until"] == time(7, 30)
+        assert rut_sched[0]["value"] == 1.5
+
+    def test_resolve_min_norm_roi_scalar_fallback(self, tmp_path):
+        from spread_scanner import build_handler
+        h = build_handler({
+            "type": "log", "path": str(tmp_path / "l.jsonl"),
+            "min_norm_roi": 3.0,
+        })
+        # No symbol, no schedule → the scalar
+        assert h._resolve_min_norm_roi() == 3.0
+        assert h._resolve_min_norm_roi("SPX") == 3.0
+
+    def test_resolve_min_norm_roi_per_ticker_overrides(self, tmp_path):
+        from spread_scanner import build_handler
+        h = build_handler({
+            "type": "log", "path": str(tmp_path / "l.jsonl"),
+            "min_norm_roi": 3.0,
+            "min_norm_roi_per_ticker": {"RUT": 1.5, "SPX": 2.5},
+        })
+        assert h._resolve_min_norm_roi("RUT") == 1.5
+        assert h._resolve_min_norm_roi("SPX") == 2.5
+        # Ticker without override → scalar fallback
+        assert h._resolve_min_norm_roi("NDX") == 3.0
+
+    def test_resolve_min_norm_roi_schedule_time_varying(self, tmp_path):
+        from spread_scanner import build_handler, _PT
+        from datetime import datetime
+        h = build_handler({
+            "type": "log", "path": str(tmp_path / "l.jsonl"),
+            "min_norm_roi_schedule": [
+                {"until": "07:30", "value": 2.0},
+                {"value": 1.5},
+            ],
+        })
+        before = datetime(2026, 4, 23, 7, 0, tzinfo=_PT)
+        after  = datetime(2026, 4, 23, 9, 0, tzinfo=_PT)
+        assert h._resolve_min_norm_roi("SPX", before) == 2.0
+        assert h._resolve_min_norm_roi("SPX", after) == 1.5
+
+    def test_resolve_min_norm_roi_per_ticker_beats_schedule(self, tmp_path):
+        """Per-ticker override wins over the time-of-day schedule."""
+        from spread_scanner import build_handler, _PT
+        from datetime import datetime
+        h = build_handler({
+            "type": "log", "path": str(tmp_path / "l.jsonl"),
+            "min_norm_roi_schedule": [
+                {"until": "07:30", "value": 2.0},
+                {"value": 1.5},
+            ],
+            "min_norm_roi_per_ticker": {"RUT": 1.0},
+        })
+        # RUT — per-ticker wins
+        before = datetime(2026, 4, 23, 7, 0, tzinfo=_PT)
+        after  = datetime(2026, 4, 23, 9, 0, tzinfo=_PT)
+        assert h._resolve_min_norm_roi("RUT", before) == 1.0
+        assert h._resolve_min_norm_roi("RUT", after) == 1.0
+        # SPX — no override, falls through to schedule
+        assert h._resolve_min_norm_roi("SPX", before) == 2.0
+        assert h._resolve_min_norm_roi("SPX", after) == 1.5
+
+    def test_trade_handler_filter_honors_schedule(self, monkeypatch, tmp_path):
+        """TradeHandler.filter() uses the resolver so time-varying threshold
+        actually lets more candidates through after the cutoff."""
+        import spread_scanner as ss
+        monkeypatch.setattr(ss.TradePolicy, "within_trading_window",
+                            lambda self, now_pt=None: True)
+        from spread_scanner import build_handler
+        h = build_handler({
+            "type": "simulate_trade",
+            "log_file": str(tmp_path / "sim.jsonl"),
+            "daemon_url": "http://d",
+            "min_norm_roi_schedule": [
+                {"until": "07:30", "value": 2.5},
+                {"value": 1.5},
+            ],
+            "policy": {"roi_pct": [1.0, 10.0]},
+        })
+        # Candidate: nROI = 2.0 (between the two thresholds)
+        cand = [{"symbol": "SPX", "option_type": "PUT", "short_strike": 7050,
+                 "long_strike": 7025, "width": 25, "credit": 0.70, "roi_pct": 2.0,
+                 "otm_pct": 1.0, "dte": 0, "prev_close": 7064, "expiration": "2026-04-22"}]
+        # Monkey-patch datetime.now() to simulate different times.
+        from datetime import datetime as real_dt
+        from spread_scanner import _PT
+        class FakeDT:
+            @staticmethod
+            def now(tz=None):
+                return FakeDT._now if tz is None else FakeDT._now
+        # BEFORE 07:30: threshold 2.5 → candidate nROI 2.0 rejected
+        FakeDT._now = real_dt(2026, 4, 23, 7, 0, tzinfo=_PT)
+        monkeypatch.setattr(ss, "datetime", FakeDT)
+        out_before = h.filter(cand)
+        assert out_before == []
+        # AFTER 07:30: threshold 1.5 → 2.0 passes
+        FakeDT._now = real_dt(2026, 4, 23, 9, 0, tzinfo=_PT)
+        out_after = h.filter(cand)
+        assert len(out_after) == 1
+
+    def test_build_handler_trade_requires_log_file(self):
+        import pytest
+        from spread_scanner import build_handler
+        with pytest.raises(ValueError, match="trade handler requires 'log_file'"):
+            build_handler({"type": "trade", "min_norm_roi": 2.0})
+        with pytest.raises(ValueError, match="simulate_trade handler requires 'log_file'"):
+            build_handler({"type": "simulate_trade", "min_norm_roi": 2.0})
+
+    # --- rejection logging ------------------------------------------------
+
+    @staticmethod
+    def _read_log(path):
+        return [json.loads(l) for l in open(path) if l.strip()]
+
+    def test_filter_logs_below_credit_floor(self, monkeypatch, tmp_path):
+        self._always_in_window(monkeypatch)
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+        log = tmp_path / "l.jsonl"
+        h = SimulateTradeHandler(
+            min_norm_roi=0,
+            log_file=str(log),
+            policy=TradePolicy.from_dict({
+                "roi_pct": [1.0, 10.0], "min_credit": {"SPX": 0.50},
+            }),
+            daemon_url="http://d",
+        )
+        h.filter([self._spread("SPX", credit=0.30)])
+        evs = self._read_log(log)
+        assert any(e["event"] == "rejected" and e["reason"] == "below_credit_floor"
+                   for e in evs)
+        r = [e for e in evs if e["reason"] == "below_credit_floor"][0]
+        assert r["credit"] == 0.30 and r["credit_floor"] == 0.50
+
+    def test_filter_logs_below_otm_floor(self, monkeypatch, tmp_path):
+        self._always_in_window(monkeypatch)
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+        log = tmp_path / "l.jsonl"
+        h = SimulateTradeHandler(
+            min_norm_roi=0, log_file=str(log),
+            policy=TradePolicy.from_dict({
+                "roi_pct": [1.0, 10.0], "min_otm_pct": {"SPX": 1.0},
+            }),
+            daemon_url="http://d",
+        )
+        h.filter([self._spread("SPX", otm=0.5)])
+        evs = self._read_log(log)
+        r = [e for e in evs if e.get("reason") == "below_otm_floor"]
+        assert len(r) == 1
+        assert r[0]["otm_pct"] == 0.5 and r[0]["otm_floor"] == 1.0
+
+    def test_filter_logs_roi_outside_band(self, monkeypatch, tmp_path):
+        self._always_in_window(monkeypatch)
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+        log = tmp_path / "l.jsonl"
+        h = SimulateTradeHandler(
+            min_norm_roi=0, log_file=str(log),
+            policy=TradePolicy.from_dict({"roi_pct": [1.5, 5.0]}),
+            daemon_url="http://d",
+        )
+        h.filter([
+            self._spread("SPX", roi=1.0),   # below
+            self._spread("SPX", roi=7.0),   # above
+        ])
+        evs = self._read_log(log)
+        r = [e for e in evs if e.get("reason") == "roi_outside_band"]
+        assert len(r) == 2
+        assert {e["roi_pct"] for e in r} == {1.0, 7.0}
+
+    def test_filter_logs_missing_prev_close(self, monkeypatch, tmp_path):
+        self._always_in_window(monkeypatch)
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+        log = tmp_path / "l.jsonl"
+        h = SimulateTradeHandler(
+            min_norm_roi=0, log_file=str(log),
+            policy=TradePolicy.from_dict({"roi_pct": [1.0, 10.0]}),
+            daemon_url="http://d",
+        )
+        h.filter([self._spread("SPX", prev_close=0)])
+        evs = self._read_log(log)
+        r = [e for e in evs if e.get("reason") == "missing_prev_close"]
+        assert len(r) == 1
+
+    def test_filter_logs_below_min_norm_roi(self, monkeypatch, tmp_path):
+        self._always_in_window(monkeypatch)
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+        log = tmp_path / "l.jsonl"
+        h = SimulateTradeHandler(
+            min_norm_roi=3.0, log_file=str(log),
+            policy=TradePolicy.from_dict({"roi_pct": [1.0, 10.0]}),
+            daemon_url="http://d",
+        )
+        h.filter([self._spread("SPX", roi=2.0)])   # nROI = 2.0 < 3.0
+        evs = self._read_log(log)
+        r = [e for e in evs if e.get("reason") == "below_min_norm_roi"]
+        assert len(r) == 1
+        assert r[0]["norm_roi"] == 2.0 and r[0]["threshold"] == 3.0
+
+    def test_filter_logs_outranked_same_ticker(self, monkeypatch, tmp_path):
+        """Two passing SPX candidates in same scan → lower-nROI one logged as outranked."""
+        self._always_in_window(monkeypatch)
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+        log = tmp_path / "l.jsonl"
+        h = SimulateTradeHandler(
+            min_norm_roi=0, log_file=str(log),
+            policy=TradePolicy.from_dict({"roi_pct": [1.0, 10.0]}),
+            daemon_url="http://d",
+        )
+        out = h.filter([
+            self._spread("SPX", roi=3.0, short=5700, long_=5680),
+            self._spread("SPX", roi=4.5, short=5710, long_=5690),   # wins
+            self._spread("SPX", roi=2.0, short=5720, long_=5700),
+        ])
+        assert len(out) == 1 and out[0]["roi_pct"] == 4.5
+        evs = self._read_log(log)
+        r = [e for e in evs if e.get("reason") == "outranked_same_ticker"]
+        assert len(r) == 2
+        for e in r:
+            assert e["winning_norm_roi"] == 4.5
+            assert e["winning_short_strike"] == 5710
+
+    def test_filter_logs_batch_outside_trading_window(self, monkeypatch, tmp_path):
+        import spread_scanner as ss
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+        monkeypatch.setattr(ss.TradePolicy, "within_trading_window",
+                            lambda self, now_pt=None: False)
+        log = tmp_path / "l.jsonl"
+        h = SimulateTradeHandler(
+            min_norm_roi=0, log_file=str(log),
+            policy=TradePolicy(), daemon_url="http://d",
+        )
+        h.filter([self._spread("SPX"), self._spread("NDX", prev_close=26000)])
+        evs = self._read_log(log)
+        # One summary event per batch (not per candidate) for this case
+        assert len(evs) == 1
+        assert evs[0]["event"] == "rejected_batch"
+        assert evs[0]["reason"] == "outside_trading_window"
+        assert evs[0]["count"] == 2
+
+    def test_count_rejected_increments(self, monkeypatch, tmp_path):
+        self._always_in_window(monkeypatch)
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+        h = SimulateTradeHandler(
+            min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+            policy=TradePolicy.from_dict({
+                "roi_pct": [1.5, 5.0], "min_credit": {"SPX": 0.50},
+            }),
+            daemon_url="http://d",
+        )
+        assert h.count_rejected == 0
+        h.filter([
+            self._spread("SPX", credit=0.20),   # below_credit_floor
+            self._spread("SPX", roi=7.0),       # roi_outside_band
+        ])
+        assert h.count_rejected == 2
+
+
+class TestRecentActionsAndNotifications:
+    """recent_actions buffer + dashboard panel + per-action notifications."""
+
+    def _ctx(self, client=None):
+        from spread_scanner import HandlerContext
+        return HandlerContext(client=client, args=None, scan_data={},
+                              is_market_hours=True, now_ts="2026-04-22T07:00:00")
+
+    @staticmethod
+    def _spread(sym="SPX", short=7050, long_=7030, credit=0.95, width=20,
+                roi=3.2, otm=1.2, prev_close=7064.01):
+        return {
+            "symbol": sym, "option_type": "PUT",
+            "short_strike": short, "long_strike": long_, "width": width,
+            "credit": credit, "roi_pct": roi, "otm_pct": otm,
+            "dte": 0, "expiration": "2026-04-22", "prev_close": prev_close,
+        }
+
+    # ── recent_actions buffer ────────────────────────────────────────────
+
+    def test_record_action_appends_to_buffer(self, tmp_path):
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "notify": False})
+        h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                                 policy=pol, daemon_url="http://d")
+        assert len(h.recent_actions) == 0
+        h._record_action("SIMULATED", self._spread(), contracts=1)
+        h._record_action("SKIPPED", self._spread(short=7040), contracts=2, reason="total_risk_cap")
+        assert len(h.recent_actions) == 2
+        first, second = h.recent_actions
+        assert first["outcome"] == "SIMULATED"
+        assert first["symbol"] == "SPX"
+        assert first["credit_dollars"] == 95.0
+        assert first["risk_dollars"] == 1905.0          # (20-0.95)*100*1
+        assert first["norm_roi"] == 3.2                  # roi_pct/(dte+1)
+        assert second["outcome"] == "SKIPPED"
+        assert second["reason"] == "total_risk_cap"
+        assert second["contracts"] == 2
+        assert second["credit_dollars"] == 190.0
+
+    def test_recent_actions_is_bounded(self, tmp_path):
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "notify": False})
+        h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                                 policy=pol, daemon_url="http://d")
+        # deque maxlen = 20; push 30, only last 20 should survive.
+        for i in range(30):
+            h._record_action("SIMULATED", self._spread(short=7000 + i), contracts=1)
+        assert len(h.recent_actions) == 20
+        # Oldest should be the one with short=7010 (the first 10 were evicted).
+        assert h.recent_actions[0]["short_strike"] == 7010
+
+    # ── render_recent_actions ────────────────────────────────────────────
+
+    def test_render_recent_actions_orders_newest_at_bottom(self, tmp_path):
+        import time
+        from spread_scanner import SimulateTradeHandler, TradePolicy, render_recent_actions
+        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "notify": False})
+        h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                                 policy=pol, daemon_url="http://d")
+        h._record_action("SIMULATED", self._spread(short=7050), contracts=1)
+        time.sleep(0.005)
+        h._record_action("SKIPPED", self._spread(short=7040), contracts=2, reason="total_risk_cap")
+        time.sleep(0.005)
+        h._record_action("ERROR", self._spread(short=7030), contracts=1, reason="broker down")
+
+        lines = render_recent_actions([h], n=3)
+        # First heading line is the section header; find data rows.
+        rows = [l for l in lines if any(c in l for c in ("P7050", "P7040", "P7030"))]
+        assert len(rows) == 3
+        # Oldest (7050) first, newest (7030) last.
+        assert "P7050" in rows[0]
+        assert "P7040" in rows[1]
+        assert "P7030" in rows[2]
+        assert "SIMULATED" in rows[0]
+        assert "SKIPPED" in rows[1] and "total_risk_cap" in rows[1]
+        assert "ERROR" in rows[2] and "broker down" in rows[2]
+
+    def test_render_recent_actions_hidden_when_n_zero(self, tmp_path):
+        from spread_scanner import SimulateTradeHandler, TradePolicy, render_recent_actions
+        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "notify": False})
+        h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                                 policy=pol, daemon_url="http://d")
+        h._record_action("SIMULATED", self._spread(), contracts=1)
+        assert render_recent_actions([h], n=0) == []
+
+    def test_render_recent_actions_merges_across_handlers(self, tmp_path):
+        import time
+        from spread_scanner import SimulateTradeHandler, TradeHandler, TradePolicy, render_recent_actions
+        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "notify": False})
+        h_sim = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "sim.jsonl"),
+                                     policy=pol, daemon_url="http://d")
+        h_live = TradeHandler(min_norm_roi=0, log_file=str(tmp_path / "live.jsonl"),
+                              policy=pol, daemon_url="http://d")
+        h_sim._record_action("SIMULATED", self._spread(short=7050), contracts=1)
+        time.sleep(0.005)
+        h_live._record_action("FILLED", self._spread(short=7030), contracts=2)
+        lines = render_recent_actions([h_sim, h_live], n=3)
+        rows = [l for l in lines if any(c in l for c in ("P7050", "P7030"))]
+        assert len(rows) == 2
+        assert "P7050" in rows[0]       # older
+        assert "P7030" in rows[1]       # newer
+        assert "SIM" in rows[0]
+        assert "TRADE" in rows[1]
+
+    # ── notification wiring ──────────────────────────────────────────────
+
+    def test_notification_fires_on_success(self, monkeypatch, tmp_path):
+        import asyncio
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+
+        posts = []
+        class FakeHttpClient:
+            async def post(self, url, json=None, timeout=None):
+                posts.append({"url": url, "json": json})
+                class R: status_code = 200
+                return R()
+
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def check_margin_credit_spread(self, **kw):
+                return {"init_margin": 1000, "error": None}
+
+        import spread_scanner as ss
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+        monkeypatch.setattr(ss.TradePolicy, "within_trading_window",
+                            lambda self, now_pt=None: True)
+
+        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0]})   # notify default True
+        h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                                 policy=pol, daemon_url="http://d")
+        asyncio.run(h.fire([self._spread()],
+            ss.HandlerContext(client=FakeHttpClient(), args=None, scan_data={},
+                              is_market_hours=True, now_ts="2026-04-22T07:00:00")))
+
+        # Exactly one /api/notify POST per successful trade.
+        notify_posts = [p for p in posts if p["url"].endswith("/api/notify")]
+        assert len(notify_posts) == 1
+        body = notify_posts[0]["json"]
+        assert body["channel"] == "both"                    # policy default
+        assert "SIMULATE_TRADE" in body["subject"]
+        assert "SPX" in body["message"]
+        assert "P7050/7030" in body["subject"] or "7050/7030" in body["subject"]
+        assert "credit $0.95" in body["message"]
+
+    def test_notification_skipped_when_policy_notify_false(self, monkeypatch, tmp_path):
+        import asyncio
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+
+        posts = []
+        class FakeHttpClient:
+            async def post(self, url, json=None, timeout=None):
+                posts.append({"url": url, "json": json})
+                class R: status_code = 200
+                return R()
+
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def check_margin_credit_spread(self, **kw):
+                return {"init_margin": 1000, "error": None}
+
+        import spread_scanner as ss
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+        monkeypatch.setattr(ss.TradePolicy, "within_trading_window",
+                            lambda self, now_pt=None: True)
+
+        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "notify": False})
+        h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                                 policy=pol, daemon_url="http://d")
+        asyncio.run(h.fire([self._spread()],
+            ss.HandlerContext(client=FakeHttpClient(), args=None, scan_data={},
+                              is_market_hours=True, now_ts="2026-04-22T07:00:00")))
+
+        assert not any(p["url"].endswith("/api/notify") for p in posts)
+
+    def test_notification_failure_swallowed(self, monkeypatch, tmp_path, capsys):
+        import asyncio
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+
+        class BadHttpClient:
+            async def post(self, url, json=None, timeout=None):
+                raise RuntimeError("notify service is down")
+
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def check_margin_credit_spread(self, **kw):
+                return {"init_margin": 1000, "error": None}
+
+        import spread_scanner as ss
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+        monkeypatch.setattr(ss.TradePolicy, "within_trading_window",
+                            lambda self, now_pt=None: True)
+
+        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0]})
+        log_path = tmp_path / "l.jsonl"
+        h = SimulateTradeHandler(min_norm_roi=0, log_file=str(log_path),
+                                 policy=pol, daemon_url="http://d")
+        asyncio.run(h.fire([self._spread()],
+            ss.HandlerContext(client=BadHttpClient(), args=None, scan_data={},
+                              is_market_hours=True, now_ts="2026-04-22T07:00:00")))
+
+        # Trade still recorded to the JSONL log + recent_actions despite notify failure.
+        events = [json.loads(l) for l in log_path.read_text().splitlines()]
+        assert any(e["event"] == "result" for e in events)
+        assert len(h.recent_actions) == 1
+        # The failure was logged to stderr.
+        err = capsys.readouterr().err
+        assert "[notify:simulate_trade] failed" in err
+
+    def test_notification_on_error_outcome(self, monkeypatch, tmp_path):
+        """A broker exception should still emit a notification tagged ERROR."""
+        import asyncio
+        from spread_scanner import TradeHandler, TradePolicy
+
+        posts = []
+        class FakeHttpClient:
+            async def post(self, url, json=None, timeout=None):
+                posts.append({"url": url, "json": json})
+                class R: status_code = 200
+                return R()
+
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def trade_credit_spread(self, **kw):
+                raise RuntimeError("broker rejected")
+
+        import spread_scanner as ss
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+        monkeypatch.setattr(ss.TradePolicy, "within_trading_window",
+                            lambda self, now_pt=None: True)
+
+        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "order_type": "MARKET"})
+        h = TradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                        policy=pol, daemon_url="http://d")
+        asyncio.run(h.fire([self._spread()],
+            ss.HandlerContext(client=FakeHttpClient(), args=None, scan_data={},
+                              is_market_hours=True, now_ts="2026-04-22T07:00:00")))
+
+        notify_posts = [p for p in posts if p["url"].endswith("/api/notify")]
+        assert len(notify_posts) == 1
+        body = notify_posts[0]["json"]
+        assert "TRADE" in body["subject"] and "ERROR" in body["subject"]
+        assert "broker rejected" in body["message"]
+
+    # ── quiet-scan heartbeats ────────────────────────────────────────────
+
+    def test_diagnose_quiet_no_spreads(self):
+        """Empty scan → 'screener produced no spreads' reason."""
+        from spread_scanner import _diagnose_quiet_reason
+        data = {"dte_sections": {0: {"spreads": {"SPX": [], "NDX": []}}}}
+        reason = _diagnose_quiet_reason([], data, [])
+        assert "no spreads" in reason
+
+    def test_diagnose_quiet_no_candidates(self):
+        """Spreads existed but the screener filters dropped them all."""
+        from spread_scanner import _diagnose_quiet_reason
+        data = {"dte_sections": {0: {"spreads": {"SPX": [{"credit": 0.1}]}}}}
+        reason = _diagnose_quiet_reason([], data, [])
+        assert "no candidates passed screener filters" in reason
+
+    def test_diagnose_quiet_names_gates_with_counts(self, tmp_path):
+        """Diagnoser reports which gates fired with their per-scan counts."""
+        from spread_scanner import _diagnose_quiet_reason, SimulateTradeHandler, TradePolicy
+        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "notify": False})
+        h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                                 policy=pol, daemon_url="http://d")
+        # Simulate this scan's filter() populating the counter with two gates:
+        h.last_scan_rejection_counts = {
+            "below_otm_floor": 3,
+            "below_credit_floor": 2,
+        }
+        data = {"dte_sections": {0: {"spreads": {"SPX": [{"credit": 0.1}]}}}}
+        reason = _diagnose_quiet_reason([h], data, [{"symbol": "SPX"}, {"symbol": "NDX"}])
+        # Should explicitly name EACH gate and its count, total = 5.
+        assert "rejected by gates" in reason
+        assert "below_otm_floor (3)" in reason
+        assert "below_credit_floor (2)" in reason
+        assert reason.startswith("5 rejected")
+
+    def test_diagnose_quiet_single_gate_omits_count(self, tmp_path):
+        """When only one gate fires, the count is implicit (all of them)."""
+        from spread_scanner import _diagnose_quiet_reason, SimulateTradeHandler, TradePolicy
+        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "notify": False})
+        h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                                 policy=pol, daemon_url="http://d")
+        h.last_scan_rejection_counts = {"total_risk_cap": 4}
+        data = {"dte_sections": {0: {"spreads": {"SPX": [{"credit": 0.1}]}}}}
+        reason = _diagnose_quiet_reason([h], data, [{"symbol": "SPX"}])
+        assert reason == "4 rejected by gates: total_risk_cap"
+
+    def test_diagnose_quiet_more_than_three_gates_truncates(self, tmp_path):
+        """When >3 gates fire, show top 3 and +N more."""
+        from spread_scanner import _diagnose_quiet_reason, SimulateTradeHandler, TradePolicy
+        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "notify": False})
+        h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                                 policy=pol, daemon_url="http://d")
+        h.last_scan_rejection_counts = {
+            "below_otm_floor": 3, "below_credit_floor": 2,
+            "roi_outside_band": 1, "missing_prev_close": 1, "total_risk_cap": 1,
+        }
+        data = {"dte_sections": {0: {"spreads": {"SPX": [{"credit": 0.1}]}}}}
+        reason = _diagnose_quiet_reason([h], data, [{"symbol": "SPX"}])
+        assert "below_otm_floor (3)" in reason
+        assert "below_credit_floor (2)" in reason
+        # 5 unique gates total → +2 more
+        assert "+2 more" in reason
+
+    def test_filter_resets_rejection_counts_each_scan(self, tmp_path, monkeypatch):
+        """filter() resets last_scan_rejection_counts so each scan is fresh."""
+        import spread_scanner as ss
+        monkeypatch.setattr(ss.TradePolicy, "within_trading_window",
+                            lambda self, now_pt=None: True)
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+        pol = TradePolicy.from_dict({
+            "roi_pct": [1.0, 10.0], "min_otm_pct": {"SPX": 1.5},
+        })
+        h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                                 policy=pol, daemon_url="http://d")
+        # First scan: 1 below_otm_floor rejection
+        h.filter([self._spread(otm=0.5)])
+        assert h.last_scan_rejection_counts == {"below_otm_floor": 1}
+        # Second scan: counter resets, now 0 rejections
+        h.filter([])
+        assert h.last_scan_rejection_counts == {}
+
+    def test_maybe_log_quiet_heartbeat_appends_when_nothing_fired(self, tmp_path):
+        from collections import deque
+        from spread_scanner import _maybe_log_quiet_heartbeat, SimulateTradeHandler, TradePolicy
+        import types
+        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "notify": False})
+        h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                                 policy=pol, daemon_url="http://d")
+        args = types.SimpleNamespace(activity_log=deque(maxlen=50))
+        data = {"dte_sections": {0: {"spreads": {"SPX": [{"credit": 0.1}]}}}}
+
+        # Nothing fired → heartbeat appended
+        _maybe_log_quiet_heartbeat(args, [h], data, [], fired=False)
+        assert len(args.activity_log) == 1
+        assert args.activity_log[0]["outcome"] == "QUIET"
+        assert "reason" in args.activity_log[0]
+
+        # Something fired → NO heartbeat
+        _maybe_log_quiet_heartbeat(args, [h], data, [], fired=True)
+        assert len(args.activity_log) == 1     # unchanged
+
+    def test_activity_panel_merges_heartbeats_with_trade_rows(self, tmp_path):
+        import time
+        from collections import deque
+        from datetime import datetime
+        from spread_scanner import (
+            SimulateTradeHandler, TradePolicy, render_activity_panel,
+        )
+        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "notify": False})
+        h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                                 policy=pol, daemon_url="http://d")
+        h._record_action("SIMULATED", self._spread(), contracts=1)
+        time.sleep(0.005)
+
+        log = deque(maxlen=50)
+        now = datetime.now()
+        log.append({
+            "ts": now.strftime("%H:%M:%S"),
+            "_sort_key": now.timestamp(),
+            "outcome": "QUIET",
+            "reason": "no candidates passed screener filters",
+        })
+        time.sleep(0.005)
+        h._record_action("SIMULATED", self._spread(short=7040), contracts=1)
+
+        lines = render_activity_panel([h], n=5, activity_log=log)
+        body = "\n".join(lines)
+        # Border present (top + bottom)
+        assert "ACTIVITY (last 3)" in body
+        # Both trade rows AND the quiet heartbeat visible
+        assert body.count("SIM") >= 2
+        assert "SCAN" in body
+        assert "no candidates passed screener filters" in body
+        # Top border and bottom border chars present
+        assert "╭" in body and "╯" in body
+
+    def test_activity_panel_renders_nothing_when_empty(self, tmp_path):
+        from spread_scanner import render_activity_panel, SimulateTradeHandler, TradePolicy
+        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "notify": False})
+        h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                                 policy=pol, daemon_url="http://d")
+        assert render_activity_panel([h], n=5, activity_log=None) == []
+
+    def test_skip_does_not_notify(self, monkeypatch, tmp_path):
+        """Risk-cap skips go to the log + recent_actions, but never trigger a notification."""
+        import asyncio
+        from spread_scanner import TradeHandler, TradePolicy
+
+        posts = []
+        class FakeHttpClient:
+            async def post(self, url, json=None, timeout=None):
+                posts.append(url)
+                class R: status_code = 200
+                return R()
+
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def trade_credit_spread(self, **kw):
+                return {"order_id": "x", "status": "FILLED"}
+
+        import spread_scanner as ss
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+        monkeypatch.setattr(ss.TradePolicy, "within_trading_window",
+                            lambda self, now_pt=None: True)
+
+        # Total risk cap = 100 → first trade's $1,905 max-loss already breaches it.
+        pol = TradePolicy.from_dict({
+            "roi_pct": [1.0, 10.0], "max_total_risk": 100,
+            "order_type": "MARKET",
+        })
+        h = TradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                        policy=pol, daemon_url="http://d")
+        asyncio.run(h.fire([self._spread()],
+            ss.HandlerContext(client=FakeHttpClient(), args=None, scan_data={},
+                              is_market_hours=True, now_ts="2026-04-22T07:00:00")))
+
+        assert not any(u.endswith("/api/notify") for u in posts)
+        # And skip was recorded
+        assert len(h.recent_actions) == 1
+        assert h.recent_actions[0]["outcome"] == "SKIPPED"
+
+
+class TestDaemonTradeDefaults:
+    """/trade/defaults endpoint + TradingClient daemon-default resolution."""
+
+    def test_get_trade_defaults_endpoint(self, monkeypatch):
+        """GET /trade/defaults returns env-configured values."""
+        from fastapi.testclient import TestClient
+        from app.config import settings
+        monkeypatch.setattr(settings, "default_order_type", "LIMIT")
+        monkeypatch.setattr(settings, "limit_slippage_pct", 2.5)
+        monkeypatch.setattr(settings, "limit_quote_max_age_sec", 7.0)
+
+        from app.main import app
+        client = TestClient(app)
+        resp = client.get("/trade/defaults")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["default_order_type"] == "LIMIT"
+        assert data["limit_slippage_pct"] == 2.5
+        assert data["limit_quote_max_age_sec"] == 7.0
+
+    def test_tradingclient_get_trade_defaults(self):
+        """TradingClient.get_trade_defaults hits /trade/defaults."""
+        import asyncio
+        from utp import TradingClient
+        captured = {}
+        class FakeHttp:
+            async def get(self, path, params=None):
+                captured["path"] = path
+                class R:
+                    status_code = 200
+                    def raise_for_status(self_): pass
+                    def json(self_): return {"default_order_type": "MARKET",
+                                             "limit_slippage_pct": 1.0,
+                                             "limit_quote_max_age_sec": 8.0}
+                return R()
+        c = TradingClient("http://d")
+        c._client = FakeHttp()
+        data = asyncio.run(c.get_trade_defaults())
+        assert captured["path"] == "/trade/defaults"
+        assert data["default_order_type"] == "MARKET"
+
+    def test_compute_uses_daemon_slippage_when_pct_is_none(self):
+        """slippage_pct=None → fetch from daemon defaults."""
+        import asyncio
+        from utp import TradingClient
+        class FakeHttp:
+            async def get(self, path, params=None):
+                class R:
+                    status_code = 200
+                    def raise_for_status(self_): pass
+                    def json(self_):
+                        if path == "/trade/defaults":
+                            return {"default_order_type": "LIMIT",
+                                    "limit_slippage_pct": 5.0,
+                                    "limit_quote_max_age_sec": 12.0}
+                        # /market/options/SPX
+                        return {
+                            "quotes": {"put": [
+                                {"strike": 5700.0, "bid": 1.00, "ask": 1.10},
+                                {"strike": 5680.0, "bid": 0.20, "ask": 0.30},
+                            ]},
+                            "meta": {"age_seconds": 4.0, "source": "fresh_cache"},
+                        }
+                return R()
+        c = TradingClient("http://d")
+        c._client = FakeHttp()
+        price, meta = asyncio.run(c.compute_credit_spread_net_price(
+            symbol="SPX", short_strike=5700.0, long_strike=5680.0,
+            option_type="PUT", expiration="2026-04-21",
+            slippage_pct=None, max_age=None, fallback_credit=0.80,
+        ))
+        # refreshed = 1.00 - 0.30 = 0.70; daemon says 5% slippage → 0.665
+        # Python's banker's rounding takes 0.665 → 0.66 (round-half-to-even).
+        assert price == 0.66
+        assert meta["slippage_pct"] == 5.0
+
+    def test_compute_falls_back_to_zero_slippage_when_daemon_unreachable(self):
+        """If /trade/defaults errors, _resolve_trade_defaults uses 0/10 fallback."""
+        import asyncio
+        from utp import TradingClient
+        class FakeHttp:
+            async def get(self, path, params=None):
+                if path == "/trade/defaults":
+                    raise RuntimeError("daemon down")
+                class R:
+                    status_code = 200
+                    def raise_for_status(self_): pass
+                    def json(self_):
+                        return {
+                            "quotes": {"put": [
+                                {"strike": 5700.0, "bid": 1.00, "ask": 1.10},
+                                {"strike": 5680.0, "bid": 0.20, "ask": 0.30},
+                            ]},
+                            "meta": {"age_seconds": 4.0, "source": "fresh_cache"},
+                        }
+                return R()
+        c = TradingClient("http://d")
+        c._client = FakeHttp()
+        price, meta = asyncio.run(c.compute_credit_spread_net_price(
+            symbol="SPX", short_strike=5700.0, long_strike=5680.0,
+            option_type="PUT", expiration="2026-04-21",
+            slippage_pct=None, max_age=None, fallback_credit=0.80,
+        ))
+        assert price == 0.70                 # refreshed credit, 0% slippage (fallback)
+        assert meta["slippage_pct"] == 0.0
+
+    def test_explicit_slippage_overrides_daemon(self):
+        """Caller-supplied slippage_pct wins over daemon config."""
+        import asyncio
+        from utp import TradingClient
+        daemon_calls = []
+        class FakeHttp:
+            async def get(self, path, params=None):
+                daemon_calls.append(path)
+                class R:
+                    status_code = 200
+                    def raise_for_status(self_): pass
+                    def json(self_):
+                        if path == "/trade/defaults":
+                            return {"limit_slippage_pct": 5.0,
+                                    "limit_quote_max_age_sec": 20.0,
+                                    "default_order_type": "MARKET"}
+                        return {
+                            "quotes": {"put": [
+                                {"strike": 5700.0, "bid": 1.00, "ask": 1.10},
+                                {"strike": 5680.0, "bid": 0.20, "ask": 0.30},
+                            ]},
+                            "meta": {"age_seconds": 4.0, "source": "fresh_cache"},
+                        }
+                return R()
+        c = TradingClient("http://d")
+        c._client = FakeHttp()
+        # Both explicit → no /trade/defaults call needed
+        price, _ = asyncio.run(c.compute_credit_spread_net_price(
+            symbol="SPX", short_strike=5700.0, long_strike=5680.0,
+            option_type="PUT", expiration="2026-04-21",
+            slippage_pct=0.0, max_age=10.0, fallback_credit=0.80,
+        ))
+        assert price == 0.70
+        assert "/trade/defaults" not in daemon_calls
+
+    def test_handler_resolves_order_type_from_daemon_when_unset(self, monkeypatch, tmp_path):
+        """With policy.order_type=None, daemon's default_order_type is used."""
+        import asyncio
+        from spread_scanner import TradeHandler, TradePolicy, HandlerContext
+
+        trade_calls: list[dict] = []
+
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def get_trade_defaults(self):
+                return {"default_order_type": "LIMIT",
+                        "limit_slippage_pct": 0.0,
+                        "limit_quote_max_age_sec": 10.0}
+            async def get_option_quotes(self, **kw):
+                return {
+                    "quotes": {"put": [
+                        {"strike": 5700.0, "bid": 1.00, "ask": 1.10},
+                        {"strike": 5680.0, "bid": 0.20, "ask": 0.30},
+                    ]},
+                    "meta": {"age_seconds": 3.0, "source": "fresh_cache"},
+                }
+            async def trade_credit_spread(self, **kw):
+                trade_calls.append(kw)
+                return {"order_id": "x", "status": "FILLED"}
+
+        # Bind real pricing + resolution helpers onto the fake
+        from utp import TradingClient
+        FakeTClient.compute_credit_spread_net_price = TradingClient.compute_credit_spread_net_price
+        FakeTClient._resolve_trade_defaults = TradingClient._resolve_trade_defaults
+
+        import spread_scanner as ss
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+        monkeypatch.setattr(ss.TradePolicy, "within_trading_window", lambda self, now_pt=None: True)
+
+        # Policy does NOT set order_type — daemon default should be used.
+        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0]})
+        assert pol.order_type is None
+        h = TradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                        policy=pol, daemon_url="http://d")
+
+        def _spread(sym, credit, short, long_, width):
+            return {
+                "symbol": sym, "option_type": "PUT",
+                "short_strike": short, "long_strike": long_, "width": width,
+                "credit": credit, "roi_pct": 3.0, "otm_pct": 1.5, "dte": 0,
+                "expiration": "2026-04-21", "prev_close": 5800.0,
+            }
+        asyncio.run(h.fire([_spread("SPX", 0.85, 5700, 5680, 20)], HandlerContext(
+            client=None, args=None, scan_data={}, is_market_hours=True,
+            now_ts="2026-04-22T07:00:00")))
+
+        # Daemon said LIMIT → handler should have submitted net_price (not None).
+        assert trade_calls[0]["net_price"] is not None
+        assert trade_calls[0]["net_price"] == 0.70        # 1.00 - 0.30 (from fake quotes)
+
+
+class TestDaemonConfigTradeDefaults:
+    """YAML `trade_defaults` section flows into StreamingConfig correctly."""
+
+    def _write(self, tmp_path, body):
+        path = tmp_path / "daemon.yaml"
+        path.write_text(body)
+        return str(path)
+
+    def test_nested_trade_defaults_block(self, tmp_path):
+        from app.services.streaming_config import load_streaming_config
+        path = self._write(tmp_path, """
+symbols: [SPX]
+trade_defaults:
+  default_order_type: LIMIT
+  limit_slippage_pct: 1.5
+  limit_quote_max_age_sec: 12.0
+""")
+        cfg = load_streaming_config(path)
+        assert cfg.default_order_type == "LIMIT"
+        assert cfg.limit_slippage_pct == 1.5
+        assert cfg.limit_quote_max_age_sec == 12.0
+
+    def test_top_level_trade_defaults(self, tmp_path):
+        """Back-compat: top-level keys still work without the nested block."""
+        from app.services.streaming_config import load_streaming_config
+        path = self._write(tmp_path, """
+symbols: [SPX]
+default_order_type: MARKET
+limit_slippage_pct: 0.0
+""")
+        cfg = load_streaming_config(path)
+        assert cfg.default_order_type == "MARKET"
+        assert cfg.limit_slippage_pct == 0.0
+        assert cfg.limit_quote_max_age_sec is None
+
+    def test_missing_trade_defaults_keeps_none(self, tmp_path):
+        """No trade_defaults in YAML → StreamingConfig fields stay None."""
+        from app.services.streaming_config import load_streaming_config
+        path = self._write(tmp_path, "symbols: [SPX]\n")
+        cfg = load_streaming_config(path)
+        assert cfg.default_order_type is None
+        assert cfg.limit_slippage_pct is None
+        assert cfg.limit_quote_max_age_sec is None
+
+
+class TestTradingClientPricing:
+    """Direct unit tests for TradingClient.compute_credit_spread_net_price.
+
+    The scanner delegates ALL limit-pricing math to this one method in utp.py,
+    so these tests guarantee there's exactly one implementation of the logic.
+    """
+
+    @staticmethod
+    def _make_client():
+        """Return a TradingClient with a fake `get_option_quotes` attached.
+
+        We don't need a real httpx connection — the pricing method only calls
+        `self.get_option_quotes`, which is safe to mock via setattr.
+        """
+        from utp import TradingClient
+        return TradingClient("http://d")
+
+    def _with_quotes(self, quotes_resp):
+        c = self._make_client()
+        async def fake_get(**kw):
+            return quotes_resp
+        c.get_option_quotes = fake_get
+        return c
+
+    def _with_error(self, err):
+        c = self._make_client()
+        async def fake_get(**kw):
+            raise err
+        c.get_option_quotes = fake_get
+        return c
+
+    def test_uses_refreshed_credit_not_fallback(self):
+        import asyncio
+        c = self._with_quotes({
+            "quotes": {"put": [
+                {"strike": 5700.0, "bid": 1.20, "ask": 1.30},
+                {"strike": 5680.0, "bid": 0.40, "ask": 0.50},
+            ]},
+            "meta": {"age_seconds": 3.0, "source": "fresh_cache"},
+        })
+        price, meta = asyncio.run(c.compute_credit_spread_net_price(
+            symbol="SPX", short_strike=5700.0, long_strike=5680.0,
+            option_type="PUT", expiration="2026-04-21",
+            slippage_pct=0.0, max_age=10.0, fallback_credit=0.85,
+        ))
+        assert price == 0.70          # 1.20 - 0.50
+        assert meta["refreshed_credit"] == 0.70
+        assert meta["scan_credit"] == 0.85
+        assert meta["age_seconds"] == 3.0
+        assert meta["quote_source"] == "fresh_cache"
+        assert "fallback_reason" not in meta
+
+    def test_applies_slippage_to_refreshed_credit(self):
+        import asyncio
+        c = self._with_quotes({
+            "quotes": {"put": [
+                {"strike": 5700.0, "bid": 1.00, "ask": 1.10},
+                {"strike": 5680.0, "bid": 0.20, "ask": 0.30},
+            ]},
+            "meta": {"age_seconds": 2.0, "source": "fresh_cache"},
+        })
+        price, meta = asyncio.run(c.compute_credit_spread_net_price(
+            symbol="SPX", short_strike=5700.0, long_strike=5680.0,
+            option_type="PUT", expiration="2026-04-21",
+            slippage_pct=10.0, max_age=10.0, fallback_credit=0.80,
+        ))
+        # refreshed = 1.00 - 0.30 = 0.70; * 0.90 = 0.63
+        assert price == 0.63
+        assert meta["refreshed_credit"] == 0.70
+        assert meta["slippage_pct"] == 10.0
+
+    def test_fallback_on_refresh_error(self):
+        import asyncio
+        c = self._with_error(RuntimeError("daemon down"))
+        price, meta = asyncio.run(c.compute_credit_spread_net_price(
+            symbol="SPX", short_strike=5700.0, long_strike=5680.0,
+            option_type="PUT", expiration="2026-04-21",
+            slippage_pct=0.0, fallback_credit=0.85,
+        ))
+        assert price == 0.85
+        assert meta["refreshed_credit"] is None
+        assert meta["quote_source"] == "error"
+        assert "quote_refresh_failed" in meta["fallback_reason"]
+
+    def test_fallback_on_missing_leg(self):
+        import asyncio
+        c = self._with_quotes({
+            "quotes": {"put": [{"strike": 5700.0, "bid": 1.20, "ask": 1.30}]},
+            "meta": {"age_seconds": 5.0, "source": "provider"},
+        })
+        price, meta = asyncio.run(c.compute_credit_spread_net_price(
+            symbol="SPX", short_strike=5700.0, long_strike=5680.0,
+            option_type="PUT", expiration="2026-04-21",
+            fallback_credit=0.90,
+        ))
+        assert price == 0.90
+        assert meta["fallback_reason"] == "missing_leg_in_refreshed_quotes"
+
+    def test_fallback_on_nonpositive_bid_ask(self):
+        import asyncio
+        c = self._with_quotes({
+            "quotes": {"put": [
+                {"strike": 5700.0, "bid": 0, "ask": 1.30},      # no bid
+                {"strike": 5680.0, "bid": 0.40, "ask": 0.50},
+            ]},
+            "meta": {"age_seconds": 4.0, "source": "fresh_cache"},
+        })
+        price, meta = asyncio.run(c.compute_credit_spread_net_price(
+            symbol="SPX", short_strike=5700.0, long_strike=5680.0,
+            option_type="PUT", expiration="2026-04-21",
+            fallback_credit=0.85,
+        ))
+        assert price == 0.85
+        assert meta["fallback_reason"] == "non_positive_bid_or_ask"
+
+    def test_fallback_on_nonpositive_refreshed_credit(self):
+        import asyncio
+        c = self._with_quotes({
+            "quotes": {"put": [
+                # short bid 0.30 < long ask 0.50 → credit goes negative
+                {"strike": 5700.0, "bid": 0.30, "ask": 0.40},
+                {"strike": 5680.0, "bid": 0.40, "ask": 0.50},
+            ]},
+            "meta": {"age_seconds": 6.0, "source": "fresh_cache"},
+        })
+        price, meta = asyncio.run(c.compute_credit_spread_net_price(
+            symbol="SPX", short_strike=5700.0, long_strike=5680.0,
+            option_type="PUT", expiration="2026-04-21",
+            fallback_credit=0.85,
+        ))
+        assert price == 0.85
+        assert meta["fallback_reason"] == "refreshed_credit_non_positive"
+        assert meta["refreshed_credit"] == -0.20
+
+    def test_fallback_credit_none_returns_none_price(self):
+        """If refresh fails AND no fallback_credit provided, caller gets None."""
+        import asyncio
+        c = self._with_error(RuntimeError("nope"))
+        price, meta = asyncio.run(c.compute_credit_spread_net_price(
+            symbol="SPX", short_strike=5700.0, long_strike=5680.0,
+            option_type="PUT", expiration="2026-04-21",
+            fallback_credit=None,
+        ))
+        assert price is None
+        assert meta["fallback_reason"].startswith("quote_refresh_failed")
+
+
+class TestTierPercentile:
+    """Percentile-based tier selectors (pN) in min_tier / min_tier_close."""
+
+    def test_normalize_named_tier(self):
+        from spread_scanner import _normalize_tier_selector
+        assert _normalize_tier_selector("aggr") == "aggressive"
+        assert _normalize_tier_selector("a") == "aggressive"
+        assert _normalize_tier_selector("mod") == "moderate"
+        assert _normalize_tier_selector("conservative") == "conservative"
+
+    def test_normalize_percentile(self):
+        from spread_scanner import _normalize_tier_selector
+        assert _normalize_tier_selector("p40") == "p40"
+        assert _normalize_tier_selector("p75") == "p75"
+        assert _normalize_tier_selector("P95") == "p95"
+        assert _normalize_tier_selector(" p99 ") == "p99"
+
+    def test_normalize_percentile_out_of_range(self):
+        from spread_scanner import _normalize_tier_selector
+        assert _normalize_tier_selector("p0") is None
+        assert _normalize_tier_selector("p100") is None
+        assert _normalize_tier_selector("p200") is None
+
+    def test_normalize_unknown(self):
+        from spread_scanner import _normalize_tier_selector
+        assert _normalize_tier_selector("weirdo") is None
+        assert _normalize_tier_selector("q50") is None
+
+    def test_is_percentile_tier(self):
+        from spread_scanner import _is_percentile_tier
+        assert _is_percentile_tier("p75") is True
+        assert _is_percentile_tier("conservative") is False
+        assert _is_percentile_tier("") is False
+
+    def test_yaml_min_tier_pN_flows_through(self, tmp_path, monkeypatch):
+        from spread_scanner import _load_config
+        path = tmp_path / "cfg.yaml"
+        path.write_text("tickers: [SPX]\nmin_tier: p75\ntiers: true\n")
+        monkeypatch.setattr("sys.argv", ["spread_scanner.py", "--config", str(path)])
+        args, _ = _load_config()
+        assert args.min_tier == "p75"
+
+    def test_resolve_tier_strike_pN_intraday(self):
+        """pN form skips the recommended lookup and uses the literal percentile."""
+        from spread_scanner import resolve_tier_strike
+        # Seed tier data: no 'recommended.intraday.p40' entry — pN must read from pcts directly.
+        tier_data = {
+            "hourly": {
+                "SPX": {
+                    "recommended": {
+                        "intraday": {"conservative": {"put": 98, "call": 98}},
+                    },
+                    "slots": {
+                        "09:00": {
+                            "when_down": {"pct": {"p40": -0.3, "p75": -1.0, "p95": -2.0}},
+                            "when_up":   {"pct": {"p40":  0.3, "p75":  1.0, "p95":  2.0}},
+                        },
+                    },
+                }
+            },
+        }
+        import spread_scanner as ss
+        import unittest.mock as um
+        with um.patch.object(ss, "_find_current_slot", return_value="09:00"):
+            r = resolve_tier_strike(tier_data, "SPX", "put", "p40",
+                                    model="intraday", prev_close=7100.0,
+                                    current_price=7000.0, dte=0)
+            assert r is not None
+            strike, raw, pct_num, pct_val = r
+            assert pct_num == 40
+            assert pct_val == -0.3
+            # 7000 * (1 - 0.003) = 6979 → rounded DOWN to nearest 5 for put = 6975
+            assert strike == 6975
+
+            r = resolve_tier_strike(tier_data, "SPX", "call", "p95",
+                                    model="intraday", prev_close=7100.0,
+                                    current_price=7000.0, dte=0)
+            assert r is not None
+            _, _, pct_num, pct_val = r
+            assert pct_num == 95 and pct_val == 2.0
+
+    def test_resolve_tier_strike_pN_close_to_close(self):
+        from spread_scanner import resolve_tier_strike
+        tier_data = {
+            "hourly": {
+                "SPX": {
+                    "recommended": {"close_to_close": {"conservative": {"put": 98, "call": 98}}},
+                    "slots": {},
+                }
+            },
+            "tickers": [{
+                "ticker": "SPX",
+                "windows": {
+                    "0": {
+                        "when_down": {"pct": {"p40": -0.5, "p75": -1.5}},
+                        "when_up":   {"pct": {"p40":  0.5, "p75":  1.5}},
+                    },
+                },
+            }],
+        }
+        r = resolve_tier_strike(tier_data, "SPX", "put", "p75",
+                                model="close_to_close", prev_close=7100.0,
+                                current_price=7050.0, dte=0)
+        assert r is not None
+        _, _, pct_num, pct_val = r
+        assert pct_num == 75 and pct_val == -1.5
+
+    def test_resolve_tier_boundaries_includes_requested_pN(self):
+        """_resolve_tier_boundaries computes boundaries for any pN that min_tier
+        requests, even though it's not in the default TIER_KEYS list."""
+        from spread_scanner import _resolve_tier_boundaries
+        import spread_scanner as ss
+        import unittest.mock as um
+        scan_data = {
+            "quotes": {"SPX": {"last": 7000}},
+            "prev_closes": {"SPX": 7100},
+            "dte_sections": {
+                0: {
+                    "tier_data": {
+                        "hourly": {
+                            "SPX": {
+                                "recommended": {
+                                    "intraday": {
+                                        "aggressive":   {"put": 90, "call": 90},
+                                        "moderate":     {"put": 95, "call": 95},
+                                        "conservative": {"put": 98, "call": 98},
+                                    },
+                                },
+                                "slots": {
+                                    "09:00": {
+                                        "when_down": {"pct": {"p40": -0.3, "p90": -1.0,
+                                                              "p95": -1.5, "p98": -2.0}},
+                                        "when_up":   {"pct": {"p40":  0.3, "p90":  1.0,
+                                                              "p95":  1.5, "p98":  2.0}},
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        }
+
+        class Args:
+            tickers = ["SPX"]
+            min_tier = "p40"
+            min_tier_close = None
+
+        with um.patch.object(ss, "_find_current_slot", return_value="09:00"):
+            bounds = _resolve_tier_boundaries(scan_data, Args(), model="intraday", dte=0)
+
+        assert "SPX" in bounds
+        # Default tiers present
+        assert "conservative" in bounds["SPX"]
+        assert "moderate" in bounds["SPX"]
+        assert "aggressive" in bounds["SPX"]
+        # Requested p40 also present
+        assert "p40" in bounds["SPX"]
+        assert "put" in bounds["SPX"]["p40"]

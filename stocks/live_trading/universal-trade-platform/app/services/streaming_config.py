@@ -75,27 +75,49 @@ class StreamingConfig:
 
     # Option quote streaming (background pre-fetch)
     option_quotes_enabled: bool = False
-    option_quotes_poll_interval: float = 15.0      # Seconds between CSV read cycles
-    option_quotes_strike_range_pct: float = 3.0    # Legacy — used as fallback if
+    # Loop-tick interval — how often the cycle wakes to (1) re-read CSV and
+    # (2) check whether the IBKR overlay gate is due.  Should be ≪ greeks_interval
+    # so the gate can fire close to its scheduled time.  Default 5s gives the
+    # 25s greeks_interval ±2.5s of jitter at most.
+    option_quotes_poll_interval: float = 5.0
+    option_quotes_strike_range_pct: float = 5.0    # Legacy — used as fallback if
                                                    # ibkr_/csv_ specific ranges aren't set.
-    option_quotes_num_expirations: int = 6         # Cover DTE 0 through 5
+    option_quotes_num_expirations: int = 12        # Resolve enough expirations to cover up to 10 DTE
 
     # CSV exports as primary fast source for option quotes
     option_quotes_csv_primary: bool = True         # Use CSV exports as primary (instant bid/ask)
     option_quotes_csv_dir: str = ""                # Empty = auto-resolve ../../csv_exports/options
-    option_quotes_greeks_interval: float = 60.0    # Seconds between IBKR fetches (prices + greeks)
+
+    # IBKR overlay cadence.  Realistic floor depends on per-call latency
+    # (5s p50 / 10s p95 from utp.py latency-probe) and ibkr_max_parallel.
+    # 25s + parallel=6 fits the typical p50; tail outliers may still time
+    # out at 0.9 × interval and retry on the next cycle.
+    option_quotes_greeks_interval: float = 25.0
+
+    # Max concurrent IBKR option-quote fetches.  Higher = shorter cycle but
+    # more pressure on the broker.  Defaults to 6 — comfortably under CPG's
+    # ~5-parallel choke point with one in flight, well within TWS limits.
+    # Tuning guidance:
+    #   CPG (--ibkr-api rest):   6  (default; safe)
+    #   TWS (default):           8–12 (more headroom)
+    # If you raise this above 8, watch /market/streaming/latency for an uptick
+    # in p95/p99 — that's a sign IBKR is starting to queue at the wire.
+    option_quotes_ibkr_max_parallel: int = 6
 
     # ── Tiered fetch ─────────────────────────────────────────────────────────
     # Split what we ask from IBKR (hot, frequent, narrow) vs CSV (warm, slower,
     # broad).  IBKR option quote latency is ~5s p50 / ~10s p95 per call, so a
     # realistic IBKR cycle floor is ~60s for 3 symbols × 3 DTEs × 2 types at
     # concurrency 3.  CSV is file I/O — cheap and fast.
-    option_quotes_ibkr_strike_range_pct: float = 2.5   # ±% of spot, IBKR tier
-    option_quotes_csv_strike_range_pct: float = 10.0   # ±% of spot, CSV tier
+    option_quotes_ibkr_strike_range_pct: float = 5.0   # ±% of spot, IBKR tier
+    option_quotes_csv_strike_range_pct: float = 5.0    # ±% of spot, CSV tier
     # Which DTEs to fetch from IBKR.  None = all expirations (legacy behavior).
     # Default [0, 1, 2] keeps IBKR focused on near-term where freshness matters
     # most; longer DTEs are served from CSV.
     option_quotes_ibkr_dte_list: Optional[list[int]] = None
+    # Max DTE for CSV tier.  CSV loads expirations up to this many trading days
+    # out (or whatever is available).  IBKR is independently capped by ibkr_dte_list.
+    option_quotes_csv_dte_max: int = 10
 
     # ── Read-time merge ──────────────────────────────────────────────────────
     # IBKR data is preferred for any strike where the IBKR cache is fresher
@@ -117,6 +139,15 @@ class StreamingConfig:
     # each side of regular hours (09:30–16:00 ET).
     option_quotes_premarket_minutes: int = 10
     option_quotes_postmarket_minutes: int = 10
+
+    # ── Trade defaults (daemon-wide) ─────────────────────────────────────────
+    # When set, these are applied to the global `settings` at daemon startup
+    # and surfaced via GET /trade/defaults. Every LIMIT caller (CLI trade,
+    # playbook, scanner trade handler) that doesn't pin its own value picks
+    # these up. None = leave the current env-var default in place.
+    default_order_type: Optional[str] = None            # "MARKET" | "LIMIT"
+    limit_slippage_pct: Optional[float] = None          # 0..100
+    limit_quote_max_age_sec: Optional[float] = None     # seconds
 
     def validate(self) -> list[str]:
         """Validate config. Returns list of errors (empty = valid)."""
@@ -174,6 +205,20 @@ def _resolve_symbol(raw: dict | str) -> StreamingSymbolConfig:
     return StreamingSymbolConfig(symbol=symbol, sec_type=sec_type, exchange=exchange)
 
 
+def _get_trade_default(raw: dict, key: str, caster):
+    """Look up `key` in either `raw["trade_defaults"][key]` or `raw[key]`.
+
+    Returns None if neither is present. Nested form wins when both are set
+    (it's the more-explicit layout).
+    """
+    nested = raw.get("trade_defaults") or {}
+    if isinstance(nested, dict) and key in nested and nested[key] is not None:
+        return caster(nested[key])
+    if key in raw and raw[key] is not None:
+        return caster(raw[key])
+    return None
+
+
 def load_streaming_config(path: str | Path) -> StreamingConfig:
     """Load streaming config from a YAML file."""
     path = Path(path)
@@ -205,29 +250,28 @@ def load_streaming_config(path: str | Path) -> StreamingConfig:
         streaming_mode=raw.get("streaming_mode", "auto"),
         cpg_poll_interval=float(raw.get("cpg_poll_interval", 1.5)),
         option_quotes_enabled=raw.get("option_quotes_enabled", False),
-        option_quotes_poll_interval=float(raw.get("option_quotes_poll_interval", 2.0)),
+        option_quotes_poll_interval=float(raw.get("option_quotes_poll_interval", 5.0)),
         option_quotes_strike_range_pct=float(raw.get("option_quotes_strike_range_pct", 3.0)),
         option_quotes_num_expirations=int(raw.get("option_quotes_num_expirations", 3)),
         option_quotes_csv_primary=raw.get("option_quotes_csv_primary", True),
         option_quotes_csv_dir=raw.get("option_quotes_csv_dir", ""),
-        option_quotes_greeks_interval=float(raw.get("option_quotes_greeks_interval", 60.0)),  # IBKR overlay interval
-        # Tiered fetch — fall back to legacy strike_range_pct so existing configs
-        # keep working unchanged.
+        option_quotes_greeks_interval=float(raw.get("option_quotes_greeks_interval", 25.0)),
+        option_quotes_ibkr_max_parallel=int(raw.get("option_quotes_ibkr_max_parallel", 6)),
+        # Strike ranges — both default to 5%.  Legacy field used as fallback.
         option_quotes_ibkr_strike_range_pct=float(
             raw.get(
                 "option_quotes_ibkr_strike_range_pct",
-                # If user shrunk legacy field below 2.5, respect that.
-                min(2.5, float(raw.get("option_quotes_strike_range_pct", 2.5))),
+                float(raw.get("option_quotes_strike_range_pct", 5.0)),
             )
         ),
         option_quotes_csv_strike_range_pct=float(
             raw.get(
                 "option_quotes_csv_strike_range_pct",
-                # CSV defaults wide; respect legacy if it was set higher.
-                max(10.0, float(raw.get("option_quotes_strike_range_pct", 10.0))),
+                float(raw.get("option_quotes_strike_range_pct", 5.0)),
             )
         ),
         option_quotes_ibkr_dte_list=raw.get("option_quotes_ibkr_dte_list", None),
+        option_quotes_csv_dte_max=int(raw.get("option_quotes_csv_dte_max", 10)),
         option_quotes_ibkr_max_age_sec=float(
             raw.get("option_quotes_ibkr_max_age_sec", 90.0)
         ),
@@ -240,6 +284,12 @@ def load_streaming_config(path: str | Path) -> StreamingConfig:
         option_quotes_postmarket_minutes=int(
             raw.get("option_quotes_postmarket_minutes", 10)
         ),
+        # Trade defaults: accept either a nested `trade_defaults:` block or
+        # top-level keys. Nested form is preferred (clearer scoping); top-level
+        # kept for simpler configs.
+        default_order_type=_get_trade_default(raw, "default_order_type", str),
+        limit_slippage_pct=_get_trade_default(raw, "limit_slippage_pct", float),
+        limit_quote_max_age_sec=_get_trade_default(raw, "limit_quote_max_age_sec", float),
     )
 
     errors = config.validate()

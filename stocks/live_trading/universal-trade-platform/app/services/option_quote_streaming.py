@@ -282,6 +282,16 @@ class OptionQuoteStreamingService:
         self._config = config
         self._provider = provider
         self._streaming_svc = streaming_svc  # MarketDataStreamingService for tick cache
+
+        # IBKR overlay single-flight guard.  When True, the previous overlay
+        # call hasn't fully drained yet — new firings are skipped to prevent
+        # piling up in-flight requests against the broker.
+        self._ibkr_overlay_in_flight: bool = False
+        self._ibkr_overlay_started_at: float | None = None
+        self._ibkr_overlay_skipped: int = 0
+        # Track spawned per-job tasks so we can drain them on cancellation.
+        self._ibkr_pending_tasks: set[asyncio.Task] = set()
+        self._warned_parallel_cap: bool = False
         # Two source-tagged caches.  The CSV cache holds wide-strike, lower-
         # frequency CSV data; the IBKR cache holds narrow-strike, higher-
         # frequency provider data with greeks.  get_merged_quotes() picks the
@@ -422,6 +432,20 @@ class OptionQuoteStreamingService:
                 "ibkr_strike_range_pct": self._config.option_quotes_ibkr_strike_range_pct,
                 "csv_strike_range_pct": self._config.option_quotes_csv_strike_range_pct,
                 "ibkr_dte_list": self._config.option_quotes_ibkr_dte_list,
+                "csv_dte_max": self._config.option_quotes_csv_dte_max,
+                "ibkr_max_parallel_configured": self._config.option_quotes_ibkr_max_parallel,
+                "ibkr_max_parallel_effective": self._effective_max_parallel(),
+                "ibkr_provider_kind": type(self._provider).__name__,
+                "ibkr_overlay_interval": self._config.option_quotes_greeks_interval,
+            },
+            "ibkr_overlay": {
+                "in_flight": self._ibkr_overlay_in_flight,
+                "started_at_age_sec": (
+                    round(time.monotonic() - self._ibkr_overlay_started_at, 1)
+                    if self._ibkr_overlay_started_at else None
+                ),
+                "skipped_overlapping": self._ibkr_overlay_skipped,
+                "pending_tasks": len(self._ibkr_pending_tasks),
             },
             "csv_primary": {
                 "enabled": self._csv_primary,
@@ -751,14 +775,74 @@ class OptionQuoteStreamingService:
 
         return quotes
 
-    # Max concurrent IBKR option quote fetches (CPG chokes on >5 parallel requests)
+    # Default cap when no config is provided (e.g. legacy callers).
+    # Production code reads option_quotes_ibkr_max_parallel from the config.
     _IBKR_FETCH_CONCURRENCY = 3
+
+    # Provider-specific upper bounds.  TWS holds a market-data line per
+    # subscribed strike (≈50/call); the IBKR line allotment is ~100, so
+    # parallel × strikes_per_call must stay well under that.  CPG is
+    # rate-limited (9 msg/sec, 2 msg/call warm), not line-limited, so it
+    # tolerates much higher parallelism.
+    _PROVIDER_PARALLEL_CAP = {
+        "IBKRLiveProvider": 3,    # TWS — line-limited
+        "IBKRRestProvider": 12,   # CPG — rate-limited
+    }
+
+    def _effective_max_parallel(self) -> int:
+        """Resolve the effective parallel cap, capped by provider type.
+
+        Honors the user's ``option_quotes_ibkr_max_parallel`` setting unless
+        it would exceed the safe limit for the active provider, in which
+        case we cap and log once.
+        """
+        configured = max(
+            1,
+            int(getattr(self._config, "option_quotes_ibkr_max_parallel",
+                        self._IBKR_FETCH_CONCURRENCY)
+                or self._IBKR_FETCH_CONCURRENCY),
+        )
+        provider_kind = type(self._provider).__name__
+        cap = self._PROVIDER_PARALLEL_CAP.get(provider_kind)
+        if cap is None or configured <= cap:
+            return configured
+        if not self._warned_parallel_cap:
+            logger.warning(
+                "option_quotes_ibkr_max_parallel=%d > safe cap %d for %s — "
+                "capping to %d. Higher values risk subscription failures (TWS) "
+                "or rate-limit thrashing (CPG).",
+                configured, cap, provider_kind, cap,
+            )
+            self._warned_parallel_cap = True
+        return cap
+
+    async def _drain_ibkr_pending_tasks(self, timeout: float = 2.0) -> None:
+        """Cancel + await any pending IBKR per-job tasks before declaring done.
+
+        Called from the overlay's finally block so the next overlay firing
+        only sees a fully-quiesced state.  Bounded by ``timeout`` so a
+        misbehaving task can't deadlock the loop.
+        """
+        if not self._ibkr_pending_tasks:
+            return
+        pending = list(self._ibkr_pending_tasks)
+        for t in pending:
+            if not t.done():
+                t.cancel()
+        try:
+            await asyncio.wait(pending, timeout=timeout)
+        except Exception:
+            pass
+        self._ibkr_pending_tasks.difference_update(pending)
 
     async def _fetch_from_ibkr(self, fetch_jobs: list[tuple]) -> None:
         """Fetch full option quotes (prices + greeks) from IBKR.
 
-        Caches the full quotes AND updates the greeks cache so CSV primary
-        mode can overlay greeks onto faster CSV price data.
+        Parallelism is governed by ``option_quotes_ibkr_max_parallel`` in the
+        streaming config, capped by the per-provider safe limit (see
+        ``_PROVIDER_PARALLEL_CAP``).  Each spawned per-job task is tracked
+        in ``self._ibkr_pending_tasks`` so the overlay's finally block can
+        drain them cleanly on cancellation.
 
         Each job stores its results immediately on completion (not batched),
         so partial results survive if the overall fetch times out.
@@ -766,7 +850,8 @@ class OptionQuoteStreamingService:
         fetch_jobs: list of (symbol, exp, opt_type, strike_min, strike_max, price_source)
         """
         self._cycle_phase = "fetching_ibkr"
-        sem = asyncio.Semaphore(self._IBKR_FETCH_CONCURRENCY)
+        max_parallel = self._effective_max_parallel()
+        sem = asyncio.Semaphore(max_parallel)
         completed = 0
 
         async def _do_fetch_and_store(symbol, exp, opt_type, smin, smax, psrc):
@@ -824,10 +909,15 @@ class OptionQuoteStreamingService:
 
                 completed += 1
 
-        await asyncio.gather(
-            *[_do_fetch_and_store(*job) for job in fetch_jobs],
-            return_exceptions=True,
-        )
+        # Track per-job tasks so the overlay's finally block can drain them
+        # cleanly if wait_for cancels us mid-cycle.
+        tasks = [asyncio.create_task(_do_fetch_and_store(*job)) for job in fetch_jobs]
+        self._ibkr_pending_tasks.update(tasks)
+        try:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            # Whatever didn't finish is left for _drain_ibkr_pending_tasks().
+            self._ibkr_pending_tasks.difference_update(t for t in tasks if t.done())
 
         self._greeks_cache_entries = sum(len(v) for v in self._greeks_cache.values())
         logger.info(
@@ -926,6 +1016,7 @@ class OptionQuoteStreamingService:
         ibkr_max = round(price * (1 + ibkr_pct), 2)
 
         ibkr_dtes = self._config.option_quotes_ibkr_dte_list
+        csv_dte_max = self._config.option_quotes_csv_dte_max
         today = date.today()
 
         csv_jobs: list[tuple] = []
@@ -933,7 +1024,9 @@ class OptionQuoteStreamingService:
         for exp in expirations:
             dte = self._dte_for_exp(exp, today)
             for opt_type in ("CALL", "PUT"):
-                csv_jobs.append((symbol, exp, opt_type, csv_min, csv_max, price_source))
+                # CSV tier: include if DTE unknown or within csv_dte_max
+                if dte is None or (isinstance(dte, int) and dte <= csv_dte_max):
+                    csv_jobs.append((symbol, exp, opt_type, csv_min, csv_max, price_source))
                 # IBKR tier: include if no DTE filter, or if DTE is in filter list
                 if ibkr_dtes is None or (dte is not None and dte in ibkr_dtes):
                     ibkr_jobs.append((symbol, exp, opt_type, ibkr_min, ibkr_max, price_source))
@@ -1057,7 +1150,22 @@ class OptionQuoteStreamingService:
         # Skip if no IBKR jobs (e.g. all DTEs filtered out, CSV-only).
         now = time.monotonic()
         if ibkr_jobs and now - self._last_greeks_fetch >= self._greeks_interval:
+            # Single-flight guard: if a previous overlay is still draining,
+            # skip this firing entirely.  Prevents pending IBKR requests from
+            # piling up against the broker.
+            if self._ibkr_overlay_in_flight:
+                elapsed = now - (self._ibkr_overlay_started_at or now)
+                self._ibkr_overlay_skipped += 1
+                logger.warning(
+                    "IBKR overlay still in flight after %.1fs — skipping new fetch "
+                    "(skipped count: %d)",
+                    elapsed, self._ibkr_overlay_skipped,
+                )
+                return
+
             self._last_greeks_fetch = now  # Set before fetch to prevent re-trigger
+            self._ibkr_overlay_in_flight = True
+            self._ibkr_overlay_started_at = now
             try:
                 await asyncio.wait_for(
                     self._fetch_from_ibkr(ibkr_jobs),
@@ -1068,6 +1176,12 @@ class OptionQuoteStreamingService:
                                self._greeks_interval * 0.9)
             except Exception as e:
                 logger.warning("IBKR fetch failed: %s", e)
+            finally:
+                # Drain any per-job tasks that the wait_for left dangling so
+                # the next overlay only starts on a clean slate.
+                await self._drain_ibkr_pending_tasks(timeout=2.0)
+                self._ibkr_overlay_in_flight = False
+                self._ibkr_overlay_started_at = None
 
     # Absolute floor prices per index — reject garbage from TWS delayed data
     _INDEX_MIN_PRICES = {"SPX": 3000, "NDX": 10000, "RUT": 1000, "DJX": 200, "VIX": 5}
