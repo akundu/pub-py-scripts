@@ -1619,35 +1619,46 @@ async def _check_strike_conflicts_http(
     except Exception:
         return []
 
-    # Build set of (strike, right) where we're currently SHORT
+    # Build map of (strike, right) → list of position descriptions for SHORT legs
     exp_clean = expiration.replace("-", "")
-    short_strikes: set[tuple[float, str]] = set()
+    # short_positions: (strike, right_char) → [description_strings]
+    short_positions: dict[tuple[float, str], list[str]] = {}
+
     for p in positions:
         if p.get("symbol") != symbol:
             continue
         p_exp = (p.get("expiration") or "").replace("-", "")
         if p_exp != exp_clean:
             continue
+        pid = (p.get("position_id") or "")[:6]
+        qty = int(float(p.get("quantity") or 0))
         # Check individual legs (spread positions)
         legs = p.get("legs") or []
-        for leg in legs:
-            action = (leg.get("action") or "").upper()
-            if "SELL" in action:
-                s = float(leg.get("strike") or 0)
-                r = (leg.get("option_type") or leg.get("right") or "").upper()
-                if r in ("PUT", "P"):
-                    r = "P"
-                elif r in ("CALL", "C"):
-                    r = "C"
-                short_strikes.add((s, r))
-        # Also check raw portfolio items (external_sync positions without legs)
-        s = float(p.get("strike") or 0)
-        r = (p.get("right") or "").upper()
-        qty = float(p.get("quantity") or 0)
-        if s > 0 and qty < 0:  # negative quantity = short
-            short_strikes.add((s, r))
+        if legs:
+            # Build a spread description like "P6995/P7030 25x"
+            leg_labels = []
+            for leg in legs:
+                ls = float(leg.get("strike") or 0)
+                lr = (leg.get("option_type") or leg.get("right") or "")[:1].upper()
+                leg_labels.append(f"{lr}{ls:.0f}")
+            spread_desc = f"{'/'.join(leg_labels)} {abs(qty)}x [{pid}]"
 
-    if not short_strikes:
+            for leg in legs:
+                action = (leg.get("action") or "").upper()
+                if "SELL" in action:
+                    s = float(leg.get("strike") or 0)
+                    r = (leg.get("option_type") or leg.get("right") or "").upper()
+                    r = "P" if r in ("PUT", "P") else "C" if r in ("CALL", "C") else r
+                    short_positions.setdefault((s, r), []).append(spread_desc)
+        else:
+            # Raw portfolio item (external_sync)
+            s = float(p.get("strike") or 0)
+            r = (p.get("right") or "").upper()
+            if s > 0 and qty < 0:
+                desc = f"{r}{s:.0f} {abs(qty)}x [{pid}]"
+                short_positions.setdefault((s, r), []).append(desc)
+
+    if not short_positions:
         return []
 
     # Check which BUY legs of the new trade would conflict
@@ -1657,20 +1668,32 @@ async def _check_strike_conflicts_http(
             (strikes["put_long"], "P", "put_long"),
             (strikes["call_long"], "C", "call_long"),
         ]
+        short_label = (f"SELL {right_map.get((option_type or 'PUT').upper(), 'P')}"
+                       f" {strikes.get('put_short', strikes.get('call_short', '?')):.0f}")
     else:
         ot_char = right_map.get((option_type or "").upper(), "P")
         buy_legs = [
             (strikes["long_strike"], ot_char, "long_strike"),
         ]
+        short_label = f"SELL {option_type} {strikes.get('short_strike', '?'):.0f}"
 
     for strike_val, right_char, leg_name in buy_legs:
-        if (strike_val, right_char) in short_strikes:
+        existing = short_positions.get((strike_val, right_char))
+        if existing:
             ot_label = "PUT" if right_char == "P" else "CALL"
-            warnings.append(
-                f"  {_color('⚠ CONFLICT:', '91')} BUY {ot_label} {strike_val:.0f} "
-                f"would close your existing SHORT at that strike.\n"
-                f"    Shift {leg_name} to avoid netting (e.g., use --width to change spread width)"
-            )
+            lines = [
+                f"  {_color('⚠ CONFLICT:', '91')} Your new trade's BUY {ot_label} "
+                f"{strike_val:.0f} would net against an existing SHORT.",
+                f"",
+                f"  Proposed trade:  {short_label} / BUY {ot_label} {strike_val:.0f}",
+                f"  Existing positions at {ot_label} {strike_val:.0f}:",
+            ]
+            for desc in existing:
+                lines.append(f"    → {desc}")
+            lines.append(f"")
+            lines.append(f"  Fix: use a different --width to shift the long leg "
+                         f"away from {strike_val:.0f}")
+            warnings.append("\n".join(lines))
 
     return warnings
 
