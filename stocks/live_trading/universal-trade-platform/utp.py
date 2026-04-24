@@ -1951,6 +1951,35 @@ async def _fetch_prev_close_from_db_server(symbol: str) -> float | None:
         return None
 
 
+def _print_resolved_strikes(
+    strikes: dict, width: float | None, sym: str,
+    option_type: str | None, is_ic: bool,
+    pct_label: str, ref_price: float, snapped: bool,
+) -> None:
+    """Print resolved strikes with actual width and chain-snap note."""
+    requested_w = width if width is not None else _DEFAULT_WIDTHS.get(sym.upper(), _DEFAULT_WIDTH)
+    snap_note = " (snapped to chain)" if snapped else ""
+    if is_ic:
+        actual_pw = abs(strikes['put_short'] - strikes['put_long'])
+        actual_cw = abs(strikes['call_short'] - strikes['call_long'])
+        print(f"  Strikes: put {strikes['put_short']}/{strikes['put_long']} | "
+              f"call {strikes['call_short']}/{strikes['call_long']} "
+              f"({pct_label} OTM, {actual_pw:.0f}/{actual_cw:.0f}pt width) "
+              f"— resolved from ${ref_price:,.2f}{snap_note}")
+        if snapped and (actual_pw != requested_w or actual_cw != requested_w):
+            print(f"  {_color('Note:', '93')} requested {requested_w:.0f}pt width, "
+                  f"actual put={actual_pw:.0f}pt call={actual_cw:.0f}pt "
+                  f"(adjusted to available strikes)")
+    else:
+        actual_w = abs(strikes['short_strike'] - strikes['long_strike'])
+        print(f"  Strikes: {strikes['short_strike']}/{strikes['long_strike']} "
+              f"({pct_label} OTM {option_type}, {actual_w:.0f}pt width) "
+              f"— resolved from ${ref_price:,.2f}{snap_note}")
+        if snapped and actual_w != requested_w:
+            print(f"  {_color('Note:', '93')} requested {requested_w:.0f}pt width, "
+                  f"actual {actual_w:.0f}pt (adjusted to available strikes)")
+
+
 async def _resolve_otm_strikes_http(args, subcommand: str, client) -> int | None:
     """If --otm-pct is set, fetch quote via HTTP and resolve strikes onto args.
 
@@ -2002,20 +2031,8 @@ async def _resolve_otm_strikes_http(args, subcommand: str, client) -> int | None
     for k, v in strikes.items():
         setattr(args, k, v)
 
-    # Print resolved strikes
-    w = width if width is not None else _DEFAULT_WIDTHS.get(sym.upper(), _DEFAULT_WIDTH)
-    snap_note = " (snapped to chain)" if snapped else ""
-    pct_label = _format_pct_label(put_pct, call_pct)
-    if is_ic:
-        print(f"  Strikes: put {strikes['put_short']}/{strikes['put_long']} | "
-              f"call {strikes['call_short']}/{strikes['call_long']} "
-              f"({pct_label} OTM, {w:.0f}pt width) "
-              f"— resolved from ${price:,.2f}{snap_note}")
-    else:
-        print(f"  Strikes: {strikes['short_strike']}/{strikes['long_strike']} "
-              f"({pct_label} OTM {option_type}, {w:.0f}pt width) "
-              f"— resolved from ${price:,.2f}{snap_note}")
-
+    _print_resolved_strikes(strikes, width, sym, option_type, is_ic,
+                            _format_pct_label(put_pct, call_pct), price, snapped)
     return None
 
 
@@ -2294,19 +2311,8 @@ async def _resolve_otm_strikes_direct(args, subcommand: str) -> int | None:
     for k, v in strikes.items():
         setattr(args, k, v)
 
-    w = width if width is not None else _DEFAULT_WIDTHS.get(sym.upper(), _DEFAULT_WIDTH)
-    snap_note = " (snapped to chain)" if snapped else ""
-    pct_label = _format_pct_label(put_pct, call_pct)
-    if is_ic:
-        print(f"  Strikes: put {strikes['put_short']}/{strikes['put_long']} | "
-              f"call {strikes['call_short']}/{strikes['call_long']} "
-              f"({pct_label} OTM, {w:.0f}pt width) "
-              f"— resolved from ${price:,.2f}{snap_note}")
-    else:
-        print(f"  Strikes: {strikes['short_strike']}/{strikes['long_strike']} "
-              f"({pct_label} OTM {option_type}, {w:.0f}pt width) "
-              f"— resolved from ${price:,.2f}{snap_note}")
-
+    _print_resolved_strikes(strikes, width, sym, option_type, is_ic,
+                            _format_pct_label(put_pct, call_pct), price, snapped)
     return None
 
 
@@ -2351,19 +2357,8 @@ async def _resolve_close_pct_strikes_http(args, subcommand: str, client) -> int 
     for k, v in strikes.items():
         setattr(args, k, v)
 
-    w = width if width is not None else _DEFAULT_WIDTHS.get(sym.upper(), _DEFAULT_WIDTH)
-    snap_note = " (snapped to chain)" if snapped else ""
-    pct_label = _format_pct_label(put_pct, call_pct)
-    if is_ic:
-        print(f"  Strikes: put {strikes['put_short']}/{strikes['put_long']} | "
-              f"call {strikes['call_short']}/{strikes['call_long']} "
-              f"({pct_label} OTM, {w:.0f}pt width) "
-              f"— resolved from prev close ${prev_close:,.2f}{snap_note}")
-    else:
-        print(f"  Strikes: {strikes['short_strike']}/{strikes['long_strike']} "
-              f"({pct_label} OTM {option_type}, {w:.0f}pt width) "
-              f"— resolved from prev close ${prev_close:,.2f}{snap_note}")
-
+    _print_resolved_strikes(strikes, width, sym, option_type, is_ic,
+                            _format_pct_label(put_pct, call_pct), prev_close, snapped)
     return None
 
 
