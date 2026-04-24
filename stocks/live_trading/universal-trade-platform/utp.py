@@ -1633,7 +1633,7 @@ async def _check_strike_conflicts_http(
         for leg in legs:
             action = (leg.get("action") or "").upper()
             if "SELL" in action:
-                s = float(leg.get("strike", 0))
+                s = float(leg.get("strike") or 0)
                 r = (leg.get("option_type") or leg.get("right") or "").upper()
                 if r in ("PUT", "P"):
                     r = "P"
@@ -1641,9 +1641,9 @@ async def _check_strike_conflicts_http(
                     r = "C"
                 short_strikes.add((s, r))
         # Also check raw portfolio items (external_sync positions without legs)
-        s = float(p.get("strike", 0))
+        s = float(p.get("strike") or 0)
         r = (p.get("right") or "").upper()
-        qty = float(p.get("quantity", 0))
+        qty = float(p.get("quantity") or 0)
         if s > 0 and qty < 0:  # negative quantity = short
             short_strikes.add((s, r))
 
