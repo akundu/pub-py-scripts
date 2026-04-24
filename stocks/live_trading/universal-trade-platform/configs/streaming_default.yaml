@@ -38,8 +38,8 @@ redis_channel_prefix: "realtime"
 
 # QuestDB direct write — inserts into realtime_data table
 # Set questdb_url to enable (same connection string as QUEST_DB_STRING)
-questdb_enabled: false
-questdb_url: ""
+questdb_enabled: true
+questdb_url: ""    # Uses $QUEST_DB_STRING env var when empty
 # Example: questdb_url: "questdb://stock_user:stock_password@lin1.kundu.dev:8812/stock_data"
 
 # ── Timing ────────────────────────────────────────────────────────────────────

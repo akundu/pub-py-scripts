@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import math
+import os
 import time
 from datetime import UTC, datetime, timezone
 from typing import Optional
@@ -426,20 +427,21 @@ class MarketDataStreamingService:
         self._ticks_received += 1
         self._ticks_received_per_symbol[symbol] = self._ticks_received_per_symbol.get(symbol, 0) + 1
 
-        # Log SPX price periodically (every 5 ticks for CPG polling, every 100 for TWS)
-        if symbol == "SPX":
-            self._spx_log_counter += 1
-            log_interval = 5 if self._streaming_mode in ("cpg_polling", "cpg_websocket") else 100
-            if self._spx_log_counter % log_interval == 0:
-                prev = self._prev_close.get("SPX", 0)
-                accepted = self._ticks_accepted_per_symbol.get("SPX", 0)
-                rejected = self._reject_count.get("SPX", 0)
-                logger.info(
-                    "SPX tick #%d: price=%.2f bid=%s ask=%s close=%s prev_close=%.2f "
-                    "(accepted=%d rejected=%d mode=%s)",
-                    self._spx_log_counter, price, bid, ask, close, prev,
-                    accepted, rejected, self._streaming_mode,
-                )
+        # Log price periodically for diagnostics
+        _sym_counter_key = f"_log_counter_{symbol}"
+        cnt = getattr(self, _sym_counter_key, 0) + 1
+        setattr(self, _sym_counter_key, cnt)
+        log_interval = 5 if self._streaming_mode in ("cpg_polling", "cpg_websocket") else 500
+        if cnt % log_interval == 0:
+            prev = self._prev_close.get(symbol, 0)
+            accepted = self._ticks_accepted_per_symbol.get(symbol, 0)
+            rejected = self._reject_count.get(symbol, 0)
+            logger.info(
+                "%s tick #%d: price=%.2f bid=%s ask=%s close=%s prev_close=%.2f "
+                "(accepted=%d rejected=%d mode=%s)",
+                symbol, cnt, price, bid, ask, close, prev,
+                accepted, rejected, self._streaming_mode,
+            )
 
         # Anchor previous close (once per symbol per session)
         # Use the same per-index floor prices to reject garbage close values from TWS
@@ -492,12 +494,13 @@ class MarketDataStreamingService:
                         )
                     return False  # Still reject this one; next tick will pass
 
-                if cnt == 1 or cnt % 100 == 0:
+                if cnt <= 5 or cnt % 500 == 0:
                     direction = "low" if price < lo_close else "high"
                     logger.warning(
                         "Price rejected (close gate) for %s: %.4f %s vs "
-                        "prev_close %.4f ±%.0f%% (rejected %d times)",
-                        symbol, price, direction, anchor_close, band * 100, cnt,
+                        "prev_close %.4f ±%.0f%% range=[%.2f, %.2f] (rejected %d times)",
+                        symbol, price, direction, anchor_close, band * 100,
+                        lo_close, hi_close, cnt,
                     )
                 return False
         elif is_index:
@@ -526,11 +529,13 @@ class MarketDataStreamingService:
             if price < lo or price > hi:
                 cnt = self._reject_count.get(symbol, 0) + 1
                 self._reject_count[symbol] = cnt
-                if cnt == 1 or cnt % 100 == 0:
+                if cnt <= 5 or cnt % 500 == 0:
                     direction = "low" if price < lo else "high"
                     logger.warning(
-                        "Price rejected (ref gate) for %s: %.4f %s vs reference %.4f (rejected %d times)",
-                        symbol, price, direction, reference, cnt,
+                        "Price rejected (ref gate) for %s: %.4f %s vs reference %.4f "
+                        "±%d%% range=[%.2f, %.2f] (rejected %d times)",
+                        symbol, price, direction, reference,
+                        20 if is_index else 35, lo, hi, cnt,
                     )
                 return False
 
@@ -583,11 +588,13 @@ class MarketDataStreamingService:
             from app.services.streaming_config import _INDEX_EXCHANGES
             is_index = symbol.upper() in _INDEX_EXCHANGES
 
-            # Determine price
+            # Determine price — use per-index floor to reject garbage intermediate values
+            _IDX_MIN = {"SPX": 3000, "NDX": 10000, "RUT": 1000, "DJX": 200, "VIX": 5}
+            min_price = _IDX_MIN.get(symbol, 100) if is_index else 1.0
             if is_index:
-                if last and last > 100:
+                if last and last > min_price:
                     price = last
-                elif market_price and market_price > 100:
+                elif market_price and market_price > min_price:
                     price = market_price
                 else:
                     continue
@@ -854,19 +861,67 @@ class MarketDataStreamingService:
 
     # ── Batch flush loop ──────────────────────────────────────────────────────
 
+    # Max seconds without a tick before resubscribing (ib_insync mode only)
+    _STALE_RESUBSCRIBE_THRESHOLD = 60
+
     async def _batch_flush_loop(self) -> None:
-        """Periodically flush buffered ticks to Redis/QuestDB/WS."""
+        """Periodically flush buffered ticks to Redis/QuestDB/WS.
+
+        Also runs a staleness watchdog: if any ib_insync subscription hasn't
+        delivered a tick in _STALE_RESUBSCRIBE_THRESHOLD seconds during market
+        hours, resubscribe all symbols (TWS silently drops subscriptions).
+        """
+        watchdog_counter = 0
         while self._running:
             try:
                 await asyncio.sleep(self._config.tick_batch_interval)
                 if not self._running:
                     break
                 await self._flush_ticks()
+
+                # Staleness watchdog (every ~30s, ib_insync mode only)
+                watchdog_counter += 1
+                if (self._streaming_mode == "ib_insync"
+                        and watchdog_counter % max(1, int(30 / self._config.tick_batch_interval)) == 0):
+                    await self._check_subscription_health()
+
             except asyncio.CancelledError:
                 break
             except Exception as e:
                 logger.error("Batch flush error: %s", e)
                 self._errors += 1
+
+    async def _check_subscription_health(self) -> None:
+        """Detect dead ib_insync subscriptions and resubscribe if needed."""
+        from app.services.market_data import _is_market_active
+        if not _is_market_active():
+            return
+
+        now = datetime.now(timezone.utc)
+        threshold = self._STALE_RESUBSCRIBE_THRESHOLD
+        stale_symbols = []
+
+        for symbol in self._subscriptions:
+            last = self._last_tick.get(symbol)
+            if not last:
+                stale_symbols.append((symbol, "never"))
+                continue
+            ts_str = last.get("timestamp", "")
+            try:
+                last_dt = datetime.fromisoformat(ts_str)
+                age = (now - last_dt).total_seconds()
+                if age > threshold:
+                    stale_symbols.append((symbol, f"{age:.0f}s"))
+            except Exception:
+                stale_symbols.append((symbol, "unparseable"))
+
+        if stale_symbols:
+            sym_desc = ", ".join(f"{s}({a})" for s, a in stale_symbols)
+            logger.warning(
+                "Stale subscriptions detected: %s — resubscribing all (%d symbols)",
+                sym_desc, len(self._subscriptions),
+            )
+            await self.resubscribe_all()
 
     async def _flush_ticks(self) -> None:
         """Flush all pending ticks to persistence targets."""
@@ -1005,12 +1060,20 @@ class MarketDataStreamingService:
 
     async def _connect_questdb(self) -> None:
         """Connect to QuestDB for direct writes to realtime_data table."""
-        if not self._config.questdb_url:
+        url = self._config.questdb_url
+        if not url:
+            # Fall back to env var (same as the rest of the codebase)
+            url = (os.environ.get("QUEST_DB_STRING")
+                   or os.environ.get("QUESTDB_CONNECTION_STRING")
+                   or os.environ.get("QUESTDB_URL")
+                   or "")
+        if not url:
+            logger.info("QuestDB streaming: no URL configured (set questdb_url or $QUEST_DB_STRING)")
             return
         try:
             import asyncpg
             # Convert questdb:// to postgresql:// for asyncpg
-            url = self._config.questdb_url.replace("questdb://", "postgresql://", 1)
+            url = url.replace("questdb://", "postgresql://", 1)
             self._questdb_pool = await asyncpg.create_pool(url, min_size=1, max_size=3)
             logger.info("Streaming QuestDB connected")
         except Exception as e:

@@ -164,7 +164,14 @@ class StreamingConfig:
         if self.redis_enabled and not self.redis_url:
             errors.append("redis_enabled=true but no redis_url specified")
         if self.questdb_enabled and not self.questdb_url:
-            errors.append("questdb_enabled=true but no questdb_url specified")
+            # Allow empty questdb_url if env var is set (resolved at connect time)
+            import os
+            has_env = bool(os.environ.get("QUEST_DB_STRING")
+                          or os.environ.get("QUESTDB_CONNECTION_STRING")
+                          or os.environ.get("QUESTDB_URL"))
+            if not has_env:
+                errors.append("questdb_enabled=true but no questdb_url specified "
+                              "(set questdb_url in YAML or $QUEST_DB_STRING env var)")
         return errors
 
 
