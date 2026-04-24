@@ -12864,6 +12864,282 @@ class TestSpreadScanner:
         assert best["width"] == 30  # highest ROI among the three
         assert best["roi_pct"] == 4.3
 
+    def test_detect_suspect_strikes_flags_non_monotonic_put_bids(self):
+        """PUT bids should rise with strike. Strikes whose bid is out of
+        order vs immediate neighbors (beyond tolerance) are flagged."""
+        from spread_scanner import _detect_suspect_strikes
+
+        # NDX-style real data: 25810 and 25840 have bids that sit way above
+        # their neighbors (phantom inflated quotes).
+        quotes = [
+            {"strike": 25800, "bid": 3.00, "ask": 3.70},
+            {"strike": 25810, "bid": 4.20, "ask": 5.00},  # inflated
+            {"strike": 25820, "bid": 3.20, "ask": 3.80},
+            {"strike": 25830, "bid": 3.10, "ask": 3.90},
+            {"strike": 25840, "bid": 4.70, "ask": 5.60},  # inflated
+            {"strike": 25850, "bid": 3.50, "ask": 4.10},
+        ]
+        suspect = _detect_suspect_strikes(quotes, "PUT", bid_tol=0.10)
+        # The "inflated" strikes are the principal outliers — they're the
+        # ones that would combine with neighbors to produce fake credit.
+        assert 25810 in suspect
+        assert 25840 in suspect
+
+    def test_detect_suspect_strikes_accepts_clean_put_chain(self):
+        """A clean monotonic chain has no suspect strikes."""
+        from spread_scanner import _detect_suspect_strikes
+
+        quotes = [
+            {"strike": 7000, "bid": 0.50, "ask": 0.70},
+            {"strike": 7010, "bid": 0.80, "ask": 1.00},
+            {"strike": 7020, "bid": 1.10, "ask": 1.30},
+            {"strike": 7030, "bid": 1.50, "ask": 1.70},
+        ]
+        assert _detect_suspect_strikes(quotes, "PUT") == set()
+
+    def test_detect_suspect_strikes_call_monotonicity_reversed(self):
+        """CALL bids should FALL with rising strike. A call strike with a
+        bid higher than its lower-strike neighbor is suspect."""
+        from spread_scanner import _detect_suspect_strikes
+
+        quotes = [
+            {"strike": 7100, "bid": 1.50, "ask": 1.70},
+            {"strike": 7110, "bid": 1.20, "ask": 1.40},
+            {"strike": 7120, "bid": 1.50, "ask": 1.70},  # higher than 7110 — suspect
+            {"strike": 7130, "bid": 0.80, "ask": 1.00},
+        ]
+        suspect = _detect_suspect_strikes(quotes, "CALL", bid_tol=0.10)
+        assert 7120 in suspect
+
+    def test_compute_spreads_skips_suspect_strikes(self):
+        """The NDX-like bogus chain should NOT build spreads using the
+        detected-suspect strikes (25810, 25840) — those produce the
+        fake-looking high-ROI entries the user caught."""
+        from spread_scanner import compute_spreads
+
+        chain = {
+            "put": [
+                {"strike": 25800, "bid": 3.00, "ask": 3.70},
+                {"strike": 25810, "bid": 4.20, "ask": 5.00},  # inflated
+                {"strike": 25820, "bid": 3.20, "ask": 3.80},
+                {"strike": 25830, "bid": 3.10, "ask": 3.90},
+                {"strike": 25840, "bid": 4.70, "ask": 5.60},  # inflated
+                {"strike": 25850, "bid": 3.50, "ask": 4.10},
+            ],
+            "call": [],
+        }
+        spreads = compute_spreads(chain, "NDX", 27100.0, max_width=50)
+        # Suspect strikes (25810, 25840) must not appear on either leg.
+        for s in spreads:
+            assert s["short_strike"] not in (25810, 25840), \
+                f"suspect strike 25810/25840 leaked into spread: {s}"
+            assert s["long_strike"] not in (25810, 25840), \
+                f"suspect strike 25810/25840 leaked into spread: {s}"
+
+    def test_compute_spreads_captures_short_delta_when_present(self):
+        """When the provider supplies greeks on the short leg, store delta on
+        the spread dict so the renderer can show it."""
+        from spread_scanner import compute_spreads
+
+        chain = {
+            "put": [
+                {"strike": 7050, "bid": 1.50, "ask": 1.70,
+                 "greeks": {"delta": -0.18, "iv": 0.22}},
+                {"strike": 7030, "bid": 0.80, "ask": 1.00,
+                 "greeks": {"delta": -0.10, "iv": 0.21}},
+            ],
+            "call": [],
+        }
+        spreads = compute_spreads(chain, "SPX", 7100.0, 20)
+        assert len(spreads) == 1
+        assert spreads[0]["short_delta"] == -0.18  # the SHORT leg's delta
+
+    def test_compute_spreads_short_delta_absent_when_provider_silent(self):
+        """When greeks aren't supplied, short_delta is None (renderer hides)."""
+        from spread_scanner import compute_spreads
+
+        chain = {
+            "put": [
+                {"strike": 7050, "bid": 1.50, "ask": 1.70},
+                {"strike": 7030, "bid": 0.80, "ask": 1.00},
+            ],
+            "call": [],
+        }
+        spreads = compute_spreads(chain, "SPX", 7100.0, 20)
+        assert len(spreads) == 1
+        assert spreads[0]["short_delta"] is None
+
+    def test_render_spread_cell_appends_delta_when_present(self):
+        """Tier-row cells should append a Δ tag when delta is on the spread."""
+        from spread_scanner import render_spread_cell
+
+        spread = {
+            "option_type": "PUT", "short_strike": 7050, "long_strike": 7030,
+            "credit": 0.50, "roi_pct": 2.6, "otm_pct": 0.7,
+            "short_delta": -0.18,
+        }
+        cell = render_spread_cell(spread, prev_close=7100.0, dte=0)
+        assert "Δ-0.18" in cell
+
+        # No delta → no tag.
+        spread_no_delta = {**spread, "short_delta": None}
+        cell2 = render_spread_cell(spread_no_delta, prev_close=7100.0, dte=0)
+        assert "Δ" not in cell2
+
+    def test_fmt_delta_filters_out_of_range_values(self):
+        """IBKR's modelGreeks.delta returns garbage (|delta|>1) when IV
+        isn't computable. Suppress instead of displaying nonsense."""
+        from spread_scanner import _fmt_delta
+
+        # Valid Greek deltas — kept.
+        assert _fmt_delta(-0.18) == "Δ-0.18"
+        assert _fmt_delta(0.42) == "Δ+0.42"
+        assert _fmt_delta(-1.0) == "Δ-1.00"  # boundary
+        assert _fmt_delta(1.0) == "Δ+1.00"   # boundary
+
+        # Out of range → suppressed.
+        assert _fmt_delta(1.643) == ""    # the IBKR-after-hours-style nonsense
+        assert _fmt_delta(-1.5) == ""
+        assert _fmt_delta(2.0) == ""
+
+        # Non-numeric / NaN / inf → suppressed.
+        assert _fmt_delta(None) == ""
+        assert _fmt_delta("oops") == ""
+        assert _fmt_delta(float("nan")) == ""
+        assert _fmt_delta(float("inf")) == ""
+
+    def test_fmt_delta_filters_sign_errors_when_option_type_known(self):
+        """A positive delta on a put (or negative on a call) is bogus
+        provider data — suppress when we know the option type."""
+        from spread_scanner import _fmt_delta
+
+        # PUT: delta should be in [-1, 0].
+        assert _fmt_delta(-0.18, "PUT") == "Δ-0.18"     # valid
+        assert _fmt_delta(0.42, "PUT") == ""            # sign error → drop
+        assert _fmt_delta(0.0, "PUT") == "Δ+0.00"       # boundary OK
+
+        # CALL: delta should be in [0, +1].
+        assert _fmt_delta(0.30, "CALL") == "Δ+0.30"     # valid
+        assert _fmt_delta(-0.30, "CALL") == ""          # sign error → drop
+
+        # Without option_type, only the magnitude check applies.
+        assert _fmt_delta(0.42, None) == "Δ+0.42"
+
+    def test_render_spread_cell_visible_width_constant(self):
+        """Cells with and without delta must have identical VISIBLE width so
+        the column grid stays aligned across the row."""
+        from spread_scanner import render_spread_cell, _visible_len, COL_WIDTH
+
+        base = {
+            "option_type": "PUT", "short_strike": 7050, "long_strike": 7030,
+            "credit": 0.50, "roi_pct": 2.6, "otm_pct": 0.7,
+        }
+        with_delta = {**base, "short_delta": -0.18}
+        without_delta = {**base, "short_delta": None}
+        a = render_spread_cell(with_delta, prev_close=7100.0, dte=0)
+        b = render_spread_cell(without_delta, prev_close=7100.0, dte=0)
+        assert _visible_len(a) == _visible_len(b) == COL_WIDTH
+
+    def test_top_picks_shows_verification_marker(self):
+        """Rows that went through the provider re-verify show ✓ + age; rows
+        that didn't (e.g. candidates below the verify batch cutoff) show —."""
+        from spread_scanner import _render_top_picks, parse_args
+
+        args = parse_args(["--tickers", "SPX", "--top", "2"])
+        scan_data = {
+            "prev_closes": {"SPX": 7100.0},
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-04-24",
+                    "spreads": {
+                        "SPX": [
+                            # Verified against a 3s-old cached quote.
+                            {"option_type": "PUT", "short_strike": 7050,
+                             "long_strike": 7030, "credit": 0.50,
+                             "roi_pct": 2.6, "otm_pct": 0.7, "width": 20,
+                             "short_delta": -0.17,
+                             "verified": True, "verify_age_seconds": 3.2},
+                            # Not verified (candidate outside top-M batch).
+                            {"option_type": "CALL", "short_strike": 7200,
+                             "long_strike": 7220, "credit": 0.60,
+                             "roi_pct": 3.1, "otm_pct": 1.4, "width": 20,
+                             "short_delta": None},
+                        ],
+                    },
+                }
+            },
+        }
+        lines = _render_top_picks(scan_data, args)
+        text = "\n".join(lines)
+        # Header exposes the Vfy column.
+        assert "Vfy" in text
+        # Verified row shows ✓ with age.
+        assert "✓3s" in text
+        # Unverified row shows —.
+        assert "—" in text
+
+    def test_top_picks_row_alignment_stable_across_strike_digits(self):
+        """NDX 5-digit strikes (25830/25820) must not push later columns
+        right vs SPX 4-digit strikes (6920/6915). The Short/Long field is
+        padded as a single unit, not long-side-only."""
+        from spread_scanner import _render_top_picks, parse_args, _visible_len
+
+        args = parse_args(["--tickers", "SPX,NDX", "--top", "2"])
+        scan_data = {
+            "prev_closes": {"SPX": 7100.0, "NDX": 27000.0},
+            "dte_sections": {
+                1: {
+                    "expiration": "2026-04-25",
+                    "spreads": {
+                        "SPX": [{"option_type": "PUT", "short_strike": 6920,
+                                 "long_strike": 6915, "credit": 0.35,
+                                 "roi_pct": 7.6, "otm_pct": 2.8, "width": 5,
+                                 "short_delta": None}],
+                        "NDX": [{"option_type": "PUT", "short_strike": 25830,
+                                 "long_strike": 25820, "credit": 0.60,
+                                 "roi_pct": 6.4, "otm_pct": 4.6, "width": 10,
+                                 "short_delta": None}],
+                    },
+                }
+            },
+        }
+        lines = _render_top_picks(scan_data, args)
+        data_rows = [ln for ln in lines if ln.strip().startswith(("1 ", "2 "))]
+        assert len(data_rows) == 2
+        # Both rows should have the same visible width (same column layout).
+        w0, w1 = _visible_len(data_rows[0]), _visible_len(data_rows[1])
+        assert w0 == w1, f"Row widths differ: {w0} vs {w1}\n  r0={data_rows[0]!r}\n  r1={data_rows[1]!r}"
+
+    def test_top_picks_renders_short_delta_column(self):
+        """Top-N rows include a Δshort column showing the short leg's delta."""
+        from spread_scanner import _render_top_picks, parse_args
+
+        args = parse_args(["--tickers", "SPX", "--top", "2"])
+        scan_data = {
+            "prev_closes": {"SPX": 7100.0},
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-04-25",
+                    "spreads": {
+                        "SPX": [
+                            {"option_type": "PUT", "short_strike": 7050, "long_strike": 7030,
+                             "credit": 0.50, "roi_pct": 2.6, "otm_pct": 0.7, "width": 20,
+                             "short_delta": -0.17},
+                            {"option_type": "CALL", "short_strike": 7200, "long_strike": 7220,
+                             "credit": 0.60, "roi_pct": 3.1, "otm_pct": 1.4, "width": 20,
+                             "short_delta": None},  # provider didn't return greeks
+                        ],
+                    },
+                }
+            },
+        }
+        lines = _render_top_picks(scan_data, args)
+        text = "\n".join(lines)
+        # Header has Δshort column.
+        assert "Δshort" in text
+        # Row with delta shows it; row without delta is fine to omit.
+        assert "Δ-0.17" in text
+
     @pytest.mark.asyncio
     async def test_resolve_percentile_url_custom_bypasses_probe(self):
         """A caller-supplied URL (not the baked-in lin1 default) is used as-is,
@@ -16337,6 +16613,149 @@ class TestTradingClientPricing:
         assert meta["fallback_reason"].startswith("quote_refresh_failed")
 
 
+class TestVerifySpreadPricing:
+    """TradingClient.verify_spread_pricing — real-time re-check of a candidate
+    spread before the scanner presents it or a trade handler commits."""
+
+    @staticmethod
+    def _client_with(quotes_resp):
+        from utp import TradingClient
+        c = TradingClient("http://d")
+        async def fake_get(**kw):
+            return quotes_resp
+        c.get_option_quotes = fake_get
+        return c
+
+    def test_ok_when_quotes_fresh_and_tradeable(self):
+        import asyncio
+        c = self._client_with({
+            "quotes": {"put": [
+                {"strike": 7050.0, "bid": 1.20, "ask": 1.40,
+                 "source": "ibkr_fresh",
+                 "greeks": {"delta": -0.18}},
+                {"strike": 7030.0, "bid": 0.40, "ask": 0.50,
+                 "source": "ibkr_fresh",
+                 "greeks": {"delta": -0.10}},
+            ]},
+            "meta": {"age_seconds": 2.0, "source": "fresh_cache"},
+        })
+        res = asyncio.run(c.verify_spread_pricing(
+            symbol="SPX", expiration="2026-04-27", option_type="PUT",
+            short_strike=7050.0, long_strike=7030.0,
+        ))
+        assert res["ok"] is True
+        assert res["credit"] == 0.70              # 1.20 - 0.50
+        assert res["short_delta"] == -0.18
+        assert res["reason"] is None
+
+    def test_rejects_csv_sourced_quotes_by_default(self):
+        """A CSV-sourced leg fails verify_spread_pricing when
+        require_provider_source=True (the default)."""
+        import asyncio
+        c = self._client_with({
+            "quotes": {"put": [
+                {"strike": 7050.0, "bid": 1.20, "ask": 1.40,
+                 "source": "ibkr_fresh"},
+                {"strike": 7030.0, "bid": 0.40, "ask": 0.50,
+                 "source": "csv"},  # CSV fallback — refuse.
+            ]},
+            "meta": {"age_seconds": 2.0, "source": "fresh_cache"},
+        })
+        res = asyncio.run(c.verify_spread_pricing(
+            symbol="SPX", expiration="2026-04-27", option_type="PUT",
+            short_strike=7050.0, long_strike=7030.0,
+        ))
+        assert res["ok"] is False
+        assert res["reason"] == "csv_source_rejected"
+        assert res["long_source"] == "csv"
+
+    def test_allows_csv_when_require_provider_source_false(self):
+        """Caller can opt in to CSV fallback (e.g. during provider outage)."""
+        import asyncio
+        c = self._client_with({
+            "quotes": {"put": [
+                {"strike": 7050.0, "bid": 1.20, "ask": 1.40, "source": "csv"},
+                {"strike": 7030.0, "bid": 0.40, "ask": 0.50, "source": "csv"},
+            ]},
+            "meta": {"age_seconds": 2.0, "source": "fresh_cache"},
+        })
+        res = asyncio.run(c.verify_spread_pricing(
+            symbol="SPX", expiration="2026-04-27", option_type="PUT",
+            short_strike=7050.0, long_strike=7030.0,
+            require_provider_source=False,
+        ))
+        assert res["ok"] is True
+        assert res["credit"] == 0.70
+
+    def test_rejects_non_monotonic_bid(self):
+        """Short bid < long bid (short is CLOSER to ATM, should bid higher)
+        → data is phantom. Reject with reason=non_monotonic."""
+        import asyncio
+        c = self._client_with({
+            "quotes": {"put": [
+                {"strike": 25830.0, "bid": 3.10, "ask": 3.90, "source": "ibkr_fresh"},
+                {"strike": 25820.0, "bid": 3.20, "ask": 3.80, "source": "ibkr_fresh"},
+            ]},
+            "meta": {"age_seconds": 1.0, "source": "fresh_cache"},
+        })
+        res = asyncio.run(c.verify_spread_pricing(
+            symbol="NDX", expiration="2026-04-27", option_type="PUT",
+            short_strike=25830.0, long_strike=25820.0,
+        ))
+        assert res["ok"] is False
+        assert res["reason"] == "non_monotonic"
+
+    def test_rejects_no_edge(self):
+        """short_bid - long_ask ≤ 0 → no tradeable credit."""
+        import asyncio
+        c = self._client_with({
+            "quotes": {"put": [
+                {"strike": 7050.0, "bid": 0.50, "ask": 0.70, "source": "ibkr_fresh"},
+                {"strike": 7030.0, "bid": 0.45, "ask": 0.60, "source": "ibkr_fresh"},
+            ]},
+            "meta": {"age_seconds": 1.0, "source": "fresh_cache"},
+        })
+        res = asyncio.run(c.verify_spread_pricing(
+            symbol="SPX", expiration="2026-04-27", option_type="PUT",
+            short_strike=7050.0, long_strike=7030.0,
+        ))
+        # credit = 0.50 - 0.60 = -0.10 → no edge
+        assert res["ok"] is False
+        assert res["reason"] == "no_edge"
+
+    def test_rejects_short_no_bid(self):
+        import asyncio
+        c = self._client_with({
+            "quotes": {"put": [
+                {"strike": 7050.0, "bid": 0.0, "ask": 0.15, "source": "ibkr_fresh"},
+                {"strike": 7030.0, "bid": 0.05, "ask": 0.10, "source": "ibkr_fresh"},
+            ]},
+            "meta": {"age_seconds": 1.0, "source": "fresh_cache"},
+        })
+        res = asyncio.run(c.verify_spread_pricing(
+            symbol="SPX", expiration="2026-04-27", option_type="PUT",
+            short_strike=7050.0, long_strike=7030.0,
+        ))
+        assert res["ok"] is False
+        assert res["reason"] == "short_no_bid"
+
+    def test_rejects_missing_strike(self):
+        import asyncio
+        c = self._client_with({
+            "quotes": {"put": [
+                {"strike": 7050.0, "bid": 1.20, "ask": 1.40, "source": "ibkr_fresh"},
+                # long strike 7030 intentionally missing from response
+            ]},
+            "meta": {"age_seconds": 1.0, "source": "fresh_cache"},
+        })
+        res = asyncio.run(c.verify_spread_pricing(
+            symbol="SPX", expiration="2026-04-27", option_type="PUT",
+            short_strike=7050.0, long_strike=7030.0,
+        ))
+        assert res["ok"] is False
+        assert res["reason"] == "missing_long_strike"
+
+
 class TestTierPercentile:
     """Percentile-based tier selectors (pN) in min_tier / min_tier_close."""
 
@@ -16496,3 +16915,176 @@ class TestTierPercentile:
         # Requested p40 also present
         assert "p40" in bounds["SPX"]
         assert "put" in bounds["SPX"]["p40"]
+
+
+class TestStrikeConflictCheck:
+    """Test _check_strike_conflicts_http detects netting conflicts."""
+
+    @pytest.mark.asyncio
+    async def test_no_conflict_when_no_positions(self):
+        from utp import _check_strike_conflicts_http
+        import httpx
+
+        async def mock_get(url, **kwargs):
+            return httpx.Response(200, json={"positions": []})
+
+        client = httpx.AsyncClient()
+        client.get = mock_get
+
+        warnings = await _check_strike_conflicts_http(
+            client, "SPX", "2026-04-24",
+            {"short_strike": 7050, "long_strike": 7025},
+            "PUT", False,
+        )
+        assert warnings == []
+
+    @pytest.mark.asyncio
+    async def test_conflict_detected_credit_spread(self):
+        """BUY leg at 7025P conflicts with existing SHORT at 7025P."""
+        from utp import _check_strike_conflicts_http
+        import httpx
+
+        positions = [{
+            "symbol": "SPX",
+            "expiration": "20260424",
+            "strike": 7025,
+            "right": "P",
+            "quantity": -30,
+            "legs": [],
+        }]
+
+        async def mock_get(url, **kwargs):
+            return httpx.Response(200, json={"positions": positions})
+
+        client = httpx.AsyncClient()
+        client.get = mock_get
+
+        warnings = await _check_strike_conflicts_http(
+            client, "SPX", "2026-04-24",
+            {"short_strike": 7050, "long_strike": 7025},
+            "PUT", False,
+        )
+        assert len(warnings) == 1
+        assert "CONFLICT" in warnings[0]
+        assert "7025" in warnings[0]
+
+    @pytest.mark.asyncio
+    async def test_no_conflict_different_strike(self):
+        """Existing SHORT at 7000P doesn't conflict with BUY at 7025P."""
+        from utp import _check_strike_conflicts_http
+        import httpx
+
+        positions = [{
+            "symbol": "SPX",
+            "expiration": "20260424",
+            "strike": 7000,
+            "right": "P",
+            "quantity": -30,
+            "legs": [],
+        }]
+
+        async def mock_get(url, **kwargs):
+            return httpx.Response(200, json={"positions": positions})
+
+        client = httpx.AsyncClient()
+        client.get = mock_get
+
+        warnings = await _check_strike_conflicts_http(
+            client, "SPX", "2026-04-24",
+            {"short_strike": 7050, "long_strike": 7025},
+            "PUT", False,
+        )
+        assert warnings == []
+
+    @pytest.mark.asyncio
+    async def test_no_conflict_different_expiration(self):
+        """Existing SHORT at 7025P for different exp doesn't conflict."""
+        from utp import _check_strike_conflicts_http
+        import httpx
+
+        positions = [{
+            "symbol": "SPX",
+            "expiration": "20260425",
+            "strike": 7025,
+            "right": "P",
+            "quantity": -30,
+            "legs": [],
+        }]
+
+        async def mock_get(url, **kwargs):
+            return httpx.Response(200, json={"positions": positions})
+
+        client = httpx.AsyncClient()
+        client.get = mock_get
+
+        warnings = await _check_strike_conflicts_http(
+            client, "SPX", "2026-04-24",
+            {"short_strike": 7050, "long_strike": 7025},
+            "PUT", False,
+        )
+        assert warnings == []
+
+    @pytest.mark.asyncio
+    async def test_conflict_from_spread_legs(self):
+        """Detect conflict from existing spread leg (not just raw position)."""
+        from utp import _check_strike_conflicts_http
+        import httpx
+
+        positions = [{
+            "symbol": "SPX",
+            "expiration": "2026-04-24",
+            "strike": 0,
+            "right": "",
+            "quantity": 25,
+            "legs": [
+                {"action": "SELL_TO_OPEN", "strike": 7025, "option_type": "PUT"},
+                {"action": "BUY_TO_OPEN", "strike": 7000, "option_type": "PUT"},
+            ],
+        }]
+
+        async def mock_get(url, **kwargs):
+            return httpx.Response(200, json={"positions": positions})
+
+        client = httpx.AsyncClient()
+        client.get = mock_get
+
+        # New trade: SELL 7050, BUY 7025 — the BUY at 7025 conflicts with existing SELL at 7025
+        warnings = await _check_strike_conflicts_http(
+            client, "SPX", "2026-04-24",
+            {"short_strike": 7050, "long_strike": 7025},
+            "PUT", False,
+        )
+        assert len(warnings) == 1
+        assert "7025" in warnings[0]
+
+    @pytest.mark.asyncio
+    async def test_iron_condor_conflict(self):
+        """Iron condor BUY legs checked against existing shorts."""
+        from utp import _check_strike_conflicts_http
+        import httpx
+
+        positions = [{
+            "symbol": "SPX",
+            "expiration": "20260424",
+            "strike": 7200,
+            "right": "C",
+            "quantity": -10,
+            "legs": [],
+        }]
+
+        async def mock_get(url, **kwargs):
+            return httpx.Response(200, json={"positions": positions})
+
+        client = httpx.AsyncClient()
+        client.get = mock_get
+
+        # IC: put_long=7000P (no conflict), call_long=7200C (conflicts with SHORT 7200C)
+        warnings = await _check_strike_conflicts_http(
+            client, "SPX", "2026-04-24",
+            {"put_short": 7050, "put_long": 7000,
+             "call_short": 7150, "call_long": 7200},
+            None, True,
+        )
+        assert len(warnings) == 1
+        assert "7200" in warnings[0]
+        assert "CALL" in warnings[0]

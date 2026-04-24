@@ -372,6 +372,113 @@ class TradingClient:
         ma = float(max_age) if max_age is not None else float(defaults.get("limit_quote_max_age_sec", 10.0))
         return sp, ma
 
+    async def verify_spread_pricing(
+        self,
+        symbol: str,
+        expiration: str,
+        option_type: str,
+        short_strike: float,
+        long_strike: float,
+        *,
+        max_age: float = 15.0,
+        force_refresh: bool = False,
+        require_provider_source: bool = True,
+    ) -> dict:
+        """Re-fetch fresh quotes for a specific short/long pair and return
+        the live credit + sanity flags.
+
+        Purpose: before presenting a spread as a TOP pick or committing it
+        to a trade, callers re-verify the quotes with the provider (not the
+        streaming cache) so phantom / stale / non-monotonic chain data can't
+        produce fake-looking high-ROI spreads.
+
+        Freshness model:
+          - `max_age` applies to the IBKR-side cache freshness gate. If the
+            IBKR cache for the leg is within `max_age` seconds, the cached
+            IBKR quote is used (no broker round-trip). Older IBKR cache
+            triggers a provider refresh.
+          - `require_provider_source=True` (default) REJECTS quotes whose
+            per-leg `source` field is anything other than IBKR-origin
+            (`ibkr_fresh` or `provider`). CSV-sourced strikes (`source:
+            "csv"`) are explicitly refused — they're fine for display
+            but not for committing to a trade. Set False to allow CSV
+            fallback when the IBKR feed is genuinely offline.
+
+        Returns a dict with keys:
+          - ok: bool — True if both legs are priced and credit > 0
+          - short_bid, short_ask, short_delta
+          - long_bid, long_ask, long_delta
+          - credit: short_bid - long_ask (rounded to 2dp)
+          - age_seconds, source — freshness metadata from the daemon
+          - short_source, long_source — per-leg source strings
+          - reason: str when ok=False. Values include
+            `short_no_bid` / `long_no_ask` / `non_monotonic` / `no_edge`
+            / `missing_short_strike` / `missing_long_strike` /
+            `csv_source_rejected`.
+        """
+        strike_min = min(short_strike, long_strike) - 1
+        strike_max = max(short_strike, long_strike) + 1
+        resp = await self.get_option_quotes(
+            symbol=symbol, expiration=expiration, option_type=option_type,
+            max_age=max_age, strike_min=strike_min, strike_max=strike_max,
+            force_refresh=force_refresh,
+        )
+        opt_key = option_type.lower()
+        quotes = resp.get("quotes", {}).get(opt_key, []) or []
+        by_strike = {float(q.get("strike")): q for q in quotes if q.get("strike") is not None}
+        sq = by_strike.get(float(short_strike))
+        lq = by_strike.get(float(long_strike))
+        meta = resp.get("meta") or {}
+        base = {
+            "ok": False, "reason": None,
+            "short_bid": None, "short_ask": None, "short_delta": None,
+            "long_bid": None, "long_ask": None, "long_delta": None,
+            "credit": None,
+            "age_seconds": meta.get("age_seconds"),
+            "source": meta.get("source"),
+        }
+        if not sq:
+            return {**base, "reason": "missing_short_strike"}
+        if not lq:
+            return {**base, "reason": "missing_long_strike"}
+        sb = float(sq.get("bid") or 0)
+        sa = float(sq.get("ask") or 0)
+        lb = float(lq.get("bid") or 0)
+        la = float(lq.get("ask") or 0)
+        sd = ((sq.get("greeks") or {}).get("delta"))
+        ld = ((lq.get("greeks") or {}).get("delta"))
+        short_src = sq.get("source")
+        long_src = lq.get("source")
+        out = {
+            **base,
+            "short_bid": sb, "short_ask": sa, "short_delta": sd,
+            "long_bid": lb, "long_ask": la, "long_delta": ld,
+            "short_source": short_src, "long_source": long_src,
+        }
+        # Provider-source gate: refuse CSV-sourced quotes (or any other
+        # non-IBKR-origin source) when `require_provider_source=True`. The
+        # streaming merge logic may fall back to CSV when the IBKR cache
+        # is older than `max_age`, which is fine for display but not for
+        # committing to a trade — the caller is asking "are these quotes
+        # provider-current?" and CSV doesn't qualify.
+        if require_provider_source:
+            allowed = {"ibkr_fresh", "provider"}
+            if short_src not in allowed or long_src not in allowed:
+                return {**out, "reason": "csv_source_rejected"}
+        if sb <= 0:
+            return {**out, "reason": "short_no_bid"}
+        if la <= 0:
+            return {**out, "reason": "long_no_ask"}
+        # Monotonicity: for the closer-to-ATM leg (short) to have a LOWER
+        # bid than the further-OTM leg (long) is physically wrong for a
+        # well-formed chain. Skip — these are almost always phantom quotes.
+        if sb < lb:
+            return {**out, "reason": "non_monotonic"}
+        credit = round(sb - la, 2)
+        if credit <= 0:
+            return {**out, "credit": credit, "reason": "no_edge"}
+        return {**out, "credit": credit, "ok": True}
+
     async def compute_credit_spread_net_price(
         self,
         symbol: str,
@@ -1489,6 +1596,83 @@ def _snap_to_chain(target: float, available: list[float], direction: str = "near
             return min(candidates)  # closest one that's still >= target
     # Fallback: nearest
     return min(available, key=lambda s: abs(s - target))
+
+
+async def _check_strike_conflicts_http(
+    client, symbol: str, expiration: str, strikes: dict[str, float],
+    option_type: str | None, is_iron_condor: bool,
+) -> list[str]:
+    """Check if any BUY leg would conflict with an existing short position.
+
+    IBKR nets options at the same strike/exp/right — a BUY_TO_OPEN at a strike
+    where you already hold a short position closes the short instead of opening
+    a new long.
+
+    Returns list of warning strings (empty = no conflicts).
+    """
+    warnings: list[str] = []
+    try:
+        resp = await client.get("/dashboard/portfolio", params={"include_quotes": "false"})
+        if resp.status_code != 200:
+            return []
+        positions = resp.json().get("positions", [])
+    except Exception:
+        return []
+
+    # Build set of (strike, right) where we're currently SHORT
+    exp_clean = expiration.replace("-", "")
+    short_strikes: set[tuple[float, str]] = set()
+    for p in positions:
+        if p.get("symbol") != symbol:
+            continue
+        p_exp = (p.get("expiration") or "").replace("-", "")
+        if p_exp != exp_clean:
+            continue
+        # Check individual legs (spread positions)
+        legs = p.get("legs") or []
+        for leg in legs:
+            action = (leg.get("action") or "").upper()
+            if "SELL" in action:
+                s = float(leg.get("strike", 0))
+                r = (leg.get("option_type") or leg.get("right") or "").upper()
+                if r in ("PUT", "P"):
+                    r = "P"
+                elif r in ("CALL", "C"):
+                    r = "C"
+                short_strikes.add((s, r))
+        # Also check raw portfolio items (external_sync positions without legs)
+        s = float(p.get("strike", 0))
+        r = (p.get("right") or "").upper()
+        qty = float(p.get("quantity", 0))
+        if s > 0 and qty < 0:  # negative quantity = short
+            short_strikes.add((s, r))
+
+    if not short_strikes:
+        return []
+
+    # Check which BUY legs of the new trade would conflict
+    right_map = {"PUT": "P", "CALL": "C"}
+    if is_iron_condor:
+        buy_legs = [
+            (strikes["put_long"], "P", "put_long"),
+            (strikes["call_long"], "C", "call_long"),
+        ]
+    else:
+        ot_char = right_map.get((option_type or "").upper(), "P")
+        buy_legs = [
+            (strikes["long_strike"], ot_char, "long_strike"),
+        ]
+
+    for strike_val, right_char, leg_name in buy_legs:
+        if (strike_val, right_char) in short_strikes:
+            ot_label = "PUT" if right_char == "P" else "CALL"
+            warnings.append(
+                f"  {_color('⚠ CONFLICT:', '91')} BUY {ot_label} {strike_val:.0f} "
+                f"would close your existing SHORT at that strike.\n"
+                f"    Shift {leg_name} to avoid netting (e.g., use --width to change spread width)"
+            )
+
+    return warnings
 
 
 async def _snap_strikes_to_chain_http(
@@ -4636,6 +4820,38 @@ async def _cmd_trade_http(args, server: str) -> int:
                 rc = await _resolve_otm_strikes_http(args, subcommand, quote_client)
             if rc is not None:
                 return rc
+
+    # Check for strike conflicts with existing positions (IBKR nets same-strike options)
+    if subcommand in ("credit-spread", "iron-condor"):
+        expiration = getattr(args, "expiration", None)
+        sym = getattr(args, "symbol", None)
+        option_type = getattr(args, "option_type", None)
+        is_ic = subcommand == "iron-condor"
+        if expiration and sym:
+            # Build strikes dict from resolved args
+            if is_ic:
+                conflict_strikes = {
+                    "put_short": getattr(args, "put_short", 0),
+                    "put_long": getattr(args, "put_long", 0),
+                    "call_short": getattr(args, "call_short", 0),
+                    "call_long": getattr(args, "call_long", 0),
+                }
+            else:
+                conflict_strikes = {
+                    "short_strike": getattr(args, "short_strike", 0),
+                    "long_strike": getattr(args, "long_strike", 0),
+                }
+            async with httpx.AsyncClient(base_url=server, timeout=15.0) as conflict_client:
+                conflicts = await _check_strike_conflicts_http(
+                    conflict_client, sym, expiration, conflict_strikes, option_type, is_ic,
+                )
+            if conflicts:
+                print()
+                for w in conflicts:
+                    print(w)
+                print(f"\n  {_color('BLOCKED:', '91')} Trade not submitted. "
+                      f"Adjust strikes to avoid netting with existing positions.")
+                return 1
 
     instr = _build_instruction_from_args(subcommand, args)
 
