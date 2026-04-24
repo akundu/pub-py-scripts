@@ -61,6 +61,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import os
 import re
 import sys
@@ -589,6 +590,53 @@ class PrevCloseCache:
 # ── Spread Computation ─────────────────────────────────────────────────────────
 
 
+def _detect_suspect_strikes(
+    quotes: list[dict], option_type: str, bid_tol: float = 0.10,
+) -> set[float]:
+    """Flag strikes whose bid violates monotonicity vs adjacent strikes.
+
+    A well-formed option chain is monotonic in bids:
+      - PUT: bid rises with strike (closer to ATM → more valuable).
+      - CALL: bid falls with strike (closer to ATM → more valuable).
+
+    Violations usually mean stale quotes or phantom quotes on just-listed
+    expirations with OI=0 and thin trading — exactly the NDX weekly
+    scenario where short=25830 bid=3.10 sat between 25810 bid=4.20 and
+    25840 bid=4.70, producing fake-looking "$0.60 credit at 4.6% OTM"
+    spreads the user rightly called out as impossible.
+
+    This is a cheap local filter. A stricter provider-side re-verify runs
+    separately before presenting top picks or committing to a trade.
+    """
+    sorted_q = [q for q in sorted(quotes, key=lambda x: x.get("strike") or 0)
+                if q.get("strike") and (q.get("bid") or 0) > 0]
+    if len(sorted_q) < 2:
+        return set()
+    suspect: set[float] = set()
+    for i, q in enumerate(sorted_q):
+        k = q["strike"]
+        bid = float(q.get("bid") or 0)
+        prev_q = sorted_q[i - 1] if i > 0 else None
+        next_q = sorted_q[i + 1] if i < len(sorted_q) - 1 else None
+        prev_bid = float(prev_q["bid"]) if prev_q else None
+        next_bid = float(next_q["bid"]) if next_q else None
+        if option_type == "PUT":
+            # Expect prev_bid ≤ bid ≤ next_bid (bids rise with strike).
+            if prev_bid is not None and prev_bid > bid + bid_tol:
+                suspect.add(k)
+                continue
+            if next_bid is not None and bid > next_bid + bid_tol:
+                suspect.add(k)
+        else:  # CALL
+            # Expect prev_bid ≥ bid ≥ next_bid (bids fall with strike).
+            if prev_bid is not None and prev_bid + bid_tol < bid:
+                suspect.add(k)
+                continue
+            if next_bid is not None and bid + bid_tol < next_bid:
+                suspect.add(k)
+    return suspect
+
+
 def compute_spreads(
     chain: dict, symbol: str, current_price: float, max_width: int,
     option_type: str = "ALL",
@@ -602,13 +650,20 @@ def compute_spreads(
     (short, long) pair becomes a candidate spread, priced with the short's
     bid and the long's ask. A narrower width generally produces higher ROI%
     per dollar-at-risk but smaller absolute credit — the caller decides.
+
+    Strikes with bid-monotonicity violations (see `_detect_suspect_strikes`)
+    are dropped on both legs before pricing — this prevents the scanner from
+    building fake-looking high-ROI spreads out of phantom quotes on illiquid
+    just-listed expirations.
     """
     spreads = []
     for opt_type in ["PUT", "CALL"]:
         if option_type != "ALL" and opt_type != option_type:
             continue
         quotes = chain.get(opt_type.lower(), [])
-        by_strike = {q["strike"]: q for q in quotes if q.get("strike")}
+        suspect_strikes = _detect_suspect_strikes(quotes, opt_type)
+        by_strike = {q["strike"]: q for q in quotes
+                     if q.get("strike") and q["strike"] not in suspect_strikes}
         all_strikes = sorted(by_strike.keys())
         for short_strike in all_strikes:
             if opt_type == "PUT" and short_strike >= current_price:
@@ -664,6 +719,10 @@ def compute_spreads(
                     "credit": credit,
                     "roi_pct": roi,
                     "otm_pct": otm,
+                    # Short-leg delta when the provider supplies Greeks.
+                    # `None` is preserved (vs missing) so renderers can tell
+                    # "no data" from "delta=0".
+                    "short_delta": (sq.get("greeks") or {}).get("delta"),
                 })
 
     spreads.sort(key=lambda s: s["roi_pct"], reverse=True)
@@ -726,7 +785,18 @@ def build_spread_from_chain(
     """
     opt_key = option_type.lower()
     quotes = chain.get(opt_key, [])
-    by_strike = {q["strike"]: q for q in quotes if q.get("strike")}
+    suspect_strikes = _detect_suspect_strikes(quotes, option_type)
+    # Drop suspect strikes on BOTH legs: a bid that violates monotonicity
+    # vs neighbors is usually stale/phantom data on just-listed illiquid
+    # expirations. Exception: allow_no_edge=True is used by the tier-row
+    # "probe" path that wants to show WHY a pair is untradeable — honor
+    # it by keeping the suspect strike in the map so the probe can still
+    # surface bid/ask/note info.
+    if not allow_no_edge:
+        by_strike = {q["strike"]: q for q in quotes
+                     if q.get("strike") and q["strike"] not in suspect_strikes}
+    else:
+        by_strike = {q["strike"]: q for q in quotes if q.get("strike")}
 
     sq = by_strike.get(short_strike)
     if not sq:
@@ -789,6 +859,7 @@ def build_spread_from_chain(
         "otm_pct": otm,
         "short_bid": short_bid,
         "long_ask": long_ask,
+        "short_delta": (sq.get("greeks") or {}).get("delta"),
     }
     if note:
         out["note"] = note
@@ -1028,7 +1099,10 @@ def _parse_date(s: str):
 # ── Rendering ──────────────────────────────────────────────────────────────────
 
 
-COL_WIDTH = 36  # fixed visible character width per ticker column
+COL_WIDTH = 44  # fixed visible character width per ticker column
+                # Wide enough for: "Strike   $Cr   nROI ot:X cl:Y Δ±0.NN"
+                # which is the delta-augmented spread cell. Without delta the
+                # cell is right-padded.
 
 
 def _visible_len(s: str) -> int:
@@ -1063,6 +1137,46 @@ def _fmt_pct(val: float) -> str:
     return f"{val:.1f}"
 
 
+def _fmt_delta(val, option_type: str | None = None) -> str:
+    """Compact short-leg delta display.
+
+    `val` is the raw Greek delta from the provider (e.g.
+    `ticker.modelGreeks.delta` from IBKR). Returns:
+      - "Δ-0.18" when the value is a valid Greek delta in [-1, +1] (with
+        the correct sign for the option type if known).
+      - "" when the value is missing, non-numeric, or out-of-range bogus
+        data (e.g. IBKR's model emits |delta|>1 when IV is unavailable —
+        you'll see `iv: null` in those quotes; the resulting greeks are
+        all nonsense and we suppress them rather than display garbage).
+
+    `option_type` is optional. When supplied:
+      - PUT: only shows delta when in [-1, 0] (puts gain on underlying drops).
+      - CALL: only shows delta when in [0, +1].
+    Without option_type, the validity check is just |delta| ≤ 1.
+    """
+    if val is None:
+        return ""
+    try:
+        d = float(val)
+    except (TypeError, ValueError):
+        return ""
+    if math.isnan(d) or math.isinf(d):
+        return ""
+    # Magnitude bound — the canonical Greek delta is in [-1, +1].
+    if d < -1.0 or d > 1.0:
+        return ""
+    # Sign-correctness — when we know the option type, suppress sign errors
+    # too (a positive delta on a put or vice versa indicates the model is
+    # broken, not a tradeable signal).
+    if option_type:
+        ot = option_type.upper()
+        if ot == "PUT" and d > 0:
+            return ""
+        if ot == "CALL" and d < 0:
+            return ""
+    return f"Δ{d:+.2f}"
+
+
 def render_spread_cell(spread: dict | None, prev_close: float = 0, dte: int = 0) -> str:
     """Render a spread cell with fixed-width fields.
 
@@ -1084,7 +1198,9 @@ def render_spread_cell(spread: dict | None, prev_close: float = 0, dte: int = 0)
     strikes = f"{short}/{long}"
     cr_str = f"${credit:.2f}"
     nroi_str = color_roi(norm_roi)
-    meta = f"{DIM}ot{otm:.1f} cl{_fmt_pct(chg_pct)}{RESET}"
+    delta_str = _fmt_delta(spread.get("short_delta"), spread.get("option_type"))
+    delta_tail = f" {DIM}{delta_str}{RESET}" if delta_str else ""
+    meta = f"{DIM}ot{otm:.1f} cl{_fmt_pct(chg_pct)}{RESET}{delta_tail}"
     return _pad(f"{strikes:<12}{cr_str:<7}{nroi_str} {meta}")
 
 
@@ -1328,9 +1444,13 @@ def _render_top_picks(scan_data: dict, args) -> list[str]:
         filters.append(f"c2c≥{args.min_tier_close[:4]}")
     filter_str = f"  {DIM}[{', '.join(filters)}]{RESET}" if filters else ""
 
+    # Column widths. `Short/Long` must fit 5+1+5 = 11 chars (NDX 5-digit
+    # strikes) plus buffer. Padding the pair as one unit (not just the long
+    # side) keeps every later column aligned regardless of strike-digit count.
+    COL_PAIR = 13
     lines.append(f" {BOLD}{GREEN}── TOP {top_n} {'─' * 65}{RESET}{filter_str}")
-    lines.append(f"  {'#':<3}{'Sym':<5}{'Type':<5}{'DTE':<4}{'Short/Long':<14}{'Credit':<9}{'nROI':<8}{'OTM%':<7}{'Cl%':<7}")
-    lines.append(f"  {'─'*3}{'─'*5}{'─'*5}{'─'*4}{'─'*14}{'─'*9}{'─'*8}{'─'*7}{'─'*7}")
+    lines.append(f"  {'#':<3}{'Sym':<5}{'Type':<5}{'DTE':<4}{'Short/Long':<{COL_PAIR}}{'Credit':<9}{'nROI':<8}{'OTM%':<7}{'Cl%':<7}{'Δshort':<8}{'Vfy':<7}")
+    lines.append(f"  {'─'*3}{'─'*5}{'─'*5}{'─'*4}{'─'*COL_PAIR}{'─'*9}{'─'*8}{'─'*7}{'─'*7}{'─'*8}{'─'*7}")
 
     for i, p in enumerate(picks, 1):
         short = int(p["short_strike"])
@@ -1341,14 +1461,29 @@ def _render_top_picks(scan_data: dict, args) -> list[str]:
         pc = p.get("prev_close", 0)
         chg = (p["short_strike"] - pc) / pc * 100 if pc > 0 else 0
         nroi_str = color_roi(norm_roi)
+        delta_str = _fmt_delta(p.get("short_delta"), p.get("option_type")) or "-"
+        pair = f"{short}/{long}"
+        # Verification marker: ✓ + age-in-seconds when verified, "–" when
+        # not verified (candidate sat below the verify batch's top-M cutoff).
+        # `verified=True` means a fresh/near-fresh provider re-check agreed
+        # with the cached spread; `verify_age_seconds` is how old the quote
+        # actually was (≤20s by policy).
+        if p.get("verified"):
+            age = p.get("verify_age_seconds")
+            age_str = f"{int(age)}s" if age is not None else "?"
+            vfy_str = f"{GREEN}✓{age_str}{RESET}"
+        else:
+            vfy_str = f"{DIM}—{RESET}"
 
         lines.append(
             f"  {i:<3}{p['symbol']:<5}{p['option_type']:<5}"
             f"{'D' + str(p['dte']):<4}"
-            f"{short}/{long:<13}"
+            f"{pair:<{COL_PAIR}}"
             f"${credit:<8.2f}"
             f"{nroi_str} "
-            f"{DIM}ot{otm:.1f} cl{_fmt_pct(chg)}{RESET}"
+            f"{DIM}ot{otm:.1f} cl{_fmt_pct(chg)}{RESET} "
+            f"{DIM}{delta_str:<7}{RESET}"
+            f"{vfy_str}"
         )
 
     lines.append("")
@@ -2906,6 +3041,123 @@ async def scan_all_tickers(
     return result
 
 
+async def _verify_top_candidates_with_provider(
+    args, data: dict, max_to_verify: int = 20,
+) -> dict:
+    """Re-fetch fresh quotes for the top M candidates from the provider.
+
+    Why: the streaming cache serves "fresh" quotes for an expiration up to
+    ~5 min old, and newly-listed expirations (NDX weeklies on Fridays, etc.)
+    often have phantom quotes on illiquid strikes that pass the local
+    monotonicity filter but still evaporate on a real quote refresh. Before
+    the scanner presents a candidate in Top-N or a handler commits to a
+    simulate / trade, we do a real provider round-trip with
+    `force_refresh=true, max_age=10` to confirm the credit still holds.
+
+    Updates the spread's credit / roi / short_delta / short_bid / long_ask
+    in place with the fresh values, and tags it `verified=True`. Spreads
+    that fail verification (`no_edge`, `short_no_bid`, `non_monotonic`,
+    etc.) are removed from `data["dte_sections"][...]["spreads"][sym]` so
+    downstream consumers (top-picks, handler filter()) never see them.
+
+    Returns a summary dict: {verified: int, dropped: int, reasons: {reason: count}}.
+    Safe to call when the daemon is unreachable — logs and returns zeros.
+    """
+    summary = {"verified": 0, "dropped": 0, "reasons": {}}
+    try:
+        from utp import TradingClient  # local import to avoid circular at module load
+    except Exception:
+        return summary
+
+    daemon_url = getattr(args, "daemon_url", None) or DEFAULT_DAEMON_URL
+
+    candidates = _collect_filtered_candidates(data, args)
+    seen: set[tuple] = set()
+    top_unique: list[dict] = []
+    for c in candidates:
+        key = (c["symbol"], c["dte"], c["option_type"], c["short_strike"], c["long_strike"])
+        if key in seen:
+            continue
+        seen.add(key)
+        top_unique.append(c)
+        if len(top_unique) >= max_to_verify:
+            break
+    if not top_unique:
+        return summary
+
+    # One TradingClient per verify batch; run all N verifications in
+    # parallel so the total wall time is ~max single call, not N × single.
+    #
+    # Freshness policy:
+    #   - `max_age=15` — IBKR-cached quote ≤15s is considered current and
+    #     reused (no broker round-trip). Older IBKR cache triggers a fresh
+    #     provider fetch.
+    #   - `require_provider_source=True` — CSV-sourced fallback quotes are
+    #     REJECTED at verify time. CSV is fine for display but not for a
+    #     pre-trade confirmation; we only green-light candidates whose
+    #     per-leg `source` is `ibkr_fresh` or `provider`.
+    try:
+        async with TradingClient(daemon_url) as client:
+            async def _one(c):
+                return c, await client.verify_spread_pricing(
+                    symbol=c["symbol"], expiration=c["expiration"],
+                    option_type=c["option_type"],
+                    short_strike=c["short_strike"], long_strike=c["long_strike"],
+                    max_age=15, force_refresh=False,
+                    require_provider_source=True,
+                )
+            results = await asyncio.gather(
+                *[_one(c) for c in top_unique], return_exceptions=True,
+            )
+    except Exception as e:
+        print(f"[verify] provider re-verify failed: {e}", file=sys.stderr)
+        return summary
+
+    drop_keys: set[tuple] = set()
+    updates: dict[tuple, dict] = {}
+    for pair in results:
+        if isinstance(pair, Exception):
+            continue
+        c, res = pair
+        key = (c["symbol"], c["dte"], c["option_type"], c["short_strike"], c["long_strike"])
+        if res.get("ok"):
+            updates[key] = res
+        else:
+            drop_keys.add(key)
+            reason = res.get("reason") or "unknown"
+            summary["reasons"][reason] = summary["reasons"].get(reason, 0) + 1
+
+    # Apply changes to the spreads list on `data`.
+    for dte, dte_data in (data.get("dte_sections") or {}).items():
+        for sym, spreads in (dte_data.get("spreads") or {}).items():
+            kept: list[dict] = []
+            for s in spreads:
+                key = (sym, dte, s["option_type"], s["short_strike"], s["long_strike"])
+                if key in drop_keys:
+                    summary["dropped"] += 1
+                    continue
+                if key in updates:
+                    u = updates[key]
+                    s["credit"] = u["credit"]
+                    s["short_bid"] = u["short_bid"]
+                    s["long_ask"] = u["long_ask"]
+                    s["short_delta"] = u.get("short_delta")
+                    w = s.get("width", 0)
+                    max_loss_pc = w * 100 - u["credit"] * 100
+                    if max_loss_pc > 0:
+                        s["roi_pct"] = round(u["credit"] * 100 / max_loss_pc * 100, 1)
+                    s["verified"] = True
+                    # Age of the quote that this verification used — lets the
+                    # display tell "verified against a 3s-old cached quote"
+                    # apart from "verified against a 19s-old cached quote".
+                    s["verify_age_seconds"] = u.get("age_seconds")
+                    s["verify_source"] = u.get("source")
+                    summary["verified"] += 1
+                kept.append(s)
+            dte_data["spreads"][sym] = kept
+    return summary
+
+
 def _count_trade_submits(handlers: list) -> int:
     """Sum of `count_submitted` across all trade/simulate-trade handlers."""
     total = 0
@@ -3010,6 +3262,25 @@ async def scan_loop(args):
             try:
                 data = await scan_all_tickers(client, args, prev_close_cache=prev_close_cache)
 
+                # Provider re-verify: before top-picks render AND before any
+                # handler fires, re-fetch fresh quotes for the top candidates
+                # from the provider (force_refresh=true). Phantom / stale /
+                # non-monotonic strikes get dropped here so downstream callers
+                # only see candidates whose credit is confirmed live.
+                try:
+                    _verify_summary = await _verify_top_candidates_with_provider(
+                        args, data, max_to_verify=20,
+                    )
+                    if _verify_summary.get("dropped", 0):
+                        print(
+                            f"[verify] dropped {_verify_summary['dropped']} "
+                            f"candidates with stale/bad quotes: "
+                            f"{_verify_summary['reasons']}",
+                            file=sys.stderr,
+                        )
+                except Exception as e:
+                    print(f"[verify] unexpected error: {e}", file=sys.stderr)
+
                 # Fire handlers FIRST so any actions land in their recent_actions
                 # buffers (and the quiet-heartbeat detector sees the deltas)
                 # BEFORE the dashboard renders.
@@ -3059,18 +3330,29 @@ async def scan_loop(args):
 
             if args.once:
                 break
-            # Tick the footer once per second so the "Next: +Ns" countdown is
-            # live. The dashboard's last line is the footer (no trailing
-            # newline), so the cursor is parked on that line right now —
-            # "\r\033[2K" jumps to column 1 and clears the line, then we
-            # repaint just the footer with the current remaining seconds.
+            # Tick the footer once per second so "Next: +Ns" stays live.
+            #
+            # After the dashboard paint, the cursor is parked at the END of
+            # the footer (last line, no trailing newline). To prevent stray
+            # logging from background tasks (notify failures, prev_close
+            # diagnostics, etc.) from clobbering the footer text, we drop the
+            # cursor to a fresh line BELOW the footer first. Each tick then
+            # uses ESC[F (cursor up to start of previous line) + ESC[2K
+            # (clear that line) to repaint just the footer, and a trailing
+            # newline to re-park below — so the cursor lives on a scratch
+            # line where stray prints can land without garbling anything.
+            print()  # park cursor below footer
             deadline = asyncio.get_event_loop().time() + args.interval
             while True:
                 remaining = int(round(deadline - asyncio.get_event_loop().time()))
                 if remaining <= 0:
                     break
-                print(f"\r\033[2K{render_footer(args, seconds_remaining=remaining)}",
-                      end="", flush=True)
+                # ESC[F: cursor to start of previous line. ESC[2K: clear it.
+                # Then repaint footer + newline to park below again.
+                print(
+                    f"\033[F\033[2K{render_footer(args, seconds_remaining=remaining)}",
+                    flush=True,
+                )
                 await asyncio.sleep(min(1.0, max(0.05, deadline - asyncio.get_event_loop().time())))
 
 
