@@ -15412,7 +15412,20 @@ def _inject_range_percentiles_ws_script(html: str, tickers: list[str]) -> str:
 
         document.querySelectorAll('.ref-close' + sel).forEach(function(el) {{
             var label = section === 'hourly' ? 'Reference Close' : (isLive ? 'Current Price' : 'Close');
-            el.innerHTML = '<strong>' + label + ':</strong> ' + fmtPrice(price) + liveBadge;
+            var diffBadge = '';
+            if (isLive) {{
+                var prevClose = parseFloat(el.dataset.prevClose);
+                if (!isNaN(prevClose) && prevClose > 0) {{
+                    var diffPct = (price - prevClose) / prevClose * 100;
+                    var arrow = diffPct >= 0 ? '▲' : '▼';
+                    var color = diffPct >= 0 ? '#27ae60' : '#c0392b';
+                    var sign = diffPct >= 0 ? '+' : '';
+                    diffBadge = ' <span style="color:' + color + ';font-size:12px;margin-left:6px">'
+                              + arrow + ' ' + sign + diffPct.toFixed(2) + '% vs prev ' + fmtPrice(prevClose)
+                              + '</span>';
+                }}
+            }}
+            el.innerHTML = '<strong>' + label + ':</strong> ' + fmtPrice(price) + liveBadge + diffBadge;
         }});
 
         var fmt = fmtPrice(price);
