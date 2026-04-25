@@ -1,0 +1,215 @@
+# UTP Daemon Configuration
+#
+# Used with: python utp.py daemon --live --config configs/daemon_default.yaml
+#
+# Single YAML that covers everything the daemon reads on startup:
+#   - Market-data streaming (IBKR ticks → Redis / QuestDB / WebSocket)
+#   - Option-quote background cache (see lower sections)
+#   - Trade defaults (default order type, LIMIT slippage, quote freshness)
+#
+# Trade defaults flow to the global `app.config.settings` object and surface
+# via GET /trade/defaults. Every LIMIT-pricing caller (CLI `utp trade`,
+# playbook, spread_scanner `trade` handler) that doesn't pin its own values
+# inherits these — change once here, everyone sees it.
+#
+# IBKR streaming limits (with 50% safety buffer):
+#   - Max 50 subscriptions (IBKR standard ~100 market data lines)
+#   - 22 msg/sec rate limit (IBKR soft limit 50 msg/sec)
+
+# ── Trade defaults (daemon-wide) ────────────────────────────────────────────
+# Any LIMIT-pricing caller (CLI, playbook, spread_scanner) that leaves
+# these unspecified will use these defaults. Pin explicit values per-caller
+# to override. Omit or set to null = leave env-var defaults in place.
+trade_defaults:
+  default_order_type: MARKET          # MARKET or LIMIT
+  limit_slippage_pct: 0.0             # fresh_credit * (1 - N/100) when LIMIT
+  limit_quote_max_age_sec: 10.0       # force provider refresh if cache older
+
+# ── Symbols to stream ───────────────────────────────────────────────────────
+# Simple string form: auto-detects index vs stock
+# Dict form: {symbol: SPX, sec_type: IND, exchange: CBOE}
+symbols:
+  # Major indices (auto-detected as IND with correct exchange)
+  - RUT
+  - NDX
+  - SPX
+  #- DJX
+  #- VIX
+  #- VIX1D
+
+  # Major ETFs (auto-detected as STK on SMART)
+  #- SPY
+  #- QQQ
+  #- IWM
+  #- DIA
+  #- TQQQ
+
+# ── Persistence targets ──────────────────────────────────────────────────────
+
+# Redis Pub/Sub — publishes to channels: realtime:quote:{SYMBOL}, realtime:trade:{SYMBOL}
+# Same format as polygon_realtime_streamer.py
+redis_enabled: true
+redis_url: "redis://lin1.kundu.dev:6379/0"
+redis_channel_prefix: "realtime"
+
+# QuestDB direct write — inserts into realtime_data table
+# Set questdb_url to enable (same connection string as QUEST_DB_STRING)
+questdb_enabled: false
+questdb_url: ""
+# Example: questdb_url: "questdb://stock_user:stock_password@lin1.kundu.dev:8812/stock_data"
+
+# ── Timing ────────────────────────────────────────────────────────────────────
+
+# How often to flush buffered ticks to persistence (seconds)
+tick_batch_interval: 0.5
+
+# Minimum seconds between Redis publishes per symbol (default: 1.0)
+# Ticks arriving faster are buffered; the latest value is published when the interval elapses.
+redis_publish_interval: 1.0
+
+# Only stream during US market hours (9:30 AM - 4:00 PM ET)
+market_hours_only: true
+
+# ── WebSocket ─────────────────────────────────────────────────────────────────
+
+# Broadcast ticks to /ws/quotes WebSocket clients
+ws_broadcast_enabled: true
+
+# ── Safety limits (50% buffer on IBKR limits) ────────────────────────────────
+
+# Max simultaneous market data subscriptions (IBKR allows ~100)
+max_subscriptions: 50
+
+# Max messages per second to IBKR API (IBKR limit is 50)
+rate_limit_msg_sec: 22.0
+
+# Hard price gate: reject any tick outside 60%-140% of previous close.
+# Also self-corrects: if 50+ ticks are rejected, re-seeds prev_close.
+# This field is kept for backward compat but the gate is now hardcoded at 60%-140%.
+close_band_pct: 0.40
+
+# ── Tick streaming mode ────────────────────────────────────────────────────
+# How to stream real-time price ticks for configured symbols.
+#
+# "auto"      — use ib_insync (reqMktData) if TWS connected, else CPG WebSocket
+# "websocket" — force CPG WebSocket streaming (wss://gateway/v1/api/ws)
+# "polling"   — force CPG snapshot polling (/iserver/marketdata/snapshot)
+streaming_mode: auto
+
+# Seconds between snapshot polls (only used when streaming_mode=polling)
+cpg_poll_interval: 2.0
+
+# ── Option quote streaming (background pre-fetch) ─────────────────────────
+# When enabled, the daemon continuously pre-fetches option quotes for streaming
+# symbols and caches them for instant serving via CLI and REST endpoints.
+#
+# Two-tier fetch:
+#   IBKR tier — narrow strike range (±2.5%), only DTE 0-2, frequent.  This is
+#               the freshness-critical hot zone where most trading attention
+#               focuses.  Realistic floor cycle is ~60s given measured IBKR
+#               latency of ~5s p50 / ~10s p95 per call (use `utp.py
+#               latency-probe` to verify).
+#   CSV tier  — wide strike range (±10%), all DTEs available in CSV exports,
+#               every option_quotes_poll_interval seconds.  File I/O — cheap.
+#
+# Read merge (in app/services/market_data.py): IBKR data wins when fresher than
+# the CSV warm cache; CSV fills in everything outside IBKR's hot zone.
+
+# Enable background option quote streaming
+option_quotes_enabled: true
+
+# Loop-tick interval — how often the cycle wakes to re-read CSV and check
+# whether the IBKR overlay gate is due.  Should be much smaller than
+# option_quotes_greeks_interval so the gate fires close to its scheduled
+# time (5s = ±2.5s of jitter relative to the 25s overlay).
+option_quotes_poll_interval: 5
+
+# Seconds between IBKR overlay fetches (tight strike range, DTE-filtered).
+# Realistic floor depends on per-call latency (utp.py latency-probe shows
+# ~5s p50 / ~10s p95) and option_quotes_ibkr_max_parallel.
+# 25s + parallel=6 fits the typical p50; tail outliers may time out at
+# 0.9 × interval (22.5s) and re-try on the next cycle.
+option_quotes_greeks_interval: 25
+
+# Max concurrent IBKR option-quote fetches.
+#
+# Provider-specific safe caps applied automatically (see _PROVIDER_PARALLEL_CAP
+# in option_quote_streaming.py):
+#   TWS  (IBKRLiveProvider): capped at 3   — TWS holds a market-data line per
+#                                            subscribed strike (~50/call); the
+#                                            standard line allotment is ~100,
+#                                            so parallel × strikes_per_call
+#                                            must stay well under that.
+#   CPG  (IBKRRestProvider): capped at 12  — rate-limited (9 msg/sec, 2 msg/call
+#                                            warm), tolerates higher parallelism.
+#
+# Per-call payload at default ±2.5% range:
+#   SPX → ~50–70 strikes per call
+#   NDX → ~50–55
+#   RUT → ~25–28
+#
+# 18 jobs (3 syms × 3 DTEs × 2 types) at parallel=N takes ~ceil(18/N) batches:
+#   parallel=3  → 6 batches × 5s p50 = 30s
+#   parallel=6  → 3 batches × 5s p50 = 15s   (default; CPG-tuned)
+#   parallel=9  → 2 batches × 5s p50 = 10s   (CPG can do this)
+#   parallel=12 → 2 batches × 5s p50 = 10s   (CPG max recommended)
+#
+# Setting this above the per-provider safe cap will be capped at runtime
+# (with a one-time warning).  Override the safe cap by editing
+# _PROVIDER_PARALLEL_CAP in option_quote_streaming.py.
+option_quotes_ibkr_max_parallel: 6
+
+# Single-flight guarantee: if the previous IBKR overlay hasn't fully drained
+# (cancellation lag, network hang, etc.), the next firing is skipped instead
+# of stacking pending requests against the broker.  Watch ibkr_overlay
+# .skipped_overlapping in /market/streaming/option-quotes/status — non-zero
+# means your broker latency is exceeding the overlay interval.
+
+# ── Tiered strike ranges ──────────────────────────────────────────────────
+# IBKR tier: narrow band around ATM where freshness matters most
+option_quotes_ibkr_strike_range_pct: 2.5
+
+# CSV tier: wide band — file reads are cheap so we cover more strikes
+option_quotes_csv_strike_range_pct: 10.0
+
+# Which DTEs to fetch from IBKR.  Omit (or set to ~) to fetch every resolved
+# expiration (legacy behavior).  Default focuses IBKR budget on DTE 0–2.
+option_quotes_ibkr_dte_list: [0, 1, 2]
+
+# Legacy: fallback if the ibkr_/csv_-specific ranges above aren't set.  Kept
+# for backwards compat with older configs.
+option_quotes_strike_range_pct: 10.0
+
+# Number of upcoming expirations to fetch per symbol (CSV scope).  IBKR scope
+# is further filtered by option_quotes_ibkr_dte_list.
+option_quotes_num_expirations: 6  # Cover DTE 0 through 5
+
+# CSV exports as primary fast source for option bid/ask/volume (~10ms per read)
+# IBKR data overlaid every greeks_interval seconds
+option_quotes_csv_primary: true
+option_quotes_csv_dir: ""          # Empty = auto-resolve ../../csv_exports/options
+
+# ── Read-time merge ──────────────────────────────────────────────────────
+# Per-strike rule applied at read time:
+#   1. IBKR has the strike AND its cache age ≤ ibkr_max_age_sec → IBKR wins
+#      (each row tagged source="ibkr_fresh")
+#   2. else CSV has the strike → CSV wins (source="csv")
+#   3. else IBKR has the strike (stale) → IBKR (source="ibkr_stale")
+# So within ibkr_max_age_sec, IBKR always wins.  Outside it — or for strikes
+# IBKR doesn't cover (anything beyond ±ibkr_strike_range_pct) — CSV fills in.
+option_quotes_ibkr_max_age_sec: 90
+
+# CSV staleness gate (applies during market hours only).  CSV exports lag
+# real-time by a few minutes; if the latest snapshot is older than this we
+# drop the row instead of returning stale data.  Outside market hours, CSV
+# is served regardless of age (live data isn't being produced).  Set 0 to
+# disable the gate.
+option_quotes_csv_max_age_market_sec: 900   # 15 min
+
+# ── Pre/post-market window ───────────────────────────────────────────────
+# How many minutes before regular open and after regular close to keep the
+# IBKR stream active.  Defaults extend from 09:20 ET to 16:10 ET (10 min on
+# each side of 09:30–16:00 ET regular hours).  Set to 0 to gate strictly to
+# regular hours; raise to 30 for early-pre-market warm-up.
+option_quotes_premarket_minutes: 10
+option_quotes_postmarket_minutes: 10
