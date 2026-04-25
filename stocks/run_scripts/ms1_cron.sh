@@ -23,17 +23,9 @@ python fetch_symbol_data.py I:NDX --latest --db-path $QUEST_DB_STRING --timezone
 
 
 python3 scripts/options_chain_download.py SPX NDX RUT --zero-dte-date-start $start_date  --zero-dte-date-end $end_date  --max-connections 30 --num-processes 2  --interval 5min --format-chain-csv --output-dir options_csv_output/
+
 python3 scripts/equities_download.py I:VIX1D I:VIX SPY DJX I:DJX TQQQ QQQ I:NDX I:SPX I:RUT  --start $start_date  --end $end_date --output-dir ./equities_output 
 #python3 scripts/options_chain_download.py SPX NDX DJX TQQQ RUT --track-from $start_date --track-end $end_date --track-days 30  --interval-minutes 5 --chunk-days 7 --max-connections 20 --num-processes 12      --window-workers 5      --skip-existing --format-chain-csv --output-dir ./options_csv_output_full/
-
-#for TICKER in RUT SPX NDX; do
-#    python3 scripts/options_chain_download.py $TICKER \
-#      --track-from $(date -v-10d +%Y-%m-%d) --track-end $(date +%Y-%m-%d) --track-days 7 --track-step 1 \
-#      --interval-minutes 5 --chunk-days 7 --max-connections 20 \
-#      --num-processes 12 --window-workers 5 \
-#      --format-chain-csv --output-dir ./options_csv_output_full_5/
-#done
-#wait
 
 python3 scripts/options_chain_download.py SPX RUT NDX DJX \
   --track-from $(date -v-10d +%Y-%m-%d) --track-end $(date +%Y-%m-%d) --track-days 30 --track-step 1 \
@@ -41,6 +33,11 @@ python3 scripts/options_chain_download.py SPX RUT NDX DJX \
   --num-processes 12 --window-workers 5 \
   --format-chain-csv --output-dir ./options_csv_output_full_5/
 
+ # python3 scripts/options_chain_download.py SPX NDX RUT \
+ #    --track-from 2025-01-01 --track-end 2026-04-22 --track-days 10 --track-step 1 \
+ #    --interval-minutes 5 --chunk-days 7 --max-connections 20 \
+ #    --num-processes 5 --window-workers 5 --skip-existing \
+ #    --format-chain-csv --output-dir ./options_csv_output_full2/
 
 #build the close models
 rm /tmp/close_model.log /tmp/rebuild_prediction_data.log
@@ -49,7 +46,7 @@ rm /tmp/close_model.log /tmp/rebuild_prediction_data.log
 # Calibrate recommended percentiles (skip weekends — only run before trading days)
 DOW=$(date +%u)  # 1=Mon ... 7=Sun
 if [ "$DOW" -le 5 ]; then
-    python3 -W ignore -m scripts.calibrate_recommendations --days 90 --target 95.0 \
+    python3 -W ignore -m scripts.calibrate_recommendations --days 90 --target 96 \
         --tickers NDX,SPX,RUT --output results/calibration/recommended_percentiles.json \
         > /tmp/calibrate_recommendations.log 2>&1
 fi
