@@ -1,0 +1,145 @@
+# Spread Scanner — Risk-Controlled Reference Config
+#
+# Encodes the risk-controlled policy this repo's analysis converged on:
+#   - market hours PT (06:31-10:00 window for trading, scanner runs anytime)
+#   - ROI band 1.5-5%
+#   - per-ticker OTM floor >= 1%
+#   - per-ticker credit floor (SPX 0.50 / NDX 1.00 / RUT 0.40)
+#   - one trade per minute per ticker, trusted prev_close required
+#   - $400k total risk cap with per-ticker sub-caps
+#   - 1 contract, LIMIT order at the observed credit
+#
+# All trade submissions route through utp.py's TradingClient to the UTP daemon.
+# The daemon decides paper vs live (via `python utp.py daemon --paper|--live`);
+# the scanner inherits that mode.
+#
+# Usage:
+#   python spread_scanner.py --config configs/spread_scanner_risk_controlled.yaml
+#
+# To go live: flip the `trade` handler from the commented block below into the
+# `handlers:` list. Leaving it commented keeps you in simulate-only mode.
+
+# ── Scanner screening ─────────────────────────────────────────────────────────
+tickers: [SPX, NDX, RUT]
+dte: [0]
+types: [put, call]
+widths:
+  SPX: 25
+  NDX: 60
+  RUT: 25
+#otm_pcts: [0.75, 1.0, 1.5, 2.0]
+interval: 20
+top: 5
+
+# ── Provider re-verify freshness ─────────────────────────────────────────────
+# Each Top-N candidate (and every spread fed to a trade/simulate handler) is
+# re-checked against the IBKR provider before display/firing. Both legs must
+# have an IBKR-cached quote at most this many seconds old, otherwise the
+# daemon refreshes from the broker. CSV-sourced fallback quotes are always
+# rejected at this gate (require_provider_source=True is enforced internally).
+# 0DTE: prices move fast — keep this tight.
+verify_max_age_sec: 30
+
+# ── Risk-tier filter (applies to top-picks + all handlers) ───────────────────
+# Requires `tiers: true` so tier data is fetched from db_server. Short-strike
+# must sit inside the named tier's safety band for that ticker.
+#
+# Two forms are accepted for min_tier / min_tier_close:
+#   1) Named tier — maps to the server's recommended percentile:
+#        conservative (cons / c) — widest safety band, fewest picks (~p98)
+#        moderate     (mod  / m) — middle ground                    (~p95)
+#        aggressive   (aggr / a) — narrowest band, most picks       (~p90)
+#   2) Raw percentile pN where N is 1-99 (e.g. p40, p75, p95):
+#        Reads directly from /range_percentiles `pct` map — no mapping layer.
+#        Higher N = safer (further OTM). p95 is roughly "moderate-to-cons",
+#        p75 is around "aggressive", p40 is close-to-the-money / risky.
+#        Useful when you want finer control than the three named tiers.
+#
+# Distinction between the two fields:
+#   min_tier       — intraday (today's price-path), updates through the day
+#   min_tier_close — close-to-close historical model (anchored to prev close)
+# Leaving them null = no tier filter.
+tiers: true
+min_tier: moderate         # or a percentile e.g. p95, p75, p40
+# min_tier_close: p95          # close-to-close variant
+
+# ── Absolute OTM floor (scanner-level) ───────────────────────────────────────
+# 0DTE has no time to recover from a breach — if the market touches the short
+# strike, you're likely max-loss. So we pair the dynamic tier filter above
+# with a hard minimum distance to spot. Effective floor per sym:
+#   max(min_otm, min_otm_per_ticker[sym])
+min_otm: .5                   # baseline: no spread closer than 1% OTM
+#min_otm_per_ticker:            # per-ticker overrides — higher wins
+#  SPX: .5
+#  NDX: .5                     # NDX's percent moves are roughly 2x SPX's
+#  RUT: .5
+
+# ── Action handlers ──────────────────────────────────────────────────────────
+handlers:
+  # Always-on: append every scan's qualifying spreads to JSONL for replay/analysis.
+  - type: log
+    min_norm_roi: 2.5
+    path: nROI.log.jsonl
+
+  # Email on higher-threshold hits, gated to market hours.
+  #- type: notify
+  #  min_norm_roi: 3.5
+  #  email: anirbankundu@gmail.com
+  #  gate_market_hours: true
+
+  # Shadow-mode: margin-check every would-have-traded spread; never submits.
+  # Same policy as the live `trade` handler so the two logs are directly
+  # comparable (shadow vs actual).
+  - type: simulate_trade
+    # Time-of-day schedule replaces the old scalar `min_norm_roi: 3`.
+    # Rationale from the 2026-04-22 session analysis:
+    #   - morning open (06:30-07:30 PT) produced nROI 4+ regularly → 2.0
+    #     is a sane bar that catches the meaningful entries
+    #   - after 07:30 PT, most candidates settle into the 1.5-2.5 nROI
+    #     range; 1.5 keeps the funnel open for the rest of the session
+    # Entries are evaluated in order; the LAST entry (with no `until`) is
+    # the open-ended fallback for the rest of the day.
+    min_norm_roi_schedule:
+      - until: "07:30"       # PT; inclusive on the boundary
+        value: 2.0
+      - value: 1.5           # after 07:30 PT
+    # Per-ticker overrides — currently OFF. When ready to enable, e.g.:
+    #   min_norm_roi_per_ticker:
+    #     RUT: 1.5           # RUT rarely reaches 2+ nROI at 0DTE
+    #     NDX: 3.0           # NDX typically has higher nROI headroom
+    # Values may be scalars OR their own schedules.
+    min_norm_roi_per_ticker: {}
+    log_file: trades_sim_dte0.jsonl
+    daemon_url: http://localhost:8000
+    policy: &trade_policy
+      roi_pct: [1, 5.0]
+      min_otm_pct:  {SPX: 0.8, NDX: 1.0, RUT: 1.0}
+      min_credit:   {SPX: 0.35, NDX: .7, RUT: 0.3}
+      max_total_risk: 300000
+      max_per_ticker_risk: {SPX: 140000, NDX: 180000, RUT: 120000}
+      # Dollar cap on RISK PER TRADE. The handler computes
+      #   contracts = max(1, floor(max_risk_per_trade / per_contract_max_loss))
+      # so a larger budget sizes up the trade instead of placing multiple
+      # separate trades. If a ticker is omitted from this map, the default
+      # is `spread.width * 100` (≈ 1 contract's worst-case loss).
+      # One trade per ticker fires per scan cycle; `contracts` is the knob.
+      max_risk_per_trade:
+        SPX: 2500        # ≈ 2-3 contracts (SPX width 25 → 2500/contract max loss)
+        NDX: 6000       # ≈ 2 contracts (NDX width 60 → 6000/contract)
+        RUT: 2500        # ≈ 2 contracts (RUT width 25 → 2500/contract)
+      require_prev_close: true
+      # MARKET: immediate fill at the prevailing NBBO credit.
+      # LIMIT:  submit at the observed credit; may not fill.
+      order_type: MARKET
+      stop_loss_multiplier: 2.0
+      trading_window_pt:
+        start: "06:31"
+        end:   "10:00"
+
+  # Live trading — uncomment to activate. Uses the SAME policy as simulate_trade
+  # via the YAML anchor above.
+  # - type: trade
+  #   min_norm_roi: 1.5
+  #   log_file: trades_live.jsonl
+  #   daemon_url: http://localhost:8000
+  #   policy: *trade_policy

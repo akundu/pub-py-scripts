@@ -13040,6 +13040,33 @@ class TestSpreadScanner:
         b = render_spread_cell(without_delta, prev_close=7100.0, dte=0)
         assert _visible_len(a) == _visible_len(b) == COL_WIDTH
 
+    def test_scanner_config_verify_max_age_default_30(self):
+        """Default verify_max_age_sec is 30s — tight enough for 0DTE."""
+        from spread_scanner import ScannerConfig
+        cfg = ScannerConfig()
+        assert cfg.verify_max_age_sec == 30.0
+
+    def test_scanner_config_verify_max_age_from_yaml(self, tmp_path):
+        """YAML can override verify_max_age_sec — typical use is 60 for
+        DTE 1-3 where slightly older quotes are acceptable."""
+        import yaml as _yaml
+        from spread_scanner import ScannerConfig
+        p = tmp_path / "cfg.yaml"
+        p.write_text(_yaml.safe_dump({"verify_max_age_sec": 60}))
+        cfg = ScannerConfig.from_yaml(str(p))
+        assert cfg.verify_max_age_sec == 60
+
+    def test_verify_max_age_sec_propagates_to_args(self, tmp_path):
+        """The CLI default for --verify-max-age-sec is overridden by YAML."""
+        import yaml as _yaml
+        from spread_scanner import ScannerConfig, parse_args
+        p = tmp_path / "cfg.yaml"
+        p.write_text(_yaml.safe_dump({"verify_max_age_sec": 45}))
+        cfg = ScannerConfig.from_yaml(str(p))
+        defaults = cfg.to_cli_defaults()
+        args = parse_args(argv=[], defaults=defaults)
+        assert args.verify_max_age_sec == 45
+
     def test_top_picks_shows_verification_marker(self):
         """Rows that went through the provider re-verify show ✓ + age; rows
         that didn't (e.g. candidates below the verify batch cutoff) show —."""

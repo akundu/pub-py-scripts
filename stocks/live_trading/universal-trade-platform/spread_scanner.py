@@ -196,6 +196,13 @@ class ScannerConfig:
     # Number of most-recent action rows shown at the bottom of the dashboard
     # (from trade/simulate-trade handlers). 0 = hide the panel entirely.
     recent_actions_count: int = 3
+    # Pre-display provider re-verify freshness — the IBKR-cache age threshold
+    # passed to `verify_spread_pricing(max_age=...)` for each leg before a
+    # candidate is shown in Top-N or fired by a trade/simulate handler.
+    # Default 30s. DTE-sensitive: 0DTE moves fast, so keep this tight (30s).
+    # Multi-DTE positions (1-3) tolerate slightly older quotes — 60s is fine.
+    # Both legs must independently pass this freshness gate.
+    verify_max_age_sec: float = 30.0
     handlers: list[dict] = field(default_factory=list)
 
     @classmethod
@@ -249,6 +256,7 @@ class ScannerConfig:
         d["min_tier"] = self.min_tier
         d["min_tier_close"] = self.min_tier_close
         d["recent_actions_count"] = self.recent_actions_count
+        d["verify_max_age_sec"] = self.verify_max_age_sec
         return d
 
 
@@ -3089,13 +3097,17 @@ async def _verify_top_candidates_with_provider(
     # parallel so the total wall time is ~max single call, not N × single.
     #
     # Freshness policy:
-    #   - `max_age=15` — IBKR-cached quote ≤15s is considered current and
-    #     reused (no broker round-trip). Older IBKR cache triggers a fresh
-    #     provider fetch.
+    #   - `max_age` — IBKR-cached quote at most this many seconds old is
+    #     considered current and reused (no broker round-trip). Older IBKR
+    #     cache triggers a fresh provider fetch. Configurable via
+    #     `verify_max_age_sec` in the YAML or `--verify-max-age-sec` CLI.
+    #     Default 30s. Recommendation: 30 for 0DTE (fast price action),
+    #     60 for 1-3 DTE (positions tolerate slightly older quotes).
     #   - `require_provider_source=True` — CSV-sourced fallback quotes are
     #     REJECTED at verify time. CSV is fine for display but not for a
     #     pre-trade confirmation; we only green-light candidates whose
     #     per-leg `source` is `ibkr_fresh` or `provider`.
+    verify_max_age = float(getattr(args, "verify_max_age_sec", None) or 30.0)
     try:
         async with TradingClient(daemon_url) as client:
             async def _one(c):
@@ -3103,7 +3115,7 @@ async def _verify_top_candidates_with_provider(
                     symbol=c["symbol"], expiration=c["expiration"],
                     option_type=c["option_type"],
                     short_strike=c["short_strike"], long_strike=c["long_strike"],
-                    max_age=15, force_refresh=False,
+                    max_age=verify_max_age, force_refresh=False,
                     require_provider_source=True,
                 )
             results = await asyncio.gather(
@@ -3469,6 +3481,13 @@ Examples:
         "--recent-actions", dest="recent_actions_count", type=int, default=3,
         help="Number of recent trade/simulate actions to show at the bottom of the dashboard "
              "(default: 3, 0 to hide the panel).",
+    )
+    parser.add_argument(
+        "--verify-max-age-sec", dest="verify_max_age_sec", type=float, default=30.0,
+        help="Provider re-verify freshness threshold (seconds). The IBKR-cache age "
+             "for each leg's quote must be ≤ this value before a candidate is allowed "
+             "into Top-N or fired by a trade/simulate handler. Recommendation: 30 for "
+             "0DTE, 60 for 1-3 DTE. YAML key: verify_max_age_sec. (default: 30.0)",
     )
     parser.add_argument(
         "--min-credit", type=float, default=0,
