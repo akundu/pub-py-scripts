@@ -142,6 +142,11 @@ def register_routes(app: web.Application) -> None:
     from common.notify import handle_notify
     app.router.add_post("/api/notify", handle_notify)
 
+    # Gemini proxy endpoints (per-client topic gating; LAN admin bypass)
+    from common.gemini_proxy import handle_gemini_ask, handle_gemini_ping
+    app.router.add_post("/api/gemini/ask", handle_gemini_ask)
+    app.router.add_get("/api/gemini/ping", handle_gemini_ping)
+
     # Catch-all handler for unknown routes (must be last)
     app.router.add_get("/{path:.*}", handle_catch_all)
     app.router.add_post("/{path:.*}", handle_catch_all)

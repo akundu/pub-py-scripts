@@ -22,11 +22,49 @@ import csv
 import signal
 import pandas as pd
 import yaml
-from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Any
+import requests
+from datetime import datetime, timedelta, timezone, date as _date
+from typing import Dict, List, Any, Optional
 from tabulate import tabulate
 from pathlib import Path
 from zoneinfo import ZoneInfo
+
+# Polygon REST base for the historical NBBO quotes endpoint (used by the
+# historical-mode bar fetcher below). The polygon SDK client doesn't expose
+# /v3/quotes pagination cleanly, so we hit it via `requests` directly.
+_POLYGON_BASE = "https://api.polygon.io"
+_TRADING_DAY_START_UTC = "T13:30:00Z"
+_TRADING_DAY_END_UTC = "T20:30:00Z"
+
+
+def _polygon_get_json(
+    url: str,
+    params: Optional[Dict] = None,
+    api_key: Optional[str] = None,
+    timeout: int = 15,
+) -> Optional[Dict]:
+    """GET with simple exponential backoff; returns parsed JSON or None.
+
+    Mirrors `scripts/options_quotes_augment.py:_get`. Used by the historical
+    quote-bars fetcher path. Retries up to 3 times on rate-limit / 5xx.
+    """
+    if params is not None and api_key:
+        params = {**params, "apiKey": api_key}
+    elif api_key and "apiKey=" not in url:
+        sep = "&" if "?" in url else "?"
+        url = f"{url}{sep}apiKey={api_key}"
+    for attempt in range(3):
+        try:
+            r = requests.get(url, params=params, timeout=timeout)
+            if r.status_code == 200:
+                return r.json()
+            if r.status_code in (429, 502, 503, 504):
+                time.sleep(2 ** attempt)
+                continue
+            return None
+        except requests.RequestException:
+            time.sleep(2 ** attempt)
+    return None
 
 # Ensure project root is on sys.path so `common` can be imported when running from any cwd
 CURRENT_DIR = Path(__file__).resolve().parent
@@ -131,9 +169,26 @@ class HistoricalDataFetcher:
 
         return (seconds_to_open, seconds_to_close)
 
-    def __init__(self, api_key: str, data_dir: str = "data", verbose: bool = False, snapshot_max_concurrent: int = 0, refresh_threshold_seconds: int | None = None):
+    def __init__(
+        self,
+        api_key: str,
+        data_dir: str = "data",
+        verbose: bool = False,
+        snapshot_max_concurrent: int = 0,
+        refresh_threshold_seconds: int | None = None,
+        # Historical-mode flags — when target_date is in the past, switch from
+        # the live snapshot endpoint (which only knows current bid/ask) to the
+        # historical NBBO quotes endpoint and resample to N-min bars.
+        historical_mode: str = "auto",
+        bar_interval_minutes: int = 15,
+        quote_per_contract_timeout_sec: float = 30.0,
+        quote_max_pages: int = 6,
+        csv_layout: str = "per-expiration",
+        csv_trading_date: str | None = None,
+    ):
         if not api_key:
             raise ValueError("Polygon API key is required.")
+        self.api_key = api_key
         self.client = RESTClient(api_key)
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(exist_ok=True)
@@ -141,11 +196,144 @@ class HistoricalDataFetcher:
         # 0 disables per-contract snapshot concurrency; otherwise bounded parallelism
         self.snapshot_max_concurrent = max(0, int(snapshot_max_concurrent))
         self.refresh_threshold_seconds = refresh_threshold_seconds
+        # Historical-mode config
+        if historical_mode not in ("auto", "on", "off"):
+            historical_mode = "auto"
+        self.historical_mode = historical_mode
+        self.bar_interval_minutes = max(1, int(bar_interval_minutes))
+        self.quote_per_contract_timeout_sec = float(quote_per_contract_timeout_sec)
+        self.quote_max_pages = max(1, int(quote_max_pages))
+        # CSV layout: "per-expiration" (default, legacy) groups rows by their
+        # expiration date — `data_dir/options/SYMBOL/{exp}.csv`.
+        # "per-trading-date" groups by the trading date the rows were captured —
+        # `data_dir/SYMBOL/SYMBOL_options_{trading_date}.csv` — and is what the
+        # nROI analysis pipeline expects (matches options_csv_output_full
+        # convention used by options_quotes_augment.py).
+        if csv_layout not in ("per-expiration", "per-trading-date"):
+            csv_layout = "per-expiration"
+        self.csv_layout = csv_layout
+        self.csv_trading_date: Optional[str] = csv_trading_date
 
     @staticmethod
     def _is_market_open(dt: datetime | None = None) -> bool:
         # Delegate to shared implementation (America/New_York)
         return common_is_market_hours(dt, "America/New_York")
+
+    # ─── Historical-mode (NBBO-quote-bars) helpers ──────────────────────
+    #
+    # When --historical-mode is "auto" we use the historical-quotes endpoint
+    # if and only if target_date < today. The live snapshot endpoint cannot
+    # answer "what was bid/ask on 2025-06-15" — it only returns current
+    # state — so for any historical date we hit /v3/quotes/{contract}
+    # directly, paginate the day's NBBO stream, and resample to N-min bars.
+
+    def _should_use_historical_mode(self, target_date_str: str) -> bool:
+        """Decide whether the historical-quotes path applies for this date."""
+        if self.historical_mode == "off":
+            return False
+        if self.historical_mode == "on":
+            return True
+        # "auto" — use historical-quotes only when the target is in the past.
+        try:
+            t = datetime.strptime(target_date_str, "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            return False
+        return t < _date.today()
+
+    def _fetch_quote_bars_for_contract(
+        self,
+        contract_obj,
+        target_date_str: str,
+    ) -> List[Dict[str, Any]]:
+        """For one contract on one historical date, pull the NBBO quote stream
+        from `/v3/quotes/{ticker}` (paginated), resample to N-minute bars
+        (median bid/ask within each bar), and return one dict per bar.
+
+        Bails early if a single contract is taking longer than
+        `self.quote_per_contract_timeout_sec` — without this cap, one slow
+        paginating contract can hold up the whole day's worker pool.
+
+        Schema of returned dicts matches what `_fetch_snapshot` would produce
+        for one row: same keys as the existing `details` dict, with greeks /
+        IV / FMV left blank (the quotes endpoint doesn't expose them).
+        """
+        contract_ticker = getattr(contract_obj, "ticker", None)
+        if not contract_ticker:
+            return []
+        contract_type = getattr(contract_obj, "contract_type", "N/A")
+        strike = getattr(contract_obj, "strike_price", "N/A")
+        expiration = getattr(contract_obj, "expiration_date", "N/A")
+
+        url = f"{_POLYGON_BASE}/v3/quotes/{contract_ticker}"
+        params = {
+            "timestamp.gte": f"{target_date_str}{_TRADING_DAY_START_UTC}",
+            "timestamp.lte": f"{target_date_str}{_TRADING_DAY_END_UTC}",
+            "limit": 50000,
+            "order": "asc",
+        }
+        quotes: List[Dict] = []
+        next_url = None
+        pages = 0
+        t0 = time.time()
+        while True:
+            if time.time() - t0 > self.quote_per_contract_timeout_sec:
+                break
+            data = _polygon_get_json(
+                next_url if next_url else url,
+                params=None if next_url else params,
+                api_key=self.api_key,
+                timeout=15,
+            )
+            if not data:
+                break
+            for q in data.get("results", []):
+                quotes.append({
+                    "ts_ns": q.get("sip_timestamp"),
+                    "bid_price": q.get("bid_price"),
+                    "ask_price": q.get("ask_price"),
+                })
+            next_url = data.get("next_url")
+            pages += 1
+            if not next_url or pages > self.quote_max_pages:
+                break
+        if not quotes:
+            return []
+
+        # Resample to N-min bars. We keep the median bid/ask within each bar
+        # because the raw NBBO stream is too noisy to use as-is.
+        df = pd.DataFrame(quotes)
+        df["ts"] = pd.to_datetime(df["ts_ns"], unit="ns", utc=True)
+        df = df.set_index("ts").sort_index()
+        bars = (
+            df.resample(f"{self.bar_interval_minutes}min")
+              .agg({"bid_price": "median", "ask_price": "median"})
+              .dropna(subset=["bid_price", "ask_price"], how="all")
+        )
+
+        rows: List[Dict[str, Any]] = []
+        for ts, row in bars.iterrows():
+            rows.append({
+                "ticker": contract_ticker,
+                "type": str(contract_type).lower() if contract_type else "",
+                "strike": strike,
+                "expiration": expiration,
+                "bid": float(row["bid_price"]) if pd.notna(row["bid_price"]) else None,
+                "ask": float(row["ask_price"]) if pd.notna(row["ask_price"]) else None,
+                "day_close": None,
+                "fmv": None,
+                "delta": None,
+                "gamma": None,
+                "theta": None,
+                "vega": None,
+                "implied_volatility": None,
+                "volume": None,
+                # Per-bar timestamp — written to the CSV's `timestamp` column
+                # so each bar gets a row tagged at its actual moment, not the
+                # current wall-clock time the existing snapshot path uses.
+                "timestamp": ts.strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+                "last_quote_timestamp": ts.to_pydatetime(),
+            })
+        return rows
 
     def _get_cache_duration_minutes(self) -> int:
         """Get cache duration in minutes based on market status."""
@@ -192,15 +380,30 @@ class HistoricalDataFetcher:
         return age_seconds > (cache_duration * 60)
 
     def _save_options_to_csv(self, symbol: str, options_data: Dict[str, Any]) -> None:
-        """Save options data to CSV files organized by expiration date."""
+        """Save options data to CSV files.
+
+        Layout depends on `self.csv_layout`:
+          - "per-expiration" (default, legacy): one CSV per expiration date
+            at `data_dir/options/SYMBOL/{exp}.csv`. Multiple invocations
+            append to the same file.
+          - "per-trading-date": one CSV per trading date at
+            `data_dir/SYMBOL/SYMBOL_options_{trading_date}.csv`. All
+            expirations are inside that one file. Trading date is taken
+            from `self.csv_trading_date` if set, otherwise inferred from
+            each row's `timestamp` (YYYY-MM-DD prefix).
+        """
         # Handle both data structures: direct contracts or nested in 'data'
         contracts = options_data.get('contracts', [])
         if not contracts and 'data' in options_data:
             contracts = options_data['data'].get('contracts', [])
-        
+
         if not contracts:
             return
         current_time = datetime.now().isoformat()
+        if self.csv_layout == "per-trading-date":
+            return self._save_options_to_csv_by_trading_date(
+                symbol, contracts, current_time,
+            )
         
         # Group contracts by expiration date
         by_expiration = {}
@@ -222,8 +425,12 @@ class HistoricalDataFetcher:
             # Prepare data for CSV
             csv_data = []
             for contract in contracts_list:
+                # Historical-mode rows carry their own per-bar timestamp; the
+                # live-snapshot path leaves it unset so we fall back to the
+                # current wall-clock time for consistency with prior behavior.
+                row_ts = contract.get('timestamp') or current_time
                 csv_data.append({
-                    'timestamp': current_time,
+                    'timestamp': row_ts,
                     'ticker': contract.get('ticker', ''),
                     'type': contract.get('type', ''),
                     'strike': contract.get('strike', ''),
@@ -255,6 +462,76 @@ class HistoricalDataFetcher:
                 print(f"Saved {len(csv_data)} contracts for {symbol} expiration {exp_date} to {csv_path}")
             else:
                 # In quiet mode, still emit a minimal trace for debugging wrong path issues
+                print(str(csv_path))
+
+    def _save_options_to_csv_by_trading_date(
+        self,
+        symbol: str,
+        contracts: List[Dict[str, Any]],
+        current_time: str,
+    ) -> None:
+        """Group rows by trading date (the date prefix of each row's
+        `timestamp`) and write one CSV per (symbol, trading_date) at
+        `data_dir/SYMBOL/SYMBOL_options_{trading_date}.csv`. This matches
+        the layout that `options_csv_output_full/` uses and that the nROI
+        analysis pipeline reads.
+        """
+        norm_symbol = (symbol or "").strip().upper() or "UNKNOWN"
+        symbol_dir = self.data_dir / norm_symbol
+        symbol_dir.mkdir(parents=True, exist_ok=True)
+
+        # Group rows by their trading-date — preferred source is the
+        # constructor-supplied `csv_trading_date`; fall back to the row's
+        # own timestamp YYYY-MM-DD prefix; final fallback is "today".
+        by_trading_date: Dict[str, List[Dict[str, Any]]] = {}
+        default_td = self.csv_trading_date
+        if not default_td:
+            default_td = datetime.now().strftime("%Y-%m-%d")
+        for c in contracts:
+            ts = c.get("timestamp") or current_time
+            td = self.csv_trading_date or (ts[:10] if ts else default_td)
+            by_trading_date.setdefault(td, []).append(c)
+
+        fieldnames = [
+            "timestamp", "ticker", "type", "strike", "expiration",
+            "bid", "ask", "day_close", "vwap", "fmv",
+            "delta", "gamma", "theta", "vega", "implied_volatility", "volume",
+        ]
+
+        for trading_date, rows in by_trading_date.items():
+            csv_path = symbol_dir / f"{norm_symbol}_options_{trading_date}.csv"
+            csv_data = []
+            for c in rows:
+                row_ts = c.get("timestamp") or current_time
+                csv_data.append({
+                    "timestamp": row_ts,
+                    "ticker": c.get("ticker", ""),
+                    "type": c.get("type", ""),
+                    "strike": c.get("strike", ""),
+                    "expiration": c.get("expiration", ""),
+                    "bid": c.get("bid", ""),
+                    "ask": c.get("ask", ""),
+                    "day_close": c.get("day_close", ""),
+                    "vwap": c.get("vwap", ""),
+                    "fmv": c.get("fmv", ""),
+                    "delta": c.get("delta", ""),
+                    "gamma": c.get("gamma", ""),
+                    "theta": c.get("theta", ""),
+                    "vega": c.get("vega", ""),
+                    "implied_volatility": c.get("implied_volatility", ""),
+                    "volume": c.get("volume", ""),
+                })
+            file_exists = csv_path.exists()
+            with open(csv_path, "a", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                if not file_exists:
+                    writer.writeheader()
+                writer.writerows(csv_data)
+            if not self.quiet:
+                print(
+                    f"Saved {len(csv_data)} rows for {norm_symbol} trading_date {trading_date} to {csv_path}"
+                )
+            else:
                 print(str(csv_path))
 
     def _load_options_from_csv(self, symbol: str, expiration_date: str) -> List[Dict[str, Any]]:
@@ -884,30 +1161,55 @@ class HistoricalDataFetcher:
                     pass
                 return details
 
+            # Historical-mode wrapper: in past-date sweeps, pull historical NBBO
+            # quote-bars from /v3/quotes; otherwise fall back to the live
+            # snapshot path. Always returns a LIST of dicts so the caller can
+            # `extend()` uniformly (snapshot path returns a 1-element list,
+            # historical path returns one entry per resampled bar).
+            use_hist = self._should_use_historical_mode(target_date_str)
+            if use_hist and not self.quiet:
+                print(
+                    f"  Historical mode ON for {target_date_str} — "
+                    f"using NBBO quote-bars at {self.bar_interval_minutes}-min resolution",
+                    flush=True,
+                )
+
+            def _fetch_contract_rows(contract_obj, idx: int) -> List[Dict[str, Any]]:
+                if use_hist:
+                    try:
+                        return self._fetch_quote_bars_for_contract(
+                            contract_obj, target_date_str,
+                        )
+                    except Exception:
+                        return []
+                # Live-snapshot path — wrap the existing single-dict result.
+                d = _fetch_snapshot(contract_obj, idx)
+                return [d] if d else []
+
             if self.snapshot_max_concurrent > 0:
                 from concurrent.futures import ThreadPoolExecutor, as_completed
                 max_workers = min(self.snapshot_max_concurrent, 32)
                 with ThreadPoolExecutor(max_workers=max_workers) as pool:
                     futures = []
                     for idx, c in enumerate(filtered_contracts):
-                        futures.append(pool.submit(_fetch_snapshot, c, idx))
+                        futures.append(pool.submit(_fetch_contract_rows, c, idx))
                     processed = 0
                     for fut in as_completed(futures):
-                        res = fut.result() or {}
-                        if res:
-                            options_data["contracts"].append(res)
+                        rows = fut.result() or []
+                        if rows:
+                            options_data["contracts"].extend(rows)
                         processed += 1
                         if processed % 10 == 0 and not self.quiet:
-                            ticker = res.get('ticker', 'unknown') if res else 'unknown'
-                            print(f"  ...processed {processed} of {len(filtered_contracts)} contracts (latest: {ticker})...", flush=True)
+                            latest = rows[-1].get('ticker', 'unknown') if rows else 'unknown'
+                            print(f"  ...processed {processed} of {len(filtered_contracts)} contracts (latest: {latest})...", flush=True)
             else:
                 for i, contract in enumerate(filtered_contracts):
                     if i > 0 and i % 10 == 0 and not self.quiet:
                         contract_ticker = getattr(contract, 'ticker', 'unknown')
                         print(f"  ...processed {i} of {len(filtered_contracts)} contracts (latest: {contract_ticker})...", flush=True)
-                    res = _fetch_snapshot(contract, i)
-                    if res:
-                        options_data["contracts"].append(res)
+                    rows = _fetch_contract_rows(contract, i)
+                    if rows:
+                        options_data["contracts"].extend(rows)
 
             processing_end = time.time()
             if not self.quiet:
@@ -1276,9 +1578,15 @@ async def display_and_save_saved_options(
         getattr(args, 'data_dir', None),
         getattr(args, 'verbose', False),
         getattr(args, 'snapshot_max_concurrent', 0),
-        getattr(args, 'refresh_threshold_seconds', None)
+        getattr(args, 'refresh_threshold_seconds', None),
+        historical_mode=getattr(args, 'historical_mode', 'auto'),
+        bar_interval_minutes=getattr(args, 'bar_interval_minutes', 15),
+        quote_per_contract_timeout_sec=getattr(args, 'quote_per_contract_timeout_sec', 30.0),
+        quote_max_pages=getattr(args, 'quote_max_pages', 6),
+        csv_layout=getattr(args, 'csv_layout', 'per-expiration'),
+        csv_trading_date=getattr(args, 'date', None),
     )
-    
+
     for symbol in symbols_list:
         try:
             # Get the target date(s) - use start_date if provided, otherwise date
@@ -1604,7 +1912,13 @@ def _run_for_symbol(symbol: str, args_namespace: argparse.Namespace, api_key: st
             args_namespace.data_dir,
             getattr(args_namespace, 'verbose', False),
             getattr(args_namespace, 'snapshot_max_concurrent', 0),
-            getattr(args_namespace, 'refresh_threshold_seconds', None)
+            getattr(args_namespace, 'refresh_threshold_seconds', None),
+            historical_mode=getattr(args_namespace, 'historical_mode', 'auto'),
+            bar_interval_minutes=getattr(args_namespace, 'bar_interval_minutes', 15),
+            quote_per_contract_timeout_sec=getattr(args_namespace, 'quote_per_contract_timeout_sec', 30.0),
+            quote_max_pages=getattr(args_namespace, 'quote_max_pages', 6),
+            csv_layout=getattr(args_namespace, 'csv_layout', 'per-expiration'),
+            csv_trading_date=getattr(args_namespace, 'date', None),
         )
         
         async def _inner():
@@ -2977,6 +3291,55 @@ Examples:
         action='store_true',
         default=False,
         help="Enable verbose output (default: quiet mode)."
+    )
+
+    # ─── Historical-mode flags ─────────────────────────────────────────
+    # When the target date is historical the live-snapshot endpoint cannot
+    # answer 'what was bid/ask at that moment' — only 'what is bid/ask
+    # right now'. With --historical-mode auto (default) we automatically
+    # fall back to /v3/quotes/{contract} for past dates, paginate the day's
+    # NBBO stream, and resample to N-minute bars.
+    parser.add_argument(
+        '--historical-mode',
+        choices=['auto', 'on', 'off'],
+        default='auto',
+        help=(
+            "When fetching historical dates, switch from live snapshot to "
+            "NBBO quote bars. 'auto' (default) = on whenever target_date "
+            "< today; 'on' = always force quote-bars; 'off' = always use "
+            "live snapshots."
+        ),
+    )
+    parser.add_argument(
+        '--bar-interval-minutes',
+        type=int,
+        default=15,
+        help="Resample interval for NBBO quote bars in historical mode (default: 15).",
+    )
+    parser.add_argument(
+        '--quote-per-contract-timeout-sec',
+        type=float,
+        default=30.0,
+        help="Per-contract timeout for the NBBO quote stream in seconds (default: 30). "
+             "Prevents one slow paginating contract from holding up a worker.",
+    )
+    parser.add_argument(
+        '--quote-max-pages',
+        type=int,
+        default=6,
+        help="Cap on quote-endpoint pagination depth per contract (default: 6 × 50K = 300K quotes).",
+    )
+    parser.add_argument(
+        '--csv-layout',
+        choices=['per-expiration', 'per-trading-date'],
+        default='per-expiration',
+        help=(
+            "CSV file layout. 'per-expiration' (default, legacy) writes "
+            "data_dir/options/SYMBOL/{exp}.csv. 'per-trading-date' writes "
+            "data_dir/SYMBOL/SYMBOL_options_{trading_date}.csv — the layout "
+            "that options_csv_output_full uses and that the nROI analysis "
+            "pipeline reads. Use this for daily augmentation cron jobs."
+        ),
     )
     # Remove old CSV flags (backward compatibility shim)
     parser.add_argument(
