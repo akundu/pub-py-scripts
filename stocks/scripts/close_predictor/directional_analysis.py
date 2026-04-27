@@ -251,6 +251,7 @@ def compute_asymmetric_bands(
     # Symmetric band definitions: band_name -> (lo_pct, hi_pct)
     band_defs = {
         "P95": (2.5, 97.5),
+        "P96": (2.0, 98.0),
         "P97": (1.5, 98.5),
         "P98": (1.0, 99.0),
         "P99": (0.5, 99.5),

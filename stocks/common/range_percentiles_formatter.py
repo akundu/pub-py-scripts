@@ -717,6 +717,7 @@ PERCENTILE_COLORS = {
     75: "rgb(54, 162, 235)",   # Blue
     90: "rgb(255, 206, 86)",   # Yellow
     95: "rgb(255, 159, 64)",   # Orange
+    96: "rgb(255, 130, 50)",   # Darker orange
     98: "rgb(255, 99, 132)",   # Red
     99: "rgb(153, 102, 255)",  # Purple
     100: "rgb(201, 203, 207)", # Gray

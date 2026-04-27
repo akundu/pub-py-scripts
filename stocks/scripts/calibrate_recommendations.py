@@ -29,7 +29,6 @@ import json
 import sys
 import time
 from datetime import datetime, timedelta
-from multiprocessing import Pool
 from pathlib import Path
 
 # Ensure project root is on path
@@ -39,12 +38,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 DEFAULT_OUTPUT = str(PROJECT_ROOT / "results" / "calibration" / "recommended_percentiles.json")
 DEFAULT_TICKERS = ["NDX", "SPX", "RUT"]
-DEFAULT_DAYS = 90
+DEFAULT_DAYS = 250  # ~1 year of trading days — finer hit-rate granularity than 90-day window.
 DEFAULT_TARGET = 95.0
-# Band levels tested by backtest_band_accuracy.py
-BAND_LEVELS = [95, 97, 98, 99, 100]
-# All percentile levels (including derived for intraday/max-move)
-ALL_PERCENTILE_LEVELS = [75, 80, 85, 90, 95, 97, 98, 99, 100]
+DEFAULT_WORKERS = 0  # 0 = auto (cpu_count), 1 = sequential
+# Band levels tested by backtest_band_accuracy.py. P96 added so targets in the
+# 95-97 range have an intermediate level to land on instead of jumping to P100.
+BAND_LEVELS = [95, 96, 97, 98, 99, 100]
+# All percentile levels (including derived for intraday/max-move).
+ALL_PERCENTILE_LEVELS = [75, 80, 85, 90, 95, 96, 97, 98, 99, 100]
 
 
 def is_next_trading_day() -> bool:
@@ -54,21 +55,26 @@ def is_next_trading_day() -> bool:
 
 
 def run_single_ticker(args):
-    """Run backtest for a single ticker (called by multiprocessing pool)."""
-    ticker, num_days, lookback = args
+    """Run backtest for a single ticker.
 
-    # Each subprocess needs its own imports
+    Per-day work inside run_band_backtest is parallelized across `workers`
+    processes (workers=0 means cpu_count). When the caller already runs multiple
+    tickers in a Pool, set workers=1 to avoid nested pools.
+    """
+    ticker, num_days, lookback, workers = args
+
     import sys
-    import io
-    import contextlib
     from pathlib import Path
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
     from scripts.backtest_band_accuracy import run_band_backtest
 
-    # Suppress verbose output from model training
-    with contextlib.redirect_stdout(io.StringIO()):
-        results = run_band_backtest(ticker, num_days=num_days, lookback=lookback, verbose=False)
+    # Don't suppress stdout when workers > 1 — the per-day fan-out output is
+    # already minimal (one print per pool init), and suppressing breaks pickling
+    # of the redirector across spawn workers.
+    results = run_band_backtest(
+        ticker, num_days=num_days, lookback=lookback, verbose=False, workers=workers,
+    )
 
     if not results:
         return ticker, None
@@ -114,17 +120,33 @@ def select_recommended(hit_rates: dict, target: float) -> int:
 
 
 def calibrate(tickers: list, num_days: int, target: float, lookback: int = 250,
-              output_path: str = DEFAULT_OUTPUT) -> dict:
-    """Run calibration for all tickers and write results."""
+              output_path: str = DEFAULT_OUTPUT, workers: int = DEFAULT_WORKERS) -> dict:
+    """Run calibration for all tickers and write results.
+
+    workers: total parallel processes for per-day backtest work. Split between
+        outer (one process per ticker) and inner (per-day pool) so total
+        concurrency doesn't exceed the requested budget.
+    """
     print(f"Calibrating recommendations: {len(tickers)} tickers, {num_days}-day window, "
           f"target={target}% hit rate")
 
+    import os
+    total_workers = workers if workers > 0 else (os.cpu_count() or 1)
+
     start = time.time()
 
-    # Run backtests in parallel
-    pool_args = [(t, num_days, lookback) for t in tickers]
-    with Pool(processes=min(len(tickers), 3)) as pool:
-        raw_results = pool.map(run_single_ticker, pool_args)
+    # Tickers are run sequentially; each ticker's per-day work is parallelized
+    # in run_band_backtest's inner pool. Nested pools (outer ticker pool +
+    # inner per-day pool) are forbidden in Python because the outer pool's
+    # workers are daemonic and daemons can't spawn children.
+    # Sequential outer + N inner gives the same wall time as N/2 outer ×
+    # N/2 inner (work is dominated by per-day LightGBM fits, not pct_df load),
+    # without the nesting trap.
+    n_inner = total_workers
+    print(f"Workers: {n_inner} per-day workers, tickers run sequentially")
+
+    pool_args = [(t, num_days, lookback, n_inner) for t in tickers]
+    raw_results = [run_single_ticker(a) for a in pool_args]
 
     result = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
@@ -141,15 +163,16 @@ def calibrate(tickers: list, num_days: int, target: float, lookback: int = 250,
 
         hr = data["hit_rates"]
 
-        # Close-to-close: use the backtest results directly
-        # The backtest tests symmetric Combined bands. Empirical analysis (120-day
-        # and 250-day windows) consistently shows UP days have wider tails than
-        # DOWN days across SPX/NDX/RUT — so CALL side needs wider bands.
+        # Close-to-close: use the backtest results directly.
+        # Both put and call use the same base — the band whose empirical hit
+        # rate meets the requested target. The previous version auto-widened
+        # the call side by one step (up tails are wider than down), but that
+        # made the loader's "moderate" tier land above target on the call side
+        # (e.g., 97% instead of 95%). Symmetric base lets moderate == target
+        # for both sides.
         c2c_base = select_recommended(hr, target)
-        c2c_put = c2c_base  # put (down) side: use base
-        # Call (up) side: one step wider (up tails are 15-30% fatter than down)
-        wider = [p for p in BAND_LEVELS if p > c2c_base]
-        c2c_call = wider[0] if wider else c2c_base
+        c2c_put = c2c_base
+        c2c_call = c2c_base
 
         # Intraday: one level tighter (less time remaining, European settlement)
         tighter = [p for p in ALL_PERCENTILE_LEVELS if p < c2c_put]
@@ -223,6 +246,8 @@ Examples:
                         help="Training lookback days for LightGBM (default: 250)")
     parser.add_argument("--output", type=str, default=DEFAULT_OUTPUT,
                         help=f"Output JSON path (default: {DEFAULT_OUTPUT})")
+    parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
+                        help="Parallel processes (1=sequential, 0=auto cpu_count, default: 0)")
     parser.add_argument("--check-trading-day", action="store_true",
                         help="Check if tomorrow is a trading day and exit")
 
@@ -237,7 +262,7 @@ Examples:
             sys.exit(1)
 
     tickers = [t.strip().upper() for t in args.tickers.split(",") if t.strip()]
-    calibrate(tickers, args.days, args.target, args.lookback, args.output)
+    calibrate(tickers, args.days, args.target, args.lookback, args.output, args.workers)
 
 
 if __name__ == "__main__":

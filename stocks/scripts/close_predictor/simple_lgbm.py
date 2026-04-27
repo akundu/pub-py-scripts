@@ -145,7 +145,7 @@ class SimpleLGBM:
         self,
         X: pd.DataFrame,
         current_price: float,
-        percentile_levels: List[int] = [95, 97, 98, 99]
+        percentile_levels: List[int] = [95, 96, 97, 98, 99]
     ) -> Dict[str, Dict[str, float]]:
         """
         Predict and convert to price bands.

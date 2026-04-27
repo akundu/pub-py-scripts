@@ -19,6 +19,7 @@ from .models import (
     LGBM_MAX_DEPTH,
     LGBM_MIN_CHILD_SAMPLES,
     LGBM_BAND_WIDTH_SCALE,
+    get_band_width_scale,
     ENABLE_DYNAMIC_VOL_SCALING,
     VOL_LOOKBACK_DAYS,
     VOL_BASELINE_DAYS,
@@ -104,7 +105,7 @@ def _train_statistical(
                 learning_rate=LGBM_LEARNING_RATE,
                 max_depth=LGBM_MAX_DEPTH,
                 min_child_samples=LGBM_MIN_CHILD_SAMPLES,
-                band_width_scale=LGBM_BAND_WIDTH_SCALE,
+                band_width_scale=get_band_width_scale(ticker),
                 use_fallback=True,  # Graceful fallback
             )
             predictor.fit(train_df)
@@ -122,18 +123,6 @@ def _train_statistical(
     return predictor
 
 
-def _winsorize_iqr(values, factor=1.5):
-    """Winsorize values using IQR fences (standard Tukey fence)."""
-    arr = np.asarray(values, dtype=float)
-    if len(arr) < 20:
-        return arr
-    q1, q3 = np.percentile(arr, [25, 75])
-    iqr = q3 - q1
-    if iqr <= 0:
-        return arr
-    return np.clip(arr, q1 - factor * iqr, q3 + factor * iqr)
-
-
 def _get_daily_moves(
     pct_df: pd.DataFrame,
     train_dates: set,
@@ -142,13 +131,21 @@ def _get_daily_moves(
     """Extract one prev_close→day_close return per date from pct_df.
 
     Returns array of return percentages, or None if insufficient data.
+
+    When exclude_outliers=True, drops samples beyond the IQR fence (NOT
+    clips). Uses the shared `_drop_outliers_iqr` from common.range_percentiles
+    so this prediction-model path and the /range_percentiles display path
+    apply the same outlier handling.
     """
     daily = pct_df[pct_df['date'].isin(train_dates)].drop_duplicates(subset='date')
     if len(daily) < 10:
         return None
     moves = ((daily['day_close'] - daily['prev_close']) / daily['prev_close'] * 100).values
     if exclude_outliers:
-        moves = _winsorize_iqr(moves)
+        # Use the project-wide drop semantics (factor=2.25). Lazy import to
+        # avoid a circular dep at module load.
+        from common.range_percentiles import _drop_outliers_iqr
+        moves = _drop_outliers_iqr(moves)
     return moves
 
 
@@ -407,6 +404,15 @@ def make_unified_prediction(
     # Combined uses time-aware percentile (more adaptive) blended with statistical
     combined_pct = time_aware_pct_bands if time_aware_pct_bands else pct_bands
     combined = combine_bands(combined_pct, stat_bands, current_price)
+
+    # Per-ticker post-scale: widens combined bands for tickers like RUT where
+    # both percentile and LightGBM bands under-fit the true distribution.
+    # Scale=1.0 (default) is a no-op; only RUT currently uses >1.0.
+    from scripts.close_predictor.models import get_combined_band_post_scale
+    from scripts.close_predictor.bands import scale_bands_about_center
+    post_scale = get_combined_band_post_scale(ticker)
+    if post_scale != 1.0:
+        combined = scale_bands_about_center(combined, post_scale, current_price)
 
     # Apply opening gap adjustment if enabled and early in trading day
     gap_adjustment_applied = False

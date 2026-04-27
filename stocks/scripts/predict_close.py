@@ -295,6 +295,7 @@ async def train_0dte_model(ticker, lookback=250, db_config=None):
     from scripts.close_predictor.models import (
         LGBM_N_ESTIMATORS, LGBM_LEARNING_RATE,
         LGBM_MAX_DEPTH, LGBM_MIN_CHILD_SAMPLES,
+        get_band_width_scale,
     )
 
     stat_predictor = LGBMClosePredictor(
@@ -302,7 +303,7 @@ async def train_0dte_model(ticker, lookback=250, db_config=None):
         learning_rate=LGBM_LEARNING_RATE,
         max_depth=LGBM_MAX_DEPTH,
         min_child_samples=LGBM_MIN_CHILD_SAMPLES,
-        band_width_scale=LGBM_BAND_WIDTH_SCALE,
+        band_width_scale=get_band_width_scale(ticker),
         use_fallback=True,
     )
 
@@ -1729,7 +1730,7 @@ async def predict_close(ticker='NDX', lookback=250, force_retrain=False, similar
             LGBM_LEARNING_RATE,
             LGBM_MAX_DEPTH,
             LGBM_MIN_CHILD_SAMPLES,
-            LGBM_BAND_WIDTH_SCALE,
+            get_band_width_scale,
         )
 
         stat_predictor = LGBMClosePredictor(
@@ -1737,7 +1738,7 @@ async def predict_close(ticker='NDX', lookback=250, force_retrain=False, similar
             learning_rate=LGBM_LEARNING_RATE,
             max_depth=LGBM_MAX_DEPTH,
             min_child_samples=LGBM_MIN_CHILD_SAMPLES,
-            band_width_scale=LGBM_BAND_WIDTH_SCALE,
+            band_width_scale=get_band_width_scale(ticker),
             use_fallback=True,
         )
 

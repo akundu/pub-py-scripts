@@ -199,7 +199,7 @@ class TestAsymmetricBands:
         assert bands == {}
 
     def test_all_band_levels_present(self):
-        """All P95-P100 bands should be present."""
+        """All P95-P100 bands should be present (including P96)."""
         np.random.seed(42)
         returns = np.random.normal(0, 1, 100)
         dir_prob = DirectionalProbability(
@@ -207,7 +207,7 @@ class TestAsymmetricBands:
             total_samples=100, confidence="high", mean_reversion_prob=0.4,
         )
         bands = compute_asymmetric_bands(returns, 20000.0, dir_prob)
-        for name in ["P95", "P97", "P98", "P99", "P100"]:
+        for name in ["P95", "P96", "P97", "P98", "P99", "P100"]:
             assert name in bands, f"Missing band {name}"
             assert bands[name].source == "directional"
 
@@ -248,7 +248,7 @@ class TestComputeDirectionalAnalysis:
         assert 0 <= result.direction_probability.p_up <= 1.0
         assert 0 <= result.direction_probability.p_down <= 1.0
         assert abs(result.direction_probability.p_up + result.direction_probability.p_down - 1.0) < 0.01
-        assert len(result.asymmetric_bands) == 5  # P95 through P100
+        assert len(result.asymmetric_bands) == 6  # P95, P96, P97, P98, P99, P100
 
 
 # --- Backward compatibility ---

@@ -48,7 +48,28 @@ rm /tmp/close_model.log /tmp/rebuild_prediction_data.log
 # Calibrate recommended percentiles (skip weekends — only run before trading days)
 DOW=$(date +%u)  # 1=Mon ... 7=Sun
 if [ "$DOW" -le 5 ]; then
-    python3 -W ignore -m scripts.calibrate_recommendations --days 90 --target 96 \
-        --tickers NDX,SPX,RUT --output results/calibration/recommended_percentiles.json \
-        > /tmp/calibrate_recommendations.log 2>&1
+    REC_OUT="results/calibration/recommended_percentiles.json"
+    REC_RUT="results/calibration/recommended_percentiles_rut.json"
+    rm -f /tmp/calibrate_recommendations.log
+
+    # NDX/SPX: full 1-year window for finer hit-rate granularity
+    python3 -W ignore -m scripts.calibrate_recommendations --days 250 --target 95 --workers 16 \
+        --tickers NDX,SPX --output "$REC_OUT" \
+        >> /tmp/calibrate_recommendations.log 2>&1
+
+    # RUT: smaller window — RUT's CSV history is shorter than NDX/SPX
+    python3 -W ignore -m scripts.calibrate_recommendations --days 200 --target 95 --workers 16 \
+        --tickers RUT --output "$REC_RUT" \
+        >> /tmp/calibrate_recommendations.log 2>&1
+
+    # Merge RUT into the canonical file so the web endpoint sees all tickers.
+    if [ -s "$REC_OUT" ] && [ -s "$REC_RUT" ]; then
+        python3 -c "
+import json, sys
+a = json.load(open('$REC_OUT'))
+b = json.load(open('$REC_RUT'))
+a['tickers'].update(b.get('tickers', {}))
+json.dump(a, open('$REC_OUT', 'w'), indent=2)
+" >> /tmp/calibrate_recommendations.log 2>&1
+    fi
 fi

@@ -26,10 +26,19 @@ except ImportError:
 
 # Constants
 DEFAULT_LOOKBACK = 250  # trading days (~1 year)
-DEFAULT_PERCENTILES = [75, 80, 85, 90, 95, 97, 98, 99, 100]
+DEFAULT_PERCENTILES = [75, 80, 85, 90, 95, 96, 97, 98, 99, 100]
 MIN_DAYS_DEFAULT = 30
 MIN_DIRECTION_DAYS_DEFAULT = 5
 DEFAULT_WINDOW = 0  # window=0 represents today (0DTE)
+
+# Outlier-removal IQR factor. SINGLE SOURCE OF TRUTH used by:
+#   - the /range_percentiles display path (compute_range_percentiles_*)
+#   - the /predictions model band path (scripts.close_predictor.prediction
+#     ._get_daily_moves)
+# Both paths import this constant; bumping it here updates both behaviors
+# atomically. Don't hardcode the number in call sites — always reference
+# this constant or call _drop_outliers_iqr without a factor argument.
+DEFAULT_OUTLIER_DROP_FACTOR = 2.25
 
 
 _CALIBRATION_CACHE = {}  # module-level cache for recommended percentiles
@@ -37,12 +46,18 @@ _CALIBRATION_FILE = SCRIPT_DIR.parent / "results" / "calibration" / "recommended
 
 # Three risk tiers for percentile recommendations.
 # Each tier has put/call values per context (close_to_close, intraday, max_move).
-# aggressive (~90% hit): tighter strikes, more premium, more breach risk
-# moderate (~93% hit): balanced
-# conservative (~95% hit): wider strikes, less premium, fewer breaches
+# Tier semantics:
+#   moderate     = the calibrated band — empirically meets the configured
+#                  --target hit rate (the "default" pick)
+#   aggressive   = one step tighter than moderate (more premium, slightly
+#                  above-target breach risk)
+#   conservative = one step wider than moderate (more safety, below-target
+#                  breach risk)
+# When the calibrated value sits at a boundary (P75 floor or P100 ceiling),
+# the unavailable side collapses to the moderate value.
 #
-# Based on 60-day backtest hit rates with directional asymmetry (UP tails wider).
-# Fallback defaults when calibration file is missing or stale.
+# Fallback defaults below are used only when the calibration JSON is missing
+# or stale (>7 days).
 _DEFAULT_RECOMMENDED = {
     "NDX": {
         "close_to_close": {"aggressive": {"put": 95, "call": 97}, "moderate": {"put": 98, "call": 99}, "conservative": {"put": 99, "call": 100}},
@@ -96,19 +111,28 @@ def _load_recommended(ticker: str) -> dict:
                         if "aggressive" in ctx_data:
                             result[ctx] = ctx_data  # already three-tier
                         else:
-                            # Old format: single put/call — use as conservative, derive others
+                            # Single calibrated put/call from calibrate_recommendations.
+                            # Treat the calibrated value as the MODERATE tier — the
+                            # band that empirically meets the requested target hit rate.
+                            # Aggressive = one step tighter (more premium, above-target
+                            # breach risk). Conservative = one step wider (more safety,
+                            # below-target breach risk). When the calibrated value is
+                            # at a boundary (P75 or P100), the unavailable side
+                            # collapses to the moderate value.
                             p, c = ctx_data.get("put", 95), ctx_data.get("call", 95)
-                            all_levels = [75, 80, 85, 90, 95, 97, 98, 99, 100]
+                            all_levels = [75, 80, 85, 90, 95, 96, 97, 98, 99, 100]
                             tighter_p = [x for x in all_levels if x < p]
                             tighter_c = [x for x in all_levels if x < c]
-                            mid_p = tighter_p[-1] if tighter_p else p
-                            mid_c = tighter_c[-1] if tighter_c else c
-                            agg_p = tighter_p[-2] if len(tighter_p) >= 2 else mid_p
-                            agg_c = tighter_c[-2] if len(tighter_c) >= 2 else mid_c
+                            wider_p = [x for x in all_levels if x > p]
+                            wider_c = [x for x in all_levels if x > c]
+                            agg_p = tighter_p[-1] if tighter_p else p
+                            agg_c = tighter_c[-1] if tighter_c else c
+                            cons_p = wider_p[0] if wider_p else p
+                            cons_c = wider_c[0] if wider_c else c
                             result[ctx] = {
                                 "aggressive": {"put": agg_p, "call": agg_c},
-                                "moderate": {"put": mid_p, "call": mid_c},
-                                "conservative": {"put": p, "call": c},
+                                "moderate": {"put": p, "call": c},
+                                "conservative": {"put": cons_p, "call": cons_c},
                             }
                     _CALIBRATION_CACHE[ticker_upper] = result
                     return result
@@ -157,6 +181,44 @@ def _winsorize_iqr(values, factor=1.5):
     lower = q1 - factor * iqr
     upper = q3 + factor * iqr
     return np.clip(arr, lower, upper)
+
+
+def _drop_outliers_iqr(values, factor: float = DEFAULT_OUTLIER_DROP_FACTOR):
+    """Drop values beyond the IQR fences (Q1 - factor*IQR, Q3 + factor*IQR).
+
+    Unlike _winsorize_iqr (which clips outliers to the fence value),
+    this REMOVES them from the sample. Use this when you want tail
+    percentiles to remain distinct — clipping would collapse P97/P98/P99
+    /P100 all to the fence value once any sample exceeds it.
+
+    factor=2.25 = drops a small number of statistically extreme samples
+    (typically 0-3 in a 250-day stock-return distribution). Tighter
+    factors (1.5-2.0x) remove real tail-risk events that traders need to
+    see; looser ones (2.5-3.0x) often drop nothing for typical tickers,
+    making the filtered view identical to raw. 2.25x is the practical
+    middle that keeps filtered ≠ raw while preserving genuine tail.
+
+    This same factor is used by the prediction model (scripts/close_predictor/
+    prediction.py) so that /range_percentiles and /predictions show
+    consistent behavior.
+    """
+    import numpy as np
+    arr = np.asarray(values, dtype=float)
+    if len(arr) < 20:
+        return arr
+    q1, q3 = np.percentile(arr, [25, 75])
+    iqr = q3 - q1
+    if iqr <= 0:
+        return arr
+    lower = q1 - factor * iqr
+    upper = q3 + factor * iqr
+    mask = (arr >= lower) & (arr <= upper)
+    cleaned = arr[mask]
+    # Safety: if we'd lose more than 20% of samples, fall back to the
+    # raw array (something is off with the IQR estimate).
+    if len(cleaned) < len(arr) * 0.8:
+        return arr
+    return cleaned
 
 
 def compute_default_windows() -> list:
@@ -379,12 +441,16 @@ async def compute_range_percentiles(
         close_float = df["close"].astype(float)
         return_pct = (close_float - prev_float) / prev_float  # as decimal, e.g. -0.01 = -1%
 
-        # Winsorize outliers: cap at Q1 - 2.5*IQR / Q3 + 2.5*IQR
+        # Drop extreme outliers (beyond 3x IQR fences). DROP not CLIP — clipping
+        # would collapse P97/P98/P99/P100 all to the fence value, destroying tail
+        # detail. With drop, the remaining sample's tail percentiles stay distinct.
         if exclude_outliers:
-            import numpy as np
-            winsorized = _winsorize_iqr(return_pct.values)
-            return_pct = return_pct.copy()
-            return_pct.iloc[:] = winsorized
+            cleaned = _drop_outliers_iqr(return_pct.values)
+            # _drop_outliers_iqr returns a possibly shorter array; rebuild a
+            # bare Series since the alignment with original df rows no longer matters
+            # (we only use return_pct's values for percentile computation below).
+            import pandas as pd
+            return_pct = pd.Series(cleaned)
 
         mask_up = return_pct > 0
         mask_down = return_pct < 0
@@ -1276,11 +1342,12 @@ async def compute_range_percentiles_multi_window(
             close_float = df_window["close"].astype(float)
             return_pct = (close_float - prev_float) / prev_float
 
-            # Winsorize outliers
+            # Drop extreme outliers (3x IQR fences) — drop, not clip, so that
+            # tail percentiles (P97-P100) remain distinct in the displayed table.
             if exclude_outliers:
-                winsorized = _winsorize_iqr(return_pct.values)
-                return_pct = return_pct.copy()
-                return_pct.iloc[:] = winsorized
+                cleaned = _drop_outliers_iqr(return_pct.values)
+                import pandas as pd
+                return_pct = pd.Series(cleaned)
 
             mask_up = return_pct > 0
             mask_down = return_pct < 0

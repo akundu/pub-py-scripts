@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Backtest accuracy of P95/P97/P98/P99/P100 confidence bands.
+Backtest accuracy of confidence bands (P95/P96/P97/P98/P99/P100).
 
 Measures:
 1. Hit rate for each band level (% of times actual close falls within band)
@@ -10,21 +10,20 @@ Measures:
 Usage:
     python backtest_band_accuracy.py NDX --days 30
     python backtest_band_accuracy.py SPX --days 60 --verbose
+    python backtest_band_accuracy.py NDX --days 250 --workers 8
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
-from collections import defaultdict
 
-sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from scripts.close_predictor.prediction import _train_statistical, make_unified_prediction
-from scripts.close_predictor.live import _build_day_context
-from scripts.csv_prediction_backtest import get_available_dates, load_csv_data
-from scripts.percentile_range_backtest import collect_all_data
+# Subset of UNIFIED_BAND_NAMES used for tail-band hit-rate analysis.
+TAIL_BAND_NAMES: List[str] = ["P95", "P96", "P97", "P98", "P99", "P100"]
 
 
 @dataclass
@@ -33,119 +32,76 @@ class BandResult:
     date: str
     time_label: str
     actual_close: float
-
-    # For each band level
-    band_hit: Dict[str, bool]  # {band_name: True/False}
-    band_widths: Dict[str, float]  # {band_name: width_pct}
-
-    # Midpoint errors
-    statistical_mid: float
-    statistical_error_pct: float
-    combined_mid: float
-    combined_error_pct: float
+    band_hit: Dict[str, bool]
+    band_widths: Dict[str, float]
+    statistical_mid: Optional[float]
+    statistical_error_pct: Optional[float]
+    combined_mid: Optional[float]
+    combined_error_pct: Optional[float]
 
 
-def run_band_backtest(
-    ticker: str,
-    num_days: int = 30,
-    lookback: int = 250,
-    verbose: bool = False,
-) -> List[BandResult]:
-    """
-    Run backtest measuring accuracy of each band level.
+# Per-worker globals populated by `_init_worker`. Storing pct_df here avoids
+# re-pickling the (multi-MB) frame for every per-day task.
+_W_TICKER: Optional[str] = None
+_W_LOOKBACK: int = 250
+_W_VERBOSE: bool = False
+_W_PCT_DF = None  # type: ignore[assignment]
+_W_UNIQUE_DATES: List[str] = []
 
-    Args:
-        ticker: Ticker symbol
-        num_days: Number of days to backtest
-        lookback: Training lookback period
-        verbose: Print detailed output
 
-    Returns:
-        List of BandResult objects
-    """
-    print(f"\n{'='*80}")
-    print(f"BAND ACCURACY BACKTEST - {ticker}")
-    print(f"{'='*80}")
-    print(f"Test period: Last {num_days} days")
-    print(f"Training lookback: {lookback} days")
-    print(f"Testing bands: P95, P97, P98, P99, P100")
-    print(f"{'='*80}\n")
+def _init_worker(ticker: str, lookback: int, verbose: bool, pct_df) -> None:
+    """Pool initializer — runs once per worker to load shared state."""
+    global _W_TICKER, _W_LOOKBACK, _W_VERBOSE, _W_PCT_DF, _W_UNIQUE_DATES
+    _W_TICKER = ticker
+    _W_LOOKBACK = lookback
+    _W_VERBOSE = verbose
+    _W_PCT_DF = pct_df
+    _W_UNIQUE_DATES = sorted(pct_df['date'].unique()) if pct_df is not None else []
+    # Make sure module imports happen once per worker, not once per task.
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    import scripts.close_predictor.prediction  # noqa: F401
+    import scripts.close_predictor.live  # noqa: F401
+    import scripts.csv_prediction_backtest  # noqa: F401
 
-    # Get available dates
-    all_dates = get_available_dates(ticker, lookback + num_days + 20)
-    if len(all_dates) < lookback + num_days:
-        print(f"❌ Insufficient data. Need {lookback + num_days} days, have {len(all_dates)}")
-        return []
 
-    test_dates = all_dates[-(num_days+1):-1]  # Exclude last day (might be incomplete)
+def _predict_one_day(args: Tuple[str, str]) -> Optional[BandResult]:
+    """Run a single-day prediction. Reads ticker/pct_df/lookback from worker globals."""
+    test_date, train_end_date = args
 
-    # Collect percentile data
-    print("Collecting percentile data...")
-    pct_df = collect_all_data(ticker, all_dates)
-    if pct_df is None or pct_df.empty:
-        print("❌ No percentile data")
-        return []
+    import io
+    import contextlib
+    from datetime import datetime
+    from scripts.close_predictor.prediction import _train_statistical, make_unified_prediction
+    from scripts.close_predictor.live import _build_day_context
+    from scripts.close_predictor.models import ET_TZ
+    from scripts.csv_prediction_backtest import load_csv_data
 
-    unique_dates = sorted(pct_df['date'].unique())
-    train_dates_sorted = unique_dates
+    cm = contextlib.nullcontext() if _W_VERBOSE else contextlib.redirect_stdout(io.StringIO())
+    with cm:
+        pct_train_dates = set(d for d in _W_UNIQUE_DATES if d < test_date)
 
-    results = []
-
-    for test_date in test_dates:
-        if verbose:
-            print(f"\n--- Testing {test_date} ---")
-
-        # Get previous date for training
-        try:
-            test_idx = all_dates.index(test_date)
-            if test_idx == 0:
-                continue
-            train_end_date = all_dates[test_idx - 1]
-        except (ValueError, IndexError):
-            continue
-
-        # Train predictor
-        stat_predictor = _train_statistical(ticker, train_end_date, lookback)
+        stat_predictor = _train_statistical(_W_TICKER, train_end_date, _W_LOOKBACK)
         if not stat_predictor:
-            if verbose:
-                print(f"  ⚠️  Failed to train predictor")
-            continue
+            return None
 
-        # Build percentile training set (exclude test date)
-        pct_train_dates = set([d for d in unique_dates if d < test_date])
-
-        # Load test day data
-        test_df = load_csv_data(ticker, test_date)
+        test_df = load_csv_data(_W_TICKER, test_date)
         if test_df is None or test_df.empty:
-            if verbose:
-                print(f"  ⚠️  No test data")
-            continue
+            return None
 
-        # Get actual close
         actual_close = test_df.iloc[-1]['close']
 
-        # Build day context
-        day_ctx = _build_day_context(ticker, test_date, test_df)
+        day_ctx = _build_day_context(_W_TICKER, test_date, test_df)
         if not day_ctx:
-            if verbose:
-                print(f"  ⚠️  Failed to build day context")
-            continue
+            return None
 
-        # Make predictions at different times of day
-        # For simplicity, test at 10:00 AM (time_label might vary)
-        # Use opening price as "current price" for consistency
         current_price = test_df.iloc[0]['open']
         day_high = test_df['high'].max()
         day_low = test_df['low'].min()
 
-        from datetime import datetime
-        from scripts.close_predictor.models import ET_TZ
-
-        # Make prediction
         pred = make_unified_prediction(
-            pct_df=pct_df,
+            pct_df=_W_PCT_DF,
             predictor=stat_predictor,
-            ticker=ticker,
+            ticker=_W_TICKER,
             current_price=current_price,
             prev_close=day_ctx.prev_close,
             current_time=datetime.now(ET_TZ),
@@ -160,53 +116,135 @@ def run_band_backtest(
             intraday_vol_factor=1.0,
         )
 
-        # Check which bands contain the actual close
-        band_hit = {}
-        band_widths = {}
+    band_hit: Dict[str, bool] = {}
+    band_widths: Dict[str, float] = {}
+    for band_name in TAIL_BAND_NAMES:
+        if band_name in pred.combined_bands:
+            band = pred.combined_bands[band_name]
+            band_hit[band_name] = band.lo_price <= actual_close <= band.hi_price
+            band_widths[band_name] = band.width_pct
 
-        # Check combined bands (primary)
-        for band_name in ['P95', 'P97', 'P98', 'P99', 'P100']:
-            if band_name in pred.combined_bands:
-                band = pred.combined_bands[band_name]
-                hit = band.lo_price <= actual_close <= band.hi_price
-                band_hit[band_name] = hit
-                band_widths[band_name] = band.width_pct
+    statistical_mid = None
+    statistical_error_pct = None
+    if 'P95' in pred.statistical_bands:
+        sb = pred.statistical_bands['P95']
+        statistical_mid = (sb.lo_price + sb.hi_price) / 2
+        statistical_error_pct = (statistical_mid - actual_close) / actual_close * 100
 
+    combined_mid = None
+    combined_error_pct = None
+    if 'P95' in pred.combined_bands:
+        cb = pred.combined_bands['P95']
+        combined_mid = (cb.lo_price + cb.hi_price) / 2
+        combined_error_pct = (combined_mid - actual_close) / actual_close * 100
+
+    return BandResult(
+        date=test_date,
+        time_label=pred.time_label,
+        actual_close=actual_close,
+        band_hit=band_hit,
+        band_widths=band_widths,
+        statistical_mid=statistical_mid,
+        statistical_error_pct=statistical_error_pct,
+        combined_mid=combined_mid,
+        combined_error_pct=combined_error_pct,
+    )
+
+
+def run_band_backtest(
+    ticker: str,
+    num_days: int = 30,
+    lookback: int = 250,
+    verbose: bool = False,
+    workers: int = 1,
+) -> List[BandResult]:
+    """
+    Run backtest measuring accuracy of each band level.
+
+    Args:
+        ticker: Ticker symbol
+        num_days: Number of days to backtest
+        lookback: Training lookback period
+        verbose: Print detailed output
+        workers: Parallel processes for per-day prediction. 1=sequential, 0=cpu_count().
+
+    Returns:
+        List of BandResult objects (sorted by date).
+    """
+    from scripts.csv_prediction_backtest import get_available_dates
+    from scripts.percentile_range_backtest import collect_all_data
+
+    print(f"\n{'='*80}")
+    print(f"BAND ACCURACY BACKTEST - {ticker}")
+    print(f"{'='*80}")
+    print(f"Test period: Last {num_days} days")
+    print(f"Training lookback: {lookback} days")
+    print(f"Testing bands: {', '.join(TAIL_BAND_NAMES)}")
+    if workers != 1:
+        n_proc = workers if workers > 0 else (os.cpu_count() or 1)
+        print(f"Parallel workers: {n_proc}")
+    print(f"{'='*80}\n")
+
+    all_dates = get_available_dates(ticker, lookback + num_days + 20)
+    if len(all_dates) < lookback + num_days:
+        print(f"❌ Insufficient data. Need {lookback + num_days} days, have {len(all_dates)}")
+        return []
+
+    test_dates = all_dates[-(num_days + 1):-1]
+
+    print("Collecting percentile data...")
+    pct_df = collect_all_data(ticker, all_dates)
+    if pct_df is None or pct_df.empty:
+        print("❌ No percentile data")
+        return []
+
+    pool_args: List[Tuple[str, str]] = []
+    for test_date in test_dates:
+        try:
+            test_idx = all_dates.index(test_date)
+            if test_idx == 0:
+                continue
+            train_end_date = all_dates[test_idx - 1]
+        except (ValueError, IndexError):
+            continue
+        pool_args.append((test_date, train_end_date))
+
+    results: List[BandResult] = []
+    if workers == 1:
+        # Sequential path: initialize globals so _predict_one_day works without a pool.
+        _init_worker(ticker, lookback, verbose, pct_df)
+        for args in pool_args:
+            r = _predict_one_day(args)
+            if r is not None:
+                results.append(r)
                 if verbose:
-                    status = "✓ HIT" if hit else "✗ MISS"
-                    print(f"  {band_name}: ${band.lo_price:,.2f} - ${band.hi_price:,.2f} | Actual: ${actual_close:,.2f} | {status}")
+                    _print_verbose_day(r)
+    else:
+        from multiprocessing import get_context
+        n_proc = workers if workers > 0 else (os.cpu_count() or 1)
+        # 'spawn' is safer than 'fork' on macOS with ML libs (joblib/lightgbm).
+        ctx = get_context("spawn")
+        with ctx.Pool(
+            processes=n_proc,
+            initializer=_init_worker,
+            initargs=(ticker, lookback, verbose, pct_df),
+        ) as pool:
+            for r in pool.imap_unordered(_predict_one_day, pool_args, chunksize=1):
+                if r is not None:
+                    results.append(r)
 
-        # Calculate midpoint errors
-        statistical_mid = None
-        statistical_error_pct = None
-        if 'P95' in pred.statistical_bands:
-            stat_band = pred.statistical_bands['P95']
-            statistical_mid = (stat_band.lo_price + stat_band.hi_price) / 2
-            statistical_error_pct = (statistical_mid - actual_close) / actual_close * 100
-
-        combined_mid = None
-        combined_error_pct = None
-        if 'P95' in pred.combined_bands:
-            comb_band = pred.combined_bands['P95']
-            combined_mid = (comb_band.lo_price + comb_band.hi_price) / 2
-            combined_error_pct = (combined_mid - actual_close) / actual_close * 100
-
-            if verbose:
-                print(f"  Midpoint: ${combined_mid:,.2f} | Actual: ${actual_close:,.2f} | Error: {combined_error_pct:+.2f}%")
-
-        results.append(BandResult(
-            date=test_date,
-            time_label=pred.time_label,
-            actual_close=actual_close,
-            band_hit=band_hit,
-            band_widths=band_widths,
-            statistical_mid=statistical_mid,
-            statistical_error_pct=statistical_error_pct,
-            combined_mid=combined_mid,
-            combined_error_pct=combined_error_pct,
-        ))
-
+    results.sort(key=lambda x: x.date)
     return results
+
+
+def _print_verbose_day(r: BandResult) -> None:
+    print(f"\n--- {r.date} ---")
+    for band_name in TAIL_BAND_NAMES:
+        if band_name in r.band_hit:
+            status = "✓ HIT" if r.band_hit[band_name] else "✗ MISS"
+            print(f"  {band_name}: width={r.band_widths[band_name]:.2f}% | actual=${r.actual_close:,.2f} | {status}")
+    if r.combined_error_pct is not None:
+        print(f"  Mid error: {r.combined_error_pct:+.2f}%")
 
 
 def print_summary(results: List[BandResult]):
@@ -219,26 +257,22 @@ def print_summary(results: List[BandResult]):
     print(f"SUMMARY STATISTICS ({len(results)} test days)")
     print(f"{'='*80}\n")
 
-    # Hit rates by band
     print("HIT RATES (% of times actual close falls within band):")
     print(f"{'Band':<8} {'Hits':<8} {'Total':<8} {'Hit Rate':<12} {'Avg Width':<12}")
     print("-" * 60)
 
-    for band_name in ['P95', 'P97', 'P98', 'P99', 'P100']:
+    for band_name in TAIL_BAND_NAMES:
         hits = sum(1 for r in results if r.band_hit.get(band_name, False))
         total = sum(1 for r in results if band_name in r.band_hit)
-
         if total > 0:
             hit_rate = hits / total * 100
             avg_width = sum(r.band_widths[band_name] for r in results if band_name in r.band_widths) / total
             print(f"{band_name:<8} {hits:<8} {total:<8} {hit_rate:>6.1f}%      {avg_width:>6.2f}%")
 
-    # Midpoint accuracy
     print(f"\n{'='*80}")
     print("MIDPOINT PREDICTION ACCURACY:")
     print(f"{'='*80}\n")
 
-    # Statistical midpoint errors
     stat_errors = [r.statistical_error_pct for r in results if r.statistical_error_pct is not None]
     if stat_errors:
         mean_stat_error = sum(abs(e) for e in stat_errors) / len(stat_errors)
@@ -246,44 +280,34 @@ def print_summary(results: List[BandResult]):
         print(f"  Mean Absolute Error: {mean_stat_error:.2f}%")
         print(f"  Max Error: {max(abs(e) for e in stat_errors):.2f}%")
 
-    # Combined midpoint errors
     comb_errors = [r.combined_error_pct for r in results if r.combined_error_pct is not None]
+    mean_comb_error = None
     if comb_errors:
         mean_comb_error = sum(abs(e) for e in comb_errors) / len(comb_errors)
         print(f"\nCombined Model (LightGBM + Percentile):")
         print(f"  Mean Absolute Error: {mean_comb_error:.2f}%")
         print(f"  Max Error: {max(abs(e) for e in comb_errors):.2f}%")
 
-    # Trading implications
     print(f"\n{'='*80}")
     print("TRADING IMPLICATIONS:")
     print(f"{'='*80}\n")
 
     print("For position sizing:")
-    p95_hits = sum(1 for r in results if r.band_hit.get('P95', False))
-    p95_total = sum(1 for r in results if 'P95' in r.band_hit)
-    if p95_total > 0:
-        print(f"  P95 band: {p95_hits}/{p95_total} hits ({p95_hits/p95_total*100:.1f}%) - Use for aggressive sizing")
+    for band_name, label in [('P95', 'aggressive'), ('P98', 'moderate'), ('P99', 'conservative')]:
+        hits = sum(1 for r in results if r.band_hit.get(band_name, False))
+        total = sum(1 for r in results if band_name in r.band_hit)
+        if total > 0:
+            print(f"  {band_name} band: {hits}/{total} hits ({hits / total * 100:.1f}%) - Use for {label} sizing")
 
-    p98_hits = sum(1 for r in results if r.band_hit.get('P98', False))
-    p98_total = sum(1 for r in results if 'P98' in r.band_hit)
-    if p98_total > 0:
-        print(f"  P98 band: {p98_hits}/{p98_total} hits ({p98_hits/p98_total*100:.1f}%) - Use for moderate sizing")
-
-    p99_hits = sum(1 for r in results if r.band_hit.get('P99', False))
-    p99_total = sum(1 for r in results if 'P99' in r.band_hit)
-    if p99_total > 0:
-        print(f"  P99 band: {p99_hits}/{p99_total} hits ({p99_hits/p99_total*100:.1f}%) - Use for conservative sizing")
-
-    print("\nFor transaction timing (using midpoint):")
-    if comb_errors:
+    if mean_comb_error is not None:
+        print("\nFor transaction timing (using midpoint):")
         print(f"  Expected error: ±{mean_comb_error:.2f}%")
         print(f"  Recommendation: Place limit orders at midpoint ± {mean_comb_error:.2f}%")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Backtest accuracy of P95/P97/P98/P99/P100 confidence bands",
+        description=f"Backtest accuracy of confidence bands ({'/'.join(TAIL_BAND_NAMES)})",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -293,15 +317,20 @@ Examples:
   %(prog)s SPX --days 60 --verbose
       Test SPX over last 60 days with detailed output
 
+  %(prog)s NDX --days 250 --workers 8
+      Test 1 year of trading days with 8 parallel workers
+
   %(prog)s NDX --days 90 --lookback 365
       Test with 365-day training period
-        """
+        """,
     )
 
     parser.add_argument('ticker', help='Ticker symbol (NDX, SPX)')
     parser.add_argument('--days', type=int, default=30, help='Number of days to backtest (default: 30)')
     parser.add_argument('--lookback', type=int, default=250, help='Training lookback days (default: 250)')
     parser.add_argument('--verbose', action='store_true', help='Show detailed output per day')
+    parser.add_argument('--workers', type=int, default=1,
+                        help='Parallel workers for per-day prediction (1=sequential, 0=auto, default: 1)')
 
     args = parser.parse_args()
 
@@ -310,6 +339,7 @@ Examples:
         num_days=args.days,
         lookback=args.lookback,
         verbose=args.verbose,
+        workers=args.workers,
     )
 
     if results:

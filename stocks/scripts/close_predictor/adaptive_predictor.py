@@ -152,6 +152,7 @@ class AdaptiveMultiDayPredictor:
         # Build percentile bands
         band_defs = {
             'P95': 1.96,   # 2 std devs
+            'P96': 2.05,
             'P97': 2.17,
             'P98': 2.33,
             'P99': 2.58,

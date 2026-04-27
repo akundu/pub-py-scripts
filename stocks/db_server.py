@@ -9897,7 +9897,9 @@ async def handle_predictions_page(request: web.Request) -> web.Response:
     if not day_tabs:
         day_tabs = compute_default_prediction_days()
 
-    # Get query parameters
+    # Get query parameters.
+    # Default = exclude outliers (IQR-winsorized view). Pass ?outliers=1
+    # (or true/yes/on) to opt into the RAW unfiltered view.
     exclude_outliers = request.query.get('outliers', '').strip().lower() not in {"1", "true", "yes", "on"}
     params = {
         'date': request.query.get('date'),
@@ -15173,6 +15175,8 @@ function toggleOutliers() {{
     var spinner = document.getElementById('outlierSpinner');
     var btn = document.getElementById('outlierToggle');
     var url = new URL(window.location.href);
+    // Default (no param) = Filtered (winsorized). To switch to Raw view,
+    // set ?outliers=1.
     var currentlyFiltered = !url.searchParams.has('outliers') || url.searchParams.get('outliers') !== '1';
 
     spinner.style.display = 'inline';
@@ -15180,8 +15184,10 @@ function toggleOutliers() {{
     btn.style.pointerEvents = 'none';
 
     if (currentlyFiltered) {{
+        // Opt into raw view.
         url.searchParams.set('outliers', '1');
     }} else {{
+        // Switch back to default filtered view.
         url.searchParams.delete('outliers');
     }}
 
@@ -15299,7 +15305,8 @@ async def handle_range_percentiles_api(request: web.Request) -> web.Response:
     start_date = request.query.get('start_date', None)
     end_date = request.query.get('end_date', None)
 
-    # Parse outlier control: default=exclude, ?outliers=1 to include raw
+    # Parse outlier control: default=exclude (winsorized). Pass ?outliers=1
+    # (or true/yes/on) to show raw unfiltered data.
     exclude_outliers = request.query.get('outliers', '').strip().lower() not in {"1", "true", "yes", "on"}
 
     # Get DB config
@@ -15403,8 +15410,16 @@ def _inject_range_percentiles_ws_script(html: str, tickers: list[str]) -> str:
 
         document.querySelectorAll('.price-cell' + sel).forEach(function(el) {{
             var pct = parseFloat(el.dataset.pct);
-            if (!isNaN(pct)) {{
-                el.textContent = fmtPrice(price * (1 + pct / 100));
+            if (isNaN(pct)) return;
+            var newPrice = price * (1 + pct / 100);
+            var bufferedPct = parseFloat(el.dataset.bufferedPct);
+            if (!isNaN(bufferedPct)) {{
+                var bufPrice = price * (1 + bufferedPct / 100);
+                el.innerHTML = fmtPrice(newPrice) +
+                    '<div class="buffer-addendum" style="font-size:11px;opacity:0.7;display:block;font-weight:normal;margin-top:2px;">' +
+                    fmtPrice(bufPrice) + '</div>';
+            }} else {{
+                el.textContent = fmtPrice(newPrice);
             }}
         }});
 
@@ -15530,6 +15545,10 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
         ?tickers=NDX (for multi-window, only single ticker supported)
         ?windows=* or ?windows=1,5,10 (triggers multi-window mode)
         ?window=5 (single-window mode, existing behavior)
+        ?buffer=0.5 (optional; render an additional smaller-font value below
+                    each %/$ cell with this percent buffer applied further in
+                    the move's direction — e.g. DOWN -1.50% with buffer=0.5
+                    shows -2.00% below)
         ?format=json or ?content-type=json to get JSON instead of HTML
         ... other params
 
@@ -15562,6 +15581,16 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
     # Parse tickers - support both 'ticker' and 'tickers' parameters
     tickers_str = request.query.get('tickers') or request.query.get('ticker', 'NDX')
     tickers = [t.strip() for t in tickers_str.split(',') if t.strip()]
+
+    # Optional buffer (% of move) — when > 0, each %/$ cell renders an
+    # additional smaller-font value below showing the buffered amount further
+    # in the move's direction.
+    try:
+        buffer_pct = float(request.query.get('buffer', '0') or 0)
+    except (TypeError, ValueError):
+        buffer_pct = 0.0
+    if buffer_pct < 0:
+        buffer_pct = 0.0
 
     # Detect multi-window mode
     windows_str = request.query.get('windows', None)
@@ -15709,14 +15738,15 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
             html = format_multi_window_as_html(
                 results,
                 params={"tickers": tickers, "windows": windows, "lookback": lookback},
-                multi_ticker=len(tickers) > 1
+                multi_ticker=len(tickers) > 1,
+                buffer=buffer_pct,
             )
 
             # If window 0 (0DTE) is included, inject hourly moves-to-close (already in hourly dict)
             if include_hourly and 0 in windows and hourly:
                 is_multi = len(tickers) > 1
                 for display_t, hourly_data in hourly.items():
-                    hourly_html = format_hourly_moves_as_html(hourly_data)
+                    hourly_html = format_hourly_moves_as_html(hourly_data, buffer=buffer_pct)
                     if not hourly_html:
                         continue
                     if is_multi:
@@ -15909,11 +15939,12 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                 "window": window,
                 "lookback": lookback,
                 "percentiles": percentiles,
-            }
+            },
+            buffer=buffer_pct,
         )
 
         if hourly:
-            hourly_sections = [format_hourly_moves_as_html(hd) for hd in hourly.values()]
+            hourly_sections = [format_hourly_moves_as_html(hd, buffer=buffer_pct) for hd in hourly.values()]
             hourly_sections = [h for h in hourly_sections if h]
             if hourly_sections:
                 hourly_combined = "\n".join(hourly_sections)

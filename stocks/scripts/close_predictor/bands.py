@@ -60,6 +60,7 @@ def map_statistical_to_bands(
             "P85": (7.5, 92.5),
             "P90": (5.0, 95.0),
             "P95": (2.5, 97.5),
+            "P96": (2.0, 98.0),
             "P97": (1.5, 98.5),
             "P98": (1.0, 99.0),
             "P99": (0.5, 99.5),
@@ -104,6 +105,7 @@ def map_statistical_to_bands(
         "P80": 0.0,
         "P90": 0.5,
         "P95": 1.0,
+        "P96": 1.25,
         "P97": 1.5,
         "P98": 2.0,
         "P99": 3.0,
@@ -157,6 +159,7 @@ def map_percentile_to_bands(
         "P85": (7.5, 92.5),
         "P90": (5.0, 95.0),
         "P95": (2.5, 97.5),
+        "P96": (2.0, 98.0),
         "P97": (1.5, 98.5),
         "P98": (1.0, 99.0),
         "P99": (0.5, 99.5),
@@ -215,6 +218,7 @@ def map_directional_percentile_to_bands(
         "P80": 80,
         "P90": 90,
         "P95": 95,
+        "P96": 96,
         "P97": 97,
         "P98": 98,
         "P99": 99,
@@ -288,3 +292,43 @@ def combine_bands(
             source="combined",
         )
     return combined
+
+
+def scale_bands_about_center(
+    bands: Dict[str, UnifiedBand],
+    scale: float,
+    current_price: float,
+) -> Dict[str, UnifiedBand]:
+    """Widen (or narrow) each band symmetrically about its center.
+
+    Used to apply a per-ticker post-combine adjustment when the underlying
+    model bands need uniform widening to hit empirical hit-rate targets.
+    For RUT, the percentile model dominates combine_bands(), so the LGBM
+    scale knob has little effect; this helper widens the COMBINED output
+    so the per-ticker calibration target is actually achievable.
+
+    scale=1.0 returns bands unchanged. scale=1.5 makes each band 50% wider.
+    """
+    if scale == 1.0 or not bands:
+        return bands
+    out = {}
+    for name, b in bands.items():
+        center = (b.lo_price + b.hi_price) / 2.0
+        half_width = (b.hi_price - b.lo_price) / 2.0 * scale
+        lo_price = center - half_width
+        hi_price = center + half_width
+        lo_pct = (lo_price - current_price) / current_price * 100.0 if current_price else 0.0
+        hi_pct = (hi_price - current_price) / current_price * 100.0 if current_price else 0.0
+        width_pts = hi_price - lo_price
+        width_pct = width_pts / current_price * 100.0 if current_price else 0.0
+        out[name] = UnifiedBand(
+            name=name,
+            lo_price=lo_price,
+            hi_price=hi_price,
+            lo_pct=lo_pct,
+            hi_pct=hi_pct,
+            width_pts=width_pts,
+            width_pct=width_pct,
+            source=b.source,
+        )
+    return out
