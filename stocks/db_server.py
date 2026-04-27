@@ -1020,6 +1020,11 @@ async def worker_server_runner(worker_id: int, port: int, db_file: str,
         from common.notify import handle_notify
         app.router.add_post("/api/notify", handle_notify)
 
+        # Gemini proxy endpoints (per-client topic gating; LAN admin bypass)
+        from common.gemini_proxy import handle_gemini_ask, handle_gemini_ping
+        app.router.add_post("/api/gemini/ask", handle_gemini_ask)
+        app.router.add_get("/api/gemini/ping", handle_gemini_ping)
+
         # Add catch-all handler for unknown routes (must be last)
         app.router.add_get("/{path:.*}", handle_catch_all)
         app.router.add_post("/{path:.*}", handle_catch_all)

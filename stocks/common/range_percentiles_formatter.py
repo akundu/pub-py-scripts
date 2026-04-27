@@ -17,6 +17,73 @@ def _raw_prev_close(prev_close) -> str:
         return ""
 
 
+# ---- buffer addendum helpers ----------------------------------------------
+# When the /range_percentiles endpoint is called with ?buffer=<pct>, each %/$
+# cell renders an additional smaller-font value below the main value showing
+# the value with the buffer applied (further in the direction of the move).
+BUFFER_ADDENDUM_STYLE = (
+    "font-size:11px;opacity:0.7;display:block;font-weight:normal;margin-top:2px;"
+)
+
+
+def _buffered_pct_value(pct, buffer: float, direction: str | None = None) -> float | None:
+    """Compute the buffered percent value, or None if buffer is unset/invalid.
+
+    direction='down' subtracts buffer (move further negative).
+    direction='up'   adds buffer (move further positive).
+    direction=None   uses sign of pct as fallback (negative→subtract, else add).
+    """
+    if not buffer or buffer <= 0:
+        return None
+    try:
+        p = float(pct)
+        b = float(buffer)
+    except (TypeError, ValueError):
+        return None
+    if direction == "down":
+        return p - b
+    if direction == "up":
+        return p + b
+    return p - b if p < 0 else p + b
+
+
+def _buffer_pct_html(pct, buffer: float, direction: str | None = None, *, signed: bool = True) -> str:
+    """Return the small-font addendum HTML showing the buffered % beneath a cell.
+
+    Returns "" when buffer is not active. signed=True prefixes positive values
+    with '+', matching how the parent cells render their values.
+    """
+    new_pct = _buffered_pct_value(pct, buffer, direction)
+    if new_pct is None:
+        return ""
+    text = f"{new_pct:+.2f}%" if signed else f"{new_pct:.2f}%"
+    return f'<div class="buffer-addendum" style="{BUFFER_ADDENDUM_STYLE}">{text}</div>'
+
+
+def _buffer_price_html(pct, prev_close, buffer: float, direction: str | None = None) -> str:
+    """Return the small-font addendum HTML showing the buffered $ price beneath a cell."""
+    new_pct = _buffered_pct_value(pct, buffer, direction)
+    if new_pct is None:
+        return ""
+    try:
+        ref = float(prev_close)
+    except (TypeError, ValueError):
+        return ""
+    new_price = ref * (1.0 + new_pct / 100.0)
+    return f'<div class="buffer-addendum" style="{BUFFER_ADDENDUM_STYLE}">${new_price:,.2f}</div>'
+
+
+def _buffer_data_attr(pct, buffer: float, direction: str | None = None) -> str:
+    """Return ` data-buffer="N" data-buffered-pct="M"` attributes for a price-cell
+    so the live-price JS can reapply the buffered addendum after replacing the cell.
+    Empty string when buffer is inactive.
+    """
+    new_pct = _buffered_pct_value(pct, buffer, direction)
+    if new_pct is None:
+        return ""
+    return f' data-buffer="{float(buffer):.4f}" data-buffered-pct="{new_pct:.4f}"'
+
+
 def _table_row(cells: list[str], width: int) -> str:
     """Format a row of cells with given width per column."""
     return " | ".join(str(c).rjust(width) for c in cells)
@@ -205,7 +272,7 @@ def format_multi_window_as_text_table(out: dict) -> str:
     return "\n".join(lines).strip()
 
 
-def format_as_html(results: list[dict], params: dict = None) -> str:
+def format_as_html(results: list[dict], params: dict = None, buffer: float = 0.0) -> str:
     from datetime import date as _date
     """
     Format range percentiles results as a styled HTML page.
@@ -213,6 +280,8 @@ def format_as_html(results: list[dict], params: dict = None) -> str:
     Args:
         results: List of result dicts from compute_range_percentiles_multi
         params: Optional dict of parameters used (for display in header)
+        buffer: Optional percent buffer; when > 0 each cell renders a smaller-font
+                addendum showing the value shifted further in the move's direction.
 
     Returns:
         Complete HTML page as string
@@ -589,10 +658,13 @@ def format_as_html(results: list[dict], params: dict = None) -> str:
             for p in percentiles:
                 pct = when_down["pct"][f"p{p}"]
                 price = when_down["price"][f"p{p}"]
+                buf_pct_html = _buffer_pct_html(pct, buffer, direction="down")
+                buf_price_html = _buffer_price_html(pct, prev_close, buffer, direction="down")
+                buf_attr = _buffer_data_attr(pct, buffer, direction="down")
                 html_parts.append(f'''                        <td>
                             <div class="percentile-cell">
-                                <div class="percentile-pct">{pct}%</div>
-                                <div class="percentile-price price-cell" data-pct="{pct}" data-ticker="{ticker}" data-section="main">${price:,.2f}</div>
+                                <div class="percentile-pct">{pct}%{buf_pct_html}</div>
+                                <div class="percentile-price price-cell" data-pct="{pct}" data-ticker="{ticker}" data-section="main"{buf_attr}>${price:,.2f}{buf_price_html}</div>
                             </div>
                         </td>
 ''')
@@ -628,10 +700,13 @@ def format_as_html(results: list[dict], params: dict = None) -> str:
             for p in percentiles:
                 pct = when_up["pct"][f"p{p}"]
                 price = when_up["price"][f"p{p}"]
+                buf_pct_html = _buffer_pct_html(pct, buffer, direction="up")
+                buf_price_html = _buffer_price_html(pct, prev_close, buffer, direction="up")
+                buf_attr = _buffer_data_attr(pct, buffer, direction="up")
                 html_parts.append(f'''                        <td>
                             <div class="percentile-cell">
-                                <div class="percentile-pct">+{pct}%</div>
-                                <div class="percentile-price price-cell" data-pct="{pct}" data-ticker="{ticker}" data-section="main">${price:,.2f}</div>
+                                <div class="percentile-pct">+{pct}%{buf_pct_html}</div>
+                                <div class="percentile-price price-cell" data-pct="{pct}" data-ticker="{ticker}" data-section="main"{buf_attr}>${price:,.2f}{buf_price_html}</div>
                             </div>
                         </td>
 ''')
@@ -724,9 +799,14 @@ PERCENTILE_COLORS = {
 }
 
 
-def _generate_ticker_content_html(result: dict, ticker_id: str) -> tuple[str, dict, dict]:
+def _generate_ticker_content_html(result: dict, ticker_id: str, buffer: float = 0.0) -> tuple[str, dict, dict]:
     """
     Generate HTML content for a single ticker's multi-window analysis.
+
+    Args:
+        buffer: Optional percent buffer (e.g. 0.5 = 0.5%); when > 0 each
+            percentage/price cell renders a smaller-font addendum showing the
+            value shifted further in the move's direction.
 
     Returns:
         Tuple of (html_content, chart_data_down, chart_data_up)
@@ -881,8 +961,11 @@ def _generate_ticker_content_html(result: dict, ticker_id: str) -> tuple[str, di
                 when_down = win_data["when_down"]
                 pct = when_down["pct"][f"p{p}"]
                 price = when_down["price"][f"p{p}"]
-                html_parts.append(f'                            <td>{pct}%</td>\n')
-                html_parts.append(f'                            <td class="price-cell" data-pct="{pct}" data-ticker="{ticker}" data-section="main">${price:,.2f}</td>\n')
+                buf_pct_html = _buffer_pct_html(pct, buffer, direction="down")
+                buf_price_html = _buffer_price_html(pct, prev_close, buffer, direction="down")
+                buf_attr = _buffer_data_attr(pct, buffer, direction="down")
+                html_parts.append(f'                            <td>{pct}%{buf_pct_html}</td>\n')
+                html_parts.append(f'                            <td class="price-cell" data-pct="{pct}" data-ticker="{ticker}" data-section="main"{buf_attr}>${price:,.2f}{buf_price_html}</td>\n')
             else:
                 html_parts.append(f'                            <td class="insufficient">--</td>\n')
                 html_parts.append(f'                            <td class="insufficient">--</td>\n')
@@ -953,8 +1036,11 @@ def _generate_ticker_content_html(result: dict, ticker_id: str) -> tuple[str, di
                 when_up = win_data["when_up"]
                 pct = when_up["pct"][f"p{p}"]
                 price = when_up["price"][f"p{p}"]
-                html_parts.append(f'                            <td>+{pct}%</td>\n')
-                html_parts.append(f'                            <td class="price-cell" data-pct="{pct}" data-ticker="{ticker}" data-section="main">${price:,.2f}</td>\n')
+                buf_pct_html = _buffer_pct_html(pct, buffer, direction="up")
+                buf_price_html = _buffer_price_html(pct, prev_close, buffer, direction="up")
+                buf_attr = _buffer_data_attr(pct, buffer, direction="up")
+                html_parts.append(f'                            <td>+{pct}%{buf_pct_html}</td>\n')
+                html_parts.append(f'                            <td class="price-cell" data-pct="{pct}" data-ticker="{ticker}" data-section="main"{buf_attr}>${price:,.2f}{buf_price_html}</td>\n')
             else:
                 html_parts.append(f'                            <td class="insufficient">--</td>\n')
                 html_parts.append(f'                            <td class="insufficient">--</td>\n')
@@ -1085,8 +1171,10 @@ def _generate_ticker_content_html(result: dict, ticker_id: str) -> tuple[str, di
                     pct = wc["pct"].get(f"p{p}", "--")
                     price = wc["price"].get(f"p{p}", "--")
                     if isinstance(pct, (int, float)):
-                        html_parts.append(f'                            <td>{pct:+.2f}%</td>\n')
-                        html_parts.append(f'                            <td>${price:,.2f}</td>\n')
+                        buf_pct_html = _buffer_pct_html(pct, buffer)
+                        buf_price_html = _buffer_price_html(pct, prev_close, buffer)
+                        html_parts.append(f'                            <td>{pct:+.2f}%{buf_pct_html}</td>\n')
+                        html_parts.append(f'                            <td>${price:,.2f}{buf_price_html}</td>\n')
                     else:
                         html_parts.append(f'                            <td class="insufficient">--</td>\n')
                         html_parts.append(f'                            <td class="insufficient">--</td>\n')
@@ -1145,8 +1233,10 @@ def _generate_ticker_content_html(result: dict, ticker_id: str) -> tuple[str, di
                     pct = wr["pct"].get(f"p{p}", "--")
                     price = wr["price"].get(f"p{p}", "--")
                     if isinstance(pct, (int, float)):
-                        html_parts.append(f'                            <td>{pct:+.2f}%</td>\n')
-                        html_parts.append(f'                            <td>${price:,.2f}</td>\n')
+                        buf_pct_html = _buffer_pct_html(pct, buffer)
+                        buf_price_html = _buffer_price_html(pct, prev_close, buffer)
+                        html_parts.append(f'                            <td>{pct:+.2f}%{buf_pct_html}</td>\n')
+                        html_parts.append(f'                            <td>${price:,.2f}{buf_price_html}</td>\n')
                     else:
                         html_parts.append(f'                            <td class="insufficient">--</td>\n')
                         html_parts.append(f'                            <td class="insufficient">--</td>\n')
@@ -1238,7 +1328,7 @@ def _generate_chart_data(windows_dict: dict, window_list: list[int],
     }
 
 
-def format_multi_window_as_html(result: dict | list[dict], params: dict = None, multi_ticker: bool = False) -> str:
+def format_multi_window_as_html(result: dict | list[dict], params: dict = None, multi_ticker: bool = False, buffer: float = 0.0) -> str:
     """
     Format multi-window analysis as styled HTML with tables and charts.
 
@@ -1253,6 +1343,9 @@ def format_multi_window_as_html(result: dict | list[dict], params: dict = None, 
         result: Multi-window result dict or list of dicts from compute_range_percentiles_multi_window_batch
         params: Optional dict of parameters used (for display in header)
         multi_ticker: If True, render tabbed interface for multiple tickers
+        buffer: Optional percent buffer; when > 0 each percentage/price cell
+                renders a smaller-font addendum showing the value shifted further
+                in the move's direction.
 
     Returns:
         Complete HTML page as string
@@ -1662,7 +1755,7 @@ def format_multi_window_as_html(result: dict | list[dict], params: dict = None, 
         active_class = "active" if result_item == results[0] else ""
 
         # Generate content using helper function
-        content_html, chart_down, chart_up = _generate_ticker_content_html(result_item, ticker_id)
+        content_html, chart_down, chart_up = _generate_ticker_content_html(result_item, ticker_id, buffer=buffer)
 
         # Store chart data
         chart_data_all[ticker_id] = {
@@ -1958,13 +2051,17 @@ def _direction_badge(direction: str) -> str:
 
 def _render_slot_table(slots: dict, sorted_keys: list[str], percentiles: list[int],
                        direction: str, title: str, ticker: str = "",
-                       highlight_p: int = 0, highlight_tiers: dict = None) -> str:
+                       highlight_p: int = 0, highlight_tiers: dict = None,
+                       buffer: float = 0.0, prev_close: float = 0.0) -> str:
     """Render a single DOWN or UP table for a set of slots.
 
     Args:
         highlight_p: (deprecated) Single percentile to highlight. Use highlight_tiers instead.
         highlight_tiers: Dict with keys 'aggressive', 'moderate', 'conservative',
                          each mapping to an int percentile. Shows three colored indicators.
+        buffer: Optional percent buffer; when > 0 each %/$ cell renders a smaller-font
+                addendum value shifted further in the move's direction.
+        prev_close: Reference close price required to compute buffered $ values.
     """
     # Build tier lookup: percentile -> tier name
     tier_map = {}
@@ -2017,8 +2114,11 @@ def _render_slot_table(slots: dict, sorted_keys: list[str], percentiles: list[in
             if block:
                 pct = block["pct"][f"p{p}"]
                 price = block["price"][f"p{p}"]
-                parts.append(f'                        <td>{sign}{pct}%</td>\n')
-                parts.append(f'                        <td class="price-cell" data-pct="{pct}" data-ticker="{ticker}" data-section="hourly">${price:,.2f}</td>\n')
+                buf_pct_html = _buffer_pct_html(pct, buffer, direction=direction)
+                buf_price_html = _buffer_price_html(pct, prev_close, buffer, direction=direction)
+                buf_attr = _buffer_data_attr(pct, buffer, direction=direction)
+                parts.append(f'                        <td>{sign}{pct}%{buf_pct_html}</td>\n')
+                parts.append(f'                        <td class="price-cell" data-pct="{pct}" data-ticker="{ticker}" data-section="hourly"{buf_attr}>${price:,.2f}{buf_price_html}</td>\n')
             else:
                 parts.append('                        <td class="insuf">--</td>\n                        <td class="insuf">--</td>\n')
         parts.append('                    </tr>\n')
@@ -2029,7 +2129,8 @@ def _render_slot_table(slots: dict, sorted_keys: list[str], percentiles: list[in
 
 def _render_max_move_table(slots: dict, sorted_keys: list[str], percentiles: list[int],
                            direction: str, title: str, ticker: str = "",
-                           highlight_p: int = 0, highlight_tiers: dict = None) -> str:
+                           highlight_p: int = 0, highlight_tiers: dict = None,
+                           buffer: float = 0.0, prev_close: float = 0.0) -> str:
     """Render a max-move (intraday excursion) table for a set of slots."""
     tier_map = {}
     if highlight_tiers:
@@ -2082,8 +2183,11 @@ def _render_max_move_table(slots: dict, sorted_keys: list[str], percentiles: lis
             if mm:
                 pct = mm[move_key][f"p{p}"]
                 price = mm[price_key][f"p{p}"]
-                parts.append(f'                        <td>{sign}{pct}%</td>\n')
-                parts.append(f'                        <td class="price-cell" data-pct="{pct}" data-ticker="{ticker}" data-section="hourly">${price:,.2f}</td>\n')
+                buf_pct_html = _buffer_pct_html(pct, buffer, direction=direction)
+                buf_price_html = _buffer_price_html(pct, prev_close, buffer, direction=direction)
+                buf_attr = _buffer_data_attr(pct, buffer, direction=direction)
+                parts.append(f'                        <td>{sign}{pct}%{buf_pct_html}</td>\n')
+                parts.append(f'                        <td class="price-cell" data-pct="{pct}" data-ticker="{ticker}" data-section="hourly"{buf_attr}>${price:,.2f}{buf_price_html}</td>\n')
             else:
                 parts.append('                        <td class="insuf">--</td>\n                        <td class="insuf">--</td>\n')
         parts.append('                    </tr>\n')
@@ -2170,7 +2274,7 @@ _HOURLY_SECTION_STYLE = """
 """
 
 
-def format_hourly_moves_as_html(hourly_data: dict) -> str:
+def format_hourly_moves_as_html(hourly_data: dict, buffer: float = 0.0) -> str:
     """
     Format intraday moves-to-close data as an HTML section.
 
@@ -2181,6 +2285,9 @@ def format_hourly_moves_as_html(hourly_data: dict) -> str:
 
     Args:
         hourly_data: Result dict from compute_hourly_moves_to_close
+        buffer: Optional percent buffer; when > 0 each %/$ cell renders a
+                smaller-font addendum showing the value shifted further in
+                the move's direction.
 
     Returns:
         HTML string for the section (not a full page)
@@ -2241,19 +2348,23 @@ def format_hourly_moves_as_html(hourly_data: dict) -> str:
     if sorted_primary:
         html_parts.append(_render_slot_table(slots_primary, sorted_primary, percentiles, "down",
                                               "DOWN MOVES TO CLOSE", ticker=ticker,
-                                              highlight_tiers=intra_put_tiers))
+                                              highlight_tiers=intra_put_tiers,
+                                              buffer=buffer, prev_close=prev_close))
         html_parts.append('        <div style="margin-top:30px"></div>\n')
         html_parts.append(_render_slot_table(slots_primary, sorted_primary, percentiles, "up",
                                               "UP MOVES TO CLOSE", ticker=ticker,
-                                              highlight_tiers=intra_call_tiers))
+                                              highlight_tiers=intra_call_tiers,
+                                              buffer=buffer, prev_close=prev_close))
     else:
         html_parts.append(_render_slot_table(slots, sorted_slots, percentiles, "down",
                                               "DOWN MOVES TO CLOSE (per half-hour)", ticker=ticker,
-                                              highlight_tiers=intra_put_tiers))
+                                              highlight_tiers=intra_put_tiers,
+                                              buffer=buffer, prev_close=prev_close))
         html_parts.append('        <div style="margin-top:30px"></div>\n')
         html_parts.append(_render_slot_table(slots, sorted_slots, percentiles, "up",
                                               "UP MOVES TO CLOSE (per half-hour)", ticker=ticker,
-                                              highlight_tiers=intra_call_tiers))
+                                              highlight_tiers=intra_call_tiers,
+                                              buffer=buffer, prev_close=prev_close))
 
     # --- Max-Move (Intraday Excursion) tables ---
     if sorted_primary and any(slots_primary[s].get("max_move") for s in sorted_primary):
@@ -2264,31 +2375,37 @@ def format_hourly_moves_as_html(hourly_data: dict) -> str:
                           'the worst-case intraday spike — the price your short strike could be tested at.</div>\n')
         html_parts.append(_render_max_move_table(slots_primary, sorted_primary, percentiles, "down",
                                                   "MAX DOWN EXCURSION (worst intraday low)", ticker=ticker,
-                                                  highlight_tiers=mm_put_tiers))
+                                                  highlight_tiers=mm_put_tiers,
+                                                  buffer=buffer, prev_close=prev_close))
         html_parts.append('        <div style="margin-top:30px"></div>\n')
         html_parts.append(_render_max_move_table(slots_primary, sorted_primary, percentiles, "up",
                                                   "MAX UP EXCURSION (highest intraday high)", ticker=ticker,
-                                                  highlight_tiers=mm_call_tiers))
+                                                  highlight_tiers=mm_call_tiers,
+                                                  buffer=buffer, prev_close=prev_close))
 
     # --- Tier 2: 10-min tables (last 30 min) ---
     sorted_10 = sorted(slots_10min.keys(), key=_time_sort_key)
     if sorted_10:
         html_parts.append('\n        <h3>Last 30 Minutes (10-min detail)</h3>\n')
         html_parts.append(_render_slot_table(slots_10min, sorted_10, percentiles, "down",
-                                              "DOWN MOVES TO CLOSE (per 10-min)", ticker=ticker))
+                                              "DOWN MOVES TO CLOSE (per 10-min)", ticker=ticker,
+                                              buffer=buffer, prev_close=prev_close))
         html_parts.append('        <div style="margin-top:30px"></div>\n')
         html_parts.append(_render_slot_table(slots_10min, sorted_10, percentiles, "up",
-                                              "UP MOVES TO CLOSE (per 10-min)", ticker=ticker))
+                                              "UP MOVES TO CLOSE (per 10-min)", ticker=ticker,
+                                              buffer=buffer, prev_close=prev_close))
 
     # --- Tier 3: 5-min tables (last 10 min) ---
     sorted_5 = sorted(slots_5min.keys(), key=_time_sort_key)
     if sorted_5:
         html_parts.append('\n        <h3>Last 10 Minutes (5-min detail)</h3>\n')
         html_parts.append(_render_slot_table(slots_5min, sorted_5, percentiles, "down",
-                                              "DOWN MOVES TO CLOSE (per 5-min)", ticker=ticker))
+                                              "DOWN MOVES TO CLOSE (per 5-min)", ticker=ticker,
+                                              buffer=buffer, prev_close=prev_close))
         html_parts.append('        <div style="margin-top:30px"></div>\n')
         html_parts.append(_render_slot_table(slots_5min, sorted_5, percentiles, "up",
-                                              "UP MOVES TO CLOSE (per 5-min)", ticker=ticker))
+                                              "UP MOVES TO CLOSE (per 5-min)", ticker=ticker,
+                                              buffer=buffer, prev_close=prev_close))
 
     if not has_fine:
         html_parts.append("""
