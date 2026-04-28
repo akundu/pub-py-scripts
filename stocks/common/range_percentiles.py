@@ -183,6 +183,36 @@ def _winsorize_iqr(values, factor=1.5):
     return np.clip(arr, lower, upper)
 
 
+def _iqr_keep_mask(values, factor: float = DEFAULT_OUTLIER_DROP_FACTOR):
+    """Boolean keep-mask matching the cleaning rule of `_drop_outliers_iqr`.
+
+    Returns a numpy bool array of shape == len(values), True where the
+    sample is inside [Q1 - factor*IQR, Q3 + factor*IQR]. Use this when
+    you need to filter parallel objects together — e.g. a return Series
+    and the date-indexed DataFrame it came from — so subsequent
+    boolean indexing across them stays aligned. Use `_drop_outliers_iqr`
+    when you only need the cleaned values and don't care about preserving
+    the source index.
+
+    Mirrors `_drop_outliers_iqr`'s safety fallbacks: returns all-True if
+    n<20, IQR<=0, or the cleaning would drop >20% of samples.
+    """
+    import numpy as np
+    arr = np.asarray(values, dtype=float)
+    if len(arr) < 20:
+        return np.ones(len(arr), dtype=bool)
+    q1, q3 = np.percentile(arr, [25, 75])
+    iqr = q3 - q1
+    if iqr <= 0:
+        return np.ones(len(arr), dtype=bool)
+    lower = q1 - factor * iqr
+    upper = q3 + factor * iqr
+    mask = (arr >= lower) & (arr <= upper)
+    if mask.sum() < len(arr) * 0.8:
+        return np.ones(len(arr), dtype=bool)
+    return mask
+
+
 def _drop_outliers_iqr(values, factor: float = DEFAULT_OUTLIER_DROP_FACTOR):
     """Drop values beyond the IQR fences (Q1 - factor*IQR, Q3 + factor*IQR).
 
@@ -1344,10 +1374,16 @@ async def compute_range_percentiles_multi_window(
 
             # Drop extreme outliers (3x IQR fences) — drop, not clip, so that
             # tail percentiles (P97-P100) remain distinct in the displayed table.
+            # Apply the keep-mask to BOTH return_pct and df_window so the date
+            # index stays aligned for the momentum-filter block below — without
+            # this, momentum_mask (indexed by df_window.index) collides with a
+            # re-indexed return_pct and pandas raises "Unalignable boolean
+            # Series provided as indexer".
             if exclude_outliers:
-                cleaned = _drop_outliers_iqr(return_pct.values)
-                import pandas as pd
-                return_pct = pd.Series(cleaned)
+                keep = _iqr_keep_mask(return_pct.values)
+                if not keep.all():
+                    return_pct = return_pct.loc[keep]
+                    df_window = df_window.loc[keep]
 
             mask_up = return_pct > 0
             mask_down = return_pct < 0
