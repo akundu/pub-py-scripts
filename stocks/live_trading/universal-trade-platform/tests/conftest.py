@@ -32,6 +32,16 @@ def _disable_server_detection(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_option_conid_cache(tmp_path, monkeypatch):
+    """Redirect the cross-provider OptionConidStore to a per-test tmp dir so
+    one test's resolved conids don't leak into the next test (or pollute the
+    real `data/utp/cache/option_conids` path on the dev's machine)."""
+    monkeypatch.setenv(
+        "UTP_OPTION_CONID_CACHE_DIR", str(tmp_path / "option_conids")
+    )
+
+
+@pytest.fixture(autouse=True)
 async def _setup_providers(tmp_path):
     """Register and connect all providers before each test; clean up after."""
     ProviderRegistry.clear()

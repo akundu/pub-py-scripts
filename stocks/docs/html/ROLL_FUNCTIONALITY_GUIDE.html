@@ -1,0 +1,759 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Roll Functionality Guide — Complete Reference</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --accent: #58a6ff;
+    --accent-hover: #79c0ff;
+    --green: #3fb950;
+    --orange: #d29922;
+    --red: #f85149;
+    --purple: #bc8cff;
+    --cyan: #56d4dd;
+    --code-bg: #1c2128;
+    --table-alt: #1c2128;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    padding: 0;
+  }
+
+  /* Header */
+  .hero {
+    background: linear-gradient(135deg, #0d1117 0%, #1c2128 100%);
+    padding: 60px 30px 40px;
+    border-bottom: 1px solid var(--border);
+    text-align: center;
+  }
+  .hero h1 {
+    font-size: 2.6em;
+    margin-bottom: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--cyan), var(--green));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .hero .subtitle { color: var(--text-muted); font-size: 1.1em; }
+  .hero .meta { color: var(--text-muted); font-size: 0.9em; margin-top: 12px; }
+
+  /* Layout */
+  .layout { display: grid; grid-template-columns: 240px 1fr; max-width: 1400px; margin: 0 auto; gap: 0; }
+  @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } .toc { display: none; } }
+
+  /* Table of contents (sticky sidebar) */
+  .toc {
+    position: sticky;
+    top: 0;
+    height: 100vh;
+    overflow-y: auto;
+    padding: 30px 18px;
+    border-right: 1px solid var(--border);
+    background: var(--surface);
+  }
+  .toc h3 { font-size: 0.78em; color: var(--text-muted); text-transform: uppercase; letter-spacing: 1px; margin-bottom: 12px; }
+  .toc ul { list-style: none; }
+  .toc li { margin: 6px 0; }
+  .toc a {
+    color: var(--text-muted);
+    text-decoration: none;
+    font-size: 0.85em;
+    display: block;
+    padding: 4px 8px;
+    border-radius: 4px;
+    transition: all 0.2s;
+  }
+  .toc a:hover { color: var(--accent); background: rgba(88,166,255,0.05); }
+
+  /* Main content */
+  .content { padding: 30px 50px 80px; max-width: 1100px; }
+  @media (max-width: 900px) { .content { padding: 25px 20px 60px; } }
+
+  section { margin-bottom: 50px; scroll-margin-top: 30px; }
+  h2 {
+    font-size: 1.7em;
+    margin-bottom: 18px;
+    padding-bottom: 10px;
+    border-bottom: 2px solid var(--border);
+    color: var(--accent);
+  }
+  h3 { font-size: 1.25em; margin: 26px 0 12px; color: var(--cyan); }
+  h4 { font-size: 1.05em; margin: 18px 0 8px; color: var(--purple); }
+  p { margin-bottom: 14px; }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; margin: 14px 0; font-size: 0.92em; }
+  th, td {
+    padding: 10px 14px;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+  }
+  th {
+    background: var(--code-bg);
+    color: var(--text-muted);
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.78em;
+    letter-spacing: 0.5px;
+  }
+  tr:hover { background: rgba(88,166,255,0.04); }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .green { color: var(--green); }
+  .red { color: var(--red); }
+  .orange { color: var(--orange); }
+  .muted { color: var(--text-muted); }
+
+  /* Code blocks */
+  code {
+    background: var(--code-bg);
+    color: var(--purple);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-family: 'SF Mono', 'Fira Code', Menlo, monospace;
+    font-size: 0.88em;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 18px;
+    overflow-x: auto;
+    margin: 14px 0;
+  }
+  pre code { background: none; padding: 0; color: var(--text); font-size: 0.85em; }
+  .cmd { color: var(--green); }
+  .comment { color: var(--text-muted); font-style: italic; }
+
+  /* Callouts */
+  .callout {
+    background: var(--surface);
+    border-left: 4px solid var(--accent);
+    padding: 16px 22px;
+    margin: 18px 0;
+    border-radius: 0 8px 8px 0;
+  }
+  .callout.green { border-left-color: var(--green); }
+  .callout.orange { border-left-color: var(--orange); }
+  .callout.red { border-left-color: var(--red); }
+  .callout.purple { border-left-color: var(--purple); }
+  .callout strong { color: var(--accent); }
+  .callout.green strong { color: var(--green); }
+  .callout.orange strong { color: var(--orange); }
+  .callout.red strong { color: var(--red); }
+
+  /* Cards & badges */
+  .card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 16px;
+    margin: 18px 0;
+  }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 18px 20px;
+  }
+  .card .label { color: var(--text-muted); font-size: 0.78em; text-transform: uppercase; letter-spacing: 1px; }
+  .card .value { font-size: 1.6em; font-weight: 700; margin: 6px 0; color: var(--accent); }
+  .card .desc { color: var(--text-muted); font-size: 0.85em; }
+
+  .badge {
+    display: inline-block;
+    padding: 2px 9px;
+    border-radius: 12px;
+    font-size: 0.74em;
+    font-weight: 600;
+    margin: 0 2px;
+  }
+  .badge.ok { background: rgba(63,185,80,0.18); color: var(--green); border: 1px solid var(--green); }
+  .badge.warn { background: rgba(210,153,34,0.18); color: var(--orange); border: 1px solid var(--orange); }
+  .badge.err { background: rgba(248,81,73,0.18); color: var(--red); border: 1px solid var(--red); }
+  .badge.info { background: rgba(88,166,255,0.18); color: var(--accent); border: 1px solid var(--accent); }
+
+  /* Severity levels visual */
+  .severity-row {
+    display: grid;
+    grid-template-columns: 110px 1fr 220px;
+    align-items: center;
+    gap: 14px;
+    padding: 10px 14px;
+    margin: 6px 0;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .sev-pill {
+    text-align: center;
+    padding: 4px 10px;
+    border-radius: 20px;
+    font-size: 0.82em;
+    font-weight: 600;
+  }
+  .sev-safe { background: rgba(63,185,80,0.15); color: var(--green); }
+  .sev-watch { background: rgba(86,212,221,0.15); color: var(--cyan); }
+  .sev-warn { background: rgba(210,153,34,0.15); color: var(--orange); }
+  .sev-crit { background: rgba(248,81,73,0.15); color: var(--red); }
+  .sev-breach { background: rgba(248,81,73,0.30); color: var(--red); border: 1px solid var(--red); }
+
+  /* Workflow steps */
+  .workflow {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 22px 26px;
+    margin: 18px 0;
+  }
+  .workflow h4 { color: var(--green); margin-top: 0; }
+  .step {
+    border-left: 2px solid var(--border);
+    padding: 6px 14px;
+    margin: 10px 0;
+    color: var(--text-muted);
+    font-size: 0.92em;
+  }
+  .step strong { color: var(--text); }
+
+  /* Roll types comparison */
+  .roll-compare {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin: 18px 0;
+  }
+  @media (max-width: 700px) { .roll-compare { grid-template-columns: 1fr; } }
+  .roll-card {
+    background: var(--surface);
+    border: 2px solid var(--border);
+    border-radius: 10px;
+    padding: 22px;
+  }
+  .roll-card.mirror { border-color: var(--purple); }
+  .roll-card.forward { border-color: var(--cyan); }
+  .roll-card h3 { margin-top: 0; }
+  .roll-card.mirror h3 { color: var(--purple); }
+  .roll-card.forward h3 { color: var(--cyan); }
+
+  /* Lists */
+  ul, ol { padding-left: 24px; margin: 8px 0 14px; }
+  li { margin-bottom: 6px; }
+
+  /* Links */
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { color: var(--accent-hover); text-decoration: underline; }
+
+  /* Footer */
+  footer {
+    margin-top: 50px;
+    padding: 24px 50px;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 0.85em;
+    text-align: center;
+  }
+
+  /* Status pill in summary table */
+  .status-pill {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 0.78em;
+    font-weight: 600;
+  }
+  .status-built { background: rgba(63,185,80,0.18); color: var(--green); }
+  .status-gap { background: rgba(248,81,73,0.18); color: var(--red); }
+  .status-partial { background: rgba(210,153,34,0.18); color: var(--orange); }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <h1>Roll Functionality Guide</h1>
+  <div class="subtitle">Complete reference: live execution, automatic suggestions, historical analysis, and backtesting</div>
+  <div class="meta">UTP daemon &middot; CLI &middot; HTTP API &middot; Roll cost table &middot; VMaxMin engine</div>
+</div>
+
+<div class="layout">
+  <!-- Sidebar TOC -->
+  <nav class="toc">
+    <h3>Contents</h3>
+    <ul>
+      <li><a href="#summary">Quick Summary</a></li>
+      <li><a href="#types">Roll Types</a></li>
+      <li><a href="#severity">Severity Levels</a></li>
+      <li><a href="#cli">CLI Commands</a></li>
+      <li><a href="#api">HTTP API</a></li>
+      <li><a href="#config">Configuration</a></li>
+      <li><a href="#scanner">Background Scanner</a></li>
+      <li><a href="#analysis">Roll Cost Analysis</a></li>
+      <li><a href="#backtest">Backtest with Rolling</a></li>
+      <li><a href="#gap">Phase 2 Gaps</a></li>
+      <li><a href="#workflows">Workflows</a></li>
+      <li><a href="#filemap">File Map</a></li>
+      <li><a href="#suggestion-fields">Suggestion Fields</a></li>
+    </ul>
+  </nav>
+
+  <!-- Main content -->
+  <div class="content">
+
+    <!-- Summary -->
+    <section id="summary">
+      <h2>Quick Summary</h2>
+      <p>Everything you can do with rolls in this codebase, at a glance:</p>
+      <table>
+        <thead>
+          <tr><th>Capability</th><th>Tool</th><th>Status</th><th>Where</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Live roll execution</td><td><code>utp.py roll</code> CLI</td><td><span class="status-pill status-built">BUILT</span></td><td>UTP daemon</td></tr>
+          <tr><td>Automatic roll suggestions</td><td>Background scanner</td><td><span class="status-pill status-built">BUILT</span></td><td>Every 30s during market hours</td></tr>
+          <tr><td>Mirror roll (opposite side, same expiry)</td><td><code>roll mirror</code></td><td><span class="status-pill status-built">BUILT</span></td><td><code>roll_service.py:352-432</code></td></tr>
+          <tr><td>Forward roll (same side, further DTE)</td><td><code>roll forward</code></td><td><span class="status-pill status-built">BUILT</span></td><td><code>roll_service.py:434-516</code></td></tr>
+          <tr><td>HTTP API</td><td><code>/roll/*</code></td><td><span class="status-pill status-built">BUILT</span></td><td><code>app/routes/roll.py</code></td></tr>
+          <tr><td>Historical roll cost analysis</td><td><code>roll_cost_table.py</code></td><td><span class="status-pill status-built">BUILT</span></td><td><code>scripts/</code></td></tr>
+          <tr><td>Multi-day backtest with rolling</td><td><code>vmaxmin_engine.py</code></td><td><span class="status-pill status-built">BUILT</span></td><td><code>scripts/backtesting/scripts/</code></td></tr>
+          <tr><td>Live cost estimates ($credit, $close)</td><td><em>stubbed at 0.0</em></td><td><span class="status-pill status-partial">PHASE 1</span></td><td>Phase 2 wiring needed</td></tr>
+          <tr><td>Auto-execution of suggestions</td><td><code>auto_execute</code> flag exists</td><td><span class="status-pill status-partial">PHASE 1</span></td><td>Not yet wired</td></tr>
+          <tr><td>Should-I-roll? cost vs loss check</td><td>—</td><td><span class="status-pill status-gap">GAP</span></td><td>Decision logic missing</td></tr>
+          <tr><td>Multi-day roll decision simulator</td><td>—</td><td><span class="status-pill status-gap">GAP</span></td><td>Not yet built</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- Roll Types -->
+    <section id="types">
+      <h2>The Two Roll Types</h2>
+      <div class="roll-compare">
+        <div class="roll-card mirror">
+          <h3>🪞 Mirror Roll</h3>
+          <p><strong>What:</strong> Opens an <em>opposite-side</em> spread on the <em>same expiration day</em>. Original (threatened) position stays open.</p>
+          <p><strong>How:</strong></p>
+          <ul>
+            <li>Threatened PUT spread → opens CALL spread</li>
+            <li>Threatened CALL spread → opens PUT spread</li>
+            <li>New short strike near current price (ATM)</li>
+            <li>Same width as original</li>
+          </ul>
+          <p><strong>When it triggers:</strong></p>
+          <ul>
+            <li><span class="badge info">Expiration day only</span></li>
+            <li>Within configured UTC window (default 18:00–20:00 = 11am–1pm PST)</li>
+            <li>Severity ≥ <code>mirror_trigger_severity</code> (default <code>warning</code>)</li>
+          </ul>
+          <p><strong>Goal:</strong> collect premium on the opposite side to offset the threatened side</p>
+        </div>
+        <div class="roll-card forward">
+          <h3>➡️ Forward Roll</h3>
+          <p><strong>What:</strong> Closes current spread, opens <em>same-side</em> spread at a <em>further DTE</em>.</p>
+          <p><strong>How:</strong></p>
+          <ul>
+            <li>PUT stays PUT, CALL stays CALL</li>
+            <li>New strikes pushed further OTM (default <code>max(1%, current_distance%)</code>)</li>
+            <li>Same width as original</li>
+            <li>DTE range: 1–5 days forward</li>
+          </ul>
+          <p><strong>When it triggers:</strong></p>
+          <ul>
+            <li><span class="badge info">Any trading day</span> (skips weekends)</li>
+            <li>Severity ≥ <code>forward_trigger_severity</code> (default <code>watch</code>)</li>
+          </ul>
+          <p><strong>Goal:</strong> extend the position with reduced breach risk and additional time</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- Severity -->
+    <section id="severity">
+      <h2>Breach Severity Levels</h2>
+      <p>Every open spread is classified on a 5-level scale based on price distance from the short strike:</p>
+
+      <div class="severity-row">
+        <div class="sev-pill sev-safe">safe</div>
+        <div>Distance ≥ 2.0% from short strike</div>
+        <div class="muted">Example: RUT @ 2570, short put @ 2520</div>
+      </div>
+      <div class="severity-row">
+        <div class="sev-pill sev-watch">watch</div>
+        <div>Distance &lt; 2.0%</div>
+        <div class="muted">Forward roll triggers here (default)</div>
+      </div>
+      <div class="severity-row">
+        <div class="sev-pill sev-warn">warning</div>
+        <div>Distance &lt; 1.0%</div>
+        <div class="muted">Mirror roll triggers here (default)</div>
+      </div>
+      <div class="severity-row">
+        <div class="sev-pill sev-crit">critical</div>
+        <div>Distance &lt; 0.5%</div>
+        <div class="muted">Imminent breach</div>
+      </div>
+      <div class="severity-row">
+        <div class="sev-pill sev-breach">breached</div>
+        <div>Price ITM (past short strike)</div>
+        <div class="muted">PUT: price ≤ strike  •  CALL: price ≥ strike</div>
+      </div>
+
+      <h4>Calculation</h4>
+      <pre><code><span class="comment"># roll_service.py: _calc_breach_status()</span>
+distance_pct = (abs(price - short_strike) / price) * 100
+
+if option_type == "PUT":
+    is_breached = price &lt;= short_strike
+elif option_type == "CALL":
+    is_breached = price &gt;= short_strike</code></pre>
+    </section>
+
+    <!-- CLI -->
+    <section id="cli">
+      <h2>CLI Commands (<code>utp.py roll</code>)</h2>
+      <p>All commands are subcommands of <code>python utp.py roll</code>. Alias: <code>rl</code>.</p>
+
+      <h3>View Suggestions</h3>
+      <pre><code><span class="cmd">python utp.py roll suggestions</span>           <span class="comment"># list pending</span>
+<span class="cmd">python utp.py roll sg</span>                    <span class="comment"># alias</span>
+<span class="cmd">python utp.py rl sg</span>                      <span class="comment"># double alias</span></code></pre>
+
+      <h3>Execute / Preview</h3>
+      <pre><code><span class="cmd">python utp.py roll execute abc123</span>           <span class="comment"># preview only</span>
+<span class="cmd">python utp.py roll execute abc123 --confirm</span>  <span class="comment"># actually submit</span>
+<span class="cmd">python utp.py roll ex abc --confirm</span>         <span class="comment"># prefix matching works</span></code></pre>
+      <div class="callout"><strong>Forward rolls:</strong> close current position, then open new spread.<br><strong>Mirror rolls:</strong> open new spread only, original stays open.</div>
+
+      <h3>Dismiss</h3>
+      <pre><code><span class="cmd">python utp.py roll dismiss abc123</span>
+<span class="cmd">python utp.py roll dm abc</span>                 <span class="comment"># alias + prefix</span></code></pre>
+
+      <h3>Manual Forward Roll</h3>
+      <pre><code><span class="cmd">python utp.py roll forward 2d9a</span>             <span class="comment"># preview by position ID</span>
+<span class="cmd">python utp.py roll forward 2d9a --confirm</span>    <span class="comment"># execute</span>
+<span class="cmd">python utp.py roll fwd 2d9a --confirm</span>        <span class="comment"># alias</span></code></pre>
+
+      <h3>Manual Mirror Roll</h3>
+      <pre><code><span class="cmd">python utp.py roll mirror 2d9a --confirm</span>
+<span class="cmd">python utp.py roll mir 2d9a --confirm</span>         <span class="comment"># alias</span></code></pre>
+
+      <h3>Configuration</h3>
+      <pre><code><span class="cmd">python utp.py roll config</span>                                 <span class="comment"># view current</span>
+<span class="cmd">python utp.py roll config --mirror-trigger critical</span>        <span class="comment"># tighter trigger</span>
+<span class="cmd">python utp.py roll config --forward-trigger watch</span>          <span class="comment"># looser trigger</span>
+<span class="cmd">python utp.py roll config --auto-execute</span>                   <span class="comment"># enable (when wired)</span>
+<span class="cmd">python utp.py roll config --no-auto-execute</span></code></pre>
+    </section>
+
+    <!-- API -->
+    <section id="api">
+      <h2>HTTP API (<code>/roll/*</code>)</h2>
+      <p>Daemon endpoints. LAN trust: no auth needed from private IPs (127.*, 10.*, 172.16-31.*, 192.168.*).</p>
+
+      <table>
+        <thead><tr><th>Endpoint</th><th>Method</th><th>Body / Headers</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td><code>/roll/suggestions</code></td><td>GET</td><td>—</td><td>List pending suggestions</td></tr>
+          <tr><td><code>/roll/execute/{id}</code></td><td>POST</td><td><code>X-Dry-Run: true</code> for preview</td><td>Execute or preview</td></tr>
+          <tr><td><code>/roll/dismiss/{id}</code></td><td>POST</td><td>—</td><td>Reject a suggestion</td></tr>
+          <tr><td><code>/roll/config</code></td><td>GET</td><td>—</td><td>View configuration</td></tr>
+          <tr><td><code>/roll/config</code></td><td>POST</td><td>JSON (partial)</td><td>Update config</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Examples</h3>
+      <pre><code><span class="comment"># List suggestions</span>
+<span class="cmd">curl http://localhost:8000/roll/suggestions</span>
+
+<span class="comment"># Preview a roll without executing</span>
+<span class="cmd">curl -X POST http://localhost:8000/roll/execute/abc123 -H 'X-Dry-Run: true'</span>
+
+<span class="comment"># Execute</span>
+<span class="cmd">curl -X POST http://localhost:8000/roll/execute/abc123</span>
+
+<span class="comment"># Update config (partial)</span>
+<span class="cmd">curl -X POST http://localhost:8000/roll/config \
+  -H 'Content-Type: application/json' \
+  -d '{"mirror_trigger_severity": "critical", "forward_max_dte": 7}'</span></code></pre>
+    </section>
+
+    <!-- Config -->
+    <section id="config">
+      <h2>Configuration (<code>RollConfig</code>)</h2>
+      <p>Defaults defined in <code>roll_service.py:54-68</code>:</p>
+      <table>
+        <thead><tr><th>Field</th><th>Default</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>check_interval</code></td><td class="num">30.0</td><td>Seconds between background scans</td></tr>
+          <tr><td><code>mirror_enabled</code></td><td class="num">true</td><td>Enable mirror roll suggestions</td></tr>
+          <tr><td><code>mirror_trigger_severity</code></td><td><code>"warning"</code></td><td>Min severity to suggest mirror</td></tr>
+          <tr><td><code>mirror_time_window_utc</code></td><td><code>("18:00", "20:00")</code></td><td>Mirror window (11am–1pm PST)</td></tr>
+          <tr><td><code>mirror_max_cost_pct</code></td><td class="num">1.0</td><td>Cap mirror cost at 100% of original max loss</td></tr>
+          <tr><td><code>forward_enabled</code></td><td class="num">true</td><td>Enable forward roll suggestions</td></tr>
+          <tr><td><code>forward_trigger_severity</code></td><td><code>"watch"</code></td><td>Min severity to suggest forward</td></tr>
+          <tr><td><code>forward_min_dte</code></td><td class="num">1</td><td>Earliest target DTE</td></tr>
+          <tr><td><code>forward_max_dte</code></td><td class="num">5</td><td>Latest target DTE</td></tr>
+          <tr><td><code>forward_max_width_multiplier</code></td><td class="num">2.0</td><td>Max width expansion vs original</td></tr>
+          <tr><td><code>auto_execute</code></td><td class="num">false</td><td>Auto-execute suggestions <span class="badge warn">NOT YET WIRED</span></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- Scanner -->
+    <section id="scanner">
+      <h2>Background Scanner</h2>
+      <p>When the daemon starts, it spawns an <code>asyncio.Task</code> that scans positions on a configurable interval.</p>
+
+      <h3>Loop Mechanics</h3>
+      <pre><code><span class="comment"># app/main.py:73-91</span>
+async def _roll_scan_loop(interval: float):
+    while True:
+        await asyncio.sleep(interval)
+        svc = get_roll_service()
+        <span class="comment"># Only during market hours: 13:30-20:00 UTC, Mon-Fri</span>
+        if now.weekday() &gt;= 5: continue
+        if hour_min &lt; 1330 or hour_min &gt; 2000: continue
+        await svc.scan_positions()</code></pre>
+
+      <h3>What <code>scan_positions()</code> Does</h3>
+      <ol>
+        <li>Gets all open multi-leg positions (credit spreads only)</li>
+        <li>Fetches current market price for each symbol</li>
+        <li>Calculates breach status (severity, distance%)</li>
+        <li>For each position, checks:
+          <ul>
+            <li><strong>Mirror:</strong> expiration day + within mirror window + severity threshold</li>
+            <li><strong>Forward:</strong> severity threshold (any day)</li>
+          </ul>
+        </li>
+        <li>Creates <code>RollSuggestion</code> if eligible (deduplicates against existing pending)</li>
+        <li>Expires old suggestions after TTL (5 min)</li>
+      </ol>
+
+      <div class="callout green"><strong>Suggestions persist in memory</strong> until executed, dismissed, or expired. Visible via <code>GET /roll/suggestions</code> at any time.</div>
+    </section>
+
+    <!-- Analysis -->
+    <section id="analysis">
+      <h2>Historical Roll Cost Analysis</h2>
+      <p>Separate analytical tool — <strong>not part of UTP</strong>. Used to study what historical rolls would have cost.</p>
+
+      <h3>Single Ticker</h3>
+      <pre><code><span class="cmd">python scripts/roll_cost_table.py \
+    --ticker RUT --start 2025-10-01 --end 2026-03-27 \
+    --spread-width 20 \
+    --entry-breach-pcts 100 75 50 25 0 -5 \
+    --target-breach-pcts 100 75 50 25 0 \
+    --check-times 09:00 09:30 10:00 10:30 11:00 11:30 12:00 12:30 12:55 \
+    --roll-dtes 1 2 3 5 \
+    --options-dir ./options_csv_output_full_5 \
+    --output-dir results_auto/roll_cost</span></code></pre>
+
+      <h3>Multi-Ticker Tabbed HTML Report</h3>
+      <pre><code><span class="cmd">python scripts/generate_roll_cost_report.py \
+    --start 2026-01-01 --end 2026-03-29 \
+    --tickers RUT:20 SPX:25 NDX:50</span></code></pre>
+
+      <h3>Output CSV Columns</h3>
+      <pre><code>date, time_pst, option_type, entry_breach_pct, roll_dte, target_breach_pct,
+net_roll_cost, close_debit, open_credit, price, close_short, close_long,
+new_short, new_long, roll_exp</code></pre>
+
+      <div class="callout">
+        <strong>Sign convention:</strong>
+        <ul>
+          <li><span class="green">Negative</span> <code>net_roll_cost</code> = credit received (rolling pays you)</li>
+          <li><span class="red">Positive</span> <code>net_roll_cost</code> = debit paid (rolling costs you)</li>
+        </ul>
+      </div>
+
+      <div class="callout orange">
+        <strong>Limitation:</strong> each row computes ONE roll independently. Does NOT chain rolls across days. To answer "if I roll today and the position is still breached tomorrow, what's the cumulative cost?" you'd need a multi-day roll decision simulator (see Phase 2 Gaps).
+      </div>
+    </section>
+
+    <!-- Backtest -->
+    <section id="backtest">
+      <h2>Multi-Day Backtest with Rolling</h2>
+      <p>The vmaxmin engine chains rolls across days but uses hardcoded rules — <em>no</em> "should I roll vs accept loss?" cost/benefit logic.</p>
+
+      <h3>Run It</h3>
+      <pre><code><span class="cmd">python scripts/backtesting/scripts/run_vmaxmin_backtest.py \
+    --tickers RUT --layer --lookback-days 120 --num-contracts 40 \
+    --max-rolls 99 --roll-snowball --roll-recovery-threshold 99.0 \
+    --options-dir options_csv_output_full_5 \
+    --max-per-transaction 500000 --max-width-multiplier 5</span></code></pre>
+
+      <h3>Roll Triggers in the Engine</h3>
+      <table>
+        <thead><tr><th>Trigger</th><th>Code</th><th>Logic</th></tr></thead>
+        <tbody>
+          <tr><td>EOD proximity</td><td><code>_handle_eod_roll</code></td><td>Roll if price within <code>proximity_threshold_pct</code> (0.5%) of short strike</td></tr>
+          <tr><td>Midday breach</td><td><code>_handle_midday_roll</code></td><td>Roll if breach &gt; <code>midday_roll_breach_pct</code> (50%)</td></tr>
+          <tr><td>Conditional</td><td><code>_attempt_dte1_roll</code></td><td>Roll only if new credit ≥ 50% of close debit</td></tr>
+        </tbody>
+      </table>
+
+      <h3>Cost Caps (Roll Halt Conditions)</h3>
+      <p>The engine STOPS rolling if any of:</p>
+      <ul>
+        <li><code>roll_count &gt;= max_roll_count</code> (default 3, can be 99)</li>
+        <li><code>cumulative_roll_cost &gt;= original_credit * roll_recovery_threshold</code> (default 0.99)</li>
+      </ul>
+      <p>When halted, the position is closed at market.</p>
+
+      <h3><code>RolledPosition</code> State Tracked</h3>
+      <pre><code>direction, short_strike, long_strike, width, credit_per_share, num_contracts,
+expiration_date,        <span class="comment"># YYYY-MM-DD</span>
+original_entry_date,    <span class="comment"># day the very first 0DTE was opened</span>
+original_credit,        <span class="comment"># total $ from original 0DTE entry</span>
+cumulative_roll_cost,   <span class="comment"># SUM of (close_debit - new_credit) across rolls</span>
+roll_count              <span class="comment"># 1, 2, 3, ...</span></code></pre>
+      <p>These objects are passed forward across days via <code>active_carries</code> in the multi-day backtest loop (<code>run_vmaxmin_backtest.py:381-402</code>).</p>
+    </section>
+
+    <!-- Gap -->
+    <section id="gap">
+      <h2>Phase 2 Gaps</h2>
+
+      <div class="card-grid">
+        <div class="card">
+          <div class="label">Gap 1</div>
+          <div class="value" style="color: var(--orange)">Live cost estimates</div>
+          <div class="desc"><code>RollSuggestion.estimated_credit</code> and <code>estimated_close_cost</code> are stubbed at <code>0.0</code>. Need wiring to <code>get_option_quotes()</code> to compute real <code>net_cost</code> and <code>covers_close</code>.</div>
+        </div>
+        <div class="card">
+          <div class="label">Gap 2</div>
+          <div class="value" style="color: var(--orange)">Auto-execution</div>
+          <div class="desc"><code>RollConfig.auto_execute</code> exists but is not wired to actually fire executions automatically. Currently only scan→suggest is automatic.</div>
+        </div>
+        <div class="card">
+          <div class="label">Gap 3</div>
+          <div class="value" style="color: var(--red)">Cost vs loss check</div>
+          <div class="desc">The service decides to suggest a roll based on breach severity alone. There's no logic that says "this roll costs more than accepting the loss — skip it."</div>
+        </div>
+        <div class="card">
+          <div class="label">Gap 4</div>
+          <div class="value" style="color: var(--red)">Multi-day chaining</div>
+          <div class="desc">No simulator answers "if I roll today and tomorrow's position is still breached, what's the cumulative cost over N days?"</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Workflows -->
+    <section id="workflows">
+      <h2>Common Workflows</h2>
+
+      <div class="workflow">
+        <h4>Workflow 1: Live Roll Decision (UTP daemon running)</h4>
+        <div class="step"><strong>1.</strong> Daemon scans positions every 30s during market hours. Suggestions accumulate.</div>
+        <div class="step"><strong>2.</strong> Check pending: <code>python utp.py roll suggestions</code></div>
+        <div class="step"><strong>3.</strong> Preview: <code>curl -X POST http://localhost:8000/roll/execute/abc -H 'X-Dry-Run: true'</code></div>
+        <div class="step"><strong>4.</strong> Execute: <code>python utp.py roll execute abc --confirm</code></div>
+        <div class="step"><strong>5.</strong> Or dismiss: <code>python utp.py roll dismiss abc</code></div>
+      </div>
+
+      <div class="workflow">
+        <h4>Workflow 2: Manual Roll Without Waiting for Suggestion</h4>
+        <div class="step"><strong>1.</strong> View positions: <code>python utp.py portfolio --live</code></div>
+        <div class="step"><strong>2.</strong> Forward roll: <code>python utp.py roll forward 2d9a --confirm</code></div>
+        <div class="step"><strong>3.</strong> Or mirror (only on expiration day): <code>python utp.py roll mirror 2d9a --confirm</code></div>
+      </div>
+
+      <div class="workflow">
+        <h4>Workflow 3: Tune Roll Aggression</h4>
+        <div class="step"><strong>Conservative:</strong> <code>python utp.py roll config --forward-trigger breached</code> (only roll when ITM)</div>
+        <div class="step"><strong>Aggressive:</strong> <code>python utp.py roll config --forward-trigger watch</code> (roll early)</div>
+        <div class="step"><strong>Disable mirrors:</strong> <code>curl -X POST .../roll/config -d '{"mirror_enabled": false}'</code></div>
+      </div>
+
+      <div class="workflow">
+        <h4>Workflow 4: Historical "What-If" Analysis</h4>
+        <div class="step"><strong>1.</strong> Generate the full roll cost matrix:<br>
+          <code>python scripts/roll_cost_table.py --ticker RUT --start 2025-10-01 --end 2026-03-27 --spread-width 20 --output-dir results_auto/roll_cost</code></div>
+        <div class="step"><strong>2.</strong> Or a tabbed multi-ticker HTML report:<br>
+          <code>python scripts/generate_roll_cost_report.py --start 2026-01-01 --end 2026-03-29</code></div>
+        <div class="step"><strong>3.</strong> Open: <code>open results/roll_cost_report/index.html</code></div>
+      </div>
+
+      <div class="workflow">
+        <h4>Workflow 5: Backtest a Roll Strategy</h4>
+        <div class="step"><strong>Run vmaxmin with infinite rolls + credit-neutral sizing:</strong><br>
+          <code>python scripts/backtesting/scripts/run_vmaxmin_backtest.py --tickers RUT --layer --lookback-days 120 --num-contracts 40 --max-rolls 99 --roll-snowball --roll-recovery-threshold 99.0 --options-dir options_csv_output_full_5</code></div>
+      </div>
+    </section>
+
+    <!-- File Map -->
+    <section id="filemap">
+      <h2>File Map</h2>
+      <table>
+        <thead><tr><th>File</th><th>Purpose</th><th>Lines</th></tr></thead>
+        <tbody>
+          <tr><td><code>live_trading/universal-trade-platform/utp.py</code></td><td>CLI commands: <code>roll suggestions</code>, <code>execute</code>, <code>dismiss</code>, <code>forward</code>, <code>mirror</code>, <code>config</code></td><td>10299-10367 (parser), 6962-7071 (handler)</td></tr>
+          <tr><td><code>app/services/roll_service.py</code></td><td>Core engine: scan, breach detection, mirror/forward logic</td><td>726</td></tr>
+          <tr><td><code>app/routes/roll.py</code></td><td>HTTP endpoints</td><td>91</td></tr>
+          <tr><td><code>app/main.py</code></td><td>Background scan loop wiring</td><td>73-91</td></tr>
+          <tr><td><code>scripts/roll_cost_table.py</code></td><td>Historical roll cost analysis</td><td>609</td></tr>
+          <tr><td><code>scripts/generate_roll_cost_report.py</code></td><td>Multi-ticker tabbed HTML report</td><td>634</td></tr>
+          <tr><td><code>scripts/backtesting/scripts/vmaxmin_engine.py</code></td><td>Backtest engine with multi-day roll chaining</td><td>1900+</td></tr>
+          <tr><td><code>tests/test_utp.py</code></td><td>UTP tests (includes roll service)</td><td>654 tests</td></tr>
+          <tr><td><code>tests/test_roll_cost_table.py</code></td><td>Roll cost table tests</td><td>34 tests</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- Suggestion fields -->
+    <section id="suggestion-fields">
+      <h2>Roll Suggestion JSON Schema</h2>
+      <p>What you get back from <code>GET /roll/suggestions</code>:</p>
+      <pre><code>{
+  "suggestion_id": "abc123...",
+  "position_id": "2d9a...",
+  "symbol": "RUT",
+  "roll_type": "forward",          <span class="comment">// "forward" or "mirror"</span>
+  "severity": "warning",           <span class="comment">// safe|watch|warning|critical|breached</span>
+  "distance_pct": 0.78,
+
+  <span class="comment">// Current position</span>
+  "current_short_strike": 2520,
+  "current_long_strike": 2540,
+  "current_option_type": "CALL",
+  "current_expiration": "2026-03-27",
+  "current_quantity": 10,
+  "current_max_loss": 20000.0,
+
+  <span class="comment">// Proposed new spread</span>
+  "new_short_strike": 2530,
+  "new_long_strike": 2550,
+  "new_option_type": "CALL",
+  "new_expiration": "2026-03-30",
+  "new_width": 20.0,
+
+  <span class="comment">// Cost estimates (Phase 1 — currently 0.0, Phase 2 will compute live)</span>
+  "estimated_credit": 0.0,
+  "estimated_close_cost": 0.0,
+  "net_cost": 0.0,
+  "new_max_loss": 20000.0,
+  "covers_close": false,
+
+  "created_at": "2026-03-30T19:45:00+00:00",
+  "status": "pending",             <span class="comment">// pending|executed|rejected|expired</span>
+  "reason": "warning severity, 0.78% from short strike"
+}</code></pre>
+    </section>
+
+  </div>
+</div>
+
+<footer>
+  <p>Generated 2026-03-30 &middot; Roll functionality reference &middot; <a href="../strategies/roll_cost_analysis.md">Roll Cost Analysis</a> &middot; <a href="../../live_trading/universal-trade-platform/CLAUDE.md">UTP CLAUDE.md</a></p>
+</footer>
+
+</body>
+</html>

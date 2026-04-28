@@ -256,6 +256,122 @@ class IBKRRateLimiter:
             await asyncio.sleep(1.0 / self._rate)
 
 
+# ── Option ConId Store (daily, JSON-backed, provider-agnostic) ────────────────
+
+
+class OptionConidStore:
+    """Cross-provider option conId cache, persisted to disk per trading day.
+
+    Both TWS (`IBKRLiveProvider`) and CPG (`IBKRRestProvider`) share this
+    store: a conId resolved by either provider becomes available to the
+    other immediately. This is what makes "use TWS or CPG interchangeably"
+    actually work — when one provider's resolution endpoint breaks (e.g.
+    CPG `/iserver/secdef/info` 500s), the other's prior resolutions still
+    let the trade go through.
+
+    File layout: `{cache_dir}/{YYYY-MM-DD}.json` containing
+    `{ "{symbol}_{yyyymmdd}_{strike}_{right}": conid_int, ... }`.
+
+    conIds are stable within a calendar day, so the store is rebuilt each
+    morning (old files are pruned by callers / housekeeping).
+    """
+
+    def __init__(self, cache_dir: str = "data/utp/cache/option_conids") -> None:
+        # Allow tests / ops to override the default cache location without
+        # having to thread a parameter through every provider constructor.
+        env_dir = os.environ.get("UTP_OPTION_CONID_CACHE_DIR")
+        self._cache_dir = Path(env_dir or cache_dir)
+        self._cache_dir.mkdir(parents=True, exist_ok=True)
+        self._memory: dict[str, int] = {}
+        self._loaded_date: date | None = None
+        self._hits = 0
+        self._misses = 0
+        self._writes = 0
+
+    def _path_for(self, d: date) -> Path:
+        return self._cache_dir / f"{d.isoformat()}.json"
+
+    @staticmethod
+    def _key(symbol: str, expiration: str, strike: float, right: str) -> str:
+        exp_clean = expiration.replace("-", "")
+        return f"{symbol}_{exp_clean}_{float(strike)}_{right}"
+
+    def _ensure_loaded(self) -> None:
+        today = date.today()
+        if self._loaded_date == today:
+            return
+        # Date rolled over (or first call) — reload from disk
+        self._memory = {}
+        self._loaded_date = today
+        path = self._path_for(today)
+        if not path.exists():
+            return
+        try:
+            with path.open() as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                for k, v in data.items():
+                    try:
+                        v_int = int(v)
+                        if v_int > 0:
+                            self._memory[k] = v_int
+                    except (ValueError, TypeError):
+                        continue
+        except Exception as e:
+            logger.warning("OptionConidStore: failed to load %s: %s", path, e)
+
+    def get(self, symbol: str, expiration: str, strike: float, right: str) -> int | None:
+        self._ensure_loaded()
+        key = self._key(symbol, expiration, strike, right)
+        v = self._memory.get(key)
+        if v and v > 0:
+            self._hits += 1
+            return v
+        self._misses += 1
+        return None
+
+    def put(self, symbol: str, expiration: str, strike: float, right: str,
+            conid: int) -> None:
+        if not conid or conid <= 0:
+            return  # Never persist negative/zero — those are failed lookups
+        self._ensure_loaded()
+        key = self._key(symbol, expiration, strike, right)
+        if self._memory.get(key) == conid:
+            return
+        self._memory[key] = conid
+        self._writes += 1
+        # Atomic write: tmp + rename
+        path = self._path_for(self._loaded_date or date.today())
+        tmp = path.with_suffix(".json.tmp")
+        try:
+            with tmp.open("w") as f:
+                json.dump(self._memory, f, indent=2, sort_keys=True)
+            os.replace(tmp, path)
+        except Exception as e:
+            logger.warning("OptionConidStore: failed to persist %s: %s", path, e)
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def clear(self) -> None:
+        self._memory.clear()
+        self._loaded_date = None
+        self._hits = 0
+        self._misses = 0
+        self._writes = 0
+
+    @property
+    def stats(self) -> dict:
+        return {
+            "size": len(self._memory),
+            "hits": self._hits,
+            "misses": self._misses,
+            "writes": self._writes,
+            "loaded_date": self._loaded_date.isoformat() if self._loaded_date else None,
+        }
+
+
 # ── Cache Manager ─────────────────────────────────────────────────────────────
 
 
@@ -263,12 +379,14 @@ class IBKRCacheManager:
     """Holds all caches and the rate limiter. Provides aggregate stats and clear."""
 
     def __init__(self, option_chain_cache_dir: str = "data/utp/cache/option_chains",
-                 quote_ttl: float = 5.0, rate_limit: float = 45.0) -> None:
+                 quote_ttl: float = 5.0, rate_limit: float = 45.0,
+                 option_conid_cache_dir: str = "data/utp/cache/option_conids") -> None:
         self.contracts = ContractCache()
         self.option_chains = OptionChainCache(cache_dir=option_chain_cache_dir)
         self.quotes = QuoteSnapshotCache(ttl_seconds=quote_ttl)
         self.option_quotes = QuoteSnapshotCache(ttl_seconds=30.0)  # 30s TTL for option quotes
         self.rate_limiter = IBKRRateLimiter(rate=rate_limit)
+        self.option_conids = OptionConidStore(cache_dir=option_conid_cache_dir)
 
     def clear_all(self) -> None:
         """Clear all caches (call on reconnect)."""
@@ -283,4 +401,5 @@ class IBKRCacheManager:
             "option_chains": self.option_chains.stats,
             "quotes": self.quotes.stats,
             "option_quotes": self.option_quotes.stats,
+            "option_conids": self.option_conids.stats,
         }

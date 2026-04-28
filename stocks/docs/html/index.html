@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Stocks Documentation Index</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --accent: #58a6ff;
+    --accent-hover: #79c0ff;
+    --green: #3fb950;
+    --orange: #d29922;
+    --red: #f85149;
+    --purple: #bc8cff;
+    --cyan: #56d4dd;
+    --code-bg: #1c2128;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.65;
+    padding: 0;
+    min-height: 100vh;
+  }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { color: var(--accent-hover); text-decoration: underline; }
+
+  /* Hero */
+  .hero {
+    background: linear-gradient(135deg, #0d1117 0%, #1c2128 100%);
+    padding: 70px 30px 50px;
+    border-bottom: 1px solid var(--border);
+    text-align: center;
+  }
+  .hero h1 {
+    font-size: 2.8em;
+    margin-bottom: 12px;
+    background: linear-gradient(135deg, var(--accent), var(--cyan), var(--green));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .hero .subtitle { color: var(--text-muted); font-size: 1.15em; max-width: 720px; margin: 0 auto; }
+  .hero .meta { color: var(--text-muted); font-size: 0.9em; margin-top: 16px; }
+
+  /* Container */
+  .container { max-width: 1100px; margin: 0 auto; padding: 40px 30px 80px; }
+
+  /* Sections */
+  section { margin-bottom: 50px; }
+  h2 {
+    font-size: 1.55em;
+    margin-bottom: 18px;
+    padding-bottom: 10px;
+    border-bottom: 2px solid var(--border);
+    color: var(--accent);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  h2 .icon { font-size: 1.2em; }
+  h3 { font-size: 1.15em; margin: 24px 0 10px; color: var(--cyan); }
+  p { color: var(--text-muted); margin-bottom: 12px; }
+
+  /* Doc cards */
+  .doc-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 16px;
+  }
+  .doc-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 22px 24px;
+    transition: all 0.2s;
+    display: block;
+    color: var(--text);
+    text-decoration: none;
+  }
+  .doc-card:hover {
+    border-color: var(--accent);
+    transform: translateY(-2px);
+    box-shadow: 0 4px 14px rgba(88,166,255,0.1);
+    text-decoration: none;
+  }
+  .doc-card .title {
+    font-size: 1.15em;
+    font-weight: 600;
+    color: var(--accent);
+    margin-bottom: 8px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .doc-card .desc {
+    color: var(--text-muted);
+    font-size: 0.9em;
+    margin-bottom: 12px;
+    line-height: 1.55;
+  }
+  .doc-card .badges {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .badge {
+    display: inline-block;
+    padding: 2px 9px;
+    border-radius: 12px;
+    font-size: 0.74em;
+    font-weight: 600;
+  }
+  .badge.html { background: rgba(63,185,80,0.18); color: var(--green); border: 1px solid var(--green); }
+  .badge.md { background: rgba(88,166,255,0.18); color: var(--accent); border: 1px solid var(--accent); }
+  .badge.new { background: rgba(189,147,249,0.18); color: var(--purple); border: 1px solid var(--purple); }
+  .badge.guide { background: rgba(86,212,221,0.18); color: var(--cyan); border: 1px solid var(--cyan); }
+  .badge.spec { background: rgba(210,153,34,0.18); color: var(--orange); border: 1px solid var(--orange); }
+
+  /* Featured (HTML versions) */
+  .featured {
+    background: linear-gradient(135deg, rgba(88,166,255,0.05), rgba(86,212,221,0.03));
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 28px 30px;
+    margin-bottom: 40px;
+  }
+  .featured h2 { border: none; padding: 0; margin-bottom: 16px; }
+
+  /* Search */
+  .search-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    color: var(--text);
+    font-size: 1em;
+    width: 100%;
+    margin-bottom: 24px;
+    transition: border-color 0.2s;
+  }
+  .search-box:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .search-box::placeholder { color: var(--text-muted); }
+
+  /* MD-only doc list (more compact) */
+  .doc-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 10px;
+  }
+  .doc-list-item {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 16px;
+    color: var(--text);
+    text-decoration: none;
+    transition: all 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .doc-list-item:hover {
+    border-color: var(--accent);
+    text-decoration: none;
+  }
+  .doc-list-item .icon-small { color: var(--text-muted); font-size: 0.9em; flex-shrink: 0; }
+  .doc-list-item .name { font-weight: 500; flex: 1; }
+  .doc-list-item .ext { color: var(--text-muted); font-size: 0.78em; }
+
+  /* Stats */
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+    margin: 20px 0 32px;
+  }
+  .stat {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 14px 18px;
+    text-align: center;
+  }
+  .stat .count { font-size: 1.6em; font-weight: 700; color: var(--accent); }
+  .stat .label { color: var(--text-muted); font-size: 0.82em; text-transform: uppercase; letter-spacing: 0.5px; }
+
+  /* Footer */
+  footer {
+    border-top: 1px solid var(--border);
+    padding: 24px 30px;
+    color: var(--text-muted);
+    font-size: 0.85em;
+    text-align: center;
+  }
+
+  /* Quick links */
+  .quick-links {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin: 16px 0;
+  }
+  .quick-link {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 14px;
+    color: var(--accent);
+    font-size: 0.88em;
+    text-decoration: none;
+    transition: all 0.2s;
+  }
+  .quick-link:hover {
+    background: var(--code-bg);
+    border-color: var(--accent);
+    text-decoration: none;
+  }
+</style>
+</head>
+<body>
+
+<div class="hero">
+  <h1>Stocks Documentation</h1>
+  <div class="subtitle">Complete reference for trading strategies, backtesting, market data, and operational tooling</div>
+  <div class="meta">Stocks Analysis System &middot; <a href="../../README.md">README</a> &middot; <a href="../../CLAUDE.md">CLAUDE.md</a></div>
+</div>
+
+<div class="container">
+
+  <!-- Quick links -->
+  <section>
+    <div class="quick-links">
+      <a class="quick-link" href="#html-docs">HTML Docs</a>
+      <a class="quick-link" href="#strategies">Strategies</a>
+      <a class="quick-link" href="#trading">Trading & Live</a>
+      <a class="quick-link" href="#data">Data Pipeline</a>
+      <a class="quick-link" href="#backtest">Backtesting</a>
+      <a class="quick-link" href="#prediction">Prediction</a>
+      <a class="quick-link" href="#all-md">All Markdown Docs</a>
+    </div>
+
+    <input class="search-box" type="text" id="searchInput" placeholder="Search docs by name (e.g. 'roll', 'predict', 'streaming')..." onkeyup="filterDocs()" />
+
+    <div class="stats">
+      <div class="stat"><div class="count">3</div><div class="label">HTML Guides</div></div>
+      <div class="stat"><div class="count">22</div><div class="label">Markdown Docs</div></div>
+      <div class="stat"><div class="count">5</div><div class="label">Strategy Docs</div></div>
+      <div class="stat"><div class="count">2</div><div class="label">CLAUDE.md Files</div></div>
+    </div>
+  </section>
+
+  <!-- Featured: HTML Docs -->
+  <section id="html-docs" class="featured">
+    <h2><span class="icon">📘</span> Featured HTML Documentation</h2>
+    <p>Polished, dark-themed reference docs with full styling and navigation.</p>
+
+    <div class="doc-grid" id="html-grid">
+      <a class="doc-card" href="ROLL_FUNCTIONALITY_GUIDE.html" data-search="roll functionality utp mirror forward live execution">
+        <div class="title">🔄 Roll Functionality Guide</div>
+        <div class="desc">Complete reference for rolling credit spread positions: live execution via UTP, mirror &amp; forward rolls, breach severity, background scanner, HTTP API, configuration, and historical roll cost analysis.</div>
+        <div class="badges">
+          <span class="badge html">HTML</span>
+          <span class="badge new">NEW</span>
+          <span class="badge guide">GUIDE</span>
+        </div>
+      </a>
+
+      <a class="doc-card" href="CREDIT_SPREAD_STRATEGIES.html" data-search="credit spread strategies architecture analyze framework">
+        <div class="title">📈 Credit Spread Strategies</div>
+        <div class="desc">Architecture &amp; strategy framework for credit spread analysis. Analyze modes, module map, CLI usage, percentile entry, tiered portfolio, IV regime condor, and the orchestration framework.</div>
+        <div class="badges">
+          <span class="badge html">HTML</span>
+          <span class="badge guide">GUIDE</span>
+        </div>
+      </a>
+
+      <a class="doc-card" href="UNIFIED_CLOSE_PREDICTOR.html" data-search="close predictor lightgbm percentile model bands prediction">
+        <div class="title">🎯 Unified Close Predictor</div>
+        <div class="desc">LightGBM + Percentile model architecture for predicting end-of-day close prices. Bands (P10/P50/P90), tail extensions to P95/P99, calibration, and combined predictions for trading decisions.</div>
+        <div class="badges">
+          <span class="badge html">HTML</span>
+          <span class="badge spec">SPEC</span>
+        </div>
+      </a>
+    </div>
+  </section>
+
+  <!-- Strategies -->
+  <section id="strategies">
+    <h2><span class="icon">⚙️</span> Strategy Documentation</h2>
+    <p>Detailed analysis and implementation guides for each trading strategy.</p>
+
+    <div class="doc-grid" id="strategies-grid">
+      <a class="doc-card" href="../strategies/vmaxmin_layer_analysis.md" data-search="vmaxmin layer rut credit spread roll dte 0dte">
+        <div class="title">📊 vMaxMin Layer Strategy</div>
+        <div class="desc">0DTE credit spread strategy: dual entry, HOD/LOD layering, infinite credit-neutral rolls. RUT 6-month: +$5.18M, 100% win rate.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+          <span class="badge guide">STRATEGY</span>
+        </div>
+      </a>
+
+      <a class="doc-card" href="../strategies/tiered_portfolio_v2.md" data-search="tiered portfolio v2 ndx multi tier">
+        <div class="title">📊 Tiered Portfolio v2 (NDX)</div>
+        <div class="desc">Multi-tier credit spread portfolio with risk-stratified entries across percentiles and DTEs. Reference HTML report standard.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+          <span class="badge guide">STRATEGY</span>
+        </div>
+      </a>
+
+      <a class="doc-card" href="../strategies/backtest_v4.md" data-search="backtest v4 multi ticker percentile entry">
+        <div class="title">📊 Backtest V4</div>
+        <div class="desc">Multi-ticker percentile entry strategy. Smart rolling with P85 strikes, conditional width expansion, IC fallback in low-VIX regimes.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+          <span class="badge guide">STRATEGY</span>
+        </div>
+      </a>
+
+      <a class="doc-card" href="../strategies/roll_cost_analysis.md" data-search="roll cost analysis dte breach playbook">
+        <div class="title">🔄 Roll Cost Analysis</div>
+        <div class="desc">Standalone tool for calculating net cost of rolling breached 0DTE spreads. Time-of-day, target DTE, and strike placement playbooks.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+          <span class="badge guide">TOOL</span>
+        </div>
+      </a>
+
+      <a class="doc-card" href="../strategies/orchestration.md" data-search="orchestration framework portfolio multi strategy">
+        <div class="title">🎼 Orchestration Framework</div>
+        <div class="desc">Multi-algorithm orchestration: trigger-based selection, budget management, two-phase architecture, and cross-strategy comparisons.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+          <span class="badge guide">FRAMEWORK</span>
+        </div>
+      </a>
+
+      <a class="doc-card" href="../STRATEGY_DEVELOPMENT_GUIDE.md" data-search="strategy development guide build new claude">
+        <div class="title">🛠️ Strategy Development Guide</div>
+        <div class="desc">Step-by-step instructions for building new trading strategies in this codebase. Architecture, registry pattern, lifecycle, configuration, testing.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+          <span class="badge guide">GUIDE</span>
+        </div>
+      </a>
+
+      <a class="doc-card" href="../CREDIT_SPREAD_STRATEGIES.md" data-search="credit spread strategies markdown architecture">
+        <div class="title">📈 Credit Spread Strategies (MD)</div>
+        <div class="desc">Source markdown for the credit spread strategies architecture document. Module map, analysis modes, CLI usage.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+        </div>
+      </a>
+
+      <a class="doc-card" href="../NDX_CREDIT_SPREAD_PLAYBOOK.md" data-search="ndx credit spread playbook daily trading">
+        <div class="title">📋 NDX Credit Spread Playbook</div>
+        <div class="desc">Daily trading playbook for NDX credit spreads. Entry rules, exit rules, position management, and risk parameters.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+          <span class="badge spec">PLAYBOOK</span>
+        </div>
+      </a>
+
+      <a class="doc-card" href="../NDX_DAILY_TRADING_ALGORITHM.md" data-search="ndx daily trading algorithm">
+        <div class="title">🤖 NDX Daily Trading Algorithm</div>
+        <div class="desc">The full algorithmic trading procedure for NDX. Step-by-step decision logic for entries, layers, and rolls.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+          <span class="badge spec">ALGORITHM</span>
+        </div>
+      </a>
+    </div>
+  </section>
+
+  <!-- Trading & Live -->
+  <section id="trading">
+    <h2><span class="icon">📡</span> Trading &amp; Live Operations</h2>
+    <p>Live trading platform, broker integration, and operational documentation.</p>
+
+    <div class="doc-grid" id="trading-grid">
+      <a class="doc-card" href="../LIVE_TRADING.md" data-search="live trading paper platform overview">
+        <div class="title">🚀 Live Trading Platform</div>
+        <div class="desc">Live paper trading platform overview. Engine architecture, executors, position store, trade journal, providers.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+          <span class="badge guide">GUIDE</span>
+        </div>
+      </a>
+
+      <a class="doc-card" href="../../live_trading/universal-trade-platform/CLAUDE.md" data-search="utp universal trade platform broker ibkr daemon">
+        <div class="title">🌐 UTP Platform (CLAUDE.md)</div>
+        <div class="desc">Universal Trade Platform: multi-broker FastAPI server, daemon mode, REPL, CLI commands, streaming, simulation, sweep, auto-trader.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+          <span class="badge guide">PLATFORM</span>
+        </div>
+      </a>
+
+      <a class="doc-card" href="../POLYGON_REALTIME_STREAMER.md" data-search="polygon realtime streaming websocket questdb">
+        <div class="title">📡 Polygon Realtime Streamer</div>
+        <div class="desc">Polygon.io real-time market data streaming to QuestDB and Redis. Tick ingestion, validation, schema.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+          <span class="badge guide">DATA</span>
+        </div>
+      </a>
+
+      <a class="doc-card" href="../TIMING_CHANGE_GUIDELINES.md" data-search="timing change guidelines daylight saving market hours">
+        <div class="title">⏰ Timing Change Guidelines</div>
+        <div class="desc">Guidelines for handling daylight saving time changes, market hour transitions, and timezone conversions.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+        </div>
+      </a>
+    </div>
+  </section>
+
+  <!-- Data Pipeline -->
+  <section id="data">
+    <h2><span class="icon">💾</span> Data Pipeline &amp; Storage</h2>
+    <p>Data fetching, storage, database setup, and retrieval APIs.</p>
+
+    <div class="doc-grid" id="data-grid">
+      <a class="doc-card" href="../FETCH_ALL_DATA.md" data-search="fetch all data download equities options">
+        <div class="title">📥 Fetch All Data</div>
+        <div class="desc">Master script for downloading all historical data: equities, options, financial info. Parallel orchestration.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+          <span class="badge spec">PIPELINE</span>
+        </div>
+      </a>
+
+      <a class="doc-card" href="../FETCH_OPTIONS.md" data-search="fetch options polygon download chains">
+        <div class="title">📥 Fetch Options</div>
+        <div class="desc">Options chain download from Polygon.io. 0DTE, multi-day, chain formatting, ticker handling.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+        </div>
+      </a>
+
+      <a class="doc-card" href="../FETCH_SYMBOL_DATA.md" data-search="fetch symbol data equity bars ohlcv">
+        <div class="title">📥 Fetch Symbol Data</div>
+        <div class="desc">Equity bar download (5-min OHLCV). Symbol management, date ranges, indices, output formats.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+        </div>
+      </a>
+
+      <a class="doc-card" href="../FETCH_IV.md" data-search="fetch iv implied volatility historical">
+        <div class="title">📥 Fetch IV</div>
+        <div class="desc">Implied volatility history. Daily IV calculations, percentile ranks, regime detection inputs.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+        </div>
+      </a>
+
+      <a class="doc-card" href="../FETCH_ALL_DATA_FINANCIAL_INFO.md" data-search="fetch financial info fundamentals">
+        <div class="title">📥 Fetch Financial Info</div>
+        <div class="desc">Financial info pipeline: fundamentals, earnings, analyst targets. Per-symbol and bulk download.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+        </div>
+      </a>
+
+      <a class="doc-card" href="../DATABASE_SETUP.md" data-search="database setup questdb postgres install">
+        <div class="title">🗄️ Database Setup</div>
+        <div class="desc">QuestDB and PostgreSQL setup instructions. Schema creation, connection strings, env vars.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+          <span class="badge spec">SETUP</span>
+        </div>
+      </a>
+
+      <a class="doc-card" href="../DB_SERVER.md" data-search="db server api endpoints crontab">
+        <div class="title">🔌 DB Server</div>
+        <div class="desc">Local DB server (port 9102) with HTTP endpoints for data queries, script triggers, notifications.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+        </div>
+      </a>
+
+      <a class="doc-card" href="../MIGRATE_FINANCIAL_INFO_90D_IV.md" data-search="migrate financial info 90 day iv schema">
+        <div class="title">🔄 Migrate 90D IV</div>
+        <div class="desc">Migration guide for 90-day IV data. Schema changes, data backfill, validation steps.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+          <span class="badge spec">MIGRATION</span>
+        </div>
+      </a>
+    </div>
+  </section>
+
+  <!-- Prediction & Modeling -->
+  <section id="prediction">
+    <h2><span class="icon">🎯</span> Prediction &amp; Modeling</h2>
+    <p>Close price prediction, range bands, percentile models, and calibration.</p>
+
+    <div class="doc-grid" id="prediction-grid">
+      <a class="doc-card" href="../UNIFIED_CLOSE_PREDICTOR.md" data-search="unified close predictor markdown source">
+        <div class="title">🎯 Unified Close Predictor (MD)</div>
+        <div class="desc">Source markdown for the LightGBM + Percentile model close predictor architecture document.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+        </div>
+      </a>
+
+      <a class="doc-card" href="../IMPROVE_LIGHTGBM_BANDS.md" data-search="improve lightgbm bands calibration">
+        <div class="title">🛠️ Improve LightGBM Bands</div>
+        <div class="desc">Calibration guide for LightGBM percentile bands. Tuning P10/P90 width, tail extensions, hit rate analysis.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+        </div>
+      </a>
+
+      <a class="doc-card" href="../RANGE_PERCENTILES_API.md" data-search="range percentiles api intraday">
+        <div class="title">📊 Range Percentiles API</div>
+        <div class="desc">API for historical intraday range percentiles. Used for percentile-based strike selection in credit spread strategies.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+        </div>
+      </a>
+
+      <a class="doc-card" href="../PREDICTION_TICKER_CONFIG.md" data-search="prediction ticker config model parameters">
+        <div class="title">⚙️ Prediction Ticker Config</div>
+        <div class="desc">Per-ticker prediction model configuration. Lookback days, percentile ranges, model params per symbol.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+        </div>
+      </a>
+
+      <a class="doc-card" href="../180_DAY_POST_FIX_ANALYSIS.md" data-search="180 day post fix analysis backtest">
+        <div class="title">📊 180-Day Post-Fix Analysis</div>
+        <div class="desc">Analysis of strategy performance over a 180-day window after fixing key bugs. Before/after comparison.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+        </div>
+      </a>
+
+      <a class="doc-card" href="../52_WEEK_RANGE.md" data-search="52 week range high low">
+        <div class="title">📈 52-Week Range</div>
+        <div class="desc">52-week high/low calculation methodology. Used for momentum and breakout signals.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+        </div>
+      </a>
+    </div>
+  </section>
+
+  <!-- All MD Docs (compact list) -->
+  <section id="all-md">
+    <h2><span class="icon">📑</span> All Markdown Documents</h2>
+    <p>Complete index of all <code>docs/*.md</code> files.</p>
+
+    <div class="doc-list" id="all-md-list">
+      <a class="doc-list-item" href="../180_DAY_POST_FIX_ANALYSIS.md" data-search="180 day post fix analysis"><span class="icon-small">📄</span><span class="name">180_DAY_POST_FIX_ANALYSIS</span><span class="ext">.md</span></a>
+      <a class="doc-list-item" href="../52_WEEK_RANGE.md" data-search="52 week range"><span class="icon-small">📄</span><span class="name">52_WEEK_RANGE</span><span class="ext">.md</span></a>
+      <a class="doc-list-item" href="../CREDIT_SPREAD_STRATEGIES.md" data-search="credit spread strategies"><span class="icon-small">📄</span><span class="name">CREDIT_SPREAD_STRATEGIES</span><span class="ext">.md</span></a>
+      <a class="doc-list-item" href="../DATABASE_SETUP.md" data-search="database setup"><span class="icon-small">📄</span><span class="name">DATABASE_SETUP</span><span class="ext">.md</span></a>
+      <a class="doc-list-item" href="../DB_SERVER.md" data-search="db server"><span class="icon-small">📄</span><span class="name">DB_SERVER</span><span class="ext">.md</span></a>
+      <a class="doc-list-item" href="../FETCH_ALL_DATA.md" data-search="fetch all data"><span class="icon-small">📄</span><span class="name">FETCH_ALL_DATA</span><span class="ext">.md</span></a>
+      <a class="doc-list-item" href="../FETCH_ALL_DATA_FINANCIAL_INFO.md" data-search="fetch financial info"><span class="icon-small">📄</span><span class="name">FETCH_ALL_DATA_FINANCIAL_INFO</span><span class="ext">.md</span></a>
+      <a class="doc-list-item" href="../FETCH_IV.md" data-search="fetch iv"><span class="icon-small">📄</span><span class="name">FETCH_IV</span><span class="ext">.md</span></a>
+      <a class="doc-list-item" href="../FETCH_OPTIONS.md" data-search="fetch options"><span class="icon-small">📄</span><span class="name">FETCH_OPTIONS</span><span class="ext">.md</span></a>
+      <a class="doc-list-item" href="../FETCH_SYMBOL_DATA.md" data-search="fetch symbol data"><span class="icon-small">📄</span><span class="name">FETCH_SYMBOL_DATA</span><span class="ext">.md</span></a>
+      <a class="doc-list-item" href="../IMPROVE_LIGHTGBM_BANDS.md" data-search="lightgbm improve bands"><span class="icon-small">📄</span><span class="name">IMPROVE_LIGHTGBM_BANDS</span><span class="ext">.md</span></a>
+      <a class="doc-list-item" href="../LIVE_TRADING.md" data-search="live trading"><span class="icon-small">📄</span><span class="name">LIVE_TRADING</span><span class="ext">.md</span></a>
+      <a class="doc-list-item" href="../MIGRATE_FINANCIAL_INFO_90D_IV.md" data-search="migrate financial 90 day iv"><span class="icon-small">📄</span><span class="name">MIGRATE_FINANCIAL_INFO_90D_IV</span><span class="ext">.md</span></a>
+      <a class="doc-list-item" href="../NDX_CREDIT_SPREAD_PLAYBOOK.md" data-search="ndx credit spread playbook"><span class="icon-small">📄</span><span class="name">NDX_CREDIT_SPREAD_PLAYBOOK</span><span class="ext">.md</span></a>
+      <a class="doc-list-item" href="../NDX_DAILY_TRADING_ALGORITHM.md" data-search="ndx daily trading algorithm"><span class="icon-small">📄</span><span class="name">NDX_DAILY_TRADING_ALGORITHM</span><span class="ext">.md</span></a>
+      <a class="doc-list-item" href="../POLYGON_REALTIME_STREAMER.md" data-search="polygon realtime streamer"><span class="icon-small">📄</span><span class="name">POLYGON_REALTIME_STREAMER</span><span class="ext">.md</span></a>
+      <a class="doc-list-item" href="../PREDICTION_TICKER_CONFIG.md" data-search="prediction ticker config"><span class="icon-small">📄</span><span class="name">PREDICTION_TICKER_CONFIG</span><span class="ext">.md</span></a>
+      <a class="doc-list-item" href="../RANGE_PERCENTILES_API.md" data-search="range percentiles api"><span class="icon-small">📄</span><span class="name">RANGE_PERCENTILES_API</span><span class="ext">.md</span></a>
+      <a class="doc-list-item" href="../STRATEGY_DEVELOPMENT_GUIDE.md" data-search="strategy development guide"><span class="icon-small">📄</span><span class="name">STRATEGY_DEVELOPMENT_GUIDE</span><span class="ext">.md</span></a>
+      <a class="doc-list-item" href="../TIMING_CHANGE_GUIDELINES.md" data-search="timing change guidelines"><span class="icon-small">📄</span><span class="name">TIMING_CHANGE_GUIDELINES</span><span class="ext">.md</span></a>
+      <a class="doc-list-item" href="../UNIFIED_CLOSE_PREDICTOR.md" data-search="unified close predictor"><span class="icon-small">📄</span><span class="name">UNIFIED_CLOSE_PREDICTOR</span><span class="ext">.md</span></a>
+      <a class="doc-list-item" href="../strategies/backtest_v4.md" data-search="backtest v4 strategy"><span class="icon-small">📁</span><span class="name">strategies/backtest_v4</span><span class="ext">.md</span></a>
+      <a class="doc-list-item" href="../strategies/orchestration.md" data-search="orchestration strategy"><span class="icon-small">📁</span><span class="name">strategies/orchestration</span><span class="ext">.md</span></a>
+      <a class="doc-list-item" href="../strategies/roll_cost_analysis.md" data-search="roll cost analysis strategy"><span class="icon-small">📁</span><span class="name">strategies/roll_cost_analysis</span><span class="ext">.md</span></a>
+      <a class="doc-list-item" href="../strategies/tiered_portfolio_v2.md" data-search="tiered portfolio v2 strategy"><span class="icon-small">📁</span><span class="name">strategies/tiered_portfolio_v2</span><span class="ext">.md</span></a>
+      <a class="doc-list-item" href="../strategies/vmaxmin_layer_analysis.md" data-search="vmaxmin layer analysis strategy"><span class="icon-small">📁</span><span class="name">strategies/vmaxmin_layer_analysis</span><span class="ext">.md</span></a>
+    </div>
+  </section>
+
+  <!-- External / CLAUDE.md Files -->
+  <section>
+    <h2><span class="icon">📌</span> CLAUDE.md Files (Codebase Context)</h2>
+    <p>Top-level documentation files used by Claude Code sessions. Authoritative for codebase conventions.</p>
+
+    <div class="doc-grid">
+      <a class="doc-card" href="../../CLAUDE.md" data-search="claude md root project conventions">
+        <div class="title">📌 Root CLAUDE.md</div>
+        <div class="desc">Project conventions: QuestDB connection, data download pipeline, CLI requirements, close predictor models, testing, backtesting framework, live advisor, UTP overview.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+          <span class="badge guide">CONVENTIONS</span>
+        </div>
+      </a>
+
+      <a class="doc-card" href="../../live_trading/universal-trade-platform/CLAUDE.md" data-search="utp claude md universal trade platform">
+        <div class="title">📌 UTP CLAUDE.md</div>
+        <div class="desc">Universal Trade Platform conventions: daemon, REPL, CLI commands, market data architecture, simulation mode, auto-trader, providers, persistence.</div>
+        <div class="badges">
+          <span class="badge md">MD</span>
+          <span class="badge guide">CONVENTIONS</span>
+        </div>
+      </a>
+    </div>
+  </section>
+
+</div>
+
+<footer>
+  <p>Stocks Documentation Index &middot; Generated 2026-03-30 &middot; Use Cmd-F or the search box to find docs by name</p>
+</footer>
+
+<script>
+function filterDocs() {
+  const query = document.getElementById('searchInput').value.toLowerCase().trim();
+
+  // Filter all doc cards and list items by data-search attribute
+  const cards = document.querySelectorAll('.doc-card');
+  const items = document.querySelectorAll('.doc-list-item');
+
+  let totalShown = 0;
+  let totalShownByGrid = {};
+
+  cards.forEach(card => {
+    const search = (card.getAttribute('data-search') || '').toLowerCase();
+    const title = (card.querySelector('.title')?.textContent || '').toLowerCase();
+    const desc = (card.querySelector('.desc')?.textContent || '').toLowerCase();
+    const haystack = `${search} ${title} ${desc}`;
+    const matches = !query || haystack.includes(query);
+    card.style.display = matches ? '' : 'none';
+    if (matches) totalShown++;
+  });
+
+  items.forEach(item => {
+    const search = (item.getAttribute('data-search') || '').toLowerCase();
+    const name = (item.querySelector('.name')?.textContent || '').toLowerCase();
+    const matches = !query || (search.includes(query) || name.includes(query));
+    item.style.display = matches ? '' : 'none';
+  });
+
+  // Hide section h2s when their grids are empty
+  document.querySelectorAll('section').forEach(section => {
+    const visibleCards = Array.from(section.querySelectorAll('.doc-card, .doc-list-item'))
+      .filter(el => el.style.display !== 'none').length;
+    const totalCards = section.querySelectorAll('.doc-card, .doc-list-item').length;
+    // Don't hide sections that have no cards (like the header section with quick links)
+    if (totalCards > 0) {
+      section.style.opacity = visibleCards === 0 ? '0.3' : '1';
+    }
+  });
+}
+</script>
+
+</body>
+</html>

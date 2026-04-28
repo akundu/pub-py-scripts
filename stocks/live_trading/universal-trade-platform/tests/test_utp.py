@@ -2445,6 +2445,89 @@ class TestIBKRProvider:
         assert placed_order.lmtPrice == 3.00
 
     @pytest.mark.asyncio
+    async def test_live_combo_reduces_leg_ratios_to_lowest_terms(self):
+        """When per-leg quantities equal the combo quantity (caller mistake),
+        the provider must reduce ComboLeg.ratio by GCD — otherwise IBKR
+        rejects with error 321 'Invalid leg ratio'."""
+        from app.core.providers.ibkr import IBKRLiveProvider
+        provider = IBKRLiveProvider()
+        provider._connected = True
+        provider._ib = MagicMock()
+
+        mock_contract = MagicMock(conId=12345)
+        provider._ib.qualifyContractsAsync = AsyncMock(return_value=[mock_contract])
+
+        mock_trade = MagicMock()
+        mock_trade.order.orderId = 99
+        provider._ib.placeOrder = MagicMock(return_value=mock_trade)
+
+        with patch("app.config.settings") as mock_settings:
+            mock_settings.ibkr_readonly = False
+
+            order = MultiLegOrder(broker=Broker.IBKR, legs=[
+                OptionLeg(symbol="SPX", expiration="2026-03-20", strike=5500.0,
+                          option_type=OptionType.PUT, action=OptionAction.SELL_TO_OPEN, quantity=10),
+                OptionLeg(symbol="SPX", expiration="2026-03-20", strike=5475.0,
+                          option_type=OptionType.PUT, action=OptionAction.BUY_TO_OPEN, quantity=10),
+            ], order_type=OrderType.LIMIT, net_price=2.50, quantity=10)
+            result = await provider.execute_multi_leg_order(order)
+
+        assert result.status == OrderStatus.SUBMITTED
+        placed_combo = provider._ib.placeOrder.call_args[0][0]
+        # Both legs reduced to ratio=1 (NOT 10:10)
+        assert all(leg.ratio == 1 for leg in placed_combo.comboLegs)
+        # Total contract count carried by Order.totalQuantity, not leg ratios
+        placed_order = provider._ib.placeOrder.call_args[0][1]
+        assert placed_order.totalQuantity == 10
+
+    @pytest.mark.asyncio
+    async def test_get_option_quotes_writes_to_cross_provider_store(self):
+        """`utp options ... --live` (which calls get_option_quotes in TWS mode)
+        must write each resolved conId to the shared OptionConidStore so CPG
+        can read it later — this is the explicit warm-up path the user runs
+        when CPG's secdef/info is broken."""
+        from app.core.providers.ibkr import IBKRLiveProvider
+        provider = IBKRLiveProvider()
+        provider._connected = True
+        provider._ib = MagicMock()
+
+        # Mock get_option_chain to return a couple of strikes
+        async def fake_chain(sym):
+            return {"expirations": ["2026-04-27"], "strikes": [7050.0, 7075.0]}
+        provider.get_option_chain = fake_chain  # type: ignore[assignment]
+
+        # Mock qualifyContractsAsync — return contracts with valid conIds
+        qualified_contracts = []
+        for s, cid in [(7050.0, 700050), (7075.0, 700075)]:
+            mc = MagicMock()
+            mc.conId = cid
+            mc.strike = s
+            mc.localSymbol = f"SPX 260427P0{int(s*1000):07d}"
+            qualified_contracts.append(mc)
+        provider._ib.qualifyContractsAsync = AsyncMock(return_value=qualified_contracts)
+
+        # Mock the market-data subscription path (we don't care about quotes for this test)
+        ticker_mocks = []
+        for s in (7050.0, 7075.0):
+            t = MagicMock()
+            t.contract = next(c for c in qualified_contracts if c.strike == s)
+            t.bid = 0.5
+            t.ask = 0.6
+            t.last = 0.55
+            t.volume = 0
+            ticker_mocks.append(t)
+        provider._ib.reqMktData = MagicMock(side_effect=ticker_mocks)
+        provider._ib.cancelMktData = MagicMock()
+
+        await provider.get_option_quotes("SPX", "2026-04-27", "PUT",
+                                          strike_min=7000, strike_max=7100)
+
+        # Each resolved conId is now in the shared store — CPG can use it.
+        store = provider._cache.option_conids
+        assert store.get("SPX", "20260427", 7050.0, "P") == 700050
+        assert store.get("SPX", "20260427", 7075.0, "P") == 700075
+
+    @pytest.mark.asyncio
     async def test_live_get_positions_not_connected(self):
         from app.core.providers.ibkr import IBKRLiveProvider
         assert await IBKRLiveProvider().get_positions() == []
@@ -2742,6 +2825,209 @@ class TestIBKRRestProvider:
         assert quote.source == "cpg"
 
     @pytest.mark.asyncio
+    async def test_resolve_option_conid_whole_dollar_strike(self):
+        """Whole-dollar strikes must be sent to CPG without trailing '.0'."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+        provider._conid_cache["SPX"] = 416904
+
+        captured_params: list[dict] = []
+
+        async def fake_get(path, params=None, **_):
+            captured_params.append(dict(params or {}))
+            return [{"conid": 999001, "maturityDate": "20260427"}]
+
+        provider._get = fake_get  # type: ignore[assignment]
+
+        con_id = await provider._resolve_option_conid("SPX", "20260427", 7065.0, "P")
+        assert con_id == 999001
+        assert captured_params, "expected at least one CPG call"
+        # Whole-dollar 7065.0 must be sent as "7065", not "7065.0"
+        assert captured_params[0]["strike"] == "7065"
+        # Fractional strikes should keep their decimals
+        captured_params.clear()
+        provider._option_conid_cache.clear()
+        provider._conid_cache["SPY"] = 756733  # short-circuit underlying lookup
+
+        async def fake_get_frac(path, params=None, **_):
+            captured_params.append(dict(params or {}))
+            return [{"conid": 999002, "maturityDate": "20260427"}]
+
+        provider._get = fake_get_frac  # type: ignore[assignment]
+        await provider._resolve_option_conid("SPY", "20260427", 5.50, "P")
+        assert captured_params[0]["strike"] == "5.5"
+
+    @pytest.mark.asyncio
+    async def test_resolve_option_conid_empty_list_diagnostic(self):
+        """CPG empty-list response should produce a diagnostic error, not silent failure."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+        provider._conid_cache["SPX"] = 416904
+
+        async def fake_get(path, params=None, **_):
+            return []  # CPG returns empty list when strike doesn't exist
+
+        provider._get = fake_get  # type: ignore[assignment]
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await provider._resolve_option_conid("SPX", "20260427", 7065.0, "P")
+        msg = str(excinfo.value)
+        # Error must include strike (without trailing ".0"), and per-attempt summary
+        assert "7065P" in msg
+        assert "attempts:" in msg
+        assert "empty" in msg
+
+    @pytest.mark.asyncio
+    async def test_resolve_option_conid_primes_after_http_errors(self):
+        """When all secdef/info attempts fail with HTTP errors in round 1,
+        the resolver should issue a marketdata snapshot to prime the
+        underlying conid, then retry secdef/info once."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+        provider._conid_cache["SPX"] = 416904
+
+        calls: list[dict] = []
+        attempts = {"count": 0}
+
+        async def fake_get(path, params=None, **_):
+            calls.append({"path": path, "params": dict(params or {})})
+            if path == "/iserver/marketdata/snapshot":
+                return [{"31": "7150"}]
+            if path == "/iserver/secdef/info":
+                attempts["count"] += 1
+                # Round 1: every exchange returns 500 (3 attempts: None, SMART, CBOE)
+                if attempts["count"] <= 3:
+                    raise RuntimeError("HTTP 500: ClientResponseError")
+                # Round 2: succeed on first try
+                return [{"conid": 999004, "maturityDate": "20260427"}]
+            return []
+
+        provider._get = fake_get  # type: ignore[assignment]
+
+        con_id = await provider._resolve_option_conid("SPX", "20260427", 7070.0, "P")
+        assert con_id == 999004
+        # Confirm the snapshot prime happened between rounds
+        snapshot_calls = [c for c in calls if c["path"] == "/iserver/marketdata/snapshot"]
+        assert len(snapshot_calls) == 1, "expected exactly one snapshot prime"
+        assert snapshot_calls[0]["params"]["conids"] == "416904"
+
+    @pytest.mark.asyncio
+    async def test_resolve_option_conid_priming_does_not_loop_forever(self):
+        """If priming + retry still all fail with HTTP errors, raise (no
+        unbounded retries)."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+        provider._conid_cache["SPX"] = 416904
+
+        async def fake_get(path, params=None, **_):
+            if path == "/iserver/marketdata/snapshot":
+                return [{"31": "7150"}]
+            if path == "/iserver/secdef/info":
+                raise RuntimeError("HTTP 500")
+            return []
+
+        provider._get = fake_get  # type: ignore[assignment]
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await provider._resolve_option_conid("SPX", "20260427", 7070.0, "P")
+        msg = str(excinfo.value)
+        # Both rounds should be in the diagnostic
+        assert "r1 exch=" in msg
+        assert "r2 exch=" in msg
+
+    @pytest.mark.asyncio
+    async def test_resolve_option_conid_uses_cross_provider_store(self, tmp_path, monkeypatch):
+        """A conId resolved by TWS (and persisted to OptionConidStore) must be
+        usable by CPG, even when CPG's own /iserver/secdef/info is broken.
+        This is the failover that makes TWS/CPG interchangeable."""
+        # Force a clean shared cache dir for this test
+        cache_dir = tmp_path / "shared_conids"
+        monkeypatch.setenv("UTP_OPTION_CONID_CACHE_DIR", str(cache_dir))
+
+        # Simulate TWS having previously resolved this contract: write to
+        # the shared store directly (this is what _qualify_option does).
+        from app.core.providers.ibkr_cache import OptionConidStore
+        store = OptionConidStore()
+        store.put("SPX", "20260427", 7075.0, "P", 555444)
+
+        # Build a fresh CPG provider — its IBKRCacheManager creates a NEW
+        # OptionConidStore, but pointed at the same env-overridden dir, so
+        # it loads the on-disk state.
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+        provider._conid_cache["SPX"] = 416904
+
+        called = {"secdef": 0}
+
+        async def fake_get(path, params=None, **_):
+            if path == "/iserver/secdef/info":
+                called["secdef"] += 1
+                # Even if CPG is fully broken, the store should already have it
+                raise RuntimeError("CPG 500")
+            return []
+
+        provider._get = fake_get  # type: ignore[assignment]
+
+        con_id = await provider._resolve_option_conid("SPX", "20260427", 7075.0, "P")
+        assert con_id == 555444
+        assert called["secdef"] == 0, "should never call secdef/info when shared store has the conid"
+
+    @pytest.mark.asyncio
+    async def test_resolve_option_conid_writes_to_cross_provider_store(self, tmp_path, monkeypatch):
+        """A successful CPG resolution must write to the shared store so TWS
+        can pick it up later (and vice-versa)."""
+        cache_dir = tmp_path / "shared_conids"
+        monkeypatch.setenv("UTP_OPTION_CONID_CACHE_DIR", str(cache_dir))
+
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+        provider._conid_cache["SPX"] = 416904
+
+        async def fake_get(path, params=None, **_):
+            return [{"conid": 778899, "maturityDate": "20260427"}]
+
+        provider._get = fake_get  # type: ignore[assignment]
+        await provider._resolve_option_conid("SPX", "20260427", 7075.0, "P")
+
+        # Now read via a fresh store instance (simulates a different provider
+        # opening the same on-disk cache)
+        from app.core.providers.ibkr_cache import OptionConidStore
+        fresh = OptionConidStore()
+        assert fresh.get("SPX", "20260427", 7075.0, "P") == 778899
+
+    @pytest.mark.asyncio
+    async def test_resolve_option_conid_cache_hit(self):
+        """Pre-populated cache should short-circuit without any HTTP calls."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._option_conid_cache["SPX_20260427_7065.0_P"] = 999003
+
+        called = False
+
+        async def fake_get(*_args, **_kwargs):
+            nonlocal called
+            called = True
+            return []
+
+        provider._get = fake_get  # type: ignore[assignment]
+        con_id = await provider._resolve_option_conid("SPX", "20260427", 7065.0, "P")
+        assert con_id == 999003
+        assert called is False
+
+    @pytest.mark.asyncio
     async def test_get_quote_not_connected(self):
         """get_quote() should raise when disconnected."""
         from app.core.providers.ibkr_rest import IBKRRestProvider
@@ -2892,6 +3178,63 @@ class TestIBKRRestProvider:
                     assert "100001/-1" in conidex
                     assert "100002/1" in conidex
                     assert conidex.startswith("416904;;;")
+                break
+
+        app.config.settings.ibkr_readonly = orig
+
+    @pytest.mark.asyncio
+    async def test_execute_credit_spread_reduces_gcd(self):
+        """When callers pass per-leg quantity equal to the combo size, the
+        provider must reduce ratios to lowest terms (1:-1) — otherwise IBKR
+        returns 'Invalid leg ratio' (error 321)."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+        provider._conid_cache["SPX"] = 416904
+        provider._option_conid_cache["SPX_20260320_5500.0_P"] = 100001
+        provider._option_conid_cache["SPX_20260320_5475.0_P"] = 100002
+
+        import app.config
+        orig = app.config.settings.ibkr_readonly
+        app.config.settings.ibkr_readonly = False
+
+        order_resp = AsyncMock()
+        order_resp.json = AsyncMock(return_value=[{"order_id": "67891"}])
+        order_resp.text = AsyncMock(return_value='[{"order_id": "67891"}]')
+        order_resp.raise_for_status = MagicMock()
+        order_resp.__aenter__ = AsyncMock(return_value=order_resp)
+        order_resp.__aexit__ = AsyncMock(return_value=False)
+        provider._session.post = MagicMock(return_value=order_resp)
+
+        # Both legs at quantity=10 (caller mistake: should be 1).
+        order = MultiLegOrder(
+            broker=Broker.IBKR,
+            legs=[
+                OptionLeg(symbol="SPX", expiration="2026-03-20", strike=5500.0,
+                         option_type=OptionType.PUT, action=OptionAction.SELL_TO_OPEN, quantity=10),
+                OptionLeg(symbol="SPX", expiration="2026-03-20", strike=5475.0,
+                         option_type=OptionType.PUT, action=OptionAction.BUY_TO_OPEN, quantity=10),
+            ],
+            order_type=OrderType.MARKET,
+            quantity=10,
+        )
+        result = await provider.execute_multi_leg_order(order)
+        assert result.status == OrderStatus.SUBMITTED
+
+        for call in provider._session.post.call_args_list:
+            url = call[0][0] if call[0] else ""
+            if "/orders" in url and "whatif" not in url:
+                body = call[1].get("json", {})
+                orders = body.get("orders", [{}])
+                if orders:
+                    conidex = orders[0].get("conidex", "")
+                    # Reduced to 1:-1 — NOT 10:-10
+                    assert "100001/-1" in conidex
+                    assert "100002/1" in conidex
+                    assert "100001/-10" not in conidex
+                    assert "100002/10" not in conidex
+                    assert orders[0]["quantity"] == 10
                 break
 
         app.config.settings.ibkr_readonly = orig
@@ -4231,6 +4574,37 @@ class TestLANTrust:
         from app.config import settings
         assert hasattr(settings, 'trust_local_network')
         assert settings.trust_local_network is True
+
+
+class TestWorkerProxy:
+    """Worker → IBKR-process proxy middleware behaviour."""
+
+    def test_proxy_timeout_default(self, monkeypatch):
+        """Default proxy timeout must exceed order_poll_timeout_seconds (60s)
+        to avoid 502 races where the proxy times out at the same instant the
+        order polling completes."""
+        import app.main as _main
+        from app.config import settings
+        # Force fresh client construction
+        monkeypatch.setattr(_main, "_worker_proxy_client", None)
+        monkeypatch.delenv("_UTP_PROXY_TIMEOUT", raising=False)
+        client = _main._get_worker_proxy_client()
+        try:
+            assert client.timeout.read >= settings.order_poll_timeout_seconds + 30, \
+                "proxy read timeout must give the order polling room to finish"
+        finally:
+            monkeypatch.setattr(_main, "_worker_proxy_client", None)
+
+    def test_proxy_timeout_env_override(self, monkeypatch):
+        """_UTP_PROXY_TIMEOUT env var overrides the default."""
+        import app.main as _main
+        monkeypatch.setattr(_main, "_worker_proxy_client", None)
+        monkeypatch.setenv("_UTP_PROXY_TIMEOUT", "300")
+        client = _main._get_worker_proxy_client()
+        try:
+            assert client.timeout.read == 300.0
+        finally:
+            monkeypatch.setattr(_main, "_worker_proxy_client", None)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -13067,6 +13441,267 @@ class TestSpreadScanner:
         args = parse_args(argv=[], defaults=defaults)
         assert args.verify_max_age_sec == 45
 
+    def test_scanner_config_verify_require_provider_source_default_true(self):
+        """Default verify_require_provider_source is True — only IBKR-fresh
+        / provider-sourced quotes are accepted at verify time. CSV-sourced
+        quotes are rejected as the safe production setting."""
+        from spread_scanner import ScannerConfig
+        cfg = ScannerConfig()
+        assert cfg.verify_require_provider_source is True
+
+    def test_scanner_config_verify_require_provider_source_from_yaml(self, tmp_path):
+        """YAML can set verify_require_provider_source: false to allow
+        CSV-sourced quotes through (escape hatch when IBKR stream is missing
+        data for a ticker, e.g. CPG silently failing on SPX 0DTE)."""
+        import yaml as _yaml
+        from spread_scanner import ScannerConfig
+        p = tmp_path / "cfg.yaml"
+        p.write_text(_yaml.safe_dump({"verify_require_provider_source": False}))
+        cfg = ScannerConfig.from_yaml(str(p))
+        assert cfg.verify_require_provider_source is False
+
+    def test_verify_require_provider_source_propagates_to_args(self, tmp_path):
+        """YAML's verify_require_provider_source flows through to argparse
+        defaults so the verify call honors it."""
+        import yaml as _yaml
+        from spread_scanner import ScannerConfig, parse_args
+        p = tmp_path / "cfg.yaml"
+        p.write_text(_yaml.safe_dump({"verify_require_provider_source": False}))
+        cfg = ScannerConfig.from_yaml(str(p))
+        defaults = cfg.to_cli_defaults()
+        args = parse_args(argv=[], defaults=defaults)
+        assert args.verify_require_provider_source is False
+
+    def test_no_verify_require_provider_source_cli_flag(self):
+        """--no-verify-require-provider-source flips the default to False."""
+        from spread_scanner import parse_args
+        args = parse_args(["--no-verify-require-provider-source"])
+        assert args.verify_require_provider_source is False
+        # Without the flag, default is True.
+        args2 = parse_args([])
+        assert args2.verify_require_provider_source is True
+
+    def test_verify_failures_are_marked_not_dropped(self):
+        """Verify failures must NOT remove spreads from data — they only
+        annotate `verified=False` so the regular DTE section still renders
+        them. Top-N filtering is what suppresses failed candidates from
+        the picks list (see test below)."""
+        import asyncio
+        import argparse
+        import sys as _sys
+        import spread_scanner as scanner
+
+        class FakeClient:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def verify_spread_pricing(self, **kw):
+                # Always reject — simulates CPG csv_source_rejected.
+                return {"ok": False, "reason": "csv_source_rejected"}
+
+        fake_utp = type(_sys)("utp")
+        fake_utp.TradingClient = lambda *a, **kw: FakeClient()
+        _sys.modules["utp"] = fake_utp
+        try:
+            args = argparse.Namespace(
+                daemon_url="http://localhost:8000",
+                verify_max_age_sec=30.0,
+                verify_require_provider_source=True,
+                tickers=["SPX"], min_credit=0, min_roi=0, min_norm_roi=0,
+                min_otm=0, max_otm=0, min_otm_per_ticker={},
+                max_otm_per_ticker={}, min_tier=None, min_tier_close=None,
+            )
+            data = {
+                "prev_closes": {"SPX": 7100.0},
+                "dte_sections": {
+                    0: {
+                        "expiration": "2026-04-27",
+                        "spreads": {
+                            "SPX": [
+                                {"option_type": "PUT", "short_strike": 7050,
+                                 "long_strike": 7030, "credit": 0.40,
+                                 "roi_pct": 2.0, "otm_pct": 0.7, "width": 20},
+                                {"option_type": "PUT", "short_strike": 7045,
+                                 "long_strike": 7025, "credit": 0.30,
+                                 "roi_pct": 1.5, "otm_pct": 0.8, "width": 20},
+                            ],
+                        },
+                    },
+                },
+            }
+            summary = asyncio.run(
+                scanner._verify_top_candidates_with_provider(args, data),
+            )
+        finally:
+            _sys.modules.pop("utp", None)
+
+        # Both spreads remain in data — non-destructive!
+        spreads = data["dte_sections"][0]["spreads"]["SPX"]
+        assert len(spreads) == 2
+        # Each is marked verified=False with the reason.
+        for s in spreads:
+            assert s["verified"] is False
+            assert s["verify_reason"] == "csv_source_rejected"
+        # Summary counts the failures.
+        assert summary["dropped"] == 2
+        assert summary["reasons"]["csv_source_rejected"] == 2
+
+    def test_top_picks_filters_out_verified_false(self):
+        """Spreads marked `verified=False` by the verify step must not
+        appear in Top-N or in the candidates fed to trade handlers."""
+        from spread_scanner import _collect_filtered_candidates, parse_args
+
+        args = parse_args(["--tickers", "SPX", "--top", "5"])
+        data = {
+            "prev_closes": {"SPX": 7100.0},
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-04-27",
+                    "spreads": {
+                        "SPX": [
+                            {"option_type": "PUT", "short_strike": 7050,
+                             "long_strike": 7030, "credit": 0.50,
+                             "roi_pct": 2.6, "otm_pct": 0.7, "width": 20,
+                             "verified": True},
+                            {"option_type": "PUT", "short_strike": 7045,
+                             "long_strike": 7025, "credit": 0.45,
+                             "roi_pct": 2.3, "otm_pct": 0.8, "width": 20,
+                             "verified": False, "verify_reason": "csv_source_rejected"},
+                            # No `verified` key — verify hasn't run yet
+                            # (top-M cutoff or daemon timeout). Allowed.
+                            {"option_type": "PUT", "short_strike": 7040,
+                             "long_strike": 7020, "credit": 0.40,
+                             "roi_pct": 2.0, "otm_pct": 0.85, "width": 20},
+                        ],
+                    },
+                },
+            },
+        }
+        candidates = _collect_filtered_candidates(data, args)
+        # The verified=False candidate is filtered out; the verified=True
+        # and unverified ones come through.
+        strikes = [c["short_strike"] for c in candidates]
+        assert 7050 in strikes
+        assert 7040 in strikes
+        assert 7045 not in strikes
+
+    def test_verify_batch_timeout_does_not_destroy_data(self):
+        """When the daemon hangs and the verify batch times out, the
+        regular DTE section must still render — we leave all spreads
+        unverified rather than nuking them."""
+        import asyncio
+        import argparse
+        import sys as _sys
+        import spread_scanner as scanner
+
+        class HangingClient:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def verify_spread_pricing(self, **kw):
+                # Hang longer than the test timeout we'll inject.
+                await asyncio.sleep(60)
+                return {"ok": True}
+
+        fake_utp = type(_sys)("utp")
+        fake_utp.TradingClient = lambda *a, **kw: HangingClient()
+        _sys.modules["utp"] = fake_utp
+        try:
+            args = argparse.Namespace(
+                daemon_url="http://localhost:8000",
+                verify_max_age_sec=30.0,
+                verify_require_provider_source=True,
+                # Tight batch timeout so the test runs quickly.
+                verify_batch_timeout_sec=0.2,
+                tickers=["SPX"], min_credit=0, min_roi=0, min_norm_roi=0,
+                min_otm=0, max_otm=0, min_otm_per_ticker={},
+                max_otm_per_ticker={}, min_tier=None, min_tier_close=None,
+            )
+            data = {
+                "prev_closes": {"SPX": 7100.0},
+                "dte_sections": {
+                    0: {
+                        "expiration": "2026-04-27",
+                        "spreads": {
+                            "SPX": [
+                                {"option_type": "PUT", "short_strike": 7050,
+                                 "long_strike": 7030, "credit": 0.40,
+                                 "roi_pct": 2.0, "otm_pct": 0.7, "width": 20},
+                            ],
+                        },
+                    },
+                },
+            }
+            summary = asyncio.run(
+                scanner._verify_top_candidates_with_provider(args, data),
+            )
+        finally:
+            _sys.modules.pop("utp", None)
+
+        # Spread is still there — batch timeout is a non-destructive event.
+        spreads = data["dte_sections"][0]["spreads"]["SPX"]
+        assert len(spreads) == 1
+        # Not marked verified=False (verify never ran on it).
+        assert spreads[0].get("verified") is not False
+        # Summary surfaces the timeout count.
+        assert summary.get("timed_out") == 1
+
+    def test_verify_passes_require_provider_source_to_client(self, tmp_path):
+        """`_verify_top_candidates_with_provider` forwards the args flag
+        to TradingClient.verify_spread_pricing(require_provider_source=...)."""
+        import asyncio
+        import argparse
+        import spread_scanner as scanner
+
+        captured = {"calls": []}
+
+        class FakeClient:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def verify_spread_pricing(self, **kw):
+                captured["calls"].append(kw)
+                return {
+                    "ok": True, "credit": 0.40, "short_bid": 0.50,
+                    "long_ask": 0.10, "short_delta": -0.17,
+                    "age_seconds": 5.0, "source": "ibkr_fresh",
+                }
+
+        # Monkeypatch the import inside _verify_top_candidates_with_provider.
+        import sys as _sys
+        fake_utp = type(_sys)("utp")
+        fake_utp.TradingClient = lambda *a, **kw: FakeClient()
+        _sys.modules["utp"] = fake_utp
+        try:
+            args = argparse.Namespace(
+                daemon_url="http://localhost:8000",
+                verify_max_age_sec=30.0,
+                verify_require_provider_source=False,
+                # Required by _collect_filtered_candidates:
+                tickers=["SPX"], min_credit=0, min_roi=0, min_norm_roi=0,
+                min_otm=0, max_otm=0, min_otm_per_ticker={},
+                max_otm_per_ticker={}, min_tier=None, min_tier_close=None,
+            )
+            data = {
+                "prev_closes": {"SPX": 7100.0},
+                "dte_sections": {
+                    0: {
+                        "expiration": "2026-04-27",
+                        "spreads": {
+                            "SPX": [{
+                                "option_type": "PUT", "short_strike": 7050,
+                                "long_strike": 7030, "credit": 0.40,
+                                "roi_pct": 2.0, "otm_pct": 0.7, "width": 20,
+                            }],
+                        },
+                    },
+                },
+            }
+            asyncio.run(scanner._verify_top_candidates_with_provider(args, data))
+        finally:
+            _sys.modules.pop("utp", None)
+
+        assert len(captured["calls"]) == 1
+        # The flag from args propagated through.
+        assert captured["calls"][0]["require_provider_source"] is False
+
     def test_top_picks_shows_verification_marker(self):
         """Rows that went through the provider re-verify show ✓ + age; rows
         that didn't (e.g. candidates below the verify batch cutoff) show —."""
@@ -13228,6 +13863,296 @@ class TestSpreadScanner:
         assert second == sp.DEFAULT_PERCENTILE_URL
         # Only probed once — second call hit the cache.
         assert call_count["n"] == 1
+
+    # ── primary/backup URL config (YAML + CLI) ────────────────────────────
+
+    def test_url_mapping_form_in_yaml_splits_into_primary_and_backup(self, tmp_path):
+        """YAML `daemon_url: {primary, backup}` populates the two scalar
+        fields so downstream resolution can pick the working one."""
+        import yaml as _yaml
+        from spread_scanner import ScannerConfig
+        p = tmp_path / "cfg.yaml"
+        p.write_text(_yaml.safe_dump({
+            "daemon_url": {
+                "primary": "http://lin1.kundu.dev:8000",
+                "backup": "http://localhost:8000",
+            },
+            "db_url": {
+                "primary": "http://lin1.kundu.dev:9102",
+                "backup": "http://localhost:9102",
+            },
+            "percentile_url": {
+                "primary": "http://lin1.kundu.dev:9100",
+                "backup": "http://localhost:9100",
+            },
+        }))
+        cfg = ScannerConfig.from_yaml(str(p))
+        assert cfg.daemon_url == "http://lin1.kundu.dev:8000"
+        assert cfg.daemon_url_backup == "http://localhost:8000"
+        assert cfg.db_url == "http://lin1.kundu.dev:9102"
+        assert cfg.db_url_backup == "http://localhost:9102"
+        assert cfg.percentile_url == "http://lin1.kundu.dev:9100"
+        assert cfg.percentile_url_backup == "http://localhost:9100"
+
+    def test_url_scalar_form_in_yaml_remains_supported(self, tmp_path):
+        """Scalar form for URL fields keeps working — it's the legacy syntax
+        used by every existing reference YAML."""
+        import yaml as _yaml
+        from spread_scanner import ScannerConfig
+        p = tmp_path / "cfg.yaml"
+        p.write_text(_yaml.safe_dump({
+            "daemon_url": "http://my.daemon:8000",
+            "db_url": "http://my.db:9102",
+        }))
+        cfg = ScannerConfig.from_yaml(str(p))
+        assert cfg.daemon_url == "http://my.daemon:8000"
+        assert cfg.daemon_url_backup is None
+        assert cfg.db_url == "http://my.db:9102"
+        assert cfg.db_url_backup is None
+
+    def test_url_mapping_form_primary_only_leaves_backup_none(self, tmp_path):
+        """Mapping form with `primary` alone (no `backup`) is allowed and
+        means 'no failover' — equivalent to scalar form."""
+        import yaml as _yaml
+        from spread_scanner import ScannerConfig
+        p = tmp_path / "cfg.yaml"
+        p.write_text(_yaml.safe_dump({
+            "daemon_url": {"primary": "http://x:8000"},
+        }))
+        cfg = ScannerConfig.from_yaml(str(p))
+        assert cfg.daemon_url == "http://x:8000"
+        assert cfg.daemon_url_backup is None
+
+    def test_url_mapping_form_rejects_missing_primary(self, tmp_path):
+        """Mapping form must include a non-empty `primary`."""
+        import yaml as _yaml
+        from spread_scanner import ScannerConfig
+        p = tmp_path / "cfg.yaml"
+        p.write_text(_yaml.safe_dump({"daemon_url": {"backup": "http://x:8000"}}))
+        with pytest.raises(ValueError, match="primary"):
+            ScannerConfig.from_yaml(str(p))
+
+    def test_url_mapping_form_rejects_unknown_keys(self, tmp_path):
+        """Catches typos like `fallback` instead of `backup` early."""
+        import yaml as _yaml
+        from spread_scanner import ScannerConfig
+        p = tmp_path / "cfg.yaml"
+        p.write_text(_yaml.safe_dump({
+            "daemon_url": {"primary": "http://x", "fallback": "http://y"},
+        }))
+        with pytest.raises(ValueError, match="fallback"):
+            ScannerConfig.from_yaml(str(p))
+
+    def test_url_mapping_form_propagates_to_args(self, tmp_path):
+        """YAML mapping form ends up on the parsed argparse namespace so the
+        startup resolver and call sites can read it."""
+        import yaml as _yaml
+        from spread_scanner import ScannerConfig, parse_args
+        p = tmp_path / "cfg.yaml"
+        p.write_text(_yaml.safe_dump({
+            "daemon_url": {"primary": "http://a:8000", "backup": "http://b:8000"},
+        }))
+        cfg = ScannerConfig.from_yaml(str(p))
+        defaults = cfg.to_cli_defaults()
+        args = parse_args(argv=[], defaults=defaults)
+        assert args.daemon_url == "http://a:8000"
+        assert args.daemon_url_backup == "http://b:8000"
+
+    def test_cli_backup_flags_override_yaml(self, tmp_path):
+        """CLI flags beat YAML, including for the new --*-url-backup pair."""
+        import yaml as _yaml
+        from spread_scanner import ScannerConfig, parse_args
+        p = tmp_path / "cfg.yaml"
+        p.write_text(_yaml.safe_dump({
+            "daemon_url": {"primary": "http://yaml-p:8000", "backup": "http://yaml-b:8000"},
+        }))
+        cfg = ScannerConfig.from_yaml(str(p))
+        defaults = cfg.to_cli_defaults()
+        args = parse_args(
+            argv=["--daemon-url", "http://cli-p:8000",
+                  "--daemon-url-backup", "http://cli-b:8000"],
+            defaults=defaults,
+        )
+        assert args.daemon_url == "http://cli-p:8000"
+        assert args.daemon_url_backup == "http://cli-b:8000"
+
+    def test_default_args_get_baked_in_percentile_backup(self):
+        """Backwards compat: with no overrides, the percentile URL still
+        gets its baked-in `localhost:9100` fallback (legacy behavior)."""
+        from spread_scanner import (
+            parse_args, DEFAULT_PERCENTILE_URL, _PERCENTILE_FALLBACK_URL,
+        )
+        args = parse_args([])
+        assert args.percentile_url == DEFAULT_PERCENTILE_URL
+        assert args.percentile_url_backup == _PERCENTILE_FALLBACK_URL
+
+    def test_custom_percentile_url_does_not_inject_backup(self):
+        """Setting a custom primary opts OUT of the baked-in backup —
+        operators with a custom percentile host don't want surprise probes
+        against localhost."""
+        from spread_scanner import parse_args
+        args = parse_args(["--percentile-url", "http://custom-percentile:9100"])
+        assert args.percentile_url == "http://custom-percentile:9100"
+        assert args.percentile_url_backup is None
+
+    @pytest.mark.asyncio
+    async def test_resolve_url_with_backup_returns_primary_when_no_backup(self):
+        """No backup configured → primary returned unchanged, no probe."""
+        import spread_scanner as sp
+        sp._resolved_url_cache.clear()
+
+        class NeverCalled:
+            async def get(self, *a, **kw):
+                raise AssertionError("probe should not fire when backup is None")
+
+        out = await sp._resolve_url_with_backup(
+            NeverCalled(), "http://primary:8000", None,
+        )
+        assert out == "http://primary:8000"
+
+    @pytest.mark.asyncio
+    async def test_resolve_url_with_backup_picks_primary_when_up(self):
+        """Primary answers → primary chosen and cached for subsequent calls."""
+        import spread_scanner as sp
+        sp._resolved_url_cache.clear()
+
+        calls = []
+
+        class PrimaryUp:
+            async def get(self, url, *a, **kw):
+                calls.append(url)
+                class R: status_code = 200
+                return R()
+
+        stub = PrimaryUp()
+        first = await sp._resolve_url_with_backup(
+            stub, "http://primary:8000", "http://backup:8000",
+            probe_path="/health",
+        )
+        second = await sp._resolve_url_with_backup(
+            stub, "http://primary:8000", "http://backup:8000",
+            probe_path="/health",
+        )
+        assert first == "http://primary:8000"
+        assert second == "http://primary:8000"
+        # Only probed once — second call hit the cache.
+        assert len(calls) == 1
+        assert calls[0].startswith("http://primary:8000")
+
+    @pytest.mark.asyncio
+    async def test_resolve_url_with_backup_falls_back_when_primary_down(self):
+        """Primary unreachable → backup probed and selected."""
+        import spread_scanner as sp
+        import httpx
+        sp._resolved_url_cache.clear()
+
+        calls = []
+
+        class PrimaryDown:
+            async def get(self, url, *a, **kw):
+                calls.append(url)
+                if url.startswith("http://primary"):
+                    raise httpx.ConnectError("simulated primary offline")
+                class R: status_code = 200
+                return R()
+
+        out = await sp._resolve_url_with_backup(
+            PrimaryDown(), "http://primary:8000", "http://backup:8000",
+            probe_path="/dashboard/summary",
+        )
+        assert out == "http://backup:8000"
+        # Probe order: primary first, then backup
+        assert calls[0].startswith("http://primary")
+        assert calls[1].startswith("http://backup")
+
+    @pytest.mark.asyncio
+    async def test_resolve_url_with_backup_caches_failure_state(self):
+        """Both unreachable → backup cached so we don't keep re-probing
+        the primary on every scan cycle."""
+        import spread_scanner as sp
+        import httpx
+        sp._resolved_url_cache.clear()
+
+        call_count = {"n": 0}
+
+        class BothDown:
+            async def get(self, url, *a, **kw):
+                call_count["n"] += 1
+                raise httpx.ConnectError("offline")
+
+        first = await sp._resolve_url_with_backup(
+            BothDown(), "http://p:1", "http://b:1",
+        )
+        second = await sp._resolve_url_with_backup(
+            BothDown(), "http://p:1", "http://b:1",
+        )
+        # Both calls return the backup; second is cached (no extra probes).
+        assert first == "http://b:1"
+        assert second == "http://b:1"
+        assert call_count["n"] == 2  # 1 primary + 1 backup probe (only the first call)
+
+    @pytest.mark.asyncio
+    async def test_resolve_endpoint_urls_writes_back_to_args(self):
+        """Startup resolver overwrites args with the working URL so later
+        fetch calls pick up the correct host."""
+        import spread_scanner as sp
+        import httpx
+        from argparse import Namespace
+        sp._resolved_url_cache.clear()
+
+        class PrimaryUp:
+            async def get(self, url, *a, **kw):
+                if url.startswith("http://daemon-p"):
+                    class R: status_code = 200
+                    return R()
+                if url.startswith("http://daemon-b"):
+                    raise httpx.ConnectError("backup not probed since primary up")
+                class R: status_code = 200
+                return R()
+
+        args = Namespace(
+            daemon_url="http://daemon-p:8000",
+            daemon_url_backup="http://daemon-b:8000",
+            db_url="http://db:9102",
+            db_url_backup=None,
+            percentile_url="http://lin1:9100",
+            percentile_url_backup=None,
+        )
+        out = await sp.resolve_endpoint_urls(PrimaryUp(), args)
+        assert args.daemon_url == "http://daemon-p:8000"
+        assert out["daemon_url"] == "http://daemon-p:8000"
+        # No-backup URLs unchanged
+        assert args.db_url == "http://db:9102"
+        assert args.percentile_url == "http://lin1:9100"
+
+    @pytest.mark.asyncio
+    async def test_resolve_endpoint_urls_swaps_to_backup_on_primary_down(self):
+        """When primary fails, the startup resolver writes the backup URL
+        back to args so all subsequent code uses the working host."""
+        import spread_scanner as sp
+        import httpx
+        from argparse import Namespace
+        sp._resolved_url_cache.clear()
+
+        class PrimaryDown:
+            async def get(self, url, *a, **kw):
+                if url.startswith("http://primary"):
+                    raise httpx.ConnectError("primary offline")
+                class R: status_code = 200
+                return R()
+
+        args = Namespace(
+            daemon_url="http://primary-d:8000",
+            daemon_url_backup="http://backup-d:8000",
+            db_url="http://primary-db:9102",
+            db_url_backup="http://backup-db:9102",
+            percentile_url="http://primary-pct:9100",
+            percentile_url_backup="http://backup-pct:9100",
+        )
+        await sp.resolve_endpoint_urls(PrimaryDown(), args)
+        assert args.daemon_url == "http://backup-d:8000"
+        assert args.db_url == "http://backup-db:9102"
+        assert args.percentile_url == "http://backup-pct:9100"
 
     def test_render_footer_uses_countdown(self):
         """render_footer's `seconds_remaining` should override the interval
@@ -14640,6 +15565,272 @@ min_otm_per_ticker: {NDX: 2.0}
         args.handlers = [OK("before"), Boom(), OK("after")]
         asyncio.run(ss.scan_loop(args))
         assert fired == ["before", "after"]
+
+
+class TestHandlerValidatePrices:
+    """Per-handler pre-fire price validation (`validate_prices: true`).
+
+    Each handler can opt into a final round-trip to verify_spread_pricing
+    immediately before firing. Failed candidates are dropped; successes
+    have their credit/bid/ask refreshed in place. Default OFF — handlers
+    fire on whatever the scan-level verify produced.
+    """
+
+    def _fake_trading_client(self, results_per_call: list[dict]):
+        """Build a fake TradingClient that returns canned results in order."""
+        calls = {"args": []}
+
+        class Fake:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def verify_spread_pricing(self, **kw):
+                calls["args"].append(kw)
+                # Pop the next canned result (or the last one if exhausted).
+                idx = min(len(calls["args"]) - 1, len(results_per_call) - 1)
+                return results_per_call[idx]
+            # Stubs the trade handler may call after validation passes —
+            # not exercised by these tests (validation drops candidates),
+            # but present so attribute lookups don't 500.
+            async def get_trade_defaults(self): return {"default_order_type": "MARKET"}
+
+        return Fake, calls
+
+    def _make_ctx(self, args=None):
+        import argparse
+        from spread_scanner import HandlerContext
+        ns = args or argparse.Namespace(
+            daemon_url="http://localhost:8000",
+            verify_max_age_sec=30.0,
+            verify_require_provider_source=True,
+            verify_batch_timeout_sec=8.0,
+        )
+        return HandlerContext(
+            client=None, args=ns, scan_data={},
+            is_market_hours=True, now_ts="2026-04-27T13:00:00",
+        )
+
+    def test_default_validate_prices_is_false(self):
+        """All handlers default validate_prices=False — no extra round-trips
+        unless the user opts in."""
+        from spread_scanner import (
+            LogHandler, NotifyHandler, SimulateTradeHandler, TradeHandler,
+            TradePolicy,
+        )
+        h_log = LogHandler(min_norm_roi=1.0, path="/tmp/x.jsonl")
+        h_notify = NotifyHandler(min_norm_roi=1.0, email="a@b.c")
+        h_sim = SimulateTradeHandler(
+            min_norm_roi=1.0, log_file="/tmp/y.jsonl",
+            policy=TradePolicy(), daemon_url="http://localhost:8000",
+        )
+        h_trade = TradeHandler(
+            min_norm_roi=1.0, log_file="/tmp/z.jsonl",
+            policy=TradePolicy(), daemon_url="http://localhost:8000",
+        )
+        # Log handler doesn't validate (intentionally — see CLAUDE.md scope).
+        # The base-class default is False for everyone else too.
+        assert h_log.validate_prices is False
+        assert h_notify.validate_prices is False
+        assert h_sim.validate_prices is False
+        assert h_trade.validate_prices is False
+
+    def test_build_handler_parses_validate_prices_from_yaml(self):
+        from spread_scanner import build_handler
+
+        h = build_handler({
+            "type": "notify", "min_norm_roi": 2.0, "email": "a@b.c",
+            "validate_prices": True,
+        })
+        assert h.validate_prices is True
+
+        h2 = build_handler({
+            "type": "simulate_trade", "min_norm_roi": 2.0,
+            "log_file": "/tmp/sim.jsonl", "policy": {},
+            "daemon_url": "http://localhost:8000",
+            "validate_prices": True,
+        })
+        assert h2.validate_prices is True
+
+        h3 = build_handler({
+            "type": "trade", "min_norm_roi": 2.0,
+            "log_file": "/tmp/live.jsonl", "policy": {},
+            "daemon_url": "http://localhost:8000",
+            "validate_prices": True,
+        })
+        assert h3.validate_prices is True
+
+        # Omitted → default False
+        h4 = build_handler({
+            "type": "notify", "min_norm_roi": 2.0, "email": "a@b.c",
+        })
+        assert h4.validate_prices is False
+
+    def test_validate_prices_false_skips_provider_call(self):
+        """Handler with validate_prices=False does NOT call
+        verify_spread_pricing, even if the helper is monkeypatched."""
+        import asyncio
+        import spread_scanner as ss
+        from spread_scanner import NotifyHandler
+
+        called = {"n": 0}
+        async def fake_validate(spreads, ctx, *, handler_name="handler"):
+            called["n"] += 1
+            return spreads
+
+        h = NotifyHandler(min_norm_roi=0.0, email="a@b.c", validate_prices=False)
+        ctx = self._make_ctx()
+        asyncio.run(h._maybe_validate_prices(
+            [{"symbol": "SPX", "expiration": "2026-04-27",
+              "option_type": "PUT", "short_strike": 7050,
+              "long_strike": 7030, "credit": 0.40, "width": 20}],
+            ctx,
+        ))
+        # The helper is reachable but the bool-gate short-circuits before it.
+        assert called["n"] == 0
+
+    def test_validate_prices_drops_failed_candidates(self):
+        """validate_prices=True drops candidates whose verify call fails."""
+        import asyncio
+        import spread_scanner as ss
+        from spread_scanner import NotifyHandler
+
+        # First spread passes, second fails.
+        Fake, calls = self._fake_trading_client([
+            {"ok": True, "credit": 0.50, "short_bid": 0.60, "long_ask": 0.10,
+             "short_delta": -0.18, "age_seconds": 3.0, "source": "ibkr_fresh"},
+            {"ok": False, "reason": "csv_source_rejected"},
+        ])
+        ss._get_trading_client_cls = lambda: Fake
+
+        h = NotifyHandler(min_norm_roi=0.0, email="a@b.c", validate_prices=True)
+        ctx = self._make_ctx()
+        spreads = [
+            {"symbol": "SPX", "expiration": "2026-04-27", "option_type": "PUT",
+             "short_strike": 7050, "long_strike": 7030, "credit": 0.40, "width": 20},
+            {"symbol": "SPX", "expiration": "2026-04-27", "option_type": "PUT",
+             "short_strike": 7045, "long_strike": 7025, "credit": 0.30, "width": 20},
+        ]
+        kept = asyncio.run(h._maybe_validate_prices(spreads, ctx))
+        assert len(kept) == 1
+        assert kept[0]["short_strike"] == 7050
+        # Survivor's credit was refreshed in place from verify result.
+        assert kept[0]["credit"] == 0.50
+        assert kept[0]["verified"] is True
+        # Both spreads were submitted for verification.
+        assert len(calls["args"]) == 2
+
+    def test_validate_prices_uses_args_freshness_policy(self):
+        """The validator forwards `verify_max_age_sec` and
+        `verify_require_provider_source` from ctx.args to verify_spread_pricing."""
+        import asyncio
+        import argparse
+        import spread_scanner as ss
+        from spread_scanner import NotifyHandler
+
+        Fake, calls = self._fake_trading_client([
+            {"ok": True, "credit": 0.50, "short_bid": 0.50, "long_ask": 0.0,
+             "short_delta": -0.1, "age_seconds": 2.0, "source": "ibkr_fresh"},
+        ])
+        ss._get_trading_client_cls = lambda: Fake
+
+        ns = argparse.Namespace(
+            daemon_url="http://localhost:8000",
+            verify_max_age_sec=45.0,
+            verify_require_provider_source=False,
+            verify_batch_timeout_sec=8.0,
+        )
+        h = NotifyHandler(min_norm_roi=0.0, email="a@b.c", validate_prices=True)
+        ctx = self._make_ctx(args=ns)
+        asyncio.run(h._maybe_validate_prices(
+            [{"symbol": "SPX", "expiration": "2026-04-27", "option_type": "PUT",
+              "short_strike": 7050, "long_strike": 7030, "credit": 0.40, "width": 20}],
+            ctx,
+        ))
+        assert calls["args"][0]["max_age"] == 45.0
+        assert calls["args"][0]["require_provider_source"] is False
+
+    def test_trade_handler_skips_failed_validation_before_risk_reservation(self, tmp_path):
+        """When validate_prices=True drops every candidate, the trade handler
+        must not reserve risk or submit anything — fire() is a no-op."""
+        import asyncio
+        import spread_scanner as ss
+        from spread_scanner import (
+            HandlerContext, SimulateTradeHandler, TradePolicy,
+        )
+
+        # Every candidate fails validation.
+        Fake, _calls = self._fake_trading_client([
+            {"ok": False, "reason": "csv_source_rejected"},
+            {"ok": False, "reason": "csv_source_rejected"},
+        ])
+        ss._get_trading_client_cls = lambda: Fake
+
+        log_file = tmp_path / "sim.jsonl"
+        h = SimulateTradeHandler(
+            min_norm_roi=0.0, log_file=str(log_file),
+            policy=TradePolicy(min_otm_pct={}, min_credit={}),
+            daemon_url="http://localhost:8000",
+            validate_prices=True,
+        )
+        ctx = self._make_ctx()
+        # Inject `expiration` since fire() reads spread.expiration via the
+        # validator path (falls through to verify before risk reservation).
+        spreads = [
+            {"symbol": "SPX", "expiration": "2026-04-27", "option_type": "PUT",
+             "short_strike": 7050, "long_strike": 7030, "credit": 0.40,
+             "width": 20, "roi_pct": 2.0, "otm_pct": 1.0, "dte": 0,
+             "norm_roi": 2.0, "prev_close": 7100.0, "timestamp": "x"},
+            {"symbol": "NDX", "expiration": "2026-04-27", "option_type": "PUT",
+             "short_strike": 26800, "long_strike": 26740, "credit": 0.50,
+             "width": 60, "roi_pct": 0.85, "otm_pct": 1.5, "dte": 0,
+             "norm_roi": 0.85, "prev_close": 27300.0, "timestamp": "x"},
+        ]
+        asyncio.run(h.fire(spreads, ctx))
+        # Risk counters untouched — we never even got to the per-ticker queue.
+        assert h.cum_risk == 0
+        assert h.count_submitted == 0
+        # No submit / result / skipped events were written either.
+        if log_file.exists():
+            lines = log_file.read_text().strip().splitlines()
+            for ln in lines:
+                # Whatever was logged, it must not be a submit/result/skipped.
+                import json as _json
+                ev = _json.loads(ln)
+                assert ev["event"] not in ("submit", "result", "skipped")
+
+    def test_validate_prices_batch_timeout_falls_through(self):
+        """If the daemon hangs and the validate-batch times out, the helper
+        returns the input unchanged so handlers still fire — better to act
+        on slightly older data than to silently drop every action."""
+        import asyncio
+        import argparse
+        import spread_scanner as ss
+        from spread_scanner import NotifyHandler
+
+        class HangingClient:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def verify_spread_pricing(self, **kw):
+                await asyncio.sleep(60)
+                return {"ok": True}
+
+        ss._get_trading_client_cls = lambda: HangingClient
+
+        ns = argparse.Namespace(
+            daemon_url="http://localhost:8000",
+            verify_max_age_sec=30.0,
+            verify_require_provider_source=True,
+            verify_batch_timeout_sec=0.2,
+        )
+        h = NotifyHandler(min_norm_roi=0.0, email="a@b.c", validate_prices=True)
+        ctx = self._make_ctx(args=ns)
+        spreads = [
+            {"symbol": "SPX", "expiration": "2026-04-27", "option_type": "PUT",
+             "short_strike": 7050, "long_strike": 7030, "credit": 0.40, "width": 20},
+        ]
+        kept = asyncio.run(h._maybe_validate_prices(spreads, ctx))
+        # Pass-through on timeout.
+        assert kept == spreads
 
 
 class TestTradePolicy:

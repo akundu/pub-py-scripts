@@ -126,6 +126,7 @@ class IBKRRestProvider(BrokerProvider):
         account_id: str = "",
         exchange: str = "SMART",
         option_chain_cache_dir: str | None = None,
+        option_conid_cache_dir: str | None = None,
     ) -> None:
         self._gateway_url = gateway_url.rstrip("/")
         self._account_id = account_id or _cfg.settings.ibkr_account_id
@@ -140,12 +141,15 @@ class IBKRRestProvider(BrokerProvider):
         self._positions_raw_cache: tuple[float, list] | None = None  # (monotonic_ts, raw CPG list)
         self._balances_cache: tuple[float, Any] | None = None  # (monotonic_ts, AccountBalances)
         self._PORTFOLIO_CACHE_TTL = 10.0  # seconds
-        self._cache = IBKRCacheManager(
-            option_chain_cache_dir=(
+        cache_kwargs: dict[str, Any] = {
+            "option_chain_cache_dir": (
                 option_chain_cache_dir or _cfg.settings.ibkr_option_chain_cache_dir
             ),
-            rate_limit=9.0,  # CPG limit is 10/sec, use 90% headroom
-        )
+            "rate_limit": 9.0,  # CPG limit is 10/sec, use 90% headroom
+        }
+        if option_conid_cache_dir is not None:
+            cache_kwargs["option_conid_cache_dir"] = option_conid_cache_dir
+        self._cache = IBKRCacheManager(**cache_kwargs)
 
     @property
     def cache_stats(self) -> dict:
@@ -233,10 +237,27 @@ class IBKRRestProvider(BrokerProvider):
         if cached is not None and cached > 0:
             return cached
 
+        # Cross-provider store: a conId resolved by TWS in this session is
+        # immediately usable by CPG (and vice-versa). This is the failover
+        # path when CPG's /iserver/secdef/info itself is broken.
+        shared = self._cache.option_conids.get(symbol, expiration, strike, right)
+        if shared and shared > 0:
+            self._option_conid_cache[key] = shared
+            return shared
+
         underlying_conid = await self._resolve_conid(symbol)
         exp_clean = expiration.replace("-", "")
 
         month_mmmyy = _to_mmmyy(exp_clean)
+
+        # CPG is strict about strike formatting: whole-dollar strikes must be
+        # passed without trailing ".0" (e.g. "7065" not "7065.0"), otherwise
+        # CPG returns either an empty list or a 500. Fractional strikes keep
+        # their decimals (e.g. "5.50").
+        if float(strike).is_integer():
+            strike_str = str(int(strike))
+        else:
+            strike_str = str(strike)
 
         # Try without exchange first (returns all expirations), then with specific exchanges.
         # CPG secdef/info fails with exchange=CBOE for some SPX contracts.
@@ -247,42 +268,95 @@ class IBKRRestProvider(BrokerProvider):
             exchange_attempts.append("SMART")
 
         last_error = None
-        for exch in exchange_attempts:
-            try:
-                params = {
-                    "conid": underlying_conid, "sectype": "OPT", "month": month_mmmyy,
-                    "strike": str(strike), "right": right,
-                }
-                if exch:
-                    params["exchange"] = exch
-                data = await self._get("/iserver/secdef/info", params=params)
-            except Exception as e:
-                last_error = e
-                data = None
-                continue
+        attempt_summary: list[str] = []
+        primed = False
+        for round_num in (1, 2):
+            for exch in exchange_attempts:
+                try:
+                    params = {
+                        "conid": underlying_conid, "sectype": "OPT", "month": month_mmmyy,
+                        "strike": strike_str, "right": right,
+                    }
+                    if exch:
+                        params["exchange"] = exch
+                    data = await self._get("/iserver/secdef/info", params=params)
+                except Exception as e:
+                    last_error = e
+                    attempt_summary.append(f"r{round_num} exch={exch}: {type(e).__name__}")
+                    continue
 
-            if isinstance(data, list):
-                available_exps = set()
-                for item in data:
-                    item_exp = str(item.get("maturityDate", "")).replace("-", "")
-                    available_exps.add(item_exp)
-                    if item_exp == exp_clean and item.get("conid"):
-                        con_id = int(item["conid"])
-                        self._option_conid_cache[key] = con_id
-                        return con_id
-                # Log available expirations for debugging
-                if available_exps:
-                    logger.warning(
-                        "conId miss: %s %s %s%s exch=%s — CPG returned %d results, exps: %s (wanted %s)",
-                        symbol, expiration, strike, right, exch, len(data),
-                        sorted(available_exps)[:10], exp_clean,
+                if isinstance(data, list):
+                    available_exps = set()
+                    for item in data:
+                        item_exp = str(item.get("maturityDate", "")).replace("-", "")
+                        available_exps.add(item_exp)
+                        if item_exp == exp_clean and item.get("conid"):
+                            con_id = int(item["conid"])
+                            self._option_conid_cache[key] = con_id
+                            try:
+                                self._cache.option_conids.put(
+                                    symbol, exp_clean, strike, right, con_id
+                                )
+                            except Exception:
+                                pass
+                            return con_id
+                    # Always record the attempt outcome — empty list is a valid
+                    # CPG response that means "strike doesn't exist for that month".
+                    if available_exps:
+                        attempt_summary.append(
+                            f"r{round_num} exch={exch}: {len(data)} results, exps={sorted(available_exps)[:10]}"
+                        )
+                        logger.warning(
+                            "conId miss: %s %s %s%s exch=%s — CPG returned %d results, exps: %s (wanted %s)",
+                            symbol, expiration, strike_str, right, exch, len(data),
+                            sorted(available_exps)[:10], exp_clean,
+                        )
+                    else:
+                        attempt_summary.append(
+                            f"r{round_num} exch={exch}: empty (no contracts at strike {strike_str})"
+                        )
+                        logger.warning(
+                            "conId miss: %s %s %s%s exch=%s — CPG returned empty list (strike likely doesn't exist for %s)",
+                            symbol, expiration, strike_str, right, exch, month_mmmyy,
+                        )
+                else:
+                    attempt_summary.append(
+                        f"r{round_num} exch={exch}: non-list response {type(data).__name__}"
                     )
+
+            # If round 1 saw nothing but HTTP errors, prime the underlying via a
+            # snapshot request and retry once. CPG can refuse option-chain
+            # queries until the underlying conid has been "touched" in the
+            # current session — the snapshot fixes that without needing the
+            # caller to manage session warm-up.
+            if round_num == 1 and not primed:
+                only_http_errors = attempt_summary and all(
+                    "Error" in s and "results" not in s and "empty" not in s
+                    for s in attempt_summary
+                )
+                if not only_http_errors:
+                    break
+                try:
+                    await self._get(
+                        "/iserver/marketdata/snapshot",
+                        params={"conids": str(underlying_conid), "fields": _FIELD_LAST},
+                    )
+                    primed = True
+                    logger.info(
+                        "CPG conId resolution: priming underlying %s (conid=%s) after HTTP errors",
+                        symbol, underlying_conid,
+                    )
+                except Exception as snap_err:
+                    attempt_summary.append(f"prime: {type(snap_err).__name__}")
+                    break
 
         # Do NOT cache negative results — transient CPG failures should not
         # block future resolution attempts
+        summary = "; ".join(attempt_summary) if attempt_summary else "no attempts recorded"
         detail = f" (last error: {last_error})" if last_error else ""
         raise RuntimeError(
-            f"Failed to resolve option conId: {symbol} {expiration} {strike}{right}{detail}"
+            f"Failed to resolve option conId: {symbol} {expiration} {strike_str}{right} "
+            f"[attempts: {summary}]{detail}"
         )
 
     # ── Order Confirmation Flow ───────────────────────────────────────────────
@@ -655,6 +729,21 @@ class IBKRRestProvider(BrokerProvider):
         underlying_symbol = order.legs[0].symbol
         underlying_conid = await self._resolve_conid(underlying_symbol)
 
+        # Reduce per-leg ratios by GCD so the conidex carries the
+        # combo proportions in lowest terms (matches IBKR's combo validation;
+        # quantity scaling lives on Order.quantity below).
+        from math import gcd as _gcd
+        leg_quantities = [int(leg.quantity) for leg in order.legs]
+        ratio_gcd = leg_quantities[0]
+        for q in leg_quantities[1:]:
+            ratio_gcd = _gcd(ratio_gcd, q)
+        ratio_gcd = max(ratio_gcd, 1)
+        if ratio_gcd != 1:
+            logger.info(
+                "CPG combo: reducing leg ratios by GCD=%d (raw=%s)",
+                ratio_gcd, leg_quantities,
+            )
+
         # Resolve each leg's option conId and build conidex parts
         leg_parts = []
         for leg in order.legs:
@@ -668,7 +757,8 @@ class IBKRRestProvider(BrokerProvider):
             # Action → ratio sign: SELL = negative, BUY = positive
             action = leg.action.value  # e.g. "SELL_TO_OPEN"
             is_sell = action.startswith("SELL")
-            ratio = -leg.quantity if is_sell else leg.quantity
+            reduced = int(leg.quantity) // ratio_gcd
+            ratio = -reduced if is_sell else reduced
             leg_parts.append(f"{option_conid}/{ratio}")
 
         # Build conidex: underlying;;;leg1,leg2
@@ -923,14 +1013,18 @@ class IBKRRestProvider(BrokerProvider):
             logger.warning("Failed to fetch strikes for %s: %s", symbol, e)
 
         # Step 3: Get expirations — use secdef/info with a known strike near ATM
-        # CPG requires strike param; use middle strike as representative
+        # CPG requires strike param; use middle strike as representative.
+        # Whole-dollar strikes must be sent without ".0" (CPG quirk).
         if strikes:
             mid_strike = strikes[len(strikes) // 2]
+            mid_strike_str = (
+                str(int(mid_strike)) if float(mid_strike).is_integer() else str(mid_strike)
+            )
             try:
                 exp_data = await self._get(
                     "/iserver/secdef/info",
                     params={"conid": con_id, "sectype": "OPT", "month": month_for_strikes,
-                            "strike": str(mid_strike), "right": "C", "exchange": opt_exchange},
+                            "strike": mid_strike_str, "right": "C", "exchange": opt_exchange},
                 )
                 if isinstance(exp_data, list):
                     seen = set()

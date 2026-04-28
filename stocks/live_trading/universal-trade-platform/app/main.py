@@ -223,9 +223,14 @@ def _get_worker_proxy_client():
     if _worker_proxy_client is None or _worker_proxy_client.is_closed:
         import httpx
         port = int(os.environ.get("_UTP_DAEMON_PORT", "8001"))
+        # Read timeout must exceed order_poll_timeout_seconds (default 60s);
+        # otherwise sync POST /trade/execute calls return a 502 right when
+        # the IBKR process is finishing its own polling. Allow override via
+        # _UTP_PROXY_TIMEOUT for very long-running operations.
+        proxy_timeout = float(os.environ.get("_UTP_PROXY_TIMEOUT", "180"))
         _worker_proxy_client = httpx.AsyncClient(
             base_url=f"http://127.0.0.1:{port}",
-            timeout=60.0,
+            timeout=proxy_timeout,
         )
     return _worker_proxy_client
 
@@ -299,9 +304,17 @@ async def worker_proxy_middleware(request: Request, call_next):
             headers=dict(resp.headers),
         )
     except Exception as e:
+        # str(e) is empty for several httpx exceptions (ReadTimeout etc.) —
+        # always include the type so 502 responses are diagnosable.
+        err_type = type(e).__name__
+        err_msg = str(e) or repr(e)
+        logger.error(
+            "Worker proxy error: %s on %s %s — %s",
+            err_type, request.method, target, err_msg,
+        )
         return JSONResponse(
             status_code=502,
-            content={"detail": f"IBKR process proxy error: {e}"},
+            content={"detail": f"IBKR process proxy error: {err_type}: {err_msg}"},
         )
 
 

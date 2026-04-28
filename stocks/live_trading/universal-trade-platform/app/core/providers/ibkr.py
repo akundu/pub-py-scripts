@@ -6,6 +6,7 @@ import asyncio
 import logging
 import uuid
 from datetime import UTC, datetime
+from math import gcd
 from typing import ClassVar
 
 import app.config as _cfg
@@ -159,13 +160,19 @@ class IBKRLiveProvider(BrokerProvider):
     broker: ClassVar[Broker] = Broker.IBKR
 
     def __init__(self, exchange: str | None = None,
-                 option_chain_cache_dir: str | None = None) -> None:
+                 option_chain_cache_dir: str | None = None,
+                 option_conid_cache_dir: str | None = None) -> None:
         self._ib = None
         self._connected = False
         self._exchange = exchange or _cfg.settings.ibkr_exchange
-        self._cache = IBKRCacheManager(
-            option_chain_cache_dir=option_chain_cache_dir or _cfg.settings.ibkr_option_chain_cache_dir,
-        )
+        cache_kwargs: dict = {
+            "option_chain_cache_dir": (
+                option_chain_cache_dir or _cfg.settings.ibkr_option_chain_cache_dir
+            ),
+        }
+        if option_conid_cache_dir is not None:
+            cache_kwargs["option_conid_cache_dir"] = option_conid_cache_dir
+        self._cache = IBKRCacheManager(**cache_kwargs)
         self._reconnect_task: asyncio.Task | None = None
         self._max_reconnect_retries = 10
         self._reconnect_backoff_cap = 10.0
@@ -311,6 +318,13 @@ class IBKRLiveProvider(BrokerProvider):
                 if qualified and qualified[0].conId > 0:
                     logger.debug("Qualified %s %s %s%s on %s (conId=%d)",
                                 symbol, exp_clean, strike, right, exchange or "ANY", qualified[0].conId)
+                    # Persist to the cross-provider store so CPG can use it.
+                    try:
+                        self._cache.option_conids.put(
+                            symbol, exp_clean, strike, right, qualified[0].conId
+                        )
+                    except Exception as e:
+                        logger.debug("OptionConidStore write failed: %s", e)
                     return qualified
             except Exception as e:
                 logger.debug("Qualify failed for %s %s %s%s on %s: %s",
@@ -341,6 +355,12 @@ class IBKRLiveProvider(BrokerProvider):
                         self._cache.contracts.put(
                             c, symbol, "OPT", exp_clean, strike, right
                         )
+                        try:
+                            self._cache.option_conids.put(
+                                symbol, exp_clean, strike, right, c.conId
+                            )
+                        except Exception:
+                            pass
                         return [c]
                 # If no exact match, pick the first valid one
                 for cd in details:
@@ -351,6 +371,12 @@ class IBKRLiveProvider(BrokerProvider):
                         self._cache.contracts.put(
                             c, symbol, "OPT", exp_clean, strike, right
                         )
+                        try:
+                            self._cache.option_conids.put(
+                                symbol, exp_clean, strike, right, c.conId
+                            )
+                        except Exception:
+                            pass
                         return [c]
         except Exception as e:
             logger.debug("Ambiguous resolution failed for %s: %s", symbol, e)
@@ -678,6 +704,23 @@ class IBKRLiveProvider(BrokerProvider):
 
         from ib_insync import ComboLeg, Contract, LimitOrder, MarketOrder, Option
 
+        # IBKR rejects combos with "Invalid leg ratio" (error 321) when leg
+        # ratios are not in lowest terms (e.g. 10:10 instead of 1:1) — the
+        # ratios encode the per-combo proportions, while Order.totalQuantity
+        # carries the contract count. Reduce by GCD so callers that pass the
+        # full contract count per leg (a common mistake) still produce a
+        # valid order.
+        leg_quantities = [int(leg.quantity) for leg in order.legs]
+        ratio_gcd = leg_quantities[0]
+        for q in leg_quantities[1:]:
+            ratio_gcd = gcd(ratio_gcd, q)
+        ratio_gcd = max(ratio_gcd, 1)
+        if ratio_gcd != 1:
+            logger.info(
+                "IBKR combo: reducing leg ratios by GCD=%d (raw=%s → %s)",
+                ratio_gcd, leg_quantities, [q // ratio_gcd for q in leg_quantities],
+            )
+
         combo_legs = []
         for leg in order.legs:
             right = "C" if leg.option_type.value == "CALL" else "P"
@@ -700,7 +743,7 @@ class IBKRLiveProvider(BrokerProvider):
             combo_legs.append(
                 ComboLeg(
                     conId=qualified[0].conId,
-                    ratio=leg.quantity,
+                    ratio=int(leg.quantity) // ratio_gcd,
                     action=action,
                     exchange=self._exchange,
                 )
@@ -1096,8 +1139,29 @@ class IBKRLiveProvider(BrokerProvider):
                             c, symbol, "OPT", exp_yyyymmdd,
                             float(c.strike), right,
                         )
+                        # Cross-provider store: makes this conId visible to CPG
+                        # (and to the trade execution path) once it lands here
+                        # via `utp options` warm-ups.
+                        try:
+                            self._cache.option_conids.put(
+                                symbol, exp_yyyymmdd, float(c.strike), right, c.conId
+                            )
+                        except Exception:
+                            pass
             finally:
                 ib_logger.setLevel(original_level)
+        # Also persist any cached contracts whose conIds may not have been
+        # written to the shared store yet (e.g. resolved on a previous run
+        # before this fix landed, then loaded back via the in-memory contract
+        # cache).
+        for c in cached_contracts:
+            try:
+                if getattr(c, "conId", 0) > 0:
+                    self._cache.option_conids.put(
+                        symbol, exp_yyyymmdd, float(c.strike), right, c.conId
+                    )
+            except Exception:
+                pass
 
         all_qualified = cached_contracts + newly_qualified
         if not all_qualified:
