@@ -626,7 +626,7 @@ def format_as_html(results: list[dict], params: dict = None, buffer: float = 0.0
             <span><strong>Last Trading Day:</strong> {last_date}</span>
             <span class="ref-close" data-ticker="{ticker}" data-section="main" data-prev-close="{_raw_prev_close(prev_close)}"><strong>Close:</strong> {prev_close_fmt}</span>
             <span><strong>Data Points:</strong> {n_data} days</span>
-            <span class="price-basis" data-ticker="{ticker}" data-section="main" style="font-style:italic;opacity:0.85">$ prices based on previous close: {prev_close_fmt}</span>
+            <span class="price-basis" data-ticker="{ticker}" data-section="main" data-prev-close="{_raw_prev_close(prev_close)}" style="font-style:italic;opacity:0.85">$ prices based on previous close: {prev_close_fmt}</span>
             <button class="live-toggle" data-ticker="{ticker}" onclick="toggleLiveMain(this)"
               style="padding:6px 14px;background:var(--bg-primary);border:1px solid var(--border-color);border-radius:6px;cursor:pointer;font-size:13px;color:var(--text-primary);transition:all 0.2s;margin-left:10px;vertical-align:middle">Use Live Prices</button>
         </div>
@@ -889,7 +889,7 @@ def _generate_ticker_content_html(result: dict, ticker_id: str, buffer: float = 
         <div class="ticker-info-header">
             <span><strong>Last Trading Day:</strong> {last_date}</span>
             <span class="ref-close" data-ticker="{ticker}" data-section="main" data-prev-close="{_raw_prev_close(prev_close)}"><strong>Close:</strong> {prev_close_fmt}</span>
-            <span class="price-basis" data-ticker="{ticker}" data-section="main" style="font-style:italic;opacity:0.85">$ prices based on previous close: {prev_close_fmt}</span>
+            <span class="price-basis" data-ticker="{ticker}" data-section="main" data-prev-close="{_raw_prev_close(prev_close)}" style="font-style:italic;opacity:0.85">$ prices based on previous close: {prev_close_fmt}</span>
             <button class="live-toggle" data-ticker="{ticker}" onclick="toggleLiveMain(this)"
               style="padding:6px 14px;background:var(--tab-inactive,#ecf0f1);border:1px solid var(--border-color,#ecf0f1);border-radius:6px;cursor:pointer;font-size:13px;color:var(--text-primary,#333);transition:all 0.2s;margin-left:10px;vertical-align:middle">Use Live Prices</button>
         </div>
@@ -2339,7 +2339,7 @@ def format_hourly_moves_as_html(hourly_data: dict, buffer: float = 0.0) -> str:
         <div class="hourly-info">
             <span class="ref-close" data-ticker="{ticker}" data-section="hourly" data-prev-close="{_raw_prev_close(prev_close)}"><strong>Reference Close:</strong> {prev_close_fmt}</span>
             <span><strong>Source:</strong> 5-min bar data</span>
-            <span class="price-basis" data-ticker="{ticker}" data-section="hourly" style="font-style:italic;opacity:0.85">$ prices based on previous close: {prev_close_fmt}</span>
+            <span class="price-basis" data-ticker="{ticker}" data-section="hourly" data-prev-close="{_raw_prev_close(prev_close)}" style="font-style:italic;opacity:0.85">$ prices based on previous close: {prev_close_fmt}</span>
         </div>
 """)
 

@@ -35,7 +35,11 @@ def test_data_prev_close_attribute_in_formatter_source():
     from common import range_percentiles_formatter as fmt
     src = Path(fmt.__file__).read_text()
     ref_spans = src.count('class="ref-close"')
-    with_attr = src.count('data-prev-close="{_raw_prev_close(prev_close)}"')
+    with_attr = sum(
+        1 for line in src.splitlines()
+        if 'class="ref-close"' in line
+        and 'data-prev-close="{_raw_prev_close(prev_close)}"' in line
+    )
     assert ref_spans > 0, "no ref-close spans found"
     assert with_attr == ref_spans, (
         f"mismatch: {ref_spans} ref-close spans but only {with_attr} have "
@@ -263,4 +267,85 @@ def test_db_server_js_handles_buffered_pct_attribute():
     )
     assert "buffer-addendum" in src, (
         "JS must rebuild the buffer-addendum div when updating price cells"
+    )
+
+
+def test_hourly_ref_close_pins_to_prev_close_in_js():
+    """The 'Reference Close' header in the hourly section must always show the
+    previous day's close, never the live price. Live price is shown in the
+    price-basis line below."""
+    src = (_REPO / "db_server.py").read_text()
+    # Find the applySectionPrices function body
+    start = src.find("function applySectionPrices(")
+    assert start != -1, "applySectionPrices function not found"
+    # Look at a reasonable chunk of the function for our markers
+    body = src[start:start + 4500]
+    assert "if (section === 'hourly')" in body, (
+        "ref-close branch must early-return for hourly so live price never "
+        "overwrites the Reference Close header"
+    )
+    assert "<strong>Reference Close:</strong> ' + fmtPrice(prevClose)" in body, (
+        "hourly ref-close must render fmtPrice(prevClose), not fmtPrice(price)"
+    )
+
+
+def test_price_basis_carries_data_prev_close():
+    """price-basis spans must carry data-prev-close so the live-price line
+    can render the diff vs previous close."""
+    from common import range_percentiles_formatter as fmt
+    src = Path(fmt.__file__).read_text()
+    basis_spans = src.count('class="price-basis"')
+    with_attr = sum(
+        1 for line in src.splitlines()
+        if 'class="price-basis"' in line
+        and 'data-prev-close="{_raw_prev_close(prev_close)}"' in line
+    )
+    assert basis_spans > 0, "no price-basis spans found"
+    assert with_attr == basis_spans, (
+        f"mismatch: {basis_spans} price-basis spans but only {with_attr} carry "
+        "data-prev-close — every price-basis must expose the attribute so the "
+        "live-price diff badge can render"
+    )
+
+
+def test_js_renders_diff_badge_on_live_price_basis():
+    """The price-basis live line must render a diff vs previous close badge
+    (▲/▼ +/-x.xx% vs prev $...) next to the live price."""
+    src = (_REPO / "db_server.py").read_text()
+    start = src.find("function applySectionPrices(")
+    assert start != -1, "applySectionPrices function not found"
+    body = src[start:start + 4500]
+    # The live-price branch of the price-basis renderer must compute diff
+    # against el.dataset.prevClose and emit a "vs prev" badge.
+    assert "basisDiffBadge" in body, (
+        "applySectionPrices must build a diff badge for the live price-basis line"
+    )
+    assert "live price: ' + fmt + '</strong>' + liveBadge + basisDiffBadge" in body, (
+        "live price-basis innerHTML must append the diff badge after the LIVE badge"
+    )
+
+
+def test_diff_badge_includes_dollar_amount_moved():
+    """The diff badge (both ref-close and price-basis) must show the dollar
+    amount moved alongside the percentage — e.g. '▼ -$2.67 (-0.04%) vs prev $...'.
+    The amount comes from `price - prevClose` and is rendered with thousand
+    separators to two decimals."""
+    src = (_REPO / "db_server.py").read_text()
+    start = src.find("function applySectionPrices(")
+    assert start != -1, "applySectionPrices function not found"
+    body = src[start:start + 5500]
+    # Both diff-badge code paths must compute the absolute dollar amount and
+    # render it before the percentage.
+    assert body.count("var diffAmt = price - prevClose;") >= 2, (
+        "both diff badges (ref-close and price-basis) must compute diffAmt = price - prevClose"
+    )
+    assert body.count("Math.abs(diffAmt)") >= 2, (
+        "both diff badges must render Math.abs(diffAmt) to avoid a double sign"
+    )
+    # Percentage must appear in parentheses, after the dollar amount.
+    assert body.count("'$' + absAmt") >= 2, (
+        "dollar amount must be rendered with a $ prefix"
+    )
+    assert body.count("' (' + pctSign + diffPct.toFixed(2) + '%)'") >= 2, (
+        "percentage must be wrapped in parentheses after the dollar amount"
     )
