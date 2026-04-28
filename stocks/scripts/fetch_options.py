@@ -500,9 +500,45 @@ class HistoricalDataFetcher:
 
         for trading_date, rows in by_trading_date.items():
             csv_path = symbol_dir / f"{norm_symbol}_options_{trading_date}.csv"
+
+            # Build a set of (ticker, expiration, timestamp) keys already on
+            # disk so re-runs only append truly-new bars. Without this the
+            # cron's daily replay duplicates every prior bar and the file
+            # grows unboundedly. A single NBBO bar is uniquely identified by
+            # contract + bar timestamp; bid/ask within that bar are
+            # deterministic medians.
+            existing_keys: set[tuple[str, str, str]] = set()
+            file_exists = csv_path.exists()
+            if file_exists:
+                try:
+                    with open(csv_path, "r", newline="", encoding="utf-8") as f_in:
+                        reader = csv.DictReader(f_in)
+                        for r in reader:
+                            existing_keys.add((
+                                r.get("ticker", "") or "",
+                                r.get("expiration", "") or "",
+                                r.get("timestamp", "") or "",
+                            ))
+                except Exception as e:
+                    print(
+                        f"Warning: could not read {csv_path} for dedup, falling "
+                        f"back to plain append: {e}",
+                        file=sys.stderr,
+                    )
+
             csv_data = []
+            skipped = 0
             for c in rows:
                 row_ts = c.get("timestamp") or current_time
+                key = (
+                    str(c.get("ticker", "") or ""),
+                    str(c.get("expiration", "") or ""),
+                    str(row_ts),
+                )
+                if key in existing_keys:
+                    skipped += 1
+                    continue
+                existing_keys.add(key)
                 csv_data.append({
                     "timestamp": row_ts,
                     "ticker": c.get("ticker", ""),
@@ -521,15 +557,25 @@ class HistoricalDataFetcher:
                     "implied_volatility": c.get("implied_volatility", ""),
                     "volume": c.get("volume", ""),
                 })
-            file_exists = csv_path.exists()
+
+            if not csv_data:
+                if not self.quiet:
+                    print(
+                        f"No new rows for {norm_symbol} trading_date {trading_date} "
+                        f"(all {skipped} already present in {csv_path})"
+                    )
+                continue
+
             with open(csv_path, "a", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 if not file_exists:
                     writer.writeheader()
                 writer.writerows(csv_data)
             if not self.quiet:
+                suffix = f" (skipped {skipped} dupes)" if skipped else ""
                 print(
-                    f"Saved {len(csv_data)} rows for {norm_symbol} trading_date {trading_date} to {csv_path}"
+                    f"Saved {len(csv_data)} rows for {norm_symbol} trading_date "
+                    f"{trading_date} to {csv_path}{suffix}"
                 )
             else:
                 print(str(csv_path))

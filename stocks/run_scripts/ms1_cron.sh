@@ -11,12 +11,13 @@
 #   3. Equity 5-min bars for the analysis universe → `equities_output/`.
 #   4. 30-day rolling options track → `options_csv_output_full_5/`.
 #   5. **Quote-augmented options chains for the moderate-tier OTM band →
-#      `options_csv_output_full/`** (the directory the nROI analysis reads).
-#      This step uses `fetch_options.py --historical-mode auto`, which falls
-#      back to Polygon's /v3/quotes endpoint for past dates. It REPLACES
-#      `options_quotes_augment.py` — that script is now backfill-only.
-#   6. Build the close-prediction models.
-#   7. Calibrate recommended percentiles (weekdays only).
+#      `options_csv_output_full/`** (the directory the nROI analysis reads)
+#      — runs SATURDAYS ONLY for ms1 (Sunday for lin1). Covers the full
+#      previous Mon-Fri trading week with the wider 5% strike band. Manual
+#      backfill via START_DATE/END_DATE/DAYS_BACK env still works any day.
+#   6. Build the close-prediction models (daily).
+#   7. Calibrate recommended percentiles — same Saturday gate as step 5 so
+#      it always sees the freshly-augmented week.
 #
 # Adding a new ticker to the augmented chain dataset:
 #   Append it to the `for tk in SPX RUT NDX; do` loop in step 5.
@@ -94,57 +95,81 @@ python3 scripts/options_chain_download.py SPX RUT NDX DJX \
  #    --num-processes 5 --window-workers 5 --skip-existing \
  #    --format-chain-csv --output-dir ./options_csv_output_full2/
 
-# ─── Step 5: quote-augmented chains for SPX/RUT/NDX → options_csv_output_full/ ────
-# Replaces `options_quotes_augment.py`. fetch_options.py with
-# --historical-mode auto detects past dates and pulls NBBO quote bars from
-# /v3/quotes/{contract} (the same endpoint the augmenter used), then writes
-# rows to data_dir/<TICKER>/<TICKER>_options_<trading_date>.csv via the new
-# --csv-layout per-trading-date flag — the layout the nROI analyzer reads.
+# ─── Step 5+6: weekly quote-augment + recommended-percentile calibration ──
+# Both blocks below are gated to **Saturday only** for ms1 (Sunday for the
+# lin1 mirror). Rationale: the per-contract NBBO quote pull is the slow
+# step in this pipeline and we want it to use the wider 5% strike band
+# without blowing up weekday wall-clock. Running it weekly on Sat gives
+# us a full Mon-Fri week of augmented data + freshly-recalibrated
+# percentiles in one place, ready for Monday's open.
 #
-# We loop over every business day from $start_date through $end_date so
-# longer DAYS_BACK windows (e.g., 10) are fully covered, not just the
-# endpoints. The augmenter is idempotent (already-covered strikes are
-# skipped) so re-running the same date is a no-op cost-wise.
-# Note: no `local` keyword — `sh` (which db_server.py uses to exec this
-# script) is not guaranteed to support it across platforms. We rely on
-# the function's positional `$1` directly inside the inner loop and don't
-# leak a function-scoped variable to the outer iteration.
-augment_one_date() {
-    for tk in SPX RUT NDX; do
-        python3 scripts/fetch_options.py --symbols $tk \
-            --date "$1" \
-            --strike-range-percent 5 \
-            --max-days-to-expiry 7 \
-            --use-csv \
-            --data-dir options_csv_output_full \
-            --csv-layout per-trading-date \
-            --historical-mode auto \
-            --bar-interval-minutes 5 \
-            --snapshot-max-concurrent 12 \
-            --quote-max-pages 6 \
-            --quiet \
-          || echo "fetch_options $tk $1 failed (continuing)"
+# Manual backfill: setting START_DATE / END_DATE / DAYS_BACK on the cron
+# query string (or in the env) forces this block to run with that window
+# regardless of the day of week — same path used for ad-hoc reprocessing.
+DOW=$(date +%u)  # 1=Mon ... 7=Sun
+WEEKLY_DOW=6     # Saturday for ms1
+if [ -n "$START_DATE" ] || [ -n "$END_DATE" ] || [ -n "$DAYS_BACK" ]; then
+    # Manual override — use the start_date/end_date already computed above.
+    aug_start="$start_date"
+    aug_end="$end_date"
+    run_weekly=1
+elif [ "$DOW" -eq "$WEEKLY_DOW" ]; then
+    # Saturday: previous week's Mon..Fri = 5..1 days back from today.
+    aug_start=$(date -j -v-5d +%Y-%m-%d)
+    aug_end=$(date -j -v-1d +%Y-%m-%d)
+    run_weekly=1
+else
+    run_weekly=0
+fi
+
+if [ "$run_weekly" -eq 1 ]; then
+    echo "weekly augment range $aug_start to $aug_end"
+
+    # Replaces `options_quotes_augment.py`. fetch_options.py with
+    # --historical-mode auto pulls NBBO quote bars from /v3/quotes/{contract}
+    # and writes per-trading-date CSVs the nROI analyzer reads.
+    # Note: no `local` keyword — `sh` (which db_server.py uses to exec this
+    # script) is not guaranteed to support it across platforms.
+    augment_one_date() {
+        # Run SPX/RUT/NDX in parallel — Polygon's per-key concurrency limit
+        # is well above 3 × 12 = 36, so 3 child processes don't conflict.
+        for tk in SPX RUT NDX; do
+            ( python3 scripts/fetch_options.py --symbols $tk \
+                --date "$1" \
+                --strike-range-percent 5 \
+                --max-days-to-expiry 5 \
+                --use-csv \
+                --data-dir options_csv_output_full \
+                --csv-layout per-trading-date \
+                --historical-mode auto \
+                --bar-interval-minutes 5 \
+                --snapshot-max-concurrent 12 \
+                --quote-max-pages 6 \
+                --quiet \
+              || echo "fetch_options $tk $1 failed (continuing)" ) &
+        done
+        wait
+    }
+
+    d="$aug_start"
+    sentinel=$(date -j -f "%Y-%m-%d" -v+1d "$aug_end" +%Y-%m-%d)
+    while [ "$d" != "$sentinel" ]; do
+        # Skip weekends — markets are closed, no bars to fetch.
+        dow=$(date -j -f "%Y-%m-%d" "$d" +%u)
+        if [ "$dow" -le 5 ]; then
+            augment_one_date "$d"
+        fi
+        d=$(date -j -f "%Y-%m-%d" -v+1d "$d" +%Y-%m-%d)
     done
-}
+fi
 
-d="$start_date"
-sentinel=$(date -j -f "%Y-%m-%d" -v+1d "$end_date" +%Y-%m-%d)
-while [ "$d" != "$sentinel" ]; do
-    # Skip weekends — markets are closed, no bars to fetch
-    dow=$(date -j -f "%Y-%m-%d" "$d" +%u)
-    if [ "$dow" -le 5 ]; then
-        augment_one_date "$d"
-    fi
-    d=$(date -j -f "%Y-%m-%d" -v+1d "$d" +%Y-%m-%d)
-done
-
-#build the close models
+#build the close models (runs daily — independent of the weekly augment)
 rm /tmp/close_model.log /tmp/rebuild_prediction_data.log
 /bin/sh run_scripts/build_close_models.sh > /tmp/close_model.log 2>&1 && /bin/bash run_scripts/rebuild_prediction_data.sh > /tmp/rebuild_prediction_data.log 2>&1
 
-# Calibrate recommended percentiles (skip weekends — only run before trading days)
-DOW=$(date +%u)  # 1=Mon ... 7=Sun
-if [ "$DOW" -le 5 ]; then
+# Calibrate recommended percentiles — gated to the same weekly run as the
+# augment, so calibration always sees the freshly-augmented week of data.
+if [ "$run_weekly" -eq 1 ]; then
     REC_OUT="results/calibration/recommended_percentiles.json"
     REC_RUT="results/calibration/recommended_percentiles_rut.json"
     rm -f /tmp/calibrate_recommendations.log
