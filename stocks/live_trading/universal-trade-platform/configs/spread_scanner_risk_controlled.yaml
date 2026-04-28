@@ -19,6 +19,24 @@
 # To go live: flip the `trade` handler from the commented block below into the
 # `handlers:` list. Leaving it commented keeps you in simulate-only mode.
 
+# ── Service endpoints (primary + optional backup) ─────────────────────────────
+# Each URL field accepts either a scalar string (no failover) or a mapping
+# with `primary` and `backup` keys. When both are configured, the scanner
+# probes the primary at startup; if it's unreachable, it transparently
+# switches to the backup for the rest of the session. Defaults below
+# preserve the legacy "lin1.kundu.dev → localhost" failover for the
+# percentile server. Override per-deployment as needed:
+#
+# daemon_url:
+#   primary: http://lin1.kundu.dev:8000
+#   backup:  http://localhost:8000
+# db_url:
+#   primary: http://lin1.kundu.dev:9102
+#   backup:  http://localhost:9102
+# percentile_url:
+#   primary: http://lin1.kundu.dev:9100
+#   backup:  http://localhost:9100
+
 # ── Scanner screening ─────────────────────────────────────────────────────────
 tickers: [SPX, NDX, RUT]
 dte: [0]
@@ -88,6 +106,11 @@ handlers:
     min_norm_roi: 3.0
     email: anirbankundu@gmail.com
     gate_market_hours: true
+    # Per-handler pre-fire price validation (default false). When true, the
+    # handler re-fetches a fresh quote from the daemon for every candidate
+    # immediately before sending the email; failed verifications are dropped.
+    # Reuses the global `verify_max_age_sec` and `verify_require_provider_source`.
+    #validate_prices: false
 
   # Shadow-mode: margin-check every would-have-traded spread; never submits.
   # Same policy as the live `trade` handler so the two logs are directly
@@ -96,6 +119,12 @@ handlers:
     min_norm_roi: 1.5
     log_file: trades_sim.jsonl
     daemon_url: http://localhost:8000
+    # Per-handler pre-fire price validation (default false). When true, every
+    # candidate gets a fresh `verify_spread_pricing` round-trip immediately
+    # before the simulated submit; failed verifications are dropped before
+    # any risk reservation. Useful when you want the simulate log to be
+    # faithful to what a live handler would have seen post-validation.
+    #validate_prices: true
     policy: &trade_policy
       roi_pct: [1.5, 5.0]
       min_otm_pct:  {SPX: 1.0, NDX: 1.0, RUT: 1.0}
@@ -139,3 +168,9 @@ handlers:
   #   log_file: trades_live.jsonl
   #   daemon_url: http://localhost:8000
   #   policy: *trade_policy
+  #   # Per-handler pre-fire price validation (default false). For LIVE trading,
+  #   # turning this on adds a final sanity check right before order submission:
+  #   # if the verify call fails (csv_source_rejected, non_monotonic, no_edge),
+  #   # the trade is silently skipped instead of submitted on stale data.
+  #   # Strongly recommended for live mode.
+  #   validate_prices: true

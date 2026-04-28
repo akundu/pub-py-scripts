@@ -169,9 +169,25 @@ class ScannerConfig:
     types: list[str] = field(default_factory=lambda: ["put", "call", "iron-condor"])
     widths: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_WIDTHS))
     interval: int = DEFAULT_INTERVAL
+    # URL endpoints. Each may be specified in the YAML as either:
+    #   1) a scalar string  →  treated as the primary; no backup.
+    #         daemon_url: http://lin1.kundu.dev:8000
+    #   2) a mapping        →  primary + optional backup. The scanner probes
+    #                          primary first; if it's unreachable it falls
+    #                          back to backup. The winning URL is cached for
+    #                          the life of the process.
+    #         daemon_url:
+    #           primary: http://lin1.kundu.dev:8000
+    #           backup:  http://localhost:8000
+    # The percentile URL keeps a baked-in default backup (`localhost:9100`)
+    # for the legacy "lin1 → localhost" failover; the daemon and db_server
+    # URLs have no implicit backup unless one is specified.
     daemon_url: str = DEFAULT_DAEMON_URL
+    daemon_url_backup: str | None = None
     db_url: str = DEFAULT_DB_URL
+    db_url_backup: str | None = None
     percentile_url: str = DEFAULT_PERCENTILE_URL
+    percentile_url_backup: str | None = None
     tiers: bool = False
     top: int = 3
     contracts: int = 1
@@ -203,12 +219,60 @@ class ScannerConfig:
     # Multi-DTE positions (1-3) tolerate slightly older quotes — 60s is fine.
     # Both legs must independently pass this freshness gate.
     verify_max_age_sec: float = 30.0
+    # When True (default), the verify step rejects any candidate whose per-leg
+    # quote `source` is `csv` (CSV-snapshot fallback) — only `ibkr_fresh` /
+    # `provider` quotes are accepted. This is the safe production setting.
+    # Set to False when the daemon's IBKR option-quote stream is missing data
+    # for a ticker (e.g. CPG silently failing on SPX 0DTE) and you'd rather
+    # see CSV-sourced picks than nothing. CSV quotes can be tens of minutes
+    # old — only loosen this when you know what you're getting.
+    verify_require_provider_source: bool = True
     handlers: list[dict] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: dict | None) -> "ScannerConfig":
         if not data:
             return cls()
+        # Pre-process URL fields that accept the {primary, backup} mapping
+        # form. Convert them to the underlying (primary, primary_backup)
+        # scalar pair before passing to the dataclass constructor.
+        data = dict(data)
+        for url_field in ("daemon_url", "db_url", "percentile_url"):
+            if url_field not in data:
+                continue
+            val = data[url_field]
+            if isinstance(val, dict):
+                primary = val.get("primary")
+                backup = val.get("backup")
+                if not primary or not isinstance(primary, str):
+                    raise ValueError(
+                        f"{url_field}: mapping form requires non-empty 'primary' string"
+                    )
+                if backup is not None and not isinstance(backup, str):
+                    raise ValueError(
+                        f"{url_field}: 'backup' must be a string when specified"
+                    )
+                extra = set(val) - {"primary", "backup"}
+                if extra:
+                    raise ValueError(
+                        f"{url_field}: unknown keys in mapping {sorted(extra)} "
+                        f"— allowed keys are 'primary' and 'backup'"
+                    )
+                backup_field = f"{url_field}_backup"
+                if backup_field in data:
+                    raise ValueError(
+                        f"Cannot specify both {url_field}.backup (mapping form) "
+                        f"and {backup_field} (scalar form) — choose one"
+                    )
+                data[url_field] = primary.strip()
+                data[backup_field] = backup.strip() if backup else None
+            elif isinstance(val, str):
+                data[url_field] = val.strip()
+            else:
+                raise ValueError(
+                    f"{url_field}: must be a string or {{primary, backup}} "
+                    f"mapping, got {type(val).__name__}"
+                )
         known = {f.name for f in cls.__dataclass_fields__.values()}
         unknown = [k for k in data if k not in known]
         if unknown:
@@ -239,8 +303,11 @@ class ScannerConfig:
         d["widths_str"] = ",".join(f"{k}={v}" for k, v in self.widths.items())
         d["interval"] = self.interval
         d["daemon_url"] = self.daemon_url
+        d["daemon_url_backup"] = self.daemon_url_backup
         d["db_url"] = self.db_url
+        d["db_url_backup"] = self.db_url_backup
         d["percentile_url"] = self.percentile_url
+        d["percentile_url_backup"] = self.percentile_url_backup
         d["tiers"] = self.tiers
         d["top"] = self.top
         d["contracts"] = self.contracts
@@ -257,6 +324,7 @@ class ScannerConfig:
         d["min_tier_close"] = self.min_tier_close
         d["recent_actions_count"] = self.recent_actions_count
         d["verify_max_age_sec"] = self.verify_max_age_sec
+        d["verify_require_provider_source"] = self.verify_require_provider_source
         return d
 
 
@@ -314,6 +382,90 @@ async def fetch_option_chain(
 # primary on every scan cycle once we know whether lin1 is up or down for
 # this process. Tests can clear this via `_percentile_url_cache.clear()`.
 _percentile_url_cache: dict[str, str] = {}
+
+# Cache: (primary, backup) tuple → winning URL. Used by the generic
+# `_resolve_url_with_backup` resolver. Distinct from `_percentile_url_cache`
+# (legacy single-key cache for the percentile-specific resolver above).
+# Tests can clear this via `_resolved_url_cache.clear()`.
+_resolved_url_cache: dict[tuple[str, str], str] = {}
+
+
+async def _resolve_url_with_backup(
+    client: httpx.AsyncClient,
+    primary: str,
+    backup: str | None,
+    *,
+    probe_path: str = "/",
+    probe_params: dict | None = None,
+    timeout: float = 2.0,
+) -> str:
+    """Pick the working URL between a configured primary and an optional backup.
+
+    Resolution rules:
+      1. If `backup` is None or equals `primary`, return `primary` unchanged
+         — no probe is performed.
+      2. Otherwise probe `primary` first; if it answers (HTTP < 500), use it.
+      3. Otherwise probe `backup`; if it answers, use it.
+      4. If both fail, cache and return `backup` so the downstream call
+         surfaces the connection error rather than re-probing every cycle.
+
+    The result is cached for the life of the process per (primary, backup)
+    pair, so this only does network I/O on first use.
+    """
+    if not backup or backup == primary:
+        return primary
+    key = (primary, backup)
+    if key in _resolved_url_cache:
+        return _resolved_url_cache[key]
+    for candidate in (primary, backup):
+        try:
+            r = await client.get(
+                f"{candidate}{probe_path}",
+                params=probe_params or {},
+                timeout=timeout,
+            )
+            if r.status_code < 500:
+                _resolved_url_cache[key] = candidate
+                return candidate
+        except Exception:
+            continue
+    _resolved_url_cache[key] = backup
+    return backup
+
+
+async def resolve_endpoint_urls(
+    client: httpx.AsyncClient, args,
+) -> dict[str, str]:
+    """Resolve primary/backup URL pairs once at scanner startup.
+
+    Probes each `(<name>_url, <name>_url_backup)` pair on the parsed args
+    namespace and overwrites `args.<name>_url` with whichever responded.
+    No-op for URLs without a configured backup. Returns a dict of the
+    resolved URLs for logging/diagnostics.
+    """
+    resolved: dict[str, str] = {}
+    # (attr-name, primary-default-marker, probe-path, probe-params)
+    endpoints = [
+        ("daemon_url", "/dashboard/summary", None),
+        ("db_url", "/api/range_percentiles",
+         {"tickers": "SPX", "lookback": "1", "min_days": "1"}),
+        ("percentile_url", "/range_percentiles",
+         {"ticker": "SPX", "windows": "0", "format": "json"}),
+    ]
+    for attr, probe_path, probe_params in endpoints:
+        primary = getattr(args, attr, None)
+        backup = getattr(args, f"{attr}_backup", None)
+        if not primary or not backup:
+            if primary is not None:
+                resolved[attr] = primary
+            continue
+        winner = await _resolve_url_with_backup(
+            client, primary, backup,
+            probe_path=probe_path, probe_params=probe_params,
+        )
+        setattr(args, attr, winner)
+        resolved[attr] = winner
+    return resolved
 
 
 async def _resolve_percentile_url(
@@ -1354,6 +1506,19 @@ def _collect_filtered_candidates(scan_data: dict, args) -> list[dict]:
             sym_min_otm = _resolve_min_otm(args, sym)
             sym_max_otm = _resolve_max_otm(args, sym)
             for s in spreads:
+                # Verify outcome gate. The verify step now annotates rather
+                # than deletes, so failed candidates remain in the spreads
+                # list (visible in the regular DTE section) but must NOT
+                # surface in Top-N or be eligible for trade/simulate
+                # handlers. `verified is False` means the verify step ran
+                # and the candidate failed (csv_source_rejected, no_edge,
+                # etc.). `verified is None`/missing means verify hasn't
+                # run yet (candidate outside the top-M batch, batch timed
+                # out, daemon unreachable) — those are still allowed
+                # through so the picks list isn't empty just because the
+                # verify call hit a hiccup.
+                if s.get("verified") is False:
+                    continue
                 if min_credit > 0 and s.get("credit", 0) < min_credit:
                     continue
                 if min_roi > 0 and s.get("roi_pct", 0) < min_roi:
@@ -2016,6 +2181,17 @@ class ActionHandler(ABC):
     min_norm_roi_schedule: list[dict] | None = None
     min_norm_roi_per_ticker: dict | None = None
 
+    # Per-handler pre-fire price validation. When True, fire() re-verifies
+    # each spread against the provider via TradingClient.verify_spread_pricing
+    # immediately before acting on it; failed candidates are dropped. Default
+    # False — handlers act on whatever the scan-level verify left in
+    # candidates. Useful for: (a) handlers that fire on candidates outside the
+    # scan-level top-M batch (e.g. simulate_trade scanning all eligibles),
+    # (b) trade handlers where you want a final sanity check right before
+    # submission. Reuses the global `verify_max_age_sec` and
+    # `verify_require_provider_source` from args.
+    validate_prices: bool = False
+
     @abstractmethod
     def filter(self, candidates: list[dict]) -> list[dict]:
         """Pick the spreads this handler should act on from the scan pool."""
@@ -2023,6 +2199,24 @@ class ActionHandler(ABC):
     @abstractmethod
     async def fire(self, spreads: list[dict], ctx: HandlerContext) -> None:
         """Execute the handler's side effect on the filtered spreads."""
+
+    async def _maybe_validate_prices(
+        self, spreads: list[dict], ctx: HandlerContext,
+    ) -> list[dict]:
+        """Apply pre-fire price validation iff `self.validate_prices` is True.
+
+        Calls `verify_spread_pricing` for each spread in parallel; surviving
+        spreads have their credit/bid/ask/delta updated in place, failures
+        are dropped from the returned list. The underlying scan_data is NOT
+        modified (caller's spreads list is the only mutation site).
+
+        On TradingClient import failure or batch timeout (8s wall clock),
+        returns the input unchanged — better to fire on stale data than to
+        silently swallow every action. Failures are logged to stderr.
+        """
+        if not getattr(self, "validate_prices", False) or not spreads:
+            return spreads
+        return await _validate_spreads_via_provider(spreads, ctx, handler_name=self.name)
 
     def dedup_key(self, spread: dict) -> str:
         """Per-spread key used by handlers that deduplicate across scans."""
@@ -2133,6 +2327,7 @@ class NotifyHandler(ActionHandler):
         *,
         min_norm_roi_schedule: list[dict] | None = None,
         min_norm_roi_per_ticker: dict | None = None,
+        validate_prices: bool = False,
     ):
         self.min_norm_roi = float(min_norm_roi)
         self.min_norm_roi_schedule = min_norm_roi_schedule
@@ -2141,6 +2336,7 @@ class NotifyHandler(ActionHandler):
         self.url = url or os.environ.get("NOTIFY_URL", "http://localhost:9102")
         self.gate_market_hours = bool(gate_market_hours)
         self.top_n = int(top_n)
+        self.validate_prices = bool(validate_prices)
         self._sent_keys: set[str] = set()
         self.count = 0
 
@@ -2171,6 +2367,9 @@ class NotifyHandler(ActionHandler):
         return new
 
     async def fire(self, spreads: list[dict], ctx: HandlerContext) -> None:
+        spreads = await self._maybe_validate_prices(spreads, ctx)
+        if not spreads:
+            return
         await _notify_qualifying_spreads(
             ctx.client, spreads, self.url, self.email, self.top_n,
         )
@@ -2331,6 +2530,7 @@ class TradeHandlerBase(ActionHandler):
         *,
         min_norm_roi_schedule: list[dict] | None = None,
         min_norm_roi_per_ticker: dict | None = None,
+        validate_prices: bool = False,
     ):
         self.min_norm_roi = float(min_norm_roi)
         self.min_norm_roi_schedule = min_norm_roi_schedule
@@ -2338,6 +2538,7 @@ class TradeHandlerBase(ActionHandler):
         self.log_file = log_file
         self.policy = policy
         self.daemon_url = daemon_url
+        self.validate_prices = bool(validate_prices)
         self._ticker_locks: dict[str, asyncio.Lock] = {}
         self._last_trade_time_by_ticker: dict[str, datetime] = {}
         self._last_trade_time_by_ticker_side: dict[tuple[str, str], datetime] = {}
@@ -2538,6 +2739,17 @@ class TradeHandlerBase(ActionHandler):
     # --- fire: per-ticker concurrent serial loops -------------------------
 
     async def fire(self, spreads: list[dict], ctx: HandlerContext) -> None:
+        # Optional pre-fire price validation. Failed candidates are dropped
+        # entirely — a trade handler should not submit an order on stale
+        # or non-monotonic data, and a simulate handler's log should be
+        # faithful to what the live handler would have done. If the daemon
+        # is unreachable the helper returns the input unchanged so the
+        # handler still acts (defensive: we'd rather act on slightly older
+        # data than miss every trade because of a transient verify hiccup).
+        spreads = await self._maybe_validate_prices(spreads, ctx)
+        if not spreads:
+            return
+
         by_ticker: dict[str, list[dict]] = {}
         for s in spreads:
             by_ticker.setdefault(s["symbol"], []).append(s)
@@ -2928,6 +3140,7 @@ def build_handler(cfg: dict) -> ActionHandler:
             url=cfg.get("url"),
             gate_market_hours=cfg.get("gate_market_hours", True),
             top_n=cfg.get("top_n", 5),
+            validate_prices=bool(cfg.get("validate_prices", False)),
             **nroi_kwargs,
         )
     if htype in ("simulate_trade", "trade"):
@@ -2942,6 +3155,7 @@ def build_handler(cfg: dict) -> ActionHandler:
             log_file=cfg["log_file"],
             policy=policy,
             daemon_url=daemon_url,
+            validate_prices=bool(cfg.get("validate_prices", False)),
             **nroi_kwargs,
         )
     raise ValueError(f"Unknown handler type: {htype!r}")
@@ -3103,11 +3317,19 @@ async def _verify_top_candidates_with_provider(
     #     `verify_max_age_sec` in the YAML or `--verify-max-age-sec` CLI.
     #     Default 30s. Recommendation: 30 for 0DTE (fast price action),
     #     60 for 1-3 DTE (positions tolerate slightly older quotes).
-    #   - `require_provider_source=True` — CSV-sourced fallback quotes are
-    #     REJECTED at verify time. CSV is fine for display but not for a
-    #     pre-trade confirmation; we only green-light candidates whose
-    #     per-leg `source` is `ibkr_fresh` or `provider`.
+    #   - `require_provider_source` — when True (default), CSV-sourced
+    #     fallback quotes are REJECTED at verify time. CSV is fine for
+    #     display but not for a pre-trade confirmation; we only green-light
+    #     candidates whose per-leg `source` is `ibkr_fresh` or `provider`.
+    #     YAML key: `verify_require_provider_source` (CLI:
+    #     `--no-verify-require-provider-source` to allow CSV).
     verify_max_age = float(getattr(args, "verify_max_age_sec", None) or 30.0)
+    require_provider = bool(getattr(args, "verify_require_provider_source", True))
+    # Wall-clock cap for the WHOLE batch. The daemon can hang on a forced
+    # provider fetch (we've seen CPG block on SPX 0DTE force_refresh). When
+    # that happens, the scan loop must still render the dashboard and move
+    # on — never block the regular DTE sections behind a stuck verify.
+    verify_batch_timeout = float(getattr(args, "verify_batch_timeout_sec", None) or 8.0)
     try:
         async with TradingClient(daemon_url) as client:
             async def _one(c):
@@ -3116,16 +3338,28 @@ async def _verify_top_candidates_with_provider(
                     option_type=c["option_type"],
                     short_strike=c["short_strike"], long_strike=c["long_strike"],
                     max_age=verify_max_age, force_refresh=False,
-                    require_provider_source=True,
+                    require_provider_source=require_provider,
                 )
-            results = await asyncio.gather(
-                *[_one(c) for c in top_unique], return_exceptions=True,
-            )
+            try:
+                results = await asyncio.wait_for(
+                    asyncio.gather(
+                        *[_one(c) for c in top_unique], return_exceptions=True,
+                    ),
+                    timeout=verify_batch_timeout,
+                )
+            except asyncio.TimeoutError:
+                print(
+                    f"[verify] batch timeout after {verify_batch_timeout}s — "
+                    f"leaving {len(top_unique)} candidates unverified",
+                    file=sys.stderr,
+                )
+                summary["timed_out"] = len(top_unique)
+                return summary
     except Exception as e:
         print(f"[verify] provider re-verify failed: {e}", file=sys.stderr)
         return summary
 
-    drop_keys: set[tuple] = set()
+    fail_keys: dict[tuple, str] = {}      # key -> reason
     updates: dict[tuple, dict] = {}
     for pair in results:
         if isinstance(pair, Exception):
@@ -3135,19 +3369,19 @@ async def _verify_top_candidates_with_provider(
         if res.get("ok"):
             updates[key] = res
         else:
-            drop_keys.add(key)
             reason = res.get("reason") or "unknown"
+            fail_keys[key] = reason
             summary["reasons"][reason] = summary["reasons"].get(reason, 0) + 1
 
-    # Apply changes to the spreads list on `data`.
+    # Annotate (don't delete). Verify is *informational* for the regular
+    # DTE sections — those keep showing every screener-output spread so the
+    # user can see what's being scanned. Top-N filtering uses the
+    # `verified == False` flag to suppress failed candidates from the
+    # picks list, but the underlying data stays intact.
     for dte, dte_data in (data.get("dte_sections") or {}).items():
         for sym, spreads in (dte_data.get("spreads") or {}).items():
-            kept: list[dict] = []
             for s in spreads:
                 key = (sym, dte, s["option_type"], s["short_strike"], s["long_strike"])
-                if key in drop_keys:
-                    summary["dropped"] += 1
-                    continue
                 if key in updates:
                     u = updates[key]
                     s["credit"] = u["credit"]
@@ -3165,9 +3399,114 @@ async def _verify_top_candidates_with_provider(
                     s["verify_age_seconds"] = u.get("age_seconds")
                     s["verify_source"] = u.get("source")
                     summary["verified"] += 1
-                kept.append(s)
-            dte_data["spreads"][sym] = kept
+                elif key in fail_keys:
+                    s["verified"] = False
+                    s["verify_reason"] = fail_keys[key]
+                    summary["dropped"] += 1
     return summary
+
+
+async def _validate_spreads_via_provider(
+    spreads: list[dict], ctx: HandlerContext, *, handler_name: str = "handler",
+) -> list[dict]:
+    """Provider-side price validation for a single handler's spread batch.
+
+    Same semantics as `_verify_top_candidates_with_provider` but per-handler:
+    each spread gets a fresh `verify_spread_pricing` call; failures are
+    DROPPED (not just marked) because the handler is about to take an
+    action — notify, simulate, or trade — that should not run on stale
+    or non-monotonic data.
+
+    Reads freshness/source policy from `ctx.args`:
+      * `verify_max_age_sec` (default 30s)
+      * `verify_require_provider_source` (default True)
+      * `verify_batch_timeout_sec` (default 8s wall clock)
+      * `daemon_url` for the TradingClient endpoint
+
+    Surviving spreads have their `credit / short_bid / long_ask / short_delta /
+    roi_pct` updated in place from the fresh quote, plus `verified=True`,
+    `verify_age_seconds`, `verify_source`. On TradingClient import failure or
+    overall timeout, returns input unchanged so the handler can still act
+    on whatever data it had — better than silently dropping every action.
+    """
+    if not spreads:
+        return spreads
+    try:
+        TradingClient = _get_trading_client_cls()
+    except Exception as e:
+        print(
+            f"[validate:{handler_name}] TradingClient unavailable ({e}); "
+            f"skipping pre-fire validation",
+            file=sys.stderr,
+        )
+        return spreads
+
+    args = ctx.args
+    daemon_url = getattr(args, "daemon_url", None) or DEFAULT_DAEMON_URL
+    max_age = float(getattr(args, "verify_max_age_sec", None) or 30.0)
+    require_provider = bool(getattr(args, "verify_require_provider_source", True))
+    batch_timeout = float(getattr(args, "verify_batch_timeout_sec", None) or 8.0)
+
+    try:
+        async with TradingClient(daemon_url) as client:
+            async def _one(s):
+                return s, await client.verify_spread_pricing(
+                    symbol=s["symbol"], expiration=s["expiration"],
+                    option_type=s["option_type"],
+                    short_strike=s["short_strike"], long_strike=s["long_strike"],
+                    max_age=max_age, force_refresh=False,
+                    require_provider_source=require_provider,
+                )
+            try:
+                results = await asyncio.wait_for(
+                    asyncio.gather(*[_one(s) for s in spreads], return_exceptions=True),
+                    timeout=batch_timeout,
+                )
+            except asyncio.TimeoutError:
+                print(
+                    f"[validate:{handler_name}] batch timeout after {batch_timeout}s — "
+                    f"firing on {len(spreads)} unvalidated candidates",
+                    file=sys.stderr,
+                )
+                return spreads
+    except Exception as e:
+        print(
+            f"[validate:{handler_name}] provider validation failed: {e}",
+            file=sys.stderr,
+        )
+        return spreads
+
+    kept: list[dict] = []
+    reasons: dict[str, int] = {}
+    for pair in results:
+        if isinstance(pair, Exception):
+            continue
+        s, res = pair
+        if not res.get("ok"):
+            reason = res.get("reason") or "unknown"
+            reasons[reason] = reasons.get(reason, 0) + 1
+            continue
+        s["credit"] = res["credit"]
+        s["short_bid"] = res["short_bid"]
+        s["long_ask"] = res["long_ask"]
+        s["short_delta"] = res.get("short_delta")
+        w = s.get("width", 0)
+        max_loss_pc = w * 100 - res["credit"] * 100
+        if max_loss_pc > 0:
+            s["roi_pct"] = round(res["credit"] * 100 / max_loss_pc * 100, 1)
+        s["verified"] = True
+        s["verify_age_seconds"] = res.get("age_seconds")
+        s["verify_source"] = res.get("source")
+        kept.append(s)
+
+    dropped = len(spreads) - len(kept)
+    if dropped:
+        print(
+            f"[validate:{handler_name}] dropped {dropped}/{len(spreads)} spreads "
+            f"with stale/bad quotes: {reasons}",
+            file=sys.stderr,
+        )
+    return kept
 
 
 def _count_trade_submits(handlers: list) -> int:
@@ -3266,6 +3605,15 @@ async def scan_loop(args):
         args.activity_log = deque(maxlen=50)
 
     async with httpx.AsyncClient(timeout=15) as client:
+        # Probe primary/backup URL pairs once at startup. For URLs without a
+        # configured backup this is a no-op. The winning URL is written back
+        # to args (so e.g. fetch_quote uses it on every subsequent call) and
+        # cached in `_resolved_url_cache` for the life of the process.
+        try:
+            await resolve_endpoint_urls(client, args)
+        except Exception as e:
+            print(f"[startup] endpoint URL resolution failed: {e}", file=sys.stderr)
+
         prev_close_cache = PrevCloseCache(args.tickers, args.db_url)
         # Initial fetch at startup (tier_data not yet available — db_server only)
         await prev_close_cache.refresh(client)
@@ -3463,15 +3811,33 @@ Examples:
     )
     parser.add_argument(
         "--daemon-url", default=DEFAULT_DAEMON_URL,
-        help=f"UTP daemon URL (default: {DEFAULT_DAEMON_URL})",
+        help=f"UTP daemon URL — primary (default: {DEFAULT_DAEMON_URL}). "
+             f"Pair with --daemon-url-backup for failover.",
+    )
+    parser.add_argument(
+        "--daemon-url-backup", default=None,
+        help="UTP daemon URL — backup. Used when the primary is unreachable. "
+             "YAML equivalent: 'daemon_url: {primary: ..., backup: ...}'.",
     )
     parser.add_argument(
         "--db-url", default=DEFAULT_DB_URL,
-        help=f"db_server URL (default: {DEFAULT_DB_URL})",
+        help=f"db_server URL — primary (default: {DEFAULT_DB_URL}). "
+             f"Pair with --db-url-backup for failover.",
+    )
+    parser.add_argument(
+        "--db-url-backup", default=None,
+        help="db_server URL — backup. Used when the primary is unreachable. "
+             "YAML equivalent: 'db_url: {primary: ..., backup: ...}'.",
     )
     parser.add_argument(
         "--percentile-url", default=DEFAULT_PERCENTILE_URL,
-        help=f"Percentile server URL (default: {DEFAULT_PERCENTILE_URL})",
+        help=f"Percentile server URL — primary (default: {DEFAULT_PERCENTILE_URL}). "
+             f"Pair with --percentile-url-backup for failover.",
+    )
+    parser.add_argument(
+        "--percentile-url-backup", default=None,
+        help="Percentile server URL — backup. Used when the primary is unreachable. "
+             "YAML equivalent: 'percentile_url: {primary: ..., backup: ...}'.",
     )
     parser.add_argument(
         "--top", type=int, default=3,
@@ -3488,6 +3854,19 @@ Examples:
              "for each leg's quote must be ≤ this value before a candidate is allowed "
              "into Top-N or fired by a trade/simulate handler. Recommendation: 30 for "
              "0DTE, 60 for 1-3 DTE. YAML key: verify_max_age_sec. (default: 30.0)",
+    )
+    parser.add_argument(
+        "--no-verify-require-provider-source",
+        dest="verify_require_provider_source",
+        action="store_false",
+        default=True,
+        help="Allow CSV-sourced quotes to pass the verify gate. By default, only "
+             "quotes whose per-leg `source` is `ibkr_fresh` or `provider` are "
+             "accepted; CSV-snapshot fallback quotes (which can be tens of minutes "
+             "old) are rejected. Use this when the daemon's IBKR option-quote stream "
+             "is missing data for a ticker (e.g. CPG silently failing on SPX 0DTE) "
+             "and you'd rather see CSV-sourced picks than nothing. "
+             "YAML key: verify_require_provider_source.",
     )
     parser.add_argument(
         "--min-credit", type=float, default=0,
@@ -3553,6 +3932,15 @@ Examples:
         parser.set_defaults(**defaults)
 
     args = parser.parse_args(argv)
+
+    # Preserve legacy "lin1 → localhost" failover for percentile URL when the
+    # operator hasn't overridden the primary AND hasn't supplied a backup.
+    # Setting a custom primary opts out of the implicit baked-in fallback —
+    # operators with a custom percentile host don't want surprise probes
+    # against localhost:9100.
+    if (args.percentile_url == DEFAULT_PERCENTILE_URL
+            and getattr(args, "percentile_url_backup", None) is None):
+        args.percentile_url_backup = _PERCENTILE_FALLBACK_URL
 
     # Parse comma-separated values
     args.tickers = [t.strip() for t in args.tickers.split(",") if t.strip()]

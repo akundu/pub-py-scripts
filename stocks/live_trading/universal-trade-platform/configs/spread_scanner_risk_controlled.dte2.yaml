@@ -19,6 +19,21 @@
 # To go live: flip the `trade` handler from the commented block below into the
 # `handlers:` list. Leaving it commented keeps you in simulate-only mode.
 
+# ── Service endpoints (primary localhost, fallback to lin1) ──────────────────
+# Workstation deployment: prefer the locally-running daemon / db_server /
+# percentile server, then fall back to lin1.kundu.dev when the local
+# instance isn't up. Probed once at scanner startup; the winning URL is
+# cached for the lifetime of the process.
+daemon_url:
+  primary: http://localhost:8000
+  backup:  http://lin1.kundu.dev:8000
+db_url:
+  primary: http://localhost:9102
+  backup:  http://lin1.kundu.dev:9102
+percentile_url:
+  primary: http://localhost:9100
+  backup:  http://lin1.kundu.dev:9100
+
 # ── Scanner screening ─────────────────────────────────────────────────────────
 tickers: [SPX, NDX, RUT]
 dte: [2]
@@ -44,7 +59,8 @@ top: 5
 # rejected at this gate (require_provider_source=True is enforced internally).
 # 2DTE: gap risk over multiple sessions dominates; intraday quote freshness
 # is least critical here. 60s threshold matches DTE=1.
-verify_max_age_sec: 60
+verify_max_age_sec: 45
+verify_require_provider_source: false
 
 # ── Risk-tier filter (applies to top-picks + all handlers) ───────────────────
 # Requires `tiers: true` so tier data is fetched from db_server. Short-strike
@@ -67,7 +83,7 @@ verify_max_age_sec: 60
 # Leaving them null = no tier filter.
 tiers: true
 #min_tier: moderate         # or a percentile e.g. p95, p75, p40
-min_tier_close: a          # close-to-close variant
+min_tier_close: p90          # close-to-close variant
 
 # ── Absolute OTM floor (scanner-level) ───────────────────────────────────────
 # 2DTE has more time for mean reversion than 1DTE, but that also means two
@@ -91,11 +107,22 @@ handlers:
   #  min_norm_roi: 3.5
   #  email: anirbankundu@gmail.com
   #  gate_market_hours: true
+  #  # Per-handler pre-fire price validation (default false). When true, the
+  #  # handler re-fetches a fresh quote from the daemon for every candidate
+  #  # immediately before sending the email; failed verifications are dropped.
+  #  # Reuses the global `verify_max_age_sec` and `verify_require_provider_source`.
+  #  validate_prices: false
 
   # Shadow-mode: margin-check every would-have-traded spread; never submits.
   # Same policy as the live `trade` handler so the two logs are directly
   # comparable (shadow vs actual).
   - type: simulate_trade
+    # Per-handler pre-fire price validation (default false). When true, every
+    # candidate gets a fresh `verify_spread_pricing` round-trip immediately
+    # before the simulated submit; failed verifications are dropped before
+    # any risk reservation. Useful when you want the simulate log to be
+    # faithful to what a live handler would have seen post-validation.
+    #validate_prices: true
     # Flat nROI floor tuned from 2026-04-22 session analysis. DTE=2 had
     # the healthiest inherent ratio (~9.3% credit/risk — a 91.5%
     # break-even WR, quite forgiving) but today's session traded
@@ -108,7 +135,7 @@ handlers:
     # scalar for `min_norm_roi_schedule: [...]` to get time-of-day
     # behavior, or populate `min_norm_roi_per_ticker` to tune per ticker
     # (SPX/RUT would benefit — their p75 is only 1.67).
-    min_norm_roi: 2.25
+    min_norm_roi: 2.5
     # Per-ticker overrides — feature plumbed in but OFF.
     # When ready, e.g.:
     #   min_norm_roi_per_ticker:
@@ -121,7 +148,7 @@ handlers:
     daemon_url: http://localhost:8000
     policy: &trade_policy
       roi_pct: [3, 10.0]
-      min_otm_pct:  {SPX: 2.0, NDX: 2.0, RUT: 3.0}
+      min_otm_pct:  {SPX: 2.5, NDX: 2.75, RUT: 4.0}
       min_credit:   {SPX: 0.5, NDX: 1.0, RUT: 0.35}
       max_total_risk: 300000
       max_per_ticker_risk: {SPX: 140000, NDX: 180000, RUT: 120000}
@@ -151,3 +178,9 @@ handlers:
   #   log_file: trades_live.jsonl
   #   daemon_url: http://localhost:8000
   #   policy: *trade_policy
+  #   # Per-handler pre-fire price validation (default false). For LIVE trading,
+  #   # turning this on adds a final sanity check right before order submission:
+  #   # if the verify call fails (csv_source_rejected, non_monotonic, no_edge),
+  #   # the trade is silently skipped instead of submitted on stale data.
+  #   # Strongly recommended for live mode.
+  #   validate_prices: true
