@@ -1,4 +1,4 @@
-# Spread Scanner — Risk-Controlled Reference Config
+#5 Spread Scanner — Risk-Controlled Reference Config
 #
 # Encodes the risk-controlled policy this repo's analysis converged on:
 #   - market hours PT (06:31-10:00 window for trading, scanner runs anytime)
@@ -94,11 +94,11 @@ min_tier: moderate         # or a percentile e.g. p95, p75, p40
 # strike, you're likely max-loss. So we pair the dynamic tier filter above
 # with a hard minimum distance to spot. Effective floor per sym:
 #   max(min_otm, min_otm_per_ticker[sym])
-min_otm: .5                   # baseline: no spread closer than 1% OTM
+#min_otm: 0.9                   # baseline: no spread closer than 1% OTM
 #min_otm_per_ticker:            # per-ticker overrides — higher wins
-#  SPX: .5
-#  NDX: .5                     # NDX's percent moves are roughly 2x SPX's
-#  RUT: .5
+#  SPX: 1.5
+#  NDX: 2                     # NDX's percent moves are roughly 2x SPX's
+#  RUT: 2
 
 # ── Action handlers ──────────────────────────────────────────────────────────
 handlers:

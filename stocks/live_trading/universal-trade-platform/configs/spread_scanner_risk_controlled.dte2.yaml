@@ -77,7 +77,7 @@ verify_require_provider_source: false
 #   min_tier_close — close-to-close historical model (anchored to prev close)
 # Leaving them null = no tier filter.
 tiers: true
-#min_tier: m         # or a percentile e.g. p95, p75, p40
+min_tier: p90         # or a percentile e.g. p95, p75, p40
 min_tier_close: p90          # close-to-close variant
 
 # ── Absolute OTM floor (scanner-level) ───────────────────────────────────────
@@ -85,11 +85,11 @@ min_tier_close: p90          # close-to-close variant
 # still expensive. Intraday tiers on calm days can sit around 1% OTM; these
 # floors prevent top-picks and trade handlers from acting on anything closer.
 # Effective floor per sym = max(min_otm, min_otm_per_ticker[sym]).
-#min_otm: 2                   # baseline: no spread closer than 1.5% OTM
-min_otm_per_ticker:            # per-ticker overrides — higher wins
-  NDX: 2.5                     # NDX's % moves ~2x SPX's → need more buffer
-  RUT: 2.5
-  SPX: 2.1
+min_otm: 2                   # baseline: no spread closer than 1.5% OTM
+#min_otm_per_ticker:            # per-ticker overrides — higher wins
+#  NDX: 2.5                     # NDX's % moves ~2x SPX's → need more buffer
+#  RUT: 2.5
+#  SPX: 2.1
 
 # ── Action handlers ──────────────────────────────────────────────────────────
 handlers:
