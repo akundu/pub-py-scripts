@@ -136,6 +136,14 @@ class IBKRRestProvider(BrokerProvider):
         self._keepalive_task: asyncio.Task | None = None
         self._conid_cache: dict[str, int] = {}
         self._option_conid_cache: dict[str, int] = {}
+        # Short-TTL negative cache for option conID resolution. Without this,
+        # streaming cycles re-try every dead strike every cycle (3 rounds × 6
+        # attempts each = 18 round-trips per dead strike), which slows NDX
+        # cycles to ~minutes when the chain returns 25-pt strikes that don't
+        # exist as NDXP dailies (NDXP grid is 50-pt). The TTL lets transient
+        # CPG hiccups self-recover after the window expires.
+        self._option_conid_negative_cache: dict[str, float] = {}  # key → time.monotonic() of failure
+        self._OPTION_CONID_NEGATIVE_TTL = 300.0  # 5 minutes
         # Short-lived caches for portfolio/balance data (avoid repeated CPG calls)
         self._portfolio_cache: tuple[float, list[dict]] | None = None  # (monotonic_ts, items)
         self._positions_raw_cache: tuple[float, list] | None = None  # (monotonic_ts, raw CPG list)
@@ -274,6 +282,8 @@ class IBKRRestProvider(BrokerProvider):
         Failed resolutions are NOT cached — transient CPG issues (session expiry,
         rate limits) should not poison the cache and block subsequent attempts.
         """
+        import time as _time
+
         key = f"{symbol}_{expiration}_{strike}_{right}"
         cached = self._option_conid_cache.get(key)
         if cached is not None and cached > 0:
@@ -286,6 +296,17 @@ class IBKRRestProvider(BrokerProvider):
         if shared and shared > 0:
             self._option_conid_cache[key] = shared
             return shared
+
+        # Negative cache — skip strikes we recently failed to resolve so the
+        # streaming service doesn't waste a full 18-attempt secdef/info burst
+        # on every dead strike every cycle. Auto-expires after the TTL so
+        # transient CPG issues self-recover.
+        neg_ts = self._option_conid_negative_cache.get(key)
+        if neg_ts is not None and (_time.monotonic() - neg_ts) < self._OPTION_CONID_NEGATIVE_TTL:
+            raise RuntimeError(
+                f"Option conId for {symbol} {expiration} {strike}{right} "
+                f"recently failed; in negative-cache cooldown"
+            )
 
         underlying_conid = await self._resolve_conid(symbol)
         exp_clean = expiration.replace("-", "")
@@ -309,66 +330,106 @@ class IBKRRestProvider(BrokerProvider):
         else:
             exchange_attempts.append("SMART")
 
+        # tradingClass attempts. For index symbols whose daily/weekly options
+        # live under a "W" class (SPXW, RUTW, NDXP), CPG's secdef/info without
+        # tradingClass can return ONLY the parent class — i.e. just the next
+        # monthly. Verified live on 2026-04-30: NDX 5/1 query without
+        # tradingClass returned 5/14 (the next monthly NDX) and every 5/1
+        # strike registered as a conId miss. Iterating with tradingClass=NDXP
+        # picks up the daily contract.
+        sym_upper = symbol.upper()
+        _W_CLASS = {"SPX": "SPXW", "RUT": "RUTW", "NDX": "NDXP"}
+        tc_attempts: list[str | None] = [None]
+        if sym_upper in _W_CLASS:
+            tc_attempts.append(_W_CLASS[sym_upper])
+
         last_error = None
         attempt_summary: list[str] = []
         primed = False
         # Round 1: baseline; Round 2: post-priming retry; Round 3: post-backoff
         # retry to ride out transient CPG 500 windows (rate limits, session
-        # re-auth in flight, IBKR backend hiccups). Without this, all six R1+R2
-        # attempts can land inside a sub-second 500 window and the trade fails.
+        # re-auth in flight, IBKR backend hiccups). Within each round we
+        # iterate tradingClasses (outer) × exchanges (inner). When CPG gives
+        # us an authoritative "wrong month" or "empty list" for a tc, we
+        # skip the remaining exchanges for that tc — those would just
+        # return the same response. After ALL tcs have given us
+        # structured non-matches, we abandon further rounds: CPG is
+        # telling us the contract genuinely isn't listed.
+        got_definitive_miss = False  # all tradingClasses returned structured non-matches
         for round_num in (1, 2, 3):
-            for exch in exchange_attempts:
-                try:
-                    params = {
-                        "conid": underlying_conid, "sectype": "OPT", "month": month_mmmyy,
-                        "strike": strike_str, "right": right,
-                    }
-                    if exch:
-                        params["exchange"] = exch
-                    data = await self._get("/iserver/secdef/info", params=params)
-                except Exception as e:
-                    last_error = e
-                    attempt_summary.append(f"r{round_num} exch={exch}: {type(e).__name__}")
+            if got_definitive_miss:
+                break
+            tc_definitive_miss: dict[str, bool] = {}
+            for tc in tc_attempts:
+                tc_label = tc or "-"
+                if tc_definitive_miss.get(tc_label):
                     continue
-
-                if isinstance(data, list):
-                    available_exps = set()
-                    for item in data:
-                        item_exp = str(item.get("maturityDate", "")).replace("-", "")
-                        available_exps.add(item_exp)
-                        if item_exp == exp_clean and item.get("conid"):
-                            con_id = int(item["conid"])
-                            self._option_conid_cache[key] = con_id
-                            try:
-                                self._cache.option_conids.put(
-                                    symbol, exp_clean, strike, right, con_id
-                                )
-                            except Exception:
-                                pass
-                            return con_id
-                    # Always record the attempt outcome — empty list is a valid
-                    # CPG response that means "strike doesn't exist for that month".
-                    if available_exps:
+                for exch in exchange_attempts:
+                    try:
+                        params = {
+                            "conid": underlying_conid, "sectype": "OPT", "month": month_mmmyy,
+                            "strike": strike_str, "right": right,
+                        }
+                        if exch:
+                            params["exchange"] = exch
+                        if tc:
+                            params["tradingClass"] = tc
+                        data = await self._get("/iserver/secdef/info", params=params)
+                    except Exception as e:
+                        last_error = e
                         attempt_summary.append(
-                            f"r{round_num} exch={exch}: {len(data)} results, exps={sorted(available_exps)[:10]}"
+                            f"r{round_num} tc={tc_label} exch={exch}: {type(e).__name__}"
                         )
-                        logger.warning(
-                            "conId miss: %s %s %s%s exch=%s — CPG returned %d results, exps: %s (wanted %s)",
-                            symbol, expiration, strike_str, right, exch, len(data),
-                            sorted(available_exps)[:10], exp_clean,
-                        )
+                        continue
+
+                    if isinstance(data, list):
+                        available_exps = set()
+                        for item in data:
+                            item_exp = str(item.get("maturityDate", "")).replace("-", "")
+                            available_exps.add(item_exp)
+                            if item_exp == exp_clean and item.get("conid"):
+                                con_id = int(item["conid"])
+                                self._option_conid_cache[key] = con_id
+                                try:
+                                    self._cache.option_conids.put(
+                                        symbol, exp_clean, strike, right, con_id
+                                    )
+                                except Exception:
+                                    pass
+                                return con_id
+                        # Authoritative "not here for this tc" — log once and
+                        # skip remaining exchanges for this tc.
+                        if available_exps:
+                            attempt_summary.append(
+                                f"r{round_num} tc={tc_label} exch={exch}: "
+                                f"{len(data)} results, exps={sorted(available_exps)[:10]}"
+                            )
+                            logger.warning(
+                                "conId miss: %s %s %s%s tc=%s exch=%s — CPG returned %d results, exps: %s (wanted %s)",
+                                symbol, expiration, strike_str, right, tc_label, exch, len(data),
+                                sorted(available_exps)[:10], exp_clean,
+                            )
+                        else:
+                            attempt_summary.append(
+                                f"r{round_num} tc={tc_label} exch={exch}: "
+                                f"empty (no contracts at strike {strike_str})"
+                            )
+                            logger.warning(
+                                "conId miss: %s %s %s%s tc=%s exch=%s — CPG returned empty list (strike likely doesn't exist for %s)",
+                                symbol, expiration, strike_str, right, tc_label, exch, month_mmmyy,
+                            )
+                        tc_definitive_miss[tc_label] = True
+                        break  # don't try more exchanges for this tc
                     else:
                         attempt_summary.append(
-                            f"r{round_num} exch={exch}: empty (no contracts at strike {strike_str})"
+                            f"r{round_num} tc={tc_label} exch={exch}: "
+                            f"non-list response {type(data).__name__}"
                         )
-                        logger.warning(
-                            "conId miss: %s %s %s%s exch=%s — CPG returned empty list (strike likely doesn't exist for %s)",
-                            symbol, expiration, strike_str, right, exch, month_mmmyy,
-                        )
-                else:
-                    attempt_summary.append(
-                        f"r{round_num} exch={exch}: non-list response {type(data).__name__}"
-                    )
+
+            # If every tradingClass got a structured "not here" reply, no
+            # further rounds will change that.
+            if all(tc_definitive_miss.get(tc or "-") for tc in tc_attempts):
+                got_definitive_miss = True
 
             # Inter-round recovery: priming after R1, sleep-backoff after R2.
             only_http_errors = attempt_summary and all(
@@ -413,8 +474,16 @@ class IBKRRestProvider(BrokerProvider):
                     symbol, expiration, strike_str, right,
                 )
 
-        # Do NOT cache negative results — transient CPG failures should not
-        # block future resolution attempts
+        # Cache the failure with a short TTL. Pure HTTP errors are excluded —
+        # those are likely transient (rate limit, session blip) and the caller
+        # should re-try on the next cycle. Structured "wrong month" / "empty
+        # results" responses ARE cached because they reflect contracts that
+        # genuinely don't exist for the requested (symbol, exp, strike, right).
+        had_structured_response = any(
+            ("results" in s or "empty" in s) for s in attempt_summary
+        )
+        if had_structured_response:
+            self._option_conid_negative_cache[key] = _time.monotonic()
         summary = "; ".join(attempt_summary) if attempt_summary else "no attempts recorded"
         detail = f" (last error: {last_error})" if last_error else ""
         raise RuntimeError(
@@ -1173,16 +1242,28 @@ class IBKRRestProvider(BrokerProvider):
         right = "C" if option_type.upper() == "CALL" else "P"
         exp_clean = expiration.replace("-", "")
 
-        # Resolve conIds for all strikes
-        conid_map: dict[int, float] = {}  # conId → strike
-        resolve_errors = 0
-        for strike in strikes:
+        # Resolve conIds for all strikes — IN PARALLEL.
+        # Sequential awaits made cold-start NDX cycles take 5+ minutes
+        # because every dead 25-pt strike takes 18 round-trips × ~200ms.
+        # Parallelizing lets the rate-limiter naturally pace the calls
+        # while letting fast (cached or successful) resolutions happen
+        # concurrently. The CPG rate limiter is the real bottleneck —
+        # this just removes the artificial Python-level serialization.
+        async def _resolve(strike: float) -> tuple[float, int | None]:
             try:
                 cid = await self._resolve_option_conid(symbol, exp_clean, strike, right)
-                conid_map[cid] = strike
+                return strike, cid
             except Exception:
+                return strike, None
+
+        results = await asyncio.gather(*[_resolve(s) for s in strikes])
+        conid_map: dict[int, float] = {}
+        resolve_errors = 0
+        for strike, cid in results:
+            if cid is not None and cid > 0:
+                conid_map[cid] = strike
+            else:
                 resolve_errors += 1
-                continue
 
         if resolve_errors > 0:
             level = logging.WARNING if len(conid_map) == 0 else logging.DEBUG

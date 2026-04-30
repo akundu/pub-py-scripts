@@ -3654,8 +3654,9 @@ class TestIBKRRestProvider:
                 return [{"31": "7150"}]
             if path == "/iserver/secdef/info":
                 attempts["count"] += 1
-                # Round 1: every exchange returns 500 (3 attempts: None, SMART, CBOE)
-                if attempts["count"] <= 3:
+                # Round 1: every (tradingClass × exchange) combo returns 500.
+                # For SPX, R1 = 2 tcs × 3 exchs = 6 attempts.
+                if attempts["count"] <= 6:
                     raise RuntimeError("HTTP 500: ClientResponseError")
                 # Round 2: succeed on first try
                 return [{"conid": 999004, "maturityDate": "20260427"}]
@@ -3702,10 +3703,140 @@ class TestIBKRRestProvider:
             await provider._resolve_option_conid("SPX", "20260427", 7070.0, "P")
         msg = str(excinfo.value)
         # All three rounds (R1 baseline, R2 post-prime, R3 post-reauth) should
-        # be in the diagnostic.
-        assert "r1 exch=" in msg
-        assert "r2 exch=" in msg
-        assert "r3 exch=" in msg
+        # be in the diagnostic. Diagnostic now includes tc= label too.
+        assert "r1 tc=" in msg
+        assert "r2 tc=" in msg
+        assert "r3 tc=" in msg
+        # Both tradingClass attempts (None and SPXW) must show up
+        assert "tc=-" in msg or "tc=None" in msg
+        assert "tc=SPXW" in msg
+
+    @pytest.mark.asyncio
+    async def test_resolve_option_conid_negative_cache_short_circuits(self):
+        """When a strike fails with a 'wrong month' / 'empty list' response
+        (a structured CPG signal that the contract genuinely doesn't exist),
+        we cache the failure for ~5 min. The next call within that window
+        skips all 18 secdef/info attempts and raises immediately. Without
+        this, NDX streaming cycles re-tried every dead 25-pt strike every
+        cycle and never finished."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+        provider._conid_cache["NDX"] = 416843
+
+        first_call_attempts = {"count": 0}
+
+        async def fake_get(path, params=None, **_):
+            if path != "/iserver/secdef/info":
+                return []
+            first_call_attempts["count"] += 1
+            # Always return a structured wrong-month response
+            return [{"conid": 999, "maturityDate": "20260514", "tradingClass": "NDX"}]
+
+        provider._get = fake_get  # type: ignore[assignment]
+
+        # First call short-circuits per tradingClass: once CPG returns a
+        # structured non-match for tc=None we move on to tc=NDXP, get the
+        # same response, and abandon further rounds. That's 2 attempts for
+        # NDX. The exhaustive 18-attempt sweep is reserved for the case
+        # where every attempt is an HTTP error (transient CPG).
+        with pytest.raises(RuntimeError):
+            await provider._resolve_option_conid("NDX", "20260501", 26275.0, "P")
+        first_count = first_call_attempts["count"]
+        assert 1 <= first_count <= 6, (
+            f"first call should short-circuit on structured misses; "
+            f"got {first_count} attempts"
+        )
+
+        # Second call within the TTL window short-circuits — zero new HTTP
+        # calls
+        with pytest.raises(RuntimeError, match="negative-cache cooldown"):
+            await provider._resolve_option_conid("NDX", "20260501", 26275.0, "P")
+        assert first_call_attempts["count"] == first_count, (
+            "negative-cached failures must not hit CPG again"
+        )
+
+    @pytest.mark.asyncio
+    async def test_resolve_option_conid_negative_cache_skipped_for_http_errors(self):
+        """Pure HTTP errors (no structured response body) MUST NOT be cached —
+        those are transient (rate limit, session expiry) and should retry on
+        the next cycle. Only 'real' failures (wrong month, empty list) get
+        the cooldown."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+        provider._conid_cache["SPX"] = 416904
+
+        # Skip propagation sleeps in the recovery flow
+        import asyncio as _aio
+        async def _fast_sleep(*_a, **_k): return None
+        original_sleep = _aio.sleep
+        _aio.sleep = _fast_sleep  # type: ignore[assignment]
+
+        async def fake_get(path, params=None, **_):
+            if path == "/iserver/marketdata/snapshot":
+                return [{"31": "7150"}]
+            if path == "/iserver/secdef/info":
+                raise RuntimeError("HTTP 500: ClientResponseError")
+            return []
+
+        async def fake_post(path, **_): return {}
+        provider._get = fake_get  # type: ignore[assignment]
+        provider._post = fake_post  # type: ignore[assignment]
+
+        try:
+            with pytest.raises(RuntimeError) as excinfo:
+                await provider._resolve_option_conid("SPX", "20260427", 7070.0, "P")
+            assert "negative-cache" not in str(excinfo.value), (
+                "HTTP-error failures must not be cached as negative"
+            )
+            # Negative cache must be empty for this key
+            key = "SPX_20260427_7070.0_P"
+            assert key not in provider._option_conid_negative_cache
+        finally:
+            _aio.sleep = original_sleep  # type: ignore[assignment]
+
+    @pytest.mark.asyncio
+    async def test_resolve_option_conid_iterates_ndxp_for_ndx(self):
+        """CPG's secdef/info for NDX without tradingClass returns ONLY the
+        next monthly contract (parent NDX class), not the daily NDXP. Live
+        on 2026-04-30, querying NDX 20260501 with no class returned the
+        20260514 monthly. Iterating with ``tradingClass=NDXP`` recovers the
+        daily NDXP contract."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+        provider._conid_cache["NDX"] = 416843
+
+        captured: list[dict] = []
+
+        async def fake_get(path, params=None, **_):
+            if path != "/iserver/secdef/info":
+                return []
+            p = dict(params or {})
+            captured.append(p)
+            tc = p.get("tradingClass")
+            # Without tradingClass: CPG returns the monthly NDX (5/14)
+            if not tc:
+                return [{"conid": 999500, "maturityDate": "20260514", "tradingClass": "NDX"}]
+            # With tradingClass=NDXP: CPG returns the daily we asked for (5/1)
+            if tc == "NDXP":
+                return [{"conid": 871545733, "maturityDate": "20260501", "tradingClass": "NDXP"}]
+            return []
+
+        provider._get = fake_get  # type: ignore[assignment]
+
+        con_id = await provider._resolve_option_conid("NDX", "20260501", 26600.0, "P")
+        assert con_id == 871545733, (
+            f"NDX 20260501 must resolve to the NDXP daily contract; got {con_id}"
+        )
+        # Confirm both tradingClass attempts were tried
+        tcs = [c.get("tradingClass") for c in captured]
+        assert any(t is None for t in tcs), "must try without tradingClass first"
+        assert "NDXP" in tcs, "must try tradingClass=NDXP for NDX"
 
     @pytest.mark.asyncio
     async def test_resolve_option_conid_session_recovery_succeeds(self, monkeypatch):
@@ -3732,8 +3863,9 @@ class TestIBKRRestProvider:
                 return [{"31": "7150"}]
             if path == "/iserver/secdef/info":
                 attempts["count"] += 1
-                # R1 (3) + R2 (3) all return CPG's stale-session signature.
-                if attempts["count"] <= 6:
+                # R1 (6) + R2 (6) all return CPG's stale-session signature.
+                # SPX iterates 2 tradingClasses × 3 exchanges = 6 attempts/round.
+                if attempts["count"] <= 12:
                     raise RuntimeError(
                         "HTTP 500 from /iserver/secdef/info: "
                         '{"error":"No Contracts retrieved "}'
@@ -3752,7 +3884,7 @@ class TestIBKRRestProvider:
 
         con_id = await provider._resolve_option_conid("SPX", "20260428", 7050.0, "P")
         assert con_id == 868691755
-        assert attempts["count"] == 7  # 3 + 3 + 1
+        assert attempts["count"] == 13  # 6 + 6 + 1
 
         # Recovery sequence ran before the successful R3 attempt
         assert "/tickle" in post_calls
@@ -15257,6 +15389,351 @@ class TestSpreadScanner:
             f"got {em_dash_count} in row: {data_rows[0]!r}"
         )
 
+    # ── Tier filter offline (fail-safe behavior) ─────────────────────────
+
+    def test_collect_filtered_candidates_returns_empty_when_tier_filter_unavailable(self):
+        """If the user configured tier filtering (--tiers / --min-tier /
+        --min-tier-close) but the percentile server is unreachable, the
+        scanner must NOT silently fall back to the OTM-only filter — it
+        must return [] so Top-N picks and trade/sim handlers see no
+        candidates. Showing picks that bypass the operator's safety
+        gate is a footgun; showing none is the safe default."""
+        from spread_scanner import _collect_filtered_candidates, parse_args
+
+        args = parse_args(["--tickers", "SPX", "--min-tier", "moderate"])
+        scan_data = {
+            "quotes": {"SPX": {"last": 7100.0}},
+            "prev_closes": {"SPX": 7100.0},
+            "tier_filter_state": "unavailable",
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-04-30",
+                    "tier_data": None,
+                    "spreads": {
+                        "SPX": [
+                            {"option_type": "PUT", "short_strike": 7050,
+                             "long_strike": 7030, "credit": 0.50,
+                             "roi_pct": 2.6, "otm_pct": 0.7, "width": 20},
+                        ],
+                    },
+                }
+            },
+        }
+        cands = _collect_filtered_candidates(scan_data, args)
+        assert cands == []
+
+    def test_collect_filtered_candidates_passes_through_when_state_active(self):
+        """Sanity check: when tier_filter_state is 'active' (server is up,
+        tier_data available), the existing filter logic still runs and
+        candidates that pass go through."""
+        from spread_scanner import _collect_filtered_candidates, parse_args
+
+        args = parse_args(["--tickers", "SPX"])
+        scan_data = {
+            "quotes": {"SPX": {"last": 7100.0}},
+            "prev_closes": {"SPX": 7100.0},
+            "tier_filter_state": "off",
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-04-30",
+                    "tier_data": None,
+                    "spreads": {
+                        "SPX": [
+                            {"option_type": "PUT", "short_strike": 7050,
+                             "long_strike": 7030, "credit": 0.50,
+                             "roi_pct": 2.6, "otm_pct": 0.7, "width": 20},
+                        ],
+                    },
+                }
+            },
+        }
+        cands = _collect_filtered_candidates(scan_data, args)
+        assert len(cands) == 1
+        assert cands[0]["short_strike"] == 7050
+
+    def test_render_top_picks_shows_offline_banner_when_tier_filter_unavailable(self):
+        """When tier_filter_state=='unavailable', the Top-N section must
+        show a prominent red 'TIER FILTER OFFLINE' banner instead of the
+        normal green TOP-N header — and contain NO data rows. Otherwise
+        the operator may not realize their safety gate is offline."""
+        from spread_scanner import _render_top_picks, parse_args, RED
+
+        args = parse_args([
+            "--tickers", "SPX", "--top", "5",
+            "--min-tier", "moderate",
+        ])
+        scan_data = {
+            "quotes": {"SPX": {"last": 7100.0}},
+            "prev_closes": {"SPX": 7100.0},
+            "tier_filter_state": "unavailable",
+            "tier_filter_error": (
+                "HTTP 500 from http://localhost:9100/range_percentiles "
+                "— [Errno 61] Connect call failed ('192.168.7.120', 8812)"
+            ),
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-04-30",
+                    "tier_data": None,
+                    "spreads": {
+                        "SPX": [
+                            {"option_type": "PUT", "short_strike": 7050,
+                             "long_strike": 7030, "credit": 0.50,
+                             "roi_pct": 2.6, "otm_pct": 0.7, "width": 20},
+                        ],
+                    },
+                }
+            },
+        }
+        lines = _render_top_picks(scan_data, args)
+        text = "\n".join(lines)
+        # Red banner present.
+        assert RED in text
+        assert "TIER FILTER OFFLINE" in text
+        assert "Top-N suppressed" in text
+        # The configured filter is named in the banner so the user knows
+        # WHICH setting is causing the suppression.
+        assert "min_tier=moderate" in text
+        # The captured error MUST appear verbatim — that's the
+        # actionable diagnostic. The 'HTTP 500' + the upstream cause
+        # ("Connect call failed ('192.168.7.120', 8812)") tell the
+        # operator the percentile server itself is up but its data
+        # source is the actual problem.
+        assert "HTTP 500" in text
+        assert "192.168.7.120" in text
+        # No data rows — the row format always begins with "  1 " or
+        # "  2 " etc. for picks.
+        data_rows = [ln for ln in lines if ln.strip().startswith(("1 ", "2 ", "3 "))]
+        assert data_rows == [], f"expected no picks, got: {data_rows}"
+
+    def test_scan_all_tickers_flags_tier_filter_unavailable_when_fetch_fails(
+        self, monkeypatch,
+    ):
+        """End-to-end: when the user requests tiers but fetch_tier_data
+        returns None (percentile server unreachable),
+        scan_all_tickers must set scan_data['tier_filter_state'] =
+        'unavailable'."""
+        import asyncio
+        import spread_scanner as ss
+        from spread_scanner import parse_args
+
+        async def fake_quote(client, daemon_url, sym):
+            return {"last": 7100.0}
+        async def fake_expirations(client, daemon_url, sym):
+            return ["2026-04-30"]
+        async def fake_chain(client, daemon_url, sym, exp, strike_range_pct=5.0):
+            return {"calls": [], "puts": []}
+        async def fake_tier_data(client, percentile_url, tickers, dte_list=None):
+            return None  # simulate percentile server unreachable
+        async def fake_prev_closes(client, db_url, tickers):
+            return {sym: 7100.0 for sym in tickers}
+
+        monkeypatch.setattr(ss, "fetch_quote", fake_quote)
+        monkeypatch.setattr(ss, "fetch_expirations", fake_expirations)
+        monkeypatch.setattr(ss, "fetch_option_chain", fake_chain)
+        monkeypatch.setattr(ss, "fetch_tier_data", fake_tier_data)
+        monkeypatch.setattr(ss, "fetch_prev_closes", fake_prev_closes)
+        monkeypatch.setattr(ss, "extract_prev_closes_from_tier_data", lambda td: {})
+
+        args = parse_args(["--tickers", "SPX", "--min-tier", "moderate"])
+        client = object()  # not used; fakes ignore it
+
+        data = asyncio.run(ss.scan_all_tickers(client, args))
+        assert data.get("tier_filter_state") == "unavailable"
+
+    def test_scan_all_tickers_marks_tier_state_off_when_not_requested(
+        self, monkeypatch,
+    ):
+        """When the user does NOT request tier filtering, state should be
+        'off' (not 'unavailable'); _collect_filtered_candidates passes
+        candidates through normally."""
+        import asyncio
+        import spread_scanner as ss
+        from spread_scanner import parse_args
+
+        async def fake_quote(client, daemon_url, sym):
+            return {"last": 7100.0}
+        async def fake_expirations(client, daemon_url, sym):
+            return ["2026-04-30"]
+        async def fake_chain(client, daemon_url, sym, exp, strike_range_pct=5.0):
+            return {"calls": [], "puts": []}
+        async def fake_prev_closes(client, db_url, tickers):
+            return {sym: 7100.0 for sym in tickers}
+
+        monkeypatch.setattr(ss, "fetch_quote", fake_quote)
+        monkeypatch.setattr(ss, "fetch_expirations", fake_expirations)
+        monkeypatch.setattr(ss, "fetch_option_chain", fake_chain)
+        monkeypatch.setattr(ss, "fetch_prev_closes", fake_prev_closes)
+        monkeypatch.setattr(ss, "extract_prev_closes_from_tier_data", lambda td: {})
+
+        args = parse_args(["--tickers", "SPX"])  # no --tiers/--min-tier
+        client = object()
+        data = asyncio.run(ss.scan_all_tickers(client, args))
+        assert data.get("tier_filter_state") == "off"
+
+    def test_maybe_log_tier_filter_unavailable_appends_sticky_entry(self):
+        """When tier_filter_state == 'unavailable', the scan loop should
+        append a TIER_OFFLINE entry to args.activity_log carrying the
+        captured error reason (HTTP code + body excerpt or exception
+        type) so the warning persists in the activity panel every cycle
+        AND tells the operator what's actually wrong."""
+        from collections import deque
+        from spread_scanner import _maybe_log_tier_filter_unavailable, parse_args
+
+        args = parse_args([
+            "--tickers", "SPX",
+            "--min-tier", "moderate",
+            "--percentile-url", "http://my-host:9100",
+        ])
+        args.activity_log = deque(maxlen=10)
+
+        _maybe_log_tier_filter_unavailable(
+            args,
+            {
+                "tier_filter_state": "unavailable",
+                "tier_filter_error": (
+                    "HTTP 500 from http://my-host:9100/range_percentiles "
+                    "— [Errno 61] Connect call failed ('192.168.7.120', 8812)"
+                ),
+            },
+        )
+        assert len(args.activity_log) == 1
+        entry = args.activity_log[0]
+        assert entry["outcome"] == "TIER_OFFLINE"
+        # The captured error is in the reason verbatim.
+        assert "HTTP 500" in entry["reason"]
+        assert "192.168.7.120" in entry["reason"]
+        assert "Top-N suppressed" in entry["reason"]
+
+        # Falls back to a generic phrasing when no error is captured.
+        args.activity_log.clear()
+        _maybe_log_tier_filter_unavailable(
+            args, {"tier_filter_state": "unavailable"},
+        )
+        assert len(args.activity_log) == 1
+        assert "no response" in args.activity_log[0]["reason"]
+
+        # No-op when state is active or off.
+        args.activity_log.clear()
+        _maybe_log_tier_filter_unavailable(args, {"tier_filter_state": "active"})
+        _maybe_log_tier_filter_unavailable(args, {"tier_filter_state": "off"})
+        _maybe_log_tier_filter_unavailable(args, {})  # missing state
+        assert len(args.activity_log) == 0
+
+    @pytest.mark.asyncio
+    async def test_fetch_tier_data_captures_http_error_with_body_excerpt(self):
+        """When the percentile server returns a non-200, fetch_tier_data
+        captures the HTTP code AND a snippet of the body so the operator
+        can see WHY (e.g. percentile server up but its upstream QuestDB
+        is down, surfaced in the HTML error page body)."""
+        import spread_scanner as ss
+
+        # Make _resolve_percentile_url a pass-through (no probe).
+        async def fake_resolve(client, configured):
+            return configured
+        orig_resolve = ss._resolve_percentile_url
+        ss._resolve_percentile_url = fake_resolve
+        try:
+            class FakeResp:
+                status_code = 500
+                text = (
+                    "<html><body><h1>Error</h1>"
+                    "<p>[Errno 61] Connect call failed ('192.168.7.120', 8812)</p>"
+                    "</body></html>"
+                )
+                def json(self):
+                    raise ValueError("html, not json")
+            class FakeClient:
+                async def get(self, url, *a, **kw):
+                    return FakeResp()
+            data = await ss.fetch_tier_data(
+                FakeClient(), "http://localhost:9100", ["SPX"],
+            )
+            assert data is None  # non-200 → no data
+            reason = ss._TIER_FETCH_LAST_ERROR.get("reason") or ""
+            assert "HTTP 500" in reason
+            # HTML stripped, useful text retained.
+            assert "192.168.7.120" in reason
+            assert "Connect call failed" in reason
+            # Should NOT contain raw HTML tags after stripping.
+            assert "<html>" not in reason
+            assert "<body>" not in reason
+        finally:
+            ss._resolve_percentile_url = orig_resolve
+
+    @pytest.mark.asyncio
+    async def test_fetch_tier_data_captures_exception_type_on_connect_failure(self):
+        """When the fetch raises (timeout, ConnectError, etc.),
+        fetch_tier_data captures the exception class + message so the
+        offline banner can distinguish "server unreachable" (network)
+        from "server returned an error" (HTTP code)."""
+        import spread_scanner as ss
+        import httpx
+
+        async def fake_resolve(client, configured):
+            return configured
+        orig_resolve = ss._resolve_percentile_url
+        ss._resolve_percentile_url = fake_resolve
+        try:
+            class FakeClient:
+                async def get(self, *a, **kw):
+                    raise httpx.ConnectError("Connection refused")
+            data = await ss.fetch_tier_data(
+                FakeClient(), "http://localhost:9100", ["SPX"],
+            )
+            assert data is None
+            reason = ss._TIER_FETCH_LAST_ERROR.get("reason") or ""
+            assert "ConnectError" in reason
+            assert "Connection refused" in reason
+        finally:
+            ss._resolve_percentile_url = orig_resolve
+
+    @pytest.mark.asyncio
+    async def test_fetch_tier_data_clears_error_on_success(self):
+        """A successful fetch clears any previous error reason so the
+        TIER_OFFLINE banner doesn't keep showing stale details after
+        the percentile server recovers."""
+        import spread_scanner as ss
+
+        ss._TIER_FETCH_LAST_ERROR["reason"] = "stale prior error"
+
+        async def fake_resolve(client, configured):
+            return configured
+        orig_resolve = ss._resolve_percentile_url
+        ss._resolve_percentile_url = fake_resolve
+        try:
+            class FakeResp:
+                status_code = 200
+                def json(self):
+                    return {"hourly": {"SPX": {"recommended": {}, "slots": {}}}}
+            class FakeClient:
+                async def get(self, *a, **kw):
+                    return FakeResp()
+            data = await ss.fetch_tier_data(
+                FakeClient(), "http://localhost:9100", ["SPX"],
+            )
+            assert data is not None
+            assert ss._TIER_FETCH_LAST_ERROR.get("reason") is None
+        finally:
+            ss._resolve_percentile_url = orig_resolve
+
+    def test_quiet_heartbeat_suppressed_when_tier_offline(self):
+        """The QUIET heartbeat would otherwise diagnose 'no candidates
+        passed screener filters' — misleading because the actual reason
+        is the tier filter being offline. The TIER_OFFLINE entry covers
+        that case; QUIET should stay silent."""
+        from collections import deque
+        from spread_scanner import _maybe_log_quiet_heartbeat, parse_args
+
+        args = parse_args(["--tickers", "SPX", "--min-tier", "moderate"])
+        args.activity_log = deque(maxlen=10)
+
+        _maybe_log_quiet_heartbeat(
+            args, handlers=[],
+            data={"tier_filter_state": "unavailable"},
+            candidates=[], fired=False,
+        )
+        assert len(args.activity_log) == 0
+
     @pytest.mark.asyncio
     async def test_resolve_percentile_url_custom_bypasses_probe(self):
         """A caller-supplied URL (not the baked-in lin1 default) is used as-is,
@@ -15627,10 +16104,16 @@ class TestSpreadScanner:
         )
 
     @pytest.mark.asyncio
-    async def test_resolve_endpoint_urls_uses_lightweight_daemon_probe(self):
-        """Daemon probe must hit /market/quote/SPX (consistently sub-10ms),
-        not /dashboard/summary (occasional 1-3s spikes that exceed the probe
-        timeout and falsely classify a healthy daemon as down)."""
+    async def test_resolve_endpoint_urls_uses_lightweight_health_probe(self):
+        """Every probe (daemon, db, percentile) must hit /health — a
+        sub-millisecond reachability check on every server we've
+        observed. Regression: previously the percentile probe hit
+        /range_percentiles which legitimately takes 7-8s on a cold
+        cache, exceeding the 4s probe timeout and silently falling
+        through to the (often unreachable) backup. The same trap had
+        already been fixed for the daemon probe (was /dashboard/summary,
+        prone to 1-3s spikes). Standardizing on /health for all three
+        avoids the same class of bug elsewhere."""
         import spread_scanner as sp
         from argparse import Namespace
         sp._resolved_url_cache.clear()
@@ -15646,20 +16129,20 @@ class TestSpreadScanner:
         args = Namespace(
             daemon_url="http://daemon-p:8000",
             daemon_url_backup="http://daemon-b:8000",
-            db_url="http://db:9102",
-            db_url_backup=None,
-            percentile_url="http://pct:9100",
-            percentile_url_backup=None,
+            db_url="http://db-p:9102",
+            db_url_backup="http://db-b:9102",
+            percentile_url="http://pct-p:9100",
+            percentile_url_backup="http://pct-b:9100",
         )
         await sp.resolve_endpoint_urls(CapturingClient(), args)
-        daemon_probes = [p for p in seen_paths if "daemon-p" in p or "daemon-b" in p]
-        assert daemon_probes, "expected at least one daemon probe"
-        assert all("/market/quote/SPX" in p for p in daemon_probes), (
-            f"daemon probe must use /market/quote/SPX, got: {daemon_probes}"
-        )
-        assert not any("/dashboard/summary" in p for p in daemon_probes), (
-            "daemon probe must NOT use /dashboard/summary (slow under load)"
-        )
+        # Every probe must end in /health.
+        for path in seen_paths:
+            assert path.endswith("/health"), (
+                f"probe must hit /health (lightweight reachability), got: {path}"
+            )
+        # And none of the slow/heavyweight endpoints should have been hit.
+        assert not any("/dashboard/summary" in p for p in seen_paths)
+        assert not any("/range_percentiles" in p for p in seen_paths)
 
     def test_render_endpoints_line_shows_resolved_endpoints_in_grey(self):
         """Endpoints line surfaces the URLs the scanner actually talks to so
