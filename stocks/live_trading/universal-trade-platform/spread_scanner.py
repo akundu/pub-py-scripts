@@ -146,6 +146,7 @@ def _is_percentile_tier(tier_name: str) -> bool:
 # ANSI colors
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
+RED = "\033[91m"
 DIM = "\033[2m"
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -397,7 +398,7 @@ async def _resolve_url_with_backup(
     *,
     probe_path: str = "/",
     probe_params: dict | None = None,
-    timeout: float = 2.0,
+    timeout: float = 4.0,
 ) -> str:
     """Pick the working URL between a configured primary and an optional backup.
 
@@ -444,9 +445,14 @@ async def resolve_endpoint_urls(
     resolved URLs for logging/diagnostics.
     """
     resolved: dict[str, str] = {}
-    # (attr-name, primary-default-marker, probe-path, probe-params)
+    # (attr-name, probe-path, probe-params)
+    # Daemon probe uses /market/quote/SPX — consistently sub-10ms because the
+    # quote comes from the streaming cache. /dashboard/summary was prone to
+    # 1-3s spikes which exceeded the probe timeout, causing healthy daemons
+    # to be misclassified as unreachable and the scanner to fall back to a
+    # backup URL that may itself be down.
     endpoints = [
-        ("daemon_url", "/dashboard/summary", None),
+        ("daemon_url", "/market/quote/SPX", None),
         ("db_url", "/api/range_percentiles",
          {"tickers": "SPX", "lookback": "1", "min_days": "1"}),
         ("percentile_url", "/range_percentiles",
@@ -1213,6 +1219,135 @@ def _find_current_slot(slots: dict) -> str | None:
     return min(slot_minutes.items(), key=lambda x: x[1])[0]
 
 
+def classify_strike_to_percentile(
+    tier_data: dict | None, symbol: str, side: str, model: str,
+    prev_close: float, current_price: float, short_strike: float,
+    dte: int = 0,
+) -> tuple[int | None, str | None]:
+    """Inverse of resolve_tier_strike(): given a short strike, return
+    (percentile, tier_name).
+
+    `percentile` is the largest pN in the model's pct map whose
+    move-from-anchor is at-least-as-protective as `short_strike`'s actual
+    offset. For puts, "more protective" = more negative offset; for calls,
+    more positive. Returns None when tier_data is missing, the model's pct
+    map is empty, or the strike is closer-to-the-money than even the
+    smallest percentile in the map.
+
+    `tier_name` is "aggressive" / "moderate" / "conservative" iff the
+    resolved percentile equals the server-recommended pN for that named
+    tier on this (model, side); otherwise None.
+    """
+    if not tier_data or not symbol or current_price <= 0:
+        return (None, None)
+    sym_data = tier_data.get("hourly", {}).get(symbol)
+    if not sym_data:
+        return (None, None)
+    if side not in ("put", "call"):
+        return (None, None)
+    direction = "when_down" if side == "put" else "when_up"
+
+    # Locate the model's pct map using the same access patterns as
+    # resolve_tier_strike() — keep them in lock-step.
+    pcts: dict | None = None
+    if model == "intraday":
+        slots = sym_data.get("slots", {})
+        current_slot = _find_current_slot(slots) if slots else None
+        if not current_slot:
+            return (None, None)
+        slot_data = slots.get(current_slot, {})
+        dir_data = slot_data.get(direction, {})
+        pcts = dir_data.get("pct", {})
+        anchor = current_price
+    else:  # close_to_close
+        anchor = prev_close if prev_close and prev_close > 0 else 0
+        tickers_list = tier_data.get("tickers", [])
+        ticker_c2c = None
+        for t in (tickers_list if isinstance(tickers_list, list) else []):
+            if t.get("ticker") == symbol:
+                ticker_c2c = t
+                break
+        if ticker_c2c:
+            windows = ticker_c2c.get("windows", {})
+            w = windows.get(str(dte)) or windows.get(dte)
+            if not w and windows:
+                avail = sorted(
+                    (k for k in windows.keys() if str(k).isdigit()),
+                    key=lambda k: int(k),
+                )
+                # Prefer the closest window <= dte; fall back to the highest.
+                for k in reversed(avail):
+                    if int(k) <= dte:
+                        w = windows[k]
+                        break
+                if not w and avail:
+                    w = windows[avail[-1]]
+            if w:
+                dir_data = w.get(direction, {})
+                pcts = dir_data.get("pct", {})
+        if pcts is None:
+            # Fallback: hourly slots anchored to prev_close
+            slots = sym_data.get("slots", {})
+            current_slot = _find_current_slot(slots) if slots else None
+            if not current_slot or anchor <= 0:
+                return (None, None)
+            slot_data = slots.get(current_slot, {})
+            dir_data = slot_data.get(direction, {})
+            pcts = dir_data.get("pct", {})
+
+    if not pcts or anchor <= 0:
+        return (None, None)
+
+    actual_offset_pct = (short_strike - anchor) / anchor * 100.0
+
+    # Build sorted (percentile, pct_val) list, ascending by percentile.
+    items: list[tuple[int, float]] = []
+    for k, v in pcts.items():
+        m = _TIER_PERCENTILE_RE.match(str(k))
+        if not m or v is None:
+            continue
+        try:
+            items.append((int(m.group(1)), float(v)))
+        except (TypeError, ValueError):
+            continue
+    if not items:
+        return (None, None)
+    items.sort(key=lambda x: x[0])
+
+    # Pick the largest pN at which the strike still survives the model's
+    # projected move. For puts the model's pct_val is negative (price
+    # drop) and projected_price = anchor * (1 + pct_val/100); the strike
+    # survives iff strike <= projected_price, equivalently
+    # actual_offset_pct <= pct_val. For calls the model's pct_val is
+    # positive (price rise) and the strike survives iff
+    # actual_offset_pct >= pct_val. As pN grows the model's move grows in
+    # magnitude, so once the strike fails the protection test it will
+    # fail at every larger pN — the break is correct.
+    chosen: int | None = None
+    for pn, pct_val in items:
+        protective = (actual_offset_pct <= pct_val) if side == "put" else (actual_offset_pct >= pct_val)
+        if protective:
+            chosen = pn
+        else:
+            break
+    if chosen is None:
+        return (None, None)
+
+    # Map to a named tier when the recommended pN matches.
+    tier_name: str | None = None
+    recommended = sym_data.get("recommended", {}).get(model, {})
+    for tier_key in TIER_KEYS:
+        rec = recommended.get(tier_key, {}).get(side)
+        try:
+            if rec is not None and int(rec) == chosen:
+                tier_name = tier_key
+                break
+        except (TypeError, ValueError):
+            continue
+
+    return (chosen, tier_name)
+
+
 # ── DTE Handling ───────────────────────────────────────────────────────────────
 
 
@@ -1335,6 +1470,30 @@ def _fmt_delta(val, option_type: str | None = None) -> str:
         if ot == "CALL" and d < 0:
             return ""
     return f"Δ{d:+.2f}"
+
+
+def _fmt_pctile_cell(pct: int | None, tier_name: str | None) -> str:
+    """Render a percentile + (optional) tier-name cell for the Top-N row.
+
+    - pct=None         → dim em-dash (no tier_data, or strike out of range).
+    - pct=92, tier=None → "p92" (matched a percentile but not a named tier).
+    - pct=N, tier=conservative → "p98 cons" (green — safest tier).
+    - pct=N, tier=moderate     → "p95 mod"  (yellow).
+    - pct=N, tier=aggressive   → "p90 agg"  (red — closest to ATM).
+
+    Always wrapped in DIM by default; the tier label adds its own color.
+    """
+    if pct is None:
+        return f"{DIM}—{RESET}"
+    label_map = {
+        "aggressive":    ("agg",  RED),
+        "moderate":      ("mod",  YELLOW),
+        "conservative":  ("cons", GREEN),
+    }
+    if tier_name in label_map:
+        short, color = label_map[tier_name]
+        return f"{DIM}p{pct}{RESET} {color}{short}{RESET}"
+    return f"{DIM}p{pct}{RESET}"
 
 
 def render_spread_cell(spread: dict | None, prev_close: float = 0, dte: int = 0) -> str:
@@ -1598,6 +1757,34 @@ def _render_top_picks(scan_data: dict, args) -> list[str]:
 
     picks = deduped[:top_n]
 
+    # Enrich each pick with historical (close-to-close) and predictive
+    # (intraday) percentile + tier classification using the same tier_data
+    # already on each dte_section. Keeps the filter pipeline above untouched
+    # — these fields are display-only. Always set the keys so the renderer
+    # can render a dim em-dash when tier_data is absent or the strike sits
+    # closer-to-the-money than the smallest percentile in the model's map.
+    quotes = scan_data.get("quotes", {})
+    tier_data_by_dte: dict[int, dict | None] = {}
+    for _dte, _section in scan_data.get("dte_sections", {}).items():
+        tier_data_by_dte[_dte] = _section.get("tier_data")
+    for p in picks:
+        sym = p.get("symbol")
+        side = (p.get("option_type") or "").lower()
+        dte_v = p.get("dte", 0)
+        prev_close = p.get("prev_close", 0) or 0
+        q = quotes.get(sym) or {}
+        price = q.get("last", 0) or 0
+        td = tier_data_by_dte.get(dte_v)
+        short_strike = p.get("short_strike", 0)
+        p["hist_percentile"], p["hist_tier_name"] = classify_strike_to_percentile(
+            td, sym, side, "close_to_close",
+            prev_close, price, short_strike, dte=dte_v,
+        )
+        p["pred_percentile"], p["pred_tier_name"] = classify_strike_to_percentile(
+            td, sym, side, "intraday",
+            prev_close, price, short_strike, dte=dte_v,
+        )
+
     lines = []
     # Build filter description
     filters = []
@@ -1617,13 +1804,47 @@ def _render_top_picks(scan_data: dict, args) -> list[str]:
         filters.append(f"c2c≥{args.min_tier_close[:4]}")
     filter_str = f"  {DIM}[{', '.join(filters)}]{RESET}" if filters else ""
 
-    # Column widths. `Short/Long` must fit 5+1+5 = 11 chars (NDX 5-digit
-    # strikes) plus buffer. Padding the pair as one unit (not just the long
-    # side) keeps every later column aligned regardless of strike-digit count.
-    COL_PAIR = 13
+    # Column widths. Every cell — header, separator, and data row — uses the
+    # SAME width below so the dashboard stays in alignment regardless of
+    # ANSI codes in the data (color_roi, dim ot/cl labels, vfy ✓/—, tier
+    # color labels). Earlier versions used f-string `:<N` padding which
+    # silently miscounts when the cell contains ANSI escapes; we now go
+    # through `_pad()` (visible-length-aware) for every cell that may.
+    COL_NUM = 3      # rank number
+    COL_SYM = 5      # ticker
+    COL_TYPE = 5     # PUT / CALL
+    COL_DTE = 4      # D0 / D1 / D2
+    COL_PAIR = 13    # short/long strikes (fits NDX 5-digit pair w/ buffer)
+    COL_CR = 9       # Credit ($N.NN)
+    COL_NROI = 8     # nROI (colored, ~5 visible chars)
+    COL_OTM = 7      # ot% from spot
+    COL_CL = 7       # close-to-close OTM%
+    COL_DELTA = 8    # Δshort (Δ±0.NN or "-")
+    COL_VFY = 7      # Vfy (✓N s or "—")
+    # Hist = close-to-close historical percentile (anchored to prev_close).
+    # Pred = intraday "predictive" percentile (anchored to current spot,
+    #        slot-aware so it tracks today's price-path model).
+    # Each cell shows the largest pN whose modeled move is at-least-as-
+    # protective as the short strike, plus the named tier (agg/mod/cons)
+    # when the resolved percentile matches the server's recommendation.
+    COL_PCT = 12
+
+    column_widths = [
+        COL_NUM, COL_SYM, COL_TYPE, COL_DTE, COL_PAIR, COL_CR, COL_NROI,
+        COL_OTM, COL_CL, COL_DELTA, COL_VFY, COL_PCT, COL_PCT,
+    ]
+    column_headers = [
+        "#", "Sym", "Type", "DTE", "Short/Long", "Credit", "nROI",
+        "OTM%", "Cl%", "Δshort", "Vfy", "Hist", "Pred",
+    ]
+    total_width = sum(column_widths)
+
     lines.append(f" {BOLD}{GREEN}── TOP {top_n} {'─' * 65}{RESET}{filter_str}")
-    lines.append(f"  {'#':<3}{'Sym':<5}{'Type':<5}{'DTE':<4}{'Short/Long':<{COL_PAIR}}{'Credit':<9}{'nROI':<8}{'OTM%':<7}{'Cl%':<7}{'Δshort':<8}{'Vfy':<7}")
-    lines.append(f"  {'─'*3}{'─'*5}{'─'*5}{'─'*4}{'─'*COL_PAIR}{'─'*9}{'─'*8}{'─'*7}{'─'*7}{'─'*8}{'─'*7}")
+    header_row = "  " + "".join(
+        _pad(h, w) for h, w in zip(column_headers, column_widths)
+    )
+    lines.append(header_row)
+    lines.append("  " + "─" * total_width)
 
     for i, p in enumerate(picks, 1):
         short = int(p["short_strike"])
@@ -1633,7 +1854,6 @@ def _render_top_picks(scan_data: dict, args) -> list[str]:
         otm = p.get("otm_pct", 0)
         pc = p.get("prev_close", 0)
         chg = (p["short_strike"] - pc) / pc * 100 if pc > 0 else 0
-        nroi_str = color_roi(norm_roi)
         delta_str = _fmt_delta(p.get("short_delta"), p.get("option_type")) or "-"
         pair = f"{short}/{long}"
         # Verification marker: ✓ + age-in-seconds when verified, "–" when
@@ -1648,15 +1868,26 @@ def _render_top_picks(scan_data: dict, args) -> list[str]:
         else:
             vfy_str = f"{DIM}—{RESET}"
 
+        # Build each cell, then pad to its declared column width. _pad
+        # ignores ANSI sequences when measuring visible length, so colored
+        # cells (nroi, ot/cl, vfy, tier label) line up under their headers.
+        cells = [
+            str(i),
+            p["symbol"],
+            p["option_type"],
+            f"D{p['dte']}",
+            pair,
+            f"${credit:.2f}",
+            color_roi(norm_roi),
+            f"{DIM}ot{otm:.1f}{RESET}",
+            f"{DIM}cl{_fmt_pct(chg)}{RESET}",
+            f"{DIM}{delta_str}{RESET}",
+            vfy_str,
+            _fmt_pctile_cell(p.get("hist_percentile"), p.get("hist_tier_name")),
+            _fmt_pctile_cell(p.get("pred_percentile"), p.get("pred_tier_name")),
+        ]
         lines.append(
-            f"  {i:<3}{p['symbol']:<5}{p['option_type']:<5}"
-            f"{'D' + str(p['dte']):<4}"
-            f"{pair:<{COL_PAIR}}"
-            f"${credit:<8.2f}"
-            f"{nroi_str} "
-            f"{DIM}ot{otm:.1f} cl{_fmt_pct(chg)}{RESET} "
-            f"{DIM}{delta_str:<7}{RESET}"
-            f"{vfy_str}"
+            "  " + "".join(_pad(c, w) for c, w in zip(cells, column_widths))
         )
 
     lines.append("")
@@ -1839,6 +2070,12 @@ def render_dashboard(scan_data: dict, args) -> str:
     activity_log = getattr(args, "activity_log", None)
     lines.extend(render_activity_panel(handlers, n_recent, activity_log=activity_log))
 
+    # Endpoints (dim grey, static — kept out of the footer so the per-second
+    # ESC[F/ESC[2K tick keeps working on a single-line footer).
+    endpoints_line = render_endpoints_line(args)
+    if endpoints_line:
+        lines.append(endpoints_line)
+
     # Footer
     lines.append(render_footer(args))
 
@@ -1865,6 +2102,33 @@ def render_footer(args, seconds_remaining: int | None = None) -> str:
         extras.append(f"notify:nROI≥{args.notify_threshold:.0f}→{args.notify_email}")
     extra_str = f" | {' '.join(extras)}" if extras else ""
     return f" Updated: {updated} | {next_t}{extra_str} | Ctrl+C to exit"
+
+
+def render_endpoints_line(args) -> str:
+    """One-line, dim-grey display of the URLs the scanner is actually talking
+    to, including the result of any primary/backup probe.
+
+    Rendered as part of the static dashboard area (NOT the footer), because
+    the per-second footer tick uses ESC[F / ESC[2K to repaint exactly one
+    line — putting endpoints in the footer would force every tick to clear
+    only half of a multi-line block and leave stray copies behind.
+
+    Falls back to the configured `*_url` fields when the probe never ran
+    (e.g. --once paths or tests that bypass scan_loop)."""
+    resolved = getattr(args, "resolved_endpoints", None) or {}
+    daemon = resolved.get("daemon_url") or getattr(args, "daemon_url", None)
+    db = resolved.get("db_url") or getattr(args, "db_url", None)
+    perc = resolved.get("percentile_url") or getattr(args, "percentile_url", None)
+    parts = []
+    if daemon:
+        parts.append(f"daemon={daemon}")
+    if db:
+        parts.append(f"db={db}")
+    if perc:
+        parts.append(f"percentile={perc}")
+    if not parts:
+        return ""
+    return f" {DIM}endpoints: {'  '.join(parts)}{RESET}"
 
 
 def _render_spread_section(
@@ -3587,6 +3851,122 @@ def _maybe_log_quiet_heartbeat(
     })
 
 
+def _compute_kickoff_lead(
+    predicted_dur: float, interval: float, *, buffer: float = 0.5,
+) -> float:
+    """How many seconds before the next paint deadline should the next
+    scan kick off, given the predicted scan duration and the configured
+    refresh interval?
+
+    Goal: scan should FINISH around the time the displayed countdown
+    reaches 0, so the operator's perceived refresh moment lines up with
+    `Next: +0s`. Lead = predicted_dur + buffer, with two safety bounds:
+
+      - Floor at `buffer` (always at least a tiny anticipatory lead so
+        a fast scan from a stale prediction doesn't lock us into a
+        sequential scan-after-paint pattern).
+      - Ceiling at `max(interval - 1, buffer)` so the user always sees
+        at least 1s of countdown above 0 — never instant scan-after-scan
+        with zero idle time, even when scan duration ≈ interval.
+
+    Pure function — no event loop, no I/O — so tests can pin the
+    arithmetic without faking asyncio.
+    """
+    raw = float(predicted_dur) + float(buffer)
+    floor = float(buffer)
+    ceiling = max(float(interval) - 1.0, floor)
+    return min(max(raw, floor), ceiling)
+
+
+async def _run_scan_cycle(
+    client: httpx.AsyncClient,
+    args,
+    prev_close_cache: "PrevCloseCache",
+    handlers: list,
+) -> tuple[str | None, str | None]:
+    """Execute one scan cycle: fetch chains, verify, fire handlers, render.
+
+    Returns `(output, error)` where:
+      * `output` is a fully-formed terminal frame (screen-clear prefix
+        included) ready to print, or None on error.
+      * `error` is a one-line error string when the cycle failed, else None.
+
+    Extracted from the body of `scan_loop` so that the loop can run this
+    function concurrently with the per-second countdown ticker via
+    `asyncio.gather`.
+    """
+    try:
+        data = await scan_all_tickers(client, args, prev_close_cache=prev_close_cache)
+
+        # Provider re-verify: before top-picks render AND before any
+        # handler fires, re-fetch fresh quotes for the top candidates
+        # from the provider (force_refresh=true). Phantom / stale /
+        # non-monotonic strikes get dropped here so downstream callers
+        # only see candidates whose credit is confirmed live.
+        try:
+            _verify_summary = await _verify_top_candidates_with_provider(
+                args, data, max_to_verify=20,
+            )
+            if _verify_summary.get("dropped", 0):
+                print(
+                    f"[verify] dropped {_verify_summary['dropped']} "
+                    f"candidates with stale/bad quotes: "
+                    f"{_verify_summary['reasons']}",
+                    file=sys.stderr,
+                )
+        except Exception as e:
+            print(f"[verify] unexpected error: {e}", file=sys.stderr)
+
+        # Fire handlers FIRST so any actions land in their recent_actions
+        # buffers (and the quiet-heartbeat detector sees the deltas)
+        # BEFORE the dashboard renders.
+        submits_before = _count_trade_submits(handlers)
+        candidates: list[dict] = []
+        if handlers:
+            candidates = _collect_filtered_candidates(data, args)
+            ctx = HandlerContext(
+                client=client,
+                args=args,
+                scan_data=data,
+                is_market_hours=is_market_hours(),
+                now_ts=datetime.now().isoformat(),
+            )
+            for handler in handlers:
+                try:
+                    eligible = handler.filter(candidates)
+                except Exception as e:
+                    print(f"[handler:{handler.name}] filter error: {e}", file=sys.stderr)
+                    continue
+                if eligible:
+                    try:
+                        await handler.fire(eligible, ctx)
+                    except Exception as e:
+                        print(f"[handler:{handler.name}] fire error: {e}", file=sys.stderr)
+
+        # Quiet-scan heartbeat: if no trade/sim handler fired AND there
+        # was nothing from the screener, record WHY so the user can
+        # glance at the ACTIVITY panel and see the system is alive.
+        submits_after = _count_trade_submits(handlers)
+        _maybe_log_quiet_heartbeat(
+            args, handlers, data, candidates,
+            fired=(submits_after > submits_before),
+        )
+
+        rendered = render_dashboard(data, args)
+        # Prefix the screen-clear so caller can `print(output)` directly
+        # and the previous frame is fully replaced.
+        return ("\033[2J\033[H" + rendered, None)
+
+    except httpx.ConnectError:
+        return (
+            None,
+            f"Cannot connect to daemon at {getattr(args, 'daemon_url', '?')}\n"
+            f" Start daemon: python utp.py daemon --live",
+        )
+    except Exception as e:
+        return (None, f"Error: {e}")
+
+
 async def scan_loop(args):
     """Main scan loop.
 
@@ -3610,110 +3990,124 @@ async def scan_loop(args):
         # to args (so e.g. fetch_quote uses it on every subsequent call) and
         # cached in `_resolved_url_cache` for the life of the process.
         try:
-            await resolve_endpoint_urls(client, args)
+            resolved_endpoints = await resolve_endpoint_urls(client, args)
+            args.resolved_endpoints = resolved_endpoints
         except Exception as e:
             print(f"[startup] endpoint URL resolution failed: {e}", file=sys.stderr)
+            args.resolved_endpoints = {
+                "daemon_url": getattr(args, "daemon_url", None),
+                "db_url": getattr(args, "db_url", None),
+                "percentile_url": getattr(args, "percentile_url", None),
+            }
 
         prev_close_cache = PrevCloseCache(args.tickers, args.db_url)
         # Initial fetch at startup (tier_data not yet available — db_server only)
         await prev_close_cache.refresh(client)
 
+        # Track recent scan durations so we can kick off each subsequent
+        # scan early enough that it COMPLETES roughly when the displayed
+        # countdown reaches 0. Bounded deque so a single slow scan early
+        # in the session doesn't permanently inflate the lead.
+        scan_duration_history: deque[float] = deque(maxlen=5)
+        # Wall-clock target (event-loop time) at which the NEXT dashboard
+        # paint should appear. None on the very first iteration.
+        next_paint_at: float | None = None
+
         while True:
-            try:
-                data = await scan_all_tickers(client, args, prev_close_cache=prev_close_cache)
+            # Phase 1 — countdown wait. Skip on the very first iteration
+            # (no previous paint to count down from).
+            if next_paint_at is not None:
+                # Predict the next scan's duration from recent history;
+                # fall back to a small floor on cold start. The +0.5s
+                # buffer covers paint/post-paint overhead we don't measure.
+                predicted_dur = max(scan_duration_history) if scan_duration_history else 0.5
+                kickoff_lead = _compute_kickoff_lead(predicted_dur, args.interval)
+                kickoff_at = next_paint_at - kickoff_lead
+                while True:
+                    now = asyncio.get_event_loop().time()
+                    if now >= kickoff_at:
+                        break
+                    paint_remaining = max(0, int(round(next_paint_at - now)))
+                    print(
+                        f"\033[F\033[2K{render_footer(args, seconds_remaining=paint_remaining)}",
+                        flush=True,
+                    )
+                    await asyncio.sleep(min(1.0, max(0.05, kickoff_at - now)))
 
-                # Provider re-verify: before top-picks render AND before any
-                # handler fires, re-fetch fresh quotes for the top candidates
-                # from the provider (force_refresh=true). Phantom / stale /
-                # non-monotonic strikes get dropped here so downstream callers
-                # only see candidates whose credit is confirmed live.
+            # Phase 2 — run scan + countdown concurrently. The countdown
+            # task ticks down to 0 as the scan executes; both finish
+            # together (whichever finishes first stops the other).
+            scan_started_at = asyncio.get_event_loop().time()
+            scan_done = asyncio.Event()
+
+            async def _do_scan_cycle():
                 try:
-                    _verify_summary = await _verify_top_candidates_with_provider(
-                        args, data, max_to_verify=20,
+                    return await _run_scan_cycle(
+                        client, args, prev_close_cache, handlers,
                     )
-                    if _verify_summary.get("dropped", 0):
-                        print(
-                            f"[verify] dropped {_verify_summary['dropped']} "
-                            f"candidates with stale/bad quotes: "
-                            f"{_verify_summary['reasons']}",
-                            file=sys.stderr,
-                        )
-                except Exception as e:
-                    print(f"[verify] unexpected error: {e}", file=sys.stderr)
+                finally:
+                    scan_done.set()
 
-                # Fire handlers FIRST so any actions land in their recent_actions
-                # buffers (and the quiet-heartbeat detector sees the deltas)
-                # BEFORE the dashboard renders.
-                submits_before = _count_trade_submits(handlers)
-                candidates = []
-                if handlers:
-                    candidates = _collect_filtered_candidates(data, args)
-                    ctx = HandlerContext(
-                        client=client,
-                        args=args,
-                        scan_data=data,
-                        is_market_hours=is_market_hours(),
-                        now_ts=datetime.now().isoformat(),
+            async def _tick_during_scan():
+                # Mirrors the Phase-1 ticker but exits as soon as the scan
+                # completes — no point updating the footer after the new
+                # dashboard is about to overwrite the screen.
+                if next_paint_at is None:
+                    return
+                while not scan_done.is_set():
+                    now = asyncio.get_event_loop().time()
+                    paint_remaining = max(0, int(round(next_paint_at - now)))
+                    print(
+                        f"\033[F\033[2K{render_footer(args, seconds_remaining=paint_remaining)}",
+                        flush=True,
                     )
-                    for handler in handlers:
-                        try:
-                            eligible = handler.filter(candidates)
-                        except Exception as e:
-                            print(f"[handler:{handler.name}] filter error: {e}", file=sys.stderr)
-                            continue
-                        if eligible:
-                            try:
-                                await handler.fire(eligible, ctx)
-                            except Exception as e:
-                                print(f"[handler:{handler.name}] fire error: {e}", file=sys.stderr)
+                    try:
+                        await asyncio.wait_for(scan_done.wait(), timeout=1.0)
+                        break
+                    except asyncio.TimeoutError:
+                        continue
 
-                # Quiet-scan heartbeat: if no trade/sim handler fired AND there
-                # was nothing from the screener, record WHY so the user can
-                # glance at the ACTIVITY panel and see the system is alive.
-                submits_after = _count_trade_submits(handlers)
-                _maybe_log_quiet_heartbeat(
-                    args, handlers, data, candidates,
-                    fired=(submits_after > submits_before),
+            if next_paint_at is None:
+                # First cycle: no countdown to keep alive yet.
+                output, err = await _do_scan_cycle()
+            else:
+                results = await asyncio.gather(
+                    _do_scan_cycle(), _tick_during_scan(),
                 )
+                output, err = results[0]
 
-                output = render_dashboard(data, args)
-                # Clear screen and render
-                print("\033[2J\033[H" + output, end="", flush=True)
+            scan_duration_history.append(
+                asyncio.get_event_loop().time() - scan_started_at
+            )
 
-            except httpx.ConnectError:
+            # Phase 3 — paint. The screen-clear is part of `output` (or
+            # the error fallback below) so the previous frame is fully
+            # replaced and stale countdown ticks don't survive.
+            if err is None and output is not None:
+                print(output, end="", flush=True)
+            else:
                 print("\033[2J\033[H")
-                print(f" {BOLD}SPREAD SCANNER{RESET} — Cannot connect to daemon at {args.daemon_url}")
-                print(f" Start daemon: python utp.py daemon --live")
-            except Exception as e:
-                print("\033[2J\033[H")
-                print(f" {BOLD}SPREAD SCANNER{RESET} — Error: {e}")
+                print(f" {BOLD}SPREAD SCANNER{RESET} — {err}")
 
             if args.once:
                 break
-            # Tick the footer once per second so "Next: +Ns" stays live.
-            #
-            # After the dashboard paint, the cursor is parked at the END of
-            # the footer (last line, no trailing newline). To prevent stray
-            # logging from background tasks (notify failures, prev_close
-            # diagnostics, etc.) from clobbering the footer text, we drop the
-            # cursor to a fresh line BELOW the footer first. Each tick then
-            # uses ESC[F (cursor up to start of previous line) + ESC[2K
-            # (clear that line) to repaint just the footer, and a trailing
-            # newline to re-park below — so the cursor lives on a scratch
-            # line where stray prints can land without garbling anything.
+
+            # After the paint, the cursor is at the end of the footer; drop
+            # to a scratch line below it so stray logs (notify failures,
+            # prev_close diagnostics) don't clobber footer repaints. Each
+            # subsequent tick uses ESC[F + ESC[2K to clear and repaint
+            # exactly the footer line.
             print()  # park cursor below footer
-            deadline = asyncio.get_event_loop().time() + args.interval
-            while True:
-                remaining = int(round(deadline - asyncio.get_event_loop().time()))
-                if remaining <= 0:
-                    break
-                # ESC[F: cursor to start of previous line. ESC[2K: clear it.
-                # Then repaint footer + newline to park below again.
-                print(
-                    f"\033[F\033[2K{render_footer(args, seconds_remaining=remaining)}",
-                    flush=True,
-                )
-                await asyncio.sleep(min(1.0, max(0.05, deadline - asyncio.get_event_loop().time())))
+            # Compute next paint deadline from THIS paint, not from the
+            # scan start — keeps the visual cadence steady even when
+            # individual scans run long.
+            paint_at_now = asyncio.get_event_loop().time()
+            base = next_paint_at if next_paint_at is not None else paint_at_now
+            next_paint_at = base + args.interval
+            # If we somehow fell behind (a scan took >1 interval), advance
+            # to the next future slot rather than instantly looping.
+            while next_paint_at <= paint_at_now:
+                next_paint_at += args.interval
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────

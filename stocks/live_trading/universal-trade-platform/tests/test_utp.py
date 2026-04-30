@@ -114,6 +114,111 @@ class TestDisplayHelpers:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
+class TestTradeHttpTimeout:
+    """The CLI's HTTP timeout for ``POST /trade/execute`` must always exceed
+    the daemon's broker-fill poll timeout. Otherwise the client gives up
+    while the daemon is still legitimately waiting on the broker — the bug
+    we hit in production with the hardcoded 90s/60s pair."""
+
+    def test_default_timeout_is_broker_timeout_plus_2pct(self, monkeypatch):
+        """With the default 60s daemon poll, client waits 61.2s (60 × 1.02)."""
+        monkeypatch.delenv("ORDER_POLL_TIMEOUT_SECONDS", raising=False)
+        monkeypatch.delenv("UTP_TRADE_HTTP_TIMEOUT", raising=False)
+        from utp import _trade_http_timeout
+        assert _trade_http_timeout() == pytest.approx(60.0 * 1.02)
+
+    def test_timeout_scales_with_broker_timeout(self, monkeypatch):
+        """If the daemon's poll timeout is bumped, the client auto-scales —
+        without the user having to set a second env var."""
+        monkeypatch.setenv("ORDER_POLL_TIMEOUT_SECONDS", "120")
+        monkeypatch.delenv("UTP_TRADE_HTTP_TIMEOUT", raising=False)
+        from utp import _trade_http_timeout
+        assert _trade_http_timeout() == pytest.approx(120.0 * 1.02)
+
+    def test_explicit_override_wins_when_above_floor(self, monkeypatch):
+        """``UTP_TRADE_HTTP_TIMEOUT`` can grant *more* slack than the +2% rule."""
+        monkeypatch.setenv("ORDER_POLL_TIMEOUT_SECONDS", "60")
+        monkeypatch.setenv("UTP_TRADE_HTTP_TIMEOUT", "300")
+        from utp import _trade_http_timeout
+        assert _trade_http_timeout() == 300.0
+
+    def test_override_floored_to_2pct_margin(self, monkeypatch):
+        """A reckless override below broker × 1.02 is silently raised to the
+        floor — the policy is "at least +2%", never less."""
+        monkeypatch.setenv("ORDER_POLL_TIMEOUT_SECONDS", "60")
+        monkeypatch.setenv("UTP_TRADE_HTTP_TIMEOUT", "30")  # too short
+        from utp import _trade_http_timeout
+        assert _trade_http_timeout() == pytest.approx(60.0 * 1.02)
+
+    def test_invalid_override_falls_back_to_floor(self, monkeypatch):
+        monkeypatch.setenv("ORDER_POLL_TIMEOUT_SECONDS", "60")
+        monkeypatch.setenv("UTP_TRADE_HTTP_TIMEOUT", "not-a-number")
+        from utp import _trade_http_timeout
+        assert _trade_http_timeout() == pytest.approx(60.0 * 1.02)
+
+
+class TestPollIntervalFloor:
+    """Order-status polling must not exceed IBKR's pacing — the floor is 2s."""
+
+    def test_settings_default_is_2s(self):
+        from app.config import Settings
+        s = Settings(_env_file=None)  # ignore any .env on disk
+        assert s.order_poll_interval_seconds == 2.0
+
+    def test_settings_validator_floors_sub_2s_overrides(self, monkeypatch):
+        """Even an explicit env var < 2s gets bumped to 2s — the validator
+        is the policy enforcement point."""
+        monkeypatch.setenv("ORDER_POLL_INTERVAL_SECONDS", "0.5")
+        from app.config import Settings
+        s = Settings(_env_file=None)
+        assert s.order_poll_interval_seconds == 2.0
+
+    def test_settings_validator_passes_higher_values(self, monkeypatch):
+        monkeypatch.setenv("ORDER_POLL_INTERVAL_SECONDS", "5.0")
+        from app.config import Settings
+        s = Settings(_env_file=None)
+        assert s.order_poll_interval_seconds == 5.0
+
+    @pytest.mark.asyncio
+    async def test_await_order_fill_floors_caller_supplied_interval(self):
+        """Defense in depth: even if a caller passes ``poll_interval=0.01``
+        directly to ``await_order_fill``, it gets bumped to the 2s floor."""
+        from app.services import trade_service
+
+        captured: list[float] = []
+        original_sleep = trade_service.asyncio.sleep
+
+        async def _spy_sleep(secs):
+            captured.append(secs)
+            # Yield without actually sleeping to keep the test fast
+            await original_sleep(0)
+
+        # Patch asyncio.sleep on the trade_service module's reference
+        trade_service.asyncio.sleep = _spy_sleep
+        try:
+            class _OneShot:
+                async def get_order_status(self, _oid):
+                    from app.models import OrderResult, OrderStatus, Broker
+                    return OrderResult(
+                        order_id="x", broker=Broker.IBKR,
+                        status=OrderStatus.FILLED, filled_price=1.0,
+                    )
+
+            with patch.object(trade_service, "ProviderRegistry") as mock_reg:
+                mock_reg.get.return_value = _OneShot()
+                await trade_service.await_order_fill(
+                    broker=Broker.IBKR, order_id="t-floor",
+                    poll_interval=0.01, timeout=1.0,
+                )
+        finally:
+            trade_service.asyncio.sleep = original_sleep
+
+        assert captured, "expected at least one sleep call"
+        assert captured[0] == pytest.approx(2.0), (
+            f"poll_interval should be floored to 2.0; got {captured[0]}"
+        )
+
+
 class TestModeDetection:
     def test_default_is_dry_run(self):
         args = argparse.Namespace(live=False, paper=False)
@@ -1843,6 +1948,72 @@ class TestFlush:
         assert json.loads(pos_file.read_text()) == {}
         assert (ledger_dir / "ledger.jsonl").read_text() == ""
 
+    async def test_flush_conid_cache_removes_disk_files(self, tmp_path, monkeypatch):
+        """Purging conid-cache deletes JSON files in the cache dir."""
+        # _isolate_option_conid_cache autouse fixture sets UTP_OPTION_CONID_CACHE_DIR
+        # to tmp_path / "option_conids". Use that location.
+        cache_dir = tmp_path / "option_conids"
+        cache_dir.mkdir(parents=True)
+        (cache_dir / "2026-04-28.json").write_text('{"NDX_20260429_26250.0_P": 416843}')
+        (cache_dir / "2026-04-27.json").write_text('{"SPX_20260428_5500.0_P": 9876543}')
+
+        # Use a bogus redis URL so the redis branch fails fast (non-fatal)
+        args = argparse.Namespace(
+            what="conid-cache",
+            data_dir=str(tmp_path / "utp"),
+            redis_url="redis://127.0.0.1:1/0",  # nothing listening
+            server_port=8000,
+        )
+        rc = await _cmd_flush(args)
+        assert rc == 0
+        assert list(cache_dir.glob("*.json")) == []
+
+    async def test_flush_conid_cache_redis_unreachable_is_nonfatal(self, tmp_path):
+        """Redis connect failure must not fail the purge (disk purge is the
+        primary action)."""
+        # No JSON files; just confirm the redis branch doesn't poison the rc.
+        args = argparse.Namespace(
+            what="conid-cache",
+            data_dir=str(tmp_path / "utp"),
+            redis_url="redis://127.0.0.1:1/0",
+            server_port=8000,
+        )
+        rc = await _cmd_flush(args)
+        assert rc == 0
+
+    async def test_flush_conid_cache_blocks_when_daemon_running(self, tmp_path, monkeypatch):
+        """Purge refuses while a daemon is detected — its in-memory cache would
+        re-save stale entries."""
+        import utp as _utp
+        monkeypatch.setattr(_utp, "_detect_server", lambda args: "http://localhost:8000")
+
+        cache_dir = tmp_path / "option_conids"
+        cache_dir.mkdir(parents=True)
+        f = cache_dir / "2026-04-28.json"
+        f.write_text("{}")
+
+        args = argparse.Namespace(
+            what="conid-cache",
+            data_dir=str(tmp_path / "utp"),
+            redis_url="redis://127.0.0.1:1/0",
+            server_port=8000,
+        )
+        rc = await _cmd_flush(args)
+        assert rc == 1
+        # File must still be present — purge bailed before touching disk
+        assert f.exists()
+
+    async def test_flush_conid_cache_empty_dir_ok(self, tmp_path):
+        """No cache files / no dir → still returns 0."""
+        args = argparse.Namespace(
+            what="conid-cache",
+            data_dir=str(tmp_path / "utp"),
+            redis_url="redis://127.0.0.1:1/0",
+            server_port=8000,
+        )
+        rc = await _cmd_flush(args)
+        assert rc == 0
+
     async def test_reconcile_with_flush(self, tmp_path):
         """Reconcile --flush clears stale data before reconciling."""
         data_dir = tmp_path / "utp"
@@ -2248,6 +2419,15 @@ class _FakeProvider:
 
 
 class TestFillTracking:
+    @pytest.fixture(autouse=True)
+    def _drop_poll_floor(self, monkeypatch):
+        """The 2s floor in await_order_fill is right for production but
+        makes these unit tests crawl. Drop it for the duration of the
+        class so we can keep fast 0.01s polls."""
+        monkeypatch.setattr(
+            "app.services.trade_service._MIN_POLL_INTERVAL", 0.0
+        )
+
     @pytest.mark.asyncio
     async def test_immediate_fill(self):
         provider = _FakeProvider(polls_before_fill=0)
@@ -2528,6 +2708,534 @@ class TestIBKRProvider:
         assert store.get("SPX", "20260427", 7075.0, "P") == 700075
 
     @pytest.mark.asyncio
+    async def test_get_option_chain_augments_via_contract_details_for_spx(self):
+        """When ``reqSecDefOptParamsAsync`` returns a partial SPX chain (only
+        the parent class's strikes, missing the SPXW chain), get_option_chain
+        must augment via ``reqContractDetails`` for the SPXW class. Locks in
+        the fix for the production bug where SPX's chain cache had only 60
+        strikes clustered around $5000-$5590 while the market was at $7130."""
+        from unittest.mock import MagicMock, AsyncMock
+        from app.core.providers.ibkr import IBKRLiveProvider
+        provider = IBKRLiveProvider()
+        provider._connected = True
+        provider._ib = MagicMock()
+
+        # Underlying qualification
+        underlying = MagicMock(); underlying.conId = 416904; underlying.secType = "IND"
+        async def fake_qualify(_c):
+            return [underlying]
+        provider._qualify_contract_cached = fake_qualify  # type: ignore[assignment]
+
+        # reqSecDefOptParamsAsync returns the partial parent-class chain
+        # (this is what TWS gave us in production for SPX).
+        partial_chain = MagicMock()
+        partial_chain.expirations = ["20260515", "20260619"]
+        partial_chain.strikes = [float(5000 + i * 10) for i in range(60)]
+        provider._ib.reqSecDefOptParamsAsync = AsyncMock(return_value=[partial_chain])
+
+        # reqContractDetailsAsync for SPXW returns the full near-term chain
+        # — strikes spanning $4000-$10000, the realistic SPXW grid.
+        full_strikes = [float(4000 + i * 5) for i in range(1200)]
+        cd_results = []
+        for s in full_strikes:
+            cd = MagicMock()
+            cd.contract = MagicMock()
+            cd.contract.strike = s
+            cd.contract.lastTradeDateOrContractMonth = "20260430"
+            cd_results.append(cd)
+        provider._ib.reqContractDetailsAsync = AsyncMock(return_value=cd_results)
+
+        result = await provider.get_option_chain("SPX")
+
+        # Confirm reqContractDetails ran with tradingClass=SPXW
+        call_args = provider._ib.reqContractDetailsAsync.call_args
+        sample_opt = call_args.args[0]
+        assert getattr(sample_opt, "tradingClass", None) == "SPXW", (
+            "augmentation must query SPXW class, not the parent class"
+        )
+
+        # Result strikes include both the partial-chain strikes AND the
+        # SPXW strikes. The chain now brackets reasonable SPX prices.
+        assert len(result["strikes"]) >= 1200
+        assert max(result["strikes"]) >= 9000.0, (
+            f"augmented chain must reach realistic SPX strikes; "
+            f"got max={max(result['strikes'])}"
+        )
+        # Both expirations from secdef AND from contract details
+        assert "20260430" in result["expirations"]
+        assert "20260515" in result["expirations"]
+
+    @pytest.mark.asyncio
+    async def test_get_option_quotes_forces_spxw_for_all_spx_expirations(self):
+        """Per deployment policy, SPX is forced to ``SPXW`` on EVERY
+        expiration — including the 3rd-Friday monthlies. SPXW is co-listed
+        with the parent SPX class on monthlies (PM- vs AM-settled), so
+        forcing SPXW always lands on the daily-style PM contract that
+        the streaming and quote paths use uniformly. Without this, daily
+        SPX expirations (4 of every 5 weekdays) return empty
+        qualifications and the streaming cache goes stale on SPX."""
+        from app.core.providers.ibkr import IBKRLiveProvider
+        provider = IBKRLiveProvider()
+        provider._connected = True
+        provider._ib = MagicMock()
+
+        captured: list[str] = []
+
+        async def fake_qualify(*contracts):
+            for c in contracts:
+                captured.append(getattr(c, "tradingClass", None) or "")
+            results = []
+            for c in contracts:
+                mc = MagicMock()
+                mc.conId = 700000 + int(c.strike)
+                mc.strike = c.strike
+                mc.localSymbol = "SPX 260429P07050000"
+                results.append(mc)
+            return results
+
+        provider._ib.qualifyContractsAsync = fake_qualify
+        provider._ib.reqMktData = MagicMock(side_effect=lambda c, **_: MagicMock(
+            contract=c, bid=1.0, ask=1.1, last=1.05, volume=0,
+        ))
+        provider._ib.cancelMktData = MagicMock()
+
+        # Daily expiration (Wed)
+        async def fake_chain(_sym):
+            return {"expirations": ["2026-04-29"], "strikes": [7050.0, 7075.0]}
+        provider.get_option_chain = fake_chain  # type: ignore[assignment]
+        await provider.get_option_quotes(
+            "SPX", "2026-04-29", "PUT", strike_min=7000, strike_max=7100,
+        )
+        assert all(tc == "SPXW" for tc in captured), (
+            f"every SPX option must carry tradingClass=SPXW; got {captured}"
+        )
+
+        # Monthly expiration (3rd Friday) — same policy: still SPXW
+        captured.clear()
+        provider._option_subs.clear()
+        provider._option_subs_last_used.clear()
+
+        async def fake_chain_monthly(_sym):
+            return {"expirations": ["2026-05-15"], "strikes": [7050.0]}
+        provider.get_option_chain = fake_chain_monthly  # type: ignore[assignment]
+        await provider.get_option_quotes(
+            "SPX", "2026-05-15", "PUT", strike_min=7000, strike_max=7100,
+        )
+        assert all(tc == "SPXW" for tc in captured), (
+            f"3rd-Friday SPX must STILL be forced to SPXW under the new "
+            f"policy (PM-settled, co-listed with monthly SPX); got {captured}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_option_quotes_forces_rutw_for_all_rut_expirations(self):
+        """Same policy as SPX — RUT always uses RUTW (PM-settled weekly),
+        even on monthly 3rd Fridays."""
+        from app.core.providers.ibkr import IBKRLiveProvider
+        provider = IBKRLiveProvider()
+        provider._connected = True
+        provider._ib = MagicMock()
+
+        async def fake_chain(_sym):
+            return {"expirations": ["2026-05-15"], "strikes": [2750.0]}
+        provider.get_option_chain = fake_chain  # type: ignore[assignment]
+
+        captured: list[str] = []
+
+        async def fake_qualify(*contracts):
+            for c in contracts:
+                captured.append(getattr(c, "tradingClass", None) or "")
+            mc = MagicMock(); mc.conId = 700001; mc.strike = 2750.0
+            mc.localSymbol = "RUT 260515P02750000"
+            return [mc]
+
+        provider._ib.qualifyContractsAsync = fake_qualify
+        provider._ib.reqMktData = MagicMock(side_effect=lambda c, **_: MagicMock(
+            contract=c, bid=1.0, ask=1.1, last=1.05, volume=0,
+        ))
+        provider._ib.cancelMktData = MagicMock()
+
+        await provider.get_option_quotes(
+            "RUT", "2026-05-15", "PUT", strike_min=2700, strike_max=2800,
+        )
+        assert captured == ["RUTW"], (
+            f"3rd-Friday RUT must be forced to RUTW; got {captured}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_option_quotes_does_not_force_class_for_ndx(self):
+        """NDX is intentionally NOT forced. Live testing on 2026-04-29
+        showed that forcing ``NDXP`` made 3 of 6 (sym, exp, type) jobs
+        fail to qualify and inflated cycle latency from <1s to 22s. The
+        default ``NDX`` class qualifies daily and weekly NDX cleanly.
+        Users can opt in to NDXP per-trade via ``--trading-class NDXP``."""
+        from app.core.providers.ibkr import IBKRLiveProvider
+        provider = IBKRLiveProvider()
+        provider._connected = True
+        provider._ib = MagicMock()
+
+        async def fake_chain(_sym):
+            return {"expirations": ["2026-04-29"], "strikes": [27000.0]}
+        provider.get_option_chain = fake_chain  # type: ignore[assignment]
+
+        captured: list[str] = []
+
+        async def fake_qualify(*contracts):
+            for c in contracts:
+                captured.append(getattr(c, "tradingClass", None) or "")
+            mc = MagicMock(); mc.conId = 700002; mc.strike = 27000.0
+            mc.localSymbol = "NDX 260429P27000000"
+            return [mc]
+
+        provider._ib.qualifyContractsAsync = fake_qualify
+        provider._ib.reqMktData = MagicMock(side_effect=lambda c, **_: MagicMock(
+            contract=c, bid=1.0, ask=1.1, last=1.05, volume=0,
+        ))
+        provider._ib.cancelMktData = MagicMock()
+
+        await provider.get_option_quotes(
+            "NDX", "2026-04-29", "PUT", strike_min=26900, strike_max=27100,
+        )
+        assert captured == [""], (
+            f"NDX must use the default class (no force); got {captured}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_qualify_option_honors_per_leg_trading_class_override(self):
+        """A per-leg ``trading_class`` (e.g. set on OptionLeg by the CLI's
+        ``--trading-class SPX``) overrides the default forced class. Empty
+        string disables forcing entirely. Real-world use: rolling out of
+        a legacy AM-settled monthly SPX position you opened years ago."""
+        from app.core.providers.ibkr import IBKRLiveProvider
+        provider = IBKRLiveProvider()
+        provider._connected = True
+        provider._ib = MagicMock()
+
+        captured: list[str] = []
+
+        async def fake_cached_qualify(opt):
+            captured.append(getattr(opt, "tradingClass", None) or "")
+            mc = MagicMock(); mc.conId = 555000; mc.strike = float(opt.strike)
+            mc.localSymbol = "SPX 260515P07050000"
+            return [mc]
+
+        provider._qualify_contract_cached = fake_cached_qualify  # type: ignore[assignment]
+
+        # Override "SPX" — user wants the AM-settled monthly contract
+        await provider._qualify_option(
+            "SPX", "20260515", 7050.0, "P",
+            trading_class_override="SPX",
+        )
+        assert captured[-1] == "SPX", (
+            f"override should set tradingClass to 'SPX'; got {captured[-1]!r}"
+        )
+
+        # Override "" — disable forcing entirely
+        captured.clear()
+        await provider._qualify_option(
+            "SPX", "20260515", 7050.0, "P",
+            trading_class_override="",
+        )
+        assert captured[-1] == "", (
+            f"empty override should leave tradingClass unset; got {captured[-1]!r}"
+        )
+
+    def test_force_option_trading_class_env_override(self, monkeypatch):
+        """``UTP_OPTION_TC_<SYMBOL>`` env var overrides the default. Useful
+        when running the daemon to flip behavior without touching code."""
+        from app.core.providers.ibkr import _force_option_trading_class
+        # Default: SPX→SPXW
+        monkeypatch.delenv("UTP_OPTION_TC_SPX", raising=False)
+        assert _force_option_trading_class("SPX") == "SPXW"
+        # Env override to use the parent class
+        monkeypatch.setenv("UTP_OPTION_TC_SPX", "SPX")
+        assert _force_option_trading_class("SPX") == "SPX"
+        # Env empty → no forcing
+        monkeypatch.setenv("UTP_OPTION_TC_SPX", "")
+        assert _force_option_trading_class("SPX") is None
+        # NDX: default is no-force; env opt-in to NDXP
+        monkeypatch.delenv("UTP_OPTION_TC_NDX", raising=False)
+        assert _force_option_trading_class("NDX") is None
+        monkeypatch.setenv("UTP_OPTION_TC_NDX", "NDXP")
+        assert _force_option_trading_class("NDX") == "NDXP"
+
+    @pytest.mark.asyncio
+    async def test_qualify_option_forces_spxw_for_trades(self):
+        """The trade execution path also forces SPXW — without this, daily SPX
+        trades would fail to qualify and the order would never reach IBKR.
+        Streaming and trading must agree on the same contract."""
+        from app.core.providers.ibkr import IBKRLiveProvider
+        provider = IBKRLiveProvider()
+        provider._connected = True
+        provider._ib = MagicMock()
+
+        captured: list[str] = []
+
+        async def fake_qualify(opt):
+            captured.append(getattr(opt, "tradingClass", None) or "")
+            return [opt]
+
+        # _qualify_contract_cached invokes _ib.qualifyContractsAsync via
+        # the cache wrapper. Stub the wrapper directly for simplicity.
+        async def fake_cached_qualify(opt):
+            await fake_qualify(opt)
+            mc = MagicMock(); mc.conId = 868691755
+            mc.strike = float(getattr(opt, "strike", 7050.0))
+            mc.localSymbol = "SPX 260429P07050000"
+            return [mc]
+
+        provider._qualify_contract_cached = fake_cached_qualify  # type: ignore[assignment]
+
+        result = await provider._qualify_option("SPX", "20260429", 7050.0, "P")
+        assert result and result[0].conId == 868691755
+        # First exchange attempt (SMART) must carry tradingClass=SPXW
+        assert captured[0] == "SPXW", (
+            f"trade-flow qualify must force SPXW for SPX; got {captured}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_get_option_quotes_does_not_raise_on_unlisted_expiration(self):
+        """TWS's ``reqSecDefOptParamsAsync`` does NOT enumerate near-term daily
+        expirations (SPXW 0DTE/1DTE/2DTE), but those contracts exist and
+        qualify normally. Previously we raised ``ValueError("Expiration …
+        not available")`` which made ~40% of option-quote streaming cycles
+        fail on SPX/RUT 1-2DTE. Now we skip the gate and let
+        ``qualifyContractsAsync`` filter — same shape as CPG's per-contract
+        ``secdef/info`` flow."""
+        from app.core.providers.ibkr import IBKRLiveProvider
+        provider = IBKRLiveProvider()
+        provider._connected = True
+        provider._ib = MagicMock()
+
+        # Chain meta omits the requested expiration (the bug scenario).
+        async def fake_chain(_sym):
+            return {
+                "expirations": ["2026-05-15", "2026-06-19"],  # only monthlies
+                "strikes": [7050.0, 7075.0],
+            }
+        provider.get_option_chain = fake_chain  # type: ignore[assignment]
+
+        # qualifyContractsAsync returns valid contracts for the "missing"
+        # expiration — TWS happily qualifies it even though it wasn't in
+        # the chain meta.
+        qualified = []
+        for s in (7050.0, 7075.0):
+            mc = MagicMock()
+            mc.conId = 700000 + int(s)
+            mc.strike = s
+            mc.localSymbol = f"SPX 260430P0{int(s*1000):07d}"
+            qualified.append(mc)
+        provider._ib.qualifyContractsAsync = AsyncMock(return_value=qualified)
+
+        ticker_iter = []
+        for c in qualified:
+            t = MagicMock(); t.contract = c
+            t.bid, t.ask, t.last, t.volume = 1.0, 1.1, 1.05, 0
+            ticker_iter.append(t)
+        provider._ib.reqMktData = MagicMock(side_effect=ticker_iter)
+        provider._ib.cancelMktData = MagicMock()
+
+        # Must NOT raise — the daily expiration is valid even though chain meta
+        # didn't list it. Returns the qualified strikes.
+        results = await provider.get_option_quotes(
+            "SPX", "2026-04-30", "PUT",
+            strike_min=7000, strike_max=7100,
+        )
+        assert len(results) == 2
+        assert {r["strike"] for r in results} == {7050.0, 7075.0}
+
+    @pytest.mark.asyncio
+    async def test_get_option_quotes_reuses_persistent_subscriptions(self):
+        """Second call for the same (symbol, exp, type, strikes) MUST NOT
+        re-subscribe via reqMktData — that's the bug that made TWS-mode
+        option quotes fall behind the streaming poll cycle. Persistent
+        Tickers tick continuously in ib_insync's background loop, so we
+        just read their current values."""
+        from app.core.providers.ibkr import IBKRLiveProvider
+        provider = IBKRLiveProvider()
+        provider._connected = True
+        provider._ib = MagicMock()
+
+        async def fake_chain(sym):
+            return {"expirations": ["2026-04-27"], "strikes": [7050.0, 7075.0]}
+        provider.get_option_chain = fake_chain  # type: ignore[assignment]
+
+        qualified = []
+        for s, cid in [(7050.0, 700050), (7075.0, 700075)]:
+            mc = MagicMock()
+            mc.conId = cid
+            mc.strike = s
+            mc.localSymbol = f"SPX 260427P0{int(s*1000):07d}"
+            qualified.append(mc)
+        provider._ib.qualifyContractsAsync = AsyncMock(return_value=qualified)
+
+        tickers = {}
+        for c in qualified:
+            t = MagicMock()
+            t.contract = c
+            t.bid, t.ask, t.last, t.volume = 1.0, 1.1, 1.05, 100
+            tickers[c.conId] = t
+
+        def _req(c, **_):
+            return tickers[c.conId]
+        provider._ib.reqMktData = MagicMock(side_effect=_req)
+        provider._ib.cancelMktData = MagicMock()
+
+        # First call subscribes both strikes
+        await provider.get_option_quotes("SPX", "2026-04-27", "PUT",
+                                          strike_min=7000, strike_max=7100)
+        assert provider._ib.reqMktData.call_count == 2
+        # No cancel between calls — this is the whole point
+        assert provider._ib.cancelMktData.call_count == 0
+        # Persistent state populated
+        assert (("SPX", "20260427", "P", 7050.0)) in provider._option_subs
+        assert (("SPX", "20260427", "P", 7075.0)) in provider._option_subs
+
+        # Second call: zero new subscriptions, zero cancels
+        provider._ib.reqMktData.reset_mock()
+        await provider.get_option_quotes("SPX", "2026-04-27", "PUT",
+                                          strike_min=7000, strike_max=7100)
+        assert provider._ib.reqMktData.call_count == 0, (
+            "second call must not re-subscribe — that was the bug"
+        )
+        assert provider._ib.cancelMktData.call_count == 0
+
+    @pytest.mark.asyncio
+    async def test_get_option_quotes_lru_evicts_oldest(self):
+        """When ``_option_subs_budget`` would be exceeded, the LRU-oldest
+        subscriptions must be cancelled to free IBKR market-data lines."""
+        from app.core.providers.ibkr import IBKRLiveProvider
+        provider = IBKRLiveProvider()
+        provider._connected = True
+        provider._ib = MagicMock()
+        provider._option_subs_budget = 2  # tiny budget for the test
+
+        # Pre-seed 2 subscriptions; mark one as oldest
+        old_t = MagicMock()
+        old_t.contract = MagicMock()
+        recent_t = MagicMock()
+        recent_t.contract = MagicMock()
+        provider._option_subs[("SPX", "20260427", "P", 6000.0)] = old_t
+        provider._option_subs[("SPX", "20260427", "P", 6500.0)] = recent_t
+        provider._option_subs_last_used[("SPX", "20260427", "P", 6000.0)] = 100.0
+        provider._option_subs_last_used[("SPX", "20260427", "P", 6500.0)] = 200.0
+
+        async def fake_chain(sym):
+            return {"expirations": ["2026-04-27"], "strikes": [7050.0]}
+        provider.get_option_chain = fake_chain  # type: ignore[assignment]
+
+        new_c = MagicMock(); new_c.conId = 700050; new_c.strike = 7050.0
+        new_c.localSymbol = "SPX 260427P07050000"
+        provider._ib.qualifyContractsAsync = AsyncMock(return_value=[new_c])
+
+        new_t = MagicMock()
+        new_t.contract = new_c
+        new_t.bid, new_t.ask, new_t.last, new_t.volume = 1.0, 1.1, 1.05, 0
+        provider._ib.reqMktData = MagicMock(return_value=new_t)
+        provider._ib.cancelMktData = MagicMock()
+
+        await provider.get_option_quotes("SPX", "2026-04-27", "PUT",
+                                          strike_min=7000, strike_max=7100)
+
+        # Oldest sub (strike 6000, last_used=100.0) is evicted
+        assert ("SPX", "20260427", "P", 6000.0) not in provider._option_subs
+        assert ("SPX", "20260427", "P", 6500.0) in provider._option_subs
+        assert ("SPX", "20260427", "P", 7050.0) in provider._option_subs
+        # The eviction issued a cancel — exactly the LRU one
+        assert provider._ib.cancelMktData.call_count == 1
+        cancelled_contract = provider._ib.cancelMktData.call_args[0][0]
+        assert cancelled_contract is old_t.contract
+
+    @pytest.mark.asyncio
+    async def test_streaming_service_applies_sub_budget_from_config(self, tmp_path, monkeypatch):
+        """``OptionQuoteStreamingService.start()`` must override the provider's
+        ``_option_subs_budget`` from ``option_quotes_ibkr_sub_budget``. The
+        production bug was the streaming workload (3 indices × 3 exps × 2
+        types × ~150 strikes ≈ 2700) blowing out the 300 default and
+        thrashing through LRU evictions every cycle."""
+        from app.core.providers.ibkr import IBKRLiveProvider
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        provider = IBKRLiveProvider()
+        provider._option_subs_budget = 300  # the old default
+        config = StreamingConfig(
+            symbols=[],
+            redis_enabled=False,
+            redis_url="",
+            questdb_enabled=False,
+            ws_broadcast_enabled=False,
+            close_band_pct=0.35,
+            option_quotes_ibkr_sub_budget=2500,
+        )
+
+        svc = OptionQuoteStreamingService(config, provider, streaming_svc=None)
+
+        # Avoid touching Redis or quote caches during this test
+        async def _noop(*_a, **_k): return None
+        monkeypatch.setattr(svc, "_redis_connect", _noop)
+        monkeypatch.setattr(svc, "_redis_load_conid_cache", _noop)
+        monkeypatch.setattr(svc, "_redis_load_quotes", _noop)
+        monkeypatch.setattr(svc._cache, "set_redis", lambda *_: None)
+        monkeypatch.setattr(svc._ibkr_cache, "set_redis", lambda *_: None)
+
+        try:
+            await svc.start()
+            assert provider._option_subs_budget == 2500, (
+                f"streaming config budget should override provider default; "
+                f"got {provider._option_subs_budget}"
+            )
+        finally:
+            svc._running = False
+
+    @pytest.mark.asyncio
+    async def test_disconnect_cancels_persistent_option_subs(self):
+        """``disconnect()`` must cancel every persistent option subscription
+        so we don't leak IBKR market-data lines across daemon restarts."""
+        from app.core.providers.ibkr import IBKRLiveProvider
+        provider = IBKRLiveProvider()
+        provider._connected = True
+        ib = MagicMock()
+        provider._ib = ib
+
+        # Two persistent subs
+        for s in (7050.0, 7075.0):
+            t = MagicMock(); t.contract = MagicMock()
+            provider._option_subs[("SPX", "20260427", "P", s)] = t
+            provider._option_subs_last_used[("SPX", "20260427", "P", s)] = 100.0
+
+        await provider.disconnect()
+
+        assert ib.cancelMktData.call_count == 2
+        assert provider._option_subs == {}
+        assert provider._option_subs_last_used == {}
+
+    def test_on_disconnect_drops_orphaned_option_subs(self):
+        """On unexpected disconnect, the registry must clear without trying
+        to cancel (the underlying ib_insync client is dead — cancel calls
+        would just throw). Reconnect's first ``get_option_quotes`` call
+        re-subscribes from scratch."""
+        from app.core.providers.ibkr import IBKRLiveProvider
+        provider = IBKRLiveProvider()
+        provider._connected = True
+        provider._ib = MagicMock()
+
+        for s in (7050.0,):
+            t = MagicMock(); t.contract = MagicMock()
+            provider._option_subs[("SPX", "20260427", "P", s)] = t
+            provider._option_subs_last_used[("SPX", "20260427", "P", s)] = 100.0
+
+        # Simulate without a running event loop — _on_disconnect catches the
+        # RuntimeError when trying to spawn the reconnect task. Either way,
+        # the registry must be cleared.
+        try:
+            provider._on_disconnect()
+        except RuntimeError:
+            pass
+
+        assert provider._option_subs == {}
+        assert provider._option_subs_last_used == {}
+
+    @pytest.mark.asyncio
     async def test_live_get_positions_not_connected(self):
         from app.core.providers.ibkr import IBKRLiveProvider
         assert await IBKRLiveProvider().get_positions() == []
@@ -2574,10 +3282,11 @@ class TestIBKRProvider:
         from app.core.providers.ibkr_cache import OptionChainCache
         from datetime import date, timedelta
         cache = OptionChainCache(cache_dir=str(tmp_path))
-        # Use today + future expiration and 50+ strikes to pass validation
+        # Use a realistic SPX chain: ~600 strikes spanning $1000-$10990 so
+        # min/max < 0.6 (passes the strike-span sanity check).
         today_exp = date.today().strftime("%Y%m%d")
         future_exp = (date.today() + timedelta(days=7)).strftime("%Y%m%d")
-        strikes = [float(5000 + i * 10) for i in range(60)]
+        strikes = [float(1000 + i * 10) for i in range(1000)]
         cache.put("SPX", [today_exp, future_exp], strikes)
         result = cache.get("SPX")
         assert result is not None
@@ -2589,10 +3298,52 @@ class TestIBKRProvider:
         c1 = OptionChainCache(cache_dir=str(tmp_path))
         today_exp = date.today().strftime("%Y%m%d")
         future_exp = (date.today() + timedelta(days=7)).strftime("%Y%m%d")
-        strikes = [float(20000 + i * 50) for i in range(60)]
+        # Realistic NDX chain spanning $5000-$45000 (min/max=0.11)
+        strikes = [float(5000 + i * 50) for i in range(800)]
         c1.put("NDX", [today_exp, future_exp], strikes)
         c2 = OptionChainCache(cache_dir=str(tmp_path))
         assert c2.get("NDX") is not None
+
+    def test_option_chain_cache_rejects_clustered_strikes(self, tmp_path):
+        """The bug we hit on 2026-04-29: ``reqSecDefOptParamsAsync`` for SPX
+        returned 60 strikes spanning only $5000-$5590 while the actual
+        market price was $7130. The cache passed the count-and-expiration
+        checks but had no strike anywhere near the underlying. This test
+        locks in the strike-span validation that now catches it."""
+        from app.core.providers.ibkr_cache import OptionChainCache
+        from datetime import date, timedelta
+        cache = OptionChainCache(cache_dir=str(tmp_path))
+        today_exp = date.today().strftime("%Y%m%d")
+        future_exp = (date.today() + timedelta(days=7)).strftime("%Y%m%d")
+        # 60 strikes clustered tightly: min/max = 5000/5590 ≈ 0.89 > 0.6 floor
+        clustered = [float(5000 + i * 10) for i in range(60)]
+        cache.put("SPX", [today_exp, future_exp], clustered)
+        # put() refused to persist — get() must return None
+        assert cache.get("SPX") is None
+
+    def test_option_chain_cache_rejects_clustered_on_read(self, tmp_path):
+        """Even if a clustered chain somehow lands on disk (e.g. written by
+        an older daemon version that lacked the put-time validation), the
+        get-time validator must reject it so the next caller falls through
+        to a fresh fetch."""
+        import json
+        from app.core.providers.ibkr_cache import OptionChainCache
+        from datetime import date, timedelta
+        cache = OptionChainCache(cache_dir=str(tmp_path))
+        today_exp = date.today().strftime("%Y%m%d")
+        future_exp = (date.today() + timedelta(days=7)).strftime("%Y%m%d")
+        # Bypass put() and write the bad chain straight to disk
+        path = cache._file_path("SPX", date.today())
+        path.write_text(json.dumps({
+            "symbol": "SPX",
+            "date": date.today().isoformat(),
+            "expirations": [today_exp, future_exp],
+            "strikes": [float(5000 + i * 10) for i in range(60)],
+            "timestamp": 0,
+        }))
+        assert cache.get("SPX") is None
+        # Validator deletes invalid file so it doesn't keep getting reread
+        assert not path.exists()
 
     @pytest.mark.asyncio
     async def test_qualify_contract_cached(self):
@@ -2918,14 +3669,19 @@ class TestIBKRRestProvider:
         assert snapshot_calls[0]["params"]["conids"] == "416904"
 
     @pytest.mark.asyncio
-    async def test_resolve_option_conid_priming_does_not_loop_forever(self):
-        """If priming + retry still all fail with HTTP errors, raise (no
-        unbounded retries)."""
+    async def test_resolve_option_conid_priming_does_not_loop_forever(self, monkeypatch):
+        """If priming + reauth + retry still all fail, raise (no unbounded
+        retries). All three rounds must appear in the diagnostic."""
         from app.core.providers.ibkr_rest import IBKRRestProvider
         provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
         provider._connected = True
         provider._session = AsyncMock()
         provider._conid_cache["SPX"] = 416904
+
+        # Skip the real 1-second propagation sleep
+        import asyncio as _aio
+        async def _fast_sleep(*_a, **_k): return None
+        monkeypatch.setattr(_aio, "sleep", _fast_sleep)
 
         async def fake_get(path, params=None, **_):
             if path == "/iserver/marketdata/snapshot":
@@ -2934,14 +3690,103 @@ class TestIBKRRestProvider:
                 raise RuntimeError("HTTP 500")
             return []
 
+        async def fake_post(path, **_):
+            return {}
+
         provider._get = fake_get  # type: ignore[assignment]
+        provider._post = fake_post  # type: ignore[assignment]
 
         with pytest.raises(RuntimeError) as excinfo:
             await provider._resolve_option_conid("SPX", "20260427", 7070.0, "P")
         msg = str(excinfo.value)
-        # Both rounds should be in the diagnostic
+        # All three rounds (R1 baseline, R2 post-prime, R3 post-reauth) should
+        # be in the diagnostic.
         assert "r1 exch=" in msg
         assert "r2 exch=" in msg
+        assert "r3 exch=" in msg
+
+    @pytest.mark.asyncio
+    async def test_resolve_option_conid_session_recovery_succeeds(self, monkeypatch):
+        """Round 3 (post-session-recovery) succeeds when R1+R2 hit 500s with
+        ``No Contracts retrieved``. Verifies that ``/tickle`` and
+        ``/iserver/reauthenticate`` are issued before the final retry — this is
+        the IBKR-recommended recovery for a daemon-side stale session whose
+        gateway-level auth still appears healthy."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+        provider._conid_cache["SPX"] = 416904
+
+        import asyncio as _aio
+        async def _fast_sleep(*_a, **_k): return None
+        monkeypatch.setattr(_aio, "sleep", _fast_sleep)
+
+        attempts = {"count": 0}
+        post_calls: list[str] = []
+
+        async def fake_get(path, params=None, **_):
+            if path == "/iserver/marketdata/snapshot":
+                return [{"31": "7150"}]
+            if path == "/iserver/secdef/info":
+                attempts["count"] += 1
+                # R1 (3) + R2 (3) all return CPG's stale-session signature.
+                if attempts["count"] <= 6:
+                    raise RuntimeError(
+                        "HTTP 500 from /iserver/secdef/info: "
+                        '{"error":"No Contracts retrieved "}'
+                    )
+                return [{"conid": 868691755, "maturityDate": "20260428"}]
+            return []
+
+        async def fake_post(path, **_):
+            post_calls.append(path)
+            if path == "/iserver/auth/status":
+                return {"authenticated": True}
+            return {}
+
+        provider._get = fake_get  # type: ignore[assignment]
+        provider._post = fake_post  # type: ignore[assignment]
+
+        con_id = await provider._resolve_option_conid("SPX", "20260428", 7050.0, "P")
+        assert con_id == 868691755
+        assert attempts["count"] == 7  # 3 + 3 + 1
+
+        # Recovery sequence ran before the successful R3 attempt
+        assert "/tickle" in post_calls
+        assert "/iserver/reauthenticate" in post_calls
+        assert "/iserver/auth/status" in post_calls
+        # Order: tickle, reauthenticate, auth/status
+        recovery_order = [p for p in post_calls
+                          if p in ("/tickle", "/iserver/reauthenticate", "/iserver/auth/status")]
+        assert recovery_order == ["/tickle", "/iserver/reauthenticate", "/iserver/auth/status"]
+
+    @pytest.mark.asyncio
+    async def test_get_surfaces_response_body_on_error(self):
+        """``_get`` must include the response body in the raised exception so
+        callers can see CPG's error message (e.g. ``Authenticated: false``,
+        ``No Contracts retrieved``). Previously bare ClientResponseError gave
+        no usable info — the surface was just the URL."""
+        from unittest.mock import AsyncMock, MagicMock
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+
+        resp = AsyncMock()
+        resp.status = 500
+        resp.raise_for_status = MagicMock(side_effect=RuntimeError("500 error"))
+        resp.text = AsyncMock(return_value='{"error":"No Contracts retrieved "}')
+        resp.__aenter__ = AsyncMock(return_value=resp)
+        resp.__aexit__ = AsyncMock(return_value=False)
+        provider._session.get = MagicMock(return_value=resp)
+
+        with pytest.raises(RuntimeError) as excinfo:
+            await provider._get("/iserver/secdef/info", params={"conid": 1})
+        msg = str(excinfo.value)
+        assert "HTTP 500" in msg
+        assert "No Contracts retrieved" in msg
 
     @pytest.mark.asyncio
     async def test_resolve_option_conid_uses_cross_provider_store(self, tmp_path, monkeypatch):
@@ -3339,11 +4184,13 @@ class TestIBKRRestProvider:
         provider._session = AsyncMock()
         provider._conid_cache["SPX"] = 416904
 
-        # Seed the daily cache directly (avoids mocking the multi-step CPG flow)
+        # Seed the daily cache directly (avoids mocking the multi-step CPG flow).
+        # Use a realistic SPX chain: ~1000 strikes spanning $1000-$10990 so
+        # min/max < 0.6 and the strike-span validator accepts it.
         from datetime import date, timedelta
         today_exp = date.today().strftime("%Y%m%d")
         future_exp = (date.today() + timedelta(days=7)).strftime("%Y%m%d")
-        strikes = [float(5000 + i * 10) for i in range(60)]
+        strikes = [float(1000 + i * 10) for i in range(1000)]
         provider._cache.option_chains.put(
             "SPX",
             expirations=[today_exp, future_exp],
@@ -3352,7 +4199,7 @@ class TestIBKRRestProvider:
 
         chain = await provider.get_option_chain("SPX")
         assert 5100.0 in chain["strikes"]
-        assert len(chain["strikes"]) == 60
+        assert len(chain["strikes"]) == 1000
         assert today_exp in chain["expirations"]
 
     @pytest.mark.asyncio
@@ -3470,6 +4317,88 @@ class TestIBKRRestProvider:
         assert result.status == OrderStatus.CANCELLED
         provider._session.delete.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_get_option_quotes_warm_path_skips_second_call(self):
+        """When CPG returns populated quotes on the first snapshot call (warm
+        conIDs), we must NOT issue the second call. This makes CPG's per-cycle
+        cost match the TWS persistent-subscription path: first call slow
+        (cold subscribe), subsequent calls fast (warm read)."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+
+        async def fake_chain(_sym):
+            return {"expirations": ["2026-04-29"], "strikes": [26500.0, 26600.0]}
+        provider.get_option_chain = fake_chain  # type: ignore[assignment]
+
+        async def fake_resolve(symbol, exp, strike, right):
+            return 800000 + int(strike)
+        provider._resolve_option_conid = fake_resolve  # type: ignore[assignment]
+
+        get_calls: list[dict] = []
+
+        async def fake_get(path, params=None, **_):
+            get_calls.append({"path": path, "params": dict(params or {})})
+            return [
+                {"conid": 826500, "31": "12.5", "84": "12.4", "86": "12.6", "87": "100"},
+                {"conid": 826600, "31": "13.5", "84": "13.4", "86": "13.6", "87": "200"},
+            ]
+
+        provider._get = fake_get  # type: ignore[assignment]
+
+        results = await provider.get_option_quotes("NDX", "2026-04-29", "PUT")
+
+        snapshot_calls = [c for c in get_calls if c["path"] == "/iserver/marketdata/snapshot"]
+        assert len(snapshot_calls) == 1, (
+            "warm conIDs must not require the second snapshot call — "
+            f"got {len(snapshot_calls)} calls"
+        )
+        assert len(results) == 2
+        assert all(r["bid"] > 0 and r["ask"] > 0 for r in results)
+
+    @pytest.mark.asyncio
+    async def test_get_option_quotes_cold_path_does_second_call(self, monkeypatch):
+        """When the first call returns rows with no prices (cold conIDs just
+        subscribed), the second call still fires after a short propagation
+        wait. This is the only case where the double-call cost is paid."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+        provider._session = AsyncMock()
+
+        async def fake_chain(_sym):
+            return {"expirations": ["2026-04-29"], "strikes": [26500.0]}
+        provider.get_option_chain = fake_chain  # type: ignore[assignment]
+
+        async def fake_resolve(symbol, exp, strike, right):
+            return 826500
+        provider._resolve_option_conid = fake_resolve  # type: ignore[assignment]
+
+        # Skip the real 0.3s propagation sleep
+        import asyncio as _aio
+        async def _fast_sleep(*_a, **_k): return None
+        monkeypatch.setattr(_aio, "sleep", _fast_sleep)
+
+        calls = {"n": 0}
+
+        async def fake_get(path, params=None, **_):
+            if path != "/iserver/marketdata/snapshot":
+                return {}
+            calls["n"] += 1
+            if calls["n"] == 1:
+                # Cold response — empty fields
+                return [{"conid": 826500, "31": "-1", "84": "", "86": None}]
+            # Warm response — populated
+            return [{"conid": 826500, "31": "12.5", "84": "12.4", "86": "12.6", "87": "100"}]
+
+        provider._get = fake_get  # type: ignore[assignment]
+        results = await provider.get_option_quotes("NDX", "2026-04-29", "PUT")
+
+        assert calls["n"] == 2, f"cold path should fire two calls; got {calls['n']}"
+        assert len(results) == 1
+        assert results[0]["bid"] == 12.4
+
     def test_resolve_conid_cached(self):
         """Cached conIds should skip HTTP calls."""
         from app.core.providers.ibkr_rest import IBKRRestProvider
@@ -3477,6 +4406,72 @@ class TestIBKRRestProvider:
         provider._conid_cache["AAPL"] = 265598
         # No session needed — cache hit
         assert provider._conid_cache["AAPL"] == 265598
+
+    @pytest.mark.asyncio
+    async def test_resolve_conid_uses_name_false(self):
+        """secdef/search must be called with name=False (exact symbol match).
+
+        ``name: True`` was treating the symbol as a partial company-name
+        substring, which caused NDX to bind to conid 416843 (an adjacent
+        NDX-prefixed instrument with no listed options for the active
+        month) and broke every downstream secdef/info lookup.
+        """
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+
+        captured_payloads: list[dict] = []
+
+        async def fake_post(path, json=None, **_):
+            captured_payloads.append(dict(json or {}))
+            return [{"conid": 9694, "symbol": "NDX"}]
+
+        provider._post = fake_post  # type: ignore[assignment]
+
+        con_id = await provider._resolve_conid("NDX")
+        assert con_id == 9694
+        assert captured_payloads, "expected at least one secdef/search POST"
+        assert all(p.get("name") is False for p in captured_payloads), (
+            f"name flag must be False; got {[p.get('name') for p in captured_payloads]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_resolve_conid_prefers_exact_symbol_match(self):
+        """When CPG returns multiple matches, prefer the one whose ``symbol``
+        equals the requested ticker exactly. Defends against future drift in
+        the search ranking returning an adjacent ticker first."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+
+        async def fake_post(path, json=None, **_):
+            # 416843-style adjacent symbol first, canonical NDX second
+            return [
+                {"conid": 416843, "symbol": "NDXP"},
+                {"conid": 9694, "symbol": "NDX"},
+                {"conid": 11111, "symbol": "NDXX"},
+            ]
+
+        provider._post = fake_post  # type: ignore[assignment]
+
+        con_id = await provider._resolve_conid("NDX")
+        assert con_id == 9694
+
+    @pytest.mark.asyncio
+    async def test_resolve_conid_falls_back_when_no_exact_symbol(self):
+        """If no result advertises a matching symbol, fall back to the first
+        entry that has a conid (covers responses where CPG omits the field)."""
+        from app.core.providers.ibkr_rest import IBKRRestProvider
+        provider = IBKRRestProvider(gateway_url="https://localhost:5000", account_id="U123")
+        provider._connected = True
+
+        async def fake_post(path, json=None, **_):
+            return [{"conid": 265598}]  # no `symbol` field
+
+        provider._post = fake_post  # type: ignore[assignment]
+
+        con_id = await provider._resolve_conid("AAPL")
+        assert con_id == 265598
 
     def test_ssl_disabled(self):
         """Provider should create session with SSL verification disabled."""
@@ -3772,6 +4767,15 @@ class TestOrdersCommand:
 
 
 class TestStatusChangeDedup:
+    @pytest.fixture(autouse=True)
+    def _drop_poll_floor(self, monkeypatch):
+        """Production policy floors poll_interval at 2s. These dedup tests
+        use sub-2s polls so they finish in milliseconds — drop the floor for
+        the duration of the class."""
+        monkeypatch.setattr(
+            "app.services.trade_service._MIN_POLL_INTERVAL", 0.0
+        )
+
     @pytest.mark.asyncio
     async def test_repeated_status_logs_once(self):
         """await_order_fill only logs status changes, not every poll."""
@@ -13802,6 +14806,363 @@ class TestSpreadScanner:
         # Row with delta shows it; row without delta is fine to omit.
         assert "Δ-0.17" in text
 
+    # ── classify_strike_to_percentile ────────────────────────────────────
+
+    @staticmethod
+    def _make_tier_data(symbol: str, *,
+                        c2c_pct_map: dict | None = None,
+                        intraday_pct_map: dict | None = None,
+                        side: str = "put",
+                        recommended_c2c: dict | None = None,
+                        recommended_intraday: dict | None = None,
+                        slot: str = "10:00",
+                        c2c_dte: int = 0) -> dict:
+        """Build a minimal tier_data fixture matching the live shape."""
+        direction = "when_down" if side == "put" else "when_up"
+        td = {"hourly": {symbol: {"recommended": {}, "slots": {}}}, "tickers": []}
+        sym = td["hourly"][symbol]
+        if recommended_c2c is not None:
+            sym["recommended"]["close_to_close"] = recommended_c2c
+        if recommended_intraday is not None:
+            sym["recommended"]["intraday"] = recommended_intraday
+        if intraday_pct_map is not None:
+            sym["slots"][slot] = {direction: {"pct": intraday_pct_map}}
+        if c2c_pct_map is not None:
+            td["tickers"].append({
+                "ticker": symbol,
+                "windows": {str(c2c_dte): {direction: {"pct": c2c_pct_map}}},
+            })
+        return td
+
+    def test_classify_strike_to_percentile_close_to_close_named_tier(self):
+        """A short put strike that lines up exactly with the cons-tier
+        percentile in the c2c map returns (98, "conservative")."""
+        from spread_scanner import classify_strike_to_percentile
+        prev_close = 7100.0
+        # p98 represents -2.0% c2c move → strike ≈ 7100 * 0.98 = 6958.
+        td = self._make_tier_data(
+            "SPX",
+            c2c_pct_map={"p90": -1.0, "p95": -1.5, "p98": -2.0, "p99": -2.5},
+            recommended_c2c={
+                "aggressive":   {"put": 90, "call": 90},
+                "moderate":     {"put": 95, "call": 95},
+                "conservative": {"put": 98, "call": 98},
+            },
+            side="put", c2c_dte=0,
+        )
+        # Place the short strike at exactly the p98 boundary.
+        pct, tier = classify_strike_to_percentile(
+            td, "SPX", "put", "close_to_close",
+            prev_close=prev_close, current_price=7090.0,
+            short_strike=6958.0, dte=0,
+        )
+        assert pct == 98
+        assert tier == "conservative"
+
+    def test_classify_strike_to_percentile_intraday_no_named_tier_match(self):
+        """When the resolved percentile lands between the named-tier
+        recommendations, return (pN, None)."""
+        from spread_scanner import classify_strike_to_percentile
+        # Provide pcts at p85, p87, p90, p95, p98.
+        td = self._make_tier_data(
+            "SPX",
+            intraday_pct_map={"p85": -0.50, "p87": -0.65, "p90": -0.80,
+                              "p95": -1.20, "p98": -1.80},
+            recommended_intraday={
+                "aggressive":   {"put": 90},
+                "moderate":     {"put": 95},
+                "conservative": {"put": 98},
+            },
+            side="put",
+        )
+        # Put a strike at -0.65% from spot → matches exactly p87 (not named).
+        spot = 7000.0
+        strike = spot * (1 - 0.0065)  # = 6954.5 → -0.65%
+        pct, tier = classify_strike_to_percentile(
+            td, "SPX", "put", "intraday",
+            prev_close=7000.0, current_price=spot,
+            short_strike=strike, dte=0,
+        )
+        assert pct == 87
+        assert tier is None
+
+    def test_classify_strike_to_percentile_returns_none_when_strike_too_close(self):
+        """If the strike is closer-to-the-money than even the smallest
+        percentile in the map, return (None, None) — caller renders dim
+        em-dash so the operator knows the strike is below the model's
+        protective range."""
+        from spread_scanner import classify_strike_to_percentile
+        td = self._make_tier_data(
+            "SPX",
+            intraday_pct_map={"p90": -1.0, "p95": -1.5, "p98": -2.0},
+            recommended_intraday={"aggressive": {"put": 90}},
+            side="put",
+        )
+        # Strike only -0.10% from spot — closer than p90's -1.0%.
+        spot = 7000.0
+        strike = spot * (1 - 0.001)
+        pct, tier = classify_strike_to_percentile(
+            td, "SPX", "put", "intraday",
+            prev_close=7000.0, current_price=spot,
+            short_strike=strike, dte=0,
+        )
+        assert pct is None
+        assert tier is None
+
+    def test_classify_strike_to_percentile_handles_missing_tier_data(self):
+        """tier_data=None or missing symbol → (None, None) without raising."""
+        from spread_scanner import classify_strike_to_percentile
+
+        for td in (None, {}, {"hourly": {}}, {"hourly": {"OTHER": {}}}):
+            pct, tier = classify_strike_to_percentile(
+                td, "SPX", "put", "close_to_close",
+                prev_close=7000.0, current_price=7000.0,
+                short_strike=6900.0, dte=0,
+            )
+            assert pct is None
+            assert tier is None
+
+    def test_classify_strike_to_percentile_calls_use_when_up_path(self):
+        """Calls use the when_up branch and the 'more positive' protection
+        rule. A call strike at +1.5% from spot should resolve to p95 when
+        the map is {p90: +1.0, p95: +1.5, p98: +2.0}."""
+        from spread_scanner import classify_strike_to_percentile
+        td = self._make_tier_data(
+            "SPX",
+            intraday_pct_map={"p90": 1.0, "p95": 1.5, "p98": 2.0},
+            recommended_intraday={
+                "aggressive":   {"call": 90},
+                "moderate":     {"call": 95},
+                "conservative": {"call": 98},
+            },
+            side="call",
+        )
+        spot = 7000.0
+        strike = 7105.0  # exactly +1.5% from spot (avoids FP noise from
+                         # `spot * 1.015`, which returns 7104.999999999999)
+        pct, tier = classify_strike_to_percentile(
+            td, "SPX", "call", "intraday",
+            prev_close=7000.0, current_price=spot,
+            short_strike=strike, dte=0,
+        )
+        assert pct == 95
+        assert tier == "moderate"
+
+    def test_top_picks_shows_hist_and_pred_percentile_columns(self):
+        """When tier_data is on the dte_section, each Top-N row picks up
+        Hist (close-to-close) and Pred (intraday) percentile cells with
+        the matching tier label rendered when the percentile equals one
+        of the recommended named tiers."""
+        from spread_scanner import _render_top_picks, parse_args
+
+        args = parse_args(["--tickers", "SPX", "--top", "1"])
+        # Strike at -1.5% c2c (= p95 → moderate) and at -0.80% intraday
+        # (= p90 → aggressive in our fixture).
+        prev_close = 7100.0
+        spot = 7090.0
+        short = prev_close * (1 - 0.015)  # 6993.5 from prev_close
+        # Round to a clean 5-strike increment for SPX, but the test only
+        # cares about the model's classification — which uses the spread's
+        # actual short_strike. So pass 6993.5 directly.
+        td = {
+            "hourly": {
+                "SPX": {
+                    "recommended": {
+                        "close_to_close": {
+                            "aggressive":   {"put": 90},
+                            "moderate":     {"put": 95},
+                            "conservative": {"put": 98},
+                        },
+                        "intraday": {
+                            "aggressive":   {"put": 90},
+                            "moderate":     {"put": 95},
+                            "conservative": {"put": 98},
+                        },
+                    },
+                    "slots": {
+                        "10:00": {
+                            "when_down": {
+                                "pct": {"p85": -0.50, "p90": -0.80,
+                                        "p95": -1.20, "p98": -1.80},
+                            }
+                        }
+                    },
+                }
+            },
+            "tickers": [{
+                "ticker": "SPX",
+                "windows": {
+                    "0": {"when_down": {
+                        "pct": {"p90": -1.0, "p95": -1.5, "p98": -2.0},
+                    }}
+                },
+            }],
+        }
+        scan_data = {
+            "quotes": {"SPX": {"last": spot}},
+            "prev_closes": {"SPX": prev_close},
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-04-30",
+                    "tier_data": td,
+                    "spreads": {
+                        "SPX": [{
+                            "option_type": "PUT",
+                            "short_strike": short,
+                            "long_strike": short - 20,
+                            "credit": 0.50, "roi_pct": 2.6, "otm_pct": 1.4,
+                            "width": 20, "short_delta": -0.17,
+                        }],
+                    },
+                }
+            },
+        }
+
+        # Patch _find_current_slot so the test isn't time-of-day dependent.
+        import spread_scanner as sp
+        orig = sp._find_current_slot
+        sp._find_current_slot = lambda slots: "10:00" if slots else None
+        try:
+            lines = _render_top_picks(scan_data, args)
+        finally:
+            sp._find_current_slot = orig
+
+        text = "\n".join(lines)
+        assert "Hist" in text and "Pred" in text
+        # Hist (c2c): strike is at exactly -1.5% from prev_close, c2c map
+        # has {p90:-1.0, p95:-1.5, p98:-2.0}. The strike survives p90
+        # (covers -1.0% drop) and p95 (covers -1.5% drop, boundary) but
+        # NOT p98 (would need to cover -2.0% drop). Resolved → p95.
+        # recommended.close_to_close.moderate.put=95 → tier label "mod".
+        #
+        # Pred (intraday): strike's offset from spot 7090 is
+        # (6993.5 - 7090)/7090 ≈ -1.36%. Intraday map has
+        # {p85:-0.50, p90:-0.80, p95:-1.20, p98:-1.80}. Strike survives
+        # p85, p90, p95 (covers -1.20%) but not p98 (-1.80% > -1.36%
+        # in magnitude). Resolved → p95.
+        # recommended.intraday.moderate.put=95 → tier label "mod".
+        #
+        # Both cells should therefore show "p95" + "mod".
+        assert "p95" in text
+        assert text.count("mod") >= 2, (
+            f"expected 'mod' in both Hist and Pred cells, got: {text!r}"
+        )
+
+    def test_top_picks_columns_align_with_header(self):
+        """Header column boundaries must coincide with data-row column
+        boundaries — i.e. once you strip ANSI codes, walking the row by
+        the declared column widths puts each cell's start under its
+        header label. Regression: earlier the data row used `nroi_str + " "`
+        and `ot{otm} cl{chg}` as one chunk, so OTM%/Cl%/Δshort/Vfy/Hist/
+        Pred all drifted left of their header labels — visible to the
+        operator as a row that doesn't line up with the header."""
+        from spread_scanner import _render_top_picks, parse_args, _visible_len
+        import re
+
+        ANSI = re.compile(r"\033\[[0-9;]*m")
+
+        args = parse_args(["--tickers", "SPX,NDX", "--top", "2"])
+        scan_data = {
+            "prev_closes": {"SPX": 7100.0, "NDX": 27000.0},
+            "dte_sections": {
+                1: {
+                    "expiration": "2026-04-30",
+                    "tier_data": None,
+                    "spreads": {
+                        "SPX": [{
+                            "option_type": "PUT", "short_strike": 6990,
+                            "long_strike": 6985, "credit": 0.40,
+                            "roi_pct": 8.0, "otm_pct": 1.5, "width": 5,
+                            "short_delta": -0.13,
+                            "verified": True, "verify_age_seconds": 12,
+                        }],
+                        "NDX": [{
+                            "option_type": "CALL", "short_strike": 27730,
+                            "long_strike": 27790, "credit": 5.30,
+                            "roi_pct": 9.7, "otm_pct": 2.7, "width": 60,
+                            "short_delta": 0.11,
+                            "verified": True, "verify_age_seconds": 56,
+                        }],
+                    },
+                }
+            },
+        }
+        lines = _render_top_picks(scan_data, args)
+        header = next(ln for ln in lines if "Short/Long" in ln)
+        plain_header = ANSI.sub("", header)
+        data_rows = [ANSI.sub("", ln) for ln in lines
+                     if ln.strip().startswith(("1 ", "2 "))]
+        assert len(data_rows) == 2
+
+        # All rows + header must have identical visible width (the layout
+        # is a fixed-width table).
+        h_w = _visible_len(plain_header)
+        for row in data_rows:
+            assert _visible_len(row) == h_w, (
+                f"row width {_visible_len(row)} != header width {h_w}\n"
+                f"  header: {plain_header!r}\n"
+                f"  row:    {row!r}"
+            )
+
+        # Walk a few distinctive header labels and assert the data row
+        # has the expected character (or a space, if the cell is shorter
+        # than its column) at the SAME visible index.
+        for label, expected_chars in [
+            ("Hist",   (" ", "p", "—")),
+            ("Pred",   (" ", "p", "—")),
+            ("Vfy",    (" ", "✓", "—")),
+            ("OTM%",   (" ", "o")),     # cell starts with "ot…"
+            ("Cl%",    (" ", "c")),     # cell starts with "cl…"
+            ("Δshort", (" ", "Δ", "-")),
+            ("nROI",   (" ", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9")),
+        ]:
+            idx = plain_header.index(label)
+            for row in data_rows:
+                ch = row[idx] if idx < len(row) else " "
+                assert ch in expected_chars, (
+                    f"data row col {idx} (under header label {label!r}) "
+                    f"should start with one of {expected_chars}, "
+                    f"got {ch!r}\n  header: {plain_header!r}\n  row:    {row!r}"
+                )
+
+    def test_top_picks_shows_dash_when_tier_data_absent(self):
+        """When tier_data is missing entirely, Hist/Pred cells render as
+        dim em-dashes — but the columns and header are still present."""
+        from spread_scanner import _render_top_picks, parse_args
+
+        args = parse_args(["--tickers", "SPX", "--top", "1"])
+        scan_data = {
+            "quotes": {"SPX": {"last": 7100.0}},
+            "prev_closes": {"SPX": 7100.0},
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-04-30",
+                    "tier_data": None,
+                    "spreads": {
+                        "SPX": [{
+                            "option_type": "PUT", "short_strike": 7050,
+                            "long_strike": 7030, "credit": 0.50,
+                            "roi_pct": 2.6, "otm_pct": 0.7, "width": 20,
+                            "short_delta": -0.17,
+                        }],
+                    },
+                }
+            },
+        }
+        lines = _render_top_picks(scan_data, args)
+        text = "\n".join(lines)
+        assert "Hist" in text and "Pred" in text
+        # Dim em-dash (— = U+2014) appears for both percentile cells.
+        # The data row should have at least 2 em-dashes (Hist + Pred).
+        # (Vfy column also uses em-dash for unverified rows, so allow ≥2.)
+        data_rows = [ln for ln in lines if ln.strip().startswith("1 ")]
+        assert data_rows, f"expected one data row, got lines: {lines!r}"
+        em_dash_count = data_rows[0].count("—")
+        assert em_dash_count >= 2, (
+            f"expected ≥2 em-dashes (Hist + Pred placeholders), "
+            f"got {em_dash_count} in row: {data_rows[0]!r}"
+        )
+
     @pytest.mark.asyncio
     async def test_resolve_percentile_url_custom_bypasses_probe(self):
         """A caller-supplied URL (not the baked-in lin1 default) is used as-is,
@@ -14153,6 +15514,114 @@ class TestSpreadScanner:
         assert args.daemon_url == "http://backup-d:8000"
         assert args.db_url == "http://backup-db:9102"
         assert args.percentile_url == "http://backup-pct:9100"
+
+    @pytest.mark.asyncio
+    async def test_resolve_url_with_backup_default_timeout_tolerates_slow_probe(self):
+        """Default probe timeout (4.0s) must NOT trip on a slow but healthy
+        primary. Regression: a 2.0s default + a daemon /dashboard/summary
+        that occasionally took 2.5s caused the resolver to silently fall
+        through to the (unreachable) backup, locking the scanner into a
+        dead URL for the rest of the process. The probe path itself was
+        also moved from /dashboard/summary to /market/quote/SPX, but the
+        timeout floor is the load-bearing fix here."""
+        import inspect
+        import spread_scanner as sp
+        sig = inspect.signature(sp._resolve_url_with_backup)
+        assert sig.parameters["timeout"].default >= 4.0, (
+            "probe timeout must be >=4s -- anything tighter regresses on "
+            "daemons whose probe endpoint hiccups above 2s under load"
+        )
+
+    @pytest.mark.asyncio
+    async def test_resolve_endpoint_urls_uses_lightweight_daemon_probe(self):
+        """Daemon probe must hit /market/quote/SPX (consistently sub-10ms),
+        not /dashboard/summary (occasional 1-3s spikes that exceed the probe
+        timeout and falsely classify a healthy daemon as down)."""
+        import spread_scanner as sp
+        from argparse import Namespace
+        sp._resolved_url_cache.clear()
+
+        seen_paths = []
+
+        class CapturingClient:
+            async def get(self, url, *a, **kw):
+                seen_paths.append(url)
+                class R: status_code = 200
+                return R()
+
+        args = Namespace(
+            daemon_url="http://daemon-p:8000",
+            daemon_url_backup="http://daemon-b:8000",
+            db_url="http://db:9102",
+            db_url_backup=None,
+            percentile_url="http://pct:9100",
+            percentile_url_backup=None,
+        )
+        await sp.resolve_endpoint_urls(CapturingClient(), args)
+        daemon_probes = [p for p in seen_paths if "daemon-p" in p or "daemon-b" in p]
+        assert daemon_probes, "expected at least one daemon probe"
+        assert all("/market/quote/SPX" in p for p in daemon_probes), (
+            f"daemon probe must use /market/quote/SPX, got: {daemon_probes}"
+        )
+        assert not any("/dashboard/summary" in p for p in daemon_probes), (
+            "daemon probe must NOT use /dashboard/summary (slow under load)"
+        )
+
+    def test_render_endpoints_line_shows_resolved_endpoints_in_grey(self):
+        """Endpoints line surfaces the URLs the scanner actually talks to so
+        a bad primary/backup probe (which would otherwise be invisible) is
+        diagnosable from the dashboard alone. Lives outside the footer so
+        the per-second tick repaint (ESC[F/ESC[2K) keeps working on a
+        single-line footer."""
+        from spread_scanner import render_endpoints_line, parse_args, DIM, RESET
+
+        args = parse_args(["--tickers", "SPX", "--interval", "30"])
+        args.resolved_endpoints = {
+            "daemon_url": "http://lin1.kundu.dev:8000",
+            "db_url": "http://localhost:9102",
+            "percentile_url": "http://localhost:9100",
+        }
+        out = render_endpoints_line(args)
+        assert "endpoints:" in out
+        assert "daemon=http://lin1.kundu.dev:8000" in out
+        assert "db=http://localhost:9102" in out
+        assert "percentile=http://localhost:9100" in out
+        assert DIM in out and RESET in out
+        # Must be a single line so it doesn't break ESC[F-based tick repaint.
+        assert "\n" not in out
+
+    def test_render_endpoints_line_falls_back_when_probe_did_not_run(self):
+        """If `--once` or a test bypasses scan_loop, args.resolved_endpoints
+        won't be set. Endpoints line should still display the configured
+        URLs from args directly so the operator can see where it's pointed."""
+        from spread_scanner import render_endpoints_line, parse_args
+
+        args = parse_args(["--tickers", "SPX", "--interval", "30"])
+        args.daemon_url = "http://localhost:8000"
+        args.db_url = "http://localhost:9102"
+        args.percentile_url = "http://localhost:9100"
+        out = render_endpoints_line(args)
+        assert "daemon=http://localhost:8000" in out
+        assert "db=http://localhost:9102" in out
+        assert "percentile=http://localhost:9100" in out
+
+    def test_render_footer_is_single_line_so_per_second_tick_repaint_works(self):
+        """The per-second footer tick uses ESC[F + ESC[2K to clear exactly
+        one line. If render_footer ever returns multiple lines, the tick
+        leaves stray copies behind and the screen scrolls. Pin the contract."""
+        from spread_scanner import render_footer, parse_args
+
+        args = parse_args(["--tickers", "SPX", "--interval", "30"])
+        args.resolved_endpoints = {
+            "daemon_url": "http://localhost:8000",
+            "db_url": "http://localhost:9102",
+            "percentile_url": "http://localhost:9100",
+        }
+        out = render_footer(args)
+        assert "\n" not in out, "render_footer must be single-line"
+        # And it must NOT carry endpoints (those go in render_endpoints_line).
+        assert "endpoints:" not in out
+        assert "daemon=" not in out
 
     def test_render_footer_uses_countdown(self):
         """render_footer's `seconds_remaining` should override the interval
@@ -15565,6 +17034,48 @@ min_otm_per_ticker: {NDX: 2.0}
         args.handlers = [OK("before"), Boom(), OK("after")]
         asyncio.run(ss.scan_loop(args))
         assert fired == ["before", "after"]
+
+    # ── Anticipatory scan kickoff (countdown lines up with refresh) ─────
+
+    def test_compute_kickoff_lead_typical_case(self):
+        """For the typical case (3s scan, 30s interval), lead =
+        predicted_dur + 0.5s buffer = 3.5s. The scan kicks off 3.5s
+        before the paint deadline so it finishes when the operator-
+        visible countdown reaches 0."""
+        from spread_scanner import _compute_kickoff_lead
+        assert _compute_kickoff_lead(predicted_dur=3.0, interval=30.0) == 3.5
+        assert _compute_kickoff_lead(predicted_dur=1.0, interval=30.0) == 1.5
+        assert _compute_kickoff_lead(predicted_dur=0.0, interval=30.0) == 0.5
+
+    def test_compute_kickoff_lead_caps_at_interval_minus_one(self):
+        """If the scan takes nearly the full interval, the lead is
+        capped at `interval - 1` so the user always sees at least one
+        second of countdown — never instant scan-after-scan."""
+        from spread_scanner import _compute_kickoff_lead
+        # 9s scan in 10s interval: raw lead = 9.5s, but cap = 9.0s.
+        assert _compute_kickoff_lead(predicted_dur=9.0, interval=10.0) == 9.0
+        # 12s scan in 10s interval: raw lead = 12.5s, cap = 9.0s.
+        assert _compute_kickoff_lead(predicted_dur=12.0, interval=10.0) == 9.0
+        # 30s scan in 30s interval: raw lead = 30.5s, cap = 29.0s.
+        assert _compute_kickoff_lead(predicted_dur=30.0, interval=30.0) == 29.0
+
+    def test_compute_kickoff_lead_floors_at_buffer(self):
+        """Lead must always be at least the buffer (default 0.5s) — even
+        a near-zero predicted scan duration still gets a tiny anticipatory
+        lead so we don't slip back into pure sequential scan-after-paint."""
+        from spread_scanner import _compute_kickoff_lead
+        assert _compute_kickoff_lead(predicted_dur=0.0, interval=30.0) == 0.5
+        assert _compute_kickoff_lead(predicted_dur=-1.0, interval=30.0) == 0.5
+
+    def test_compute_kickoff_lead_tiny_interval(self):
+        """Edge case: when interval is so small that ceiling collapses
+        below the floor, the floor wins. Prevents nonsensical negative
+        leads on degenerate configs."""
+        from spread_scanner import _compute_kickoff_lead
+        # interval=1.0 → ceiling=max(0, 0.5)=0.5; floor=0.5 → lead=0.5.
+        assert _compute_kickoff_lead(predicted_dur=5.0, interval=1.0) == 0.5
+        # interval=0.5 → ceiling=max(-0.5, 0.5)=0.5; floor=0.5 → lead=0.5.
+        assert _compute_kickoff_lead(predicted_dur=5.0, interval=0.5) == 0.5
 
 
 class TestHandlerValidatePrices:
