@@ -379,6 +379,38 @@ async def get_option_quotes_with_age(
     from app.services.option_quote_streaming import get_option_quote_streaming
     oq_svc = get_option_quote_streaming()
 
+    def _representative_age(quotes_list: list[dict] | None) -> float | None:
+        """Pick the age that represents the data actually served. The
+        get_merged_quotes layer stamps each row with its own ``age_seconds``
+        (per-source: ibkr_fresh / csv / ibkr_stale). The aggregate the
+        callers care about is the IBKR age when any IBKR-fresh rows exist
+        — those rows reflect the live broker stream. Falling through to
+        the per-row CSV age when fresh IBKR isn't available preserves
+        truthful staleness reporting. Without this, a single CSV row in
+        a mostly-IBKR-fresh response would make the aggregate look like
+        a multi-minute-old quote and break verifier display in the
+        screener."""
+        if not quotes_list:
+            return None
+        ages: list[float] = []
+        ibkr_fresh_ages: list[float] = []
+        for q in quotes_list:
+            a = q.get("age_seconds")
+            if a is None:
+                continue
+            try:
+                a_f = float(a)
+            except (TypeError, ValueError):
+                continue
+            ages.append(a_f)
+            if q.get("source") == "ibkr_fresh":
+                ibkr_fresh_ages.append(a_f)
+        if ibkr_fresh_ages:
+            return min(ibkr_fresh_ages)
+        if ages:
+            return min(ages)
+        return None
+
     # 1. Fresh cache (respect caller-supplied max_age, else module default)
     fresh_ttl = max_age if max_age is not None else _OPTION_CACHE_TTL
     if not force_refresh and oq_svc:
@@ -388,7 +420,7 @@ async def get_option_quotes_with_age(
             max_age=fresh_ttl,
         )
         if cached:
-            age = oq_svc._cache.get_age(symbol, expiration, option_type)
+            age = _representative_age(cached)
             return cached, age, "fresh_cache"
 
     # 2. Stale cache capture (served only if provider is unavailable or when
@@ -403,7 +435,7 @@ async def get_option_quotes_with_age(
             max_age=_OPTION_STALE_TTL,
         )
         if stale_quotes:
-            stale_age = oq_svc._cache.get_age(symbol, expiration, option_type)
+            stale_age = _representative_age(stale_quotes)
 
     if max_age is None and stale_quotes:
         logger.debug("Serving stale option quotes for %s %s %s (< %ds)",

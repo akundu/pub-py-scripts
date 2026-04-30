@@ -446,17 +446,22 @@ async def resolve_endpoint_urls(
     """
     resolved: dict[str, str] = {}
     # (attr-name, probe-path, probe-params)
-    # Daemon probe uses /market/quote/SPX — consistently sub-10ms because the
-    # quote comes from the streaming cache. /dashboard/summary was prone to
-    # 1-3s spikes which exceeded the probe timeout, causing healthy daemons
-    # to be misclassified as unreachable and the scanner to fall back to a
-    # backup URL that may itself be down.
+    #
+    # All three probes use /health — consistently sub-millisecond on every
+    # server we've observed (daemon, db_server, percentile_server), and
+    # the resolver accepts any status<500 so even a server that doesn't
+    # define /health (returns 404) still resolves correctly. The probe
+    # is a REACHABILITY check ("can this URL respond at all?"), not a
+    # functionality check — using a heavyweight data endpoint as the
+    # probe causes false negatives whenever the data path is slow on a
+    # healthy server (e.g. percentile /range_percentiles legitimately
+    # takes 7-8s on a cold cache, way past the 4s probe timeout, so
+    # the resolver falls through to the backup even though the primary
+    # is up).
     endpoints = [
-        ("daemon_url", "/market/quote/SPX", None),
-        ("db_url", "/api/range_percentiles",
-         {"tickers": "SPX", "lookback": "1", "min_days": "1"}),
-        ("percentile_url", "/range_percentiles",
-         {"ticker": "SPX", "windows": "0", "format": "json"}),
+        ("daemon_url",     "/health", None),
+        ("db_url",         "/health", None),
+        ("percentile_url", "/health", None),
     ]
     for attr, probe_path, probe_params in endpoints:
         primary = getattr(args, attr, None)
@@ -510,6 +515,9 @@ async def _resolve_percentile_url(
     return _PERCENTILE_FALLBACK_URL
 
 
+_TIER_FETCH_LAST_ERROR: dict[str, str | None] = {"reason": None}
+
+
 async def fetch_tier_data(
     client: httpx.AsyncClient, percentile_url: str, tickers: list[str],
     dte_list: list[int] | None = None,
@@ -518,6 +526,12 @@ async def fetch_tier_data(
 
     Returns the hourly data structure with recommended tiers per ticker.
     Requests windows matching the DTE list so close-to-close data is available.
+
+    Side effect: captures the last failure reason in
+    `_TIER_FETCH_LAST_ERROR["reason"]` so callers can distinguish "couldn't
+    reach the server" from "server returned an error" (e.g. HTTP 500
+    because the percentile server's upstream QuestDB is down). Cleared on
+    success.
     """
     # Resolve primary/fallback the first time through; subsequent calls hit
     # the cache immediately (no extra round-trip).
@@ -525,15 +539,35 @@ async def fetch_tier_data(
     # Request all windows needed for the DTEs being scanned
     windows = sorted(set([0] + (dte_list or [0])))
     windows_str = ",".join(str(w) for w in windows)
+    target = (
+        f"{percentile_url}/range_percentiles"
+        f"?ticker={','.join(tickers)}&windows={windows_str}"
+    )
     try:
         resp = await client.get(
             f"{percentile_url}/range_percentiles",
             params={"ticker": ",".join(tickers), "windows": windows_str, "format": "json"},
         )
         if resp.status_code == 200:
+            _TIER_FETCH_LAST_ERROR["reason"] = None
             return resp.json()
-    except Exception:
-        pass
+        # Non-200 — try to extract a useful snippet from the body so the
+        # operator can see what's actually wrong. Many percentile-server
+        # errors include the upstream cause (e.g. "Connect call failed
+        # ('192.168.7.120', 8812)" when QuestDB is down).
+        body = (resp.text or "").strip()
+        # Strip HTML tags if the server returned an error page.
+        import re
+        body_text = re.sub(r"<[^>]+>", " ", body)
+        body_text = re.sub(r"\s+", " ", body_text).strip()[:160]
+        _TIER_FETCH_LAST_ERROR["reason"] = (
+            f"HTTP {resp.status_code} from {target}"
+            + (f" — {body_text}" if body_text else "")
+        )
+    except Exception as e:
+        _TIER_FETCH_LAST_ERROR["reason"] = (
+            f"{type(e).__name__} reaching {target}: {str(e)[:120]}"
+        )
     return None
 
 
@@ -632,6 +666,72 @@ def extract_prev_closes_from_tier_data(tier_data: dict | None) -> dict[str, floa
         if pc:
             result[sym] = float(pc)
     return result
+
+
+class TierDataCache:
+    """Caches the percentile-server `range_percentiles` payload.
+
+    The payload is heavy (~120KB) and slow to compute (~7-8s on a cold
+    cache); it changes only when the upstream models are retrained
+    (typically a few times per day, anchored to market close). Refreshing
+    on every scan cycle was wasting the local network and the percentile
+    server's CPU.
+
+    Refresh policy:
+      * No cached payload yet (cold start, or every prior fetch failed)
+        → refresh on every call. Transient startup failures shouldn't
+        lock out tier filtering for the full TTL.
+      * Cached payload present → refresh only when older than
+        `ttl_seconds` (default 2 hours).
+      * On a refresh failure with cached data already present → keep
+        the stale data (better than no picks) but stash the error so
+        the offline banner can show a "stale: <reason>" detail later
+        if needed.
+    """
+
+    DEFAULT_TTL_SECONDS: float = 2 * 60 * 60  # 2 hours
+
+    def __init__(self, ttl_seconds: float | None = None) -> None:
+        self.data: dict | None = None
+        self.last_refresh_monotonic: float | None = None
+        self.error_reason: str | None = None
+        self.ttl_seconds = (
+            float(ttl_seconds) if ttl_seconds is not None
+            else self.DEFAULT_TTL_SECONDS
+        )
+
+    def should_refresh(self, now_monotonic: float | None = None) -> bool:
+        if self.data is None or self.last_refresh_monotonic is None:
+            return True
+        if now_monotonic is None:
+            import time
+            now_monotonic = time.monotonic()
+        return (now_monotonic - self.last_refresh_monotonic) >= self.ttl_seconds
+
+    def absorb_fetch_result(
+        self, fresh: dict | None, *, error_reason: str | None = None,
+        now_monotonic: float | None = None,
+    ) -> None:
+        """Update the cache from the result of a `fetch_tier_data` call.
+
+        Pass `fresh` when the fetch succeeded (overwrites cached payload
+        and resets the timer). Pass `fresh=None` with an `error_reason`
+        when the fetch failed — the cached payload is preserved (so we
+        keep serving stale data if any) but the error is recorded.
+        """
+        if fresh is not None:
+            self.data = fresh
+            if now_monotonic is None:
+                import time
+                now_monotonic = time.monotonic()
+            self.last_refresh_monotonic = now_monotonic
+            self.error_reason = None
+            return
+        # Fetch failed — keep self.data (might be None or stale).
+        self.error_reason = error_reason or _TIER_FETCH_LAST_ERROR.get("reason")
+
+    def get(self) -> dict | None:
+        return self.data
 
 
 class PrevCloseCache:
@@ -1636,7 +1736,26 @@ def _collect_filtered_candidates(scan_data: dict, args) -> list[dict]:
 
     Applies: --min-credit, --min-roi, --min-norm-roi, --min-otm, --max-otm,
     --min-tier, --min-tier-close.  Returns sorted by ROI descending.
+
+    `min_tier` is DTE-routed: a `pN` (or named-tier) value means "the
+    pN of the appropriate distribution for the spread's holding period".
+    DTE 0 spreads use the intraday model (current slot → EOD); DTE N>0
+    spreads use the close-to-close model with window=N. The intraday
+    model is structurally same-day; applying it to DTE 1+ spreads
+    silently produced wrong filter boundaries.
+
+    `min_tier_close` is unchanged — it explicitly applies the c2c
+    model with window=DTE for every spread.
+
+    Fail-safe behavior: if tier filtering was *requested* (--tiers /
+    --min-tier / --min-tier-close) but tier_data wasn't returned by the
+    percentile server, return [] instead of silently passing every
+    candidate through. The user explicitly asked for a tier-gated list;
+    showing picks that bypass that gate is worse than showing none.
     """
+    if scan_data.get("tier_filter_state") == "unavailable":
+        return []
+
     prev_closes = scan_data.get("prev_closes", {})
     min_credit = args.min_credit
     min_roi = args.min_roi
@@ -1644,10 +1763,19 @@ def _collect_filtered_candidates(scan_data: dict, args) -> list[dict]:
     min_tier = args.min_tier
     min_tier_close = args.min_tier_close
 
-    # Resolve tier boundaries for filters (per DTE for close-to-close)
-    tier_boundaries = {}
+    # Boundaries for the `min_tier` filter, keyed by DTE.
+    #   - DTE 0 → intraday model (same data structure regardless of dte param)
+    #   - DTE N>0 → close-to-close model with window=N
+    # We compute both up-front so the per-spread loop is just a dict lookup.
+    min_tier_boundaries_by_dte: dict[int, dict] = {}
     if min_tier:
-        tier_boundaries = _resolve_tier_boundaries(scan_data, args, "intraday", dte=0)
+        for dte_val in scan_data.get("dte_sections", {}).keys():
+            model = "intraday" if dte_val == 0 else "close_to_close"
+            min_tier_boundaries_by_dte[dte_val] = _resolve_tier_boundaries(
+                scan_data, args, model, dte=dte_val,
+            )
+
+    # Boundaries for `min_tier_close` — always c2c model with the spread's DTE.
     tier_boundaries_c2c: dict[int, dict] = {}
     if min_tier_close:
         for dte_val in scan_data.get("dte_sections", {}).keys():
@@ -1690,9 +1818,13 @@ def _collect_filtered_candidates(scan_data: dict, args) -> list[dict]:
                 if sym_max_otm > 0 and otm > sym_max_otm:
                     continue
 
-                # Tier filter (intraday)
-                if min_tier and sym in tier_boundaries:
-                    tier_sides = tier_boundaries[sym].get(min_tier, {})
+                # Tier filter — DTE-routed: DTE 0 hits intraday model,
+                # DTE N>0 hits close-to-close model with window=N. The
+                # boundaries for both were pre-computed above and keyed
+                # by the spread's actual DTE.
+                if min_tier:
+                    sym_bounds = min_tier_boundaries_by_dte.get(dte, {}).get(sym, {})
+                    tier_sides = sym_bounds.get(min_tier, {})
                     if s["option_type"] == "PUT":
                         boundary = tier_sides.get("put")
                         if boundary is not None and s["short_strike"] > boundary:
@@ -1736,6 +1868,38 @@ def _render_top_picks(scan_data: dict, args) -> list[str]:
     top_n = args.top
     if top_n <= 0:
         return []
+
+    # Tier-filter unavailable: show a prominent red banner explaining that
+    # Top-N is suppressed because the percentile server isn't reachable.
+    # Without this, the silent fallback ("filter not engaged → all
+    # candidates pass") shows picks that violate the user's safety
+    # configuration. The DTE matrix below is unaffected, so the operator
+    # can still see what's in the chain — just nothing is recommended
+    # while the gate is offline.
+    if scan_data.get("tier_filter_state") == "unavailable":
+        configured = []
+        if getattr(args, "min_tier", None):
+            configured.append(f"min_tier={args.min_tier}")
+        if getattr(args, "min_tier_close", None):
+            configured.append(f"min_tier_close={args.min_tier_close}")
+        if getattr(args, "tiers", False) and not configured:
+            configured.append("tiers=true")
+        cfg_str = ", ".join(configured) or "tiers requested"
+        url = getattr(args, "percentile_url", None) or "?"
+        err = scan_data.get("tier_filter_error")
+        # Show the captured error verbatim when present — that's the
+        # actionable diagnostic. Fall back to the generic "unreachable"
+        # phrasing when no error reason was captured.
+        diag = err if err else f"unreachable at {url}"
+        return [
+            f" {BOLD}{RED}── TOP {top_n} {'─' * 65}{RESET}",
+            f"  {RED}TIER FILTER OFFLINE — Top-N suppressed.{RESET}",
+            f"  {DIM}{cfg_str} configured; percentile fetch failed:{RESET}",
+            f"  {DIM}  {diag}{RESET}",
+            f"  {DIM}Showing picks here would bypass the safety gate; "
+            f"DTE matrix below is unaffected.{RESET}",
+            "",
+        ]
 
     all_candidates = _collect_filtered_candidates(scan_data, args)
     if not all_candidates:
@@ -1799,7 +1963,11 @@ def _render_top_picks(scan_data: dict, args) -> list[str]:
     if args.max_otm > 0:
         filters.append(f"otm≤{args.max_otm:.1f}%")
     if args.min_tier:
-        filters.append(f"intra≥{args.min_tier[:4]}")
+        # min_tier is DTE-routed: intraday model for DTE 0 spreads,
+        # close-to-close window=N for DTE N>0 spreads. "tier" is a
+        # truthful generic label since the same configured value gates
+        # both branches.
+        filters.append(f"tier≥{args.min_tier[:4]}")
     if args.min_tier_close:
         filters.append(f"c2c≥{args.min_tier_close[:4]}")
     filter_str = f"  {DIM}[{', '.join(filters)}]{RESET}" if filters else ""
@@ -1821,6 +1989,12 @@ def _render_top_picks(scan_data: dict, args) -> list[str]:
     COL_CL = 7       # close-to-close OTM%
     COL_DELTA = 8    # Δshort (Δ±0.NN or "-")
     COL_VFY = 7      # Vfy (✓N s or "—")
+    # Bid/Ask shows the LEG prices that compose the net credit:
+    # short leg's bid (what you'd sell at) / long leg's ask (what you'd
+    # buy at). credit = short_bid - long_ask. Useful for predicting
+    # what a LIMIT submit will actually pay before slippage; a bid of
+    # 0.05 + ask of 0.05 means you're scraping the ATM noise floor.
+    COL_BIDASK = 12
     # Hist = close-to-close historical percentile (anchored to prev_close).
     # Pred = intraday "predictive" percentile (anchored to current spot,
     #        slot-aware so it tracks today's price-path model).
@@ -1830,12 +2004,12 @@ def _render_top_picks(scan_data: dict, args) -> list[str]:
     COL_PCT = 12
 
     column_widths = [
-        COL_NUM, COL_SYM, COL_TYPE, COL_DTE, COL_PAIR, COL_CR, COL_NROI,
-        COL_OTM, COL_CL, COL_DELTA, COL_VFY, COL_PCT, COL_PCT,
+        COL_NUM, COL_SYM, COL_TYPE, COL_DTE, COL_PAIR, COL_CR, COL_BIDASK,
+        COL_NROI, COL_OTM, COL_CL, COL_DELTA, COL_VFY, COL_PCT, COL_PCT,
     ]
     column_headers = [
-        "#", "Sym", "Type", "DTE", "Short/Long", "Credit", "nROI",
-        "OTM%", "Cl%", "Δshort", "Vfy", "Hist", "Pred",
+        "#", "Sym", "Type", "DTE", "Short/Long", "Credit", "Bid/Ask",
+        "nROI", "OTM%", "Cl%", "Δshort", "Vfy", "Hist", "Pred",
     ]
     total_width = sum(column_widths)
 
@@ -1868,6 +2042,16 @@ def _render_top_picks(scan_data: dict, args) -> list[str]:
         else:
             vfy_str = f"{DIM}—{RESET}"
 
+        # short_bid / long_ask are the leg prices that the net credit is
+        # computed from. Display as "{short_bid}/{long_ask}". Falls back
+        # to "—/—" when either side is missing (legacy data, pre-verify).
+        sb = p.get("short_bid")
+        la = p.get("long_ask")
+        if sb is not None and la is not None and (sb > 0 or la > 0):
+            bidask_str = f"{DIM}{sb:.2f}/{la:.2f}{RESET}"
+        else:
+            bidask_str = f"{DIM}—{RESET}"
+
         # Build each cell, then pad to its declared column width. _pad
         # ignores ANSI sequences when measuring visible length, so colored
         # cells (nroi, ot/cl, vfy, tier label) line up under their headers.
@@ -1878,6 +2062,7 @@ def _render_top_picks(scan_data: dict, args) -> list[str]:
             f"D{p['dte']}",
             pair,
             f"${credit:.2f}",
+            bidask_str,
             color_roi(norm_roi),
             f"{DIM}ot{otm:.1f}{RESET}",
             f"{DIM}cl{_fmt_pct(chg)}{RESET}",
@@ -1912,15 +2097,16 @@ def _format_activity_row(a: dict) -> str:
     GREY = "\033[90m"
 
     icon = {
-        "FILLED":    f"{GREEN}✓{RESET}",
-        "SIMULATED": f"{CYAN}◉{RESET}",
-        "SUBMITTED": f"{YELLOW}→{RESET}",
-        "PENDING":   f"{YELLOW}→{RESET}",
-        "SKIPPED":   f"{DIM}⊗{RESET}",
-        "ERROR":     f"{RED}✗{RESET}",
-        "REJECTED":  f"{RED}✗{RESET}",
-        "CANCELLED": f"{DIM}⊗{RESET}",
-        "QUIET":     f"{DIM}·{RESET}",
+        "FILLED":       f"{GREEN}✓{RESET}",
+        "SIMULATED":    f"{CYAN}◉{RESET}",
+        "SUBMITTED":    f"{YELLOW}→{RESET}",
+        "PENDING":      f"{YELLOW}→{RESET}",
+        "SKIPPED":      f"{DIM}⊗{RESET}",
+        "ERROR":        f"{RED}✗{RESET}",
+        "REJECTED":     f"{RED}✗{RESET}",
+        "CANCELLED":    f"{DIM}⊗{RESET}",
+        "QUIET":        f"{DIM}·{RESET}",
+        "TIER_OFFLINE": f"{RED}!{RESET}",
     }
     kind_tag = {
         "simulate_trade": f"{CYAN}SIM  {RESET}",
@@ -1937,6 +2123,14 @@ def _format_activity_row(a: dict) -> str:
         reason = a.get("reason", "no activity")
         tag = kind_tag[None]
         return f" {ic} {DIM}{ts}{RESET}  {tag}  {DIM}{reason}{RESET}"
+
+    # Tier filter unavailable — sticky red warning that persists every
+    # cycle the percentile server is down. Distinct from QUIET because
+    # the scanner IS doing work; it's just refusing to surface picks.
+    if outcome == "TIER_OFFLINE":
+        reason = a.get("reason", "tier filter unavailable")
+        tag = f"{RED}TIER {RESET}"
+        return f" {ic} {DIM}{ts}{RESET}  {tag}  {RED}{reason}{RESET}"
 
     # Trade / simulate row — colored key fields.
     kt = kind_tag.get(a.get("handler")) or f"{DIM}{(a.get('handler') or '')[:5].upper():<5}{RESET}"
@@ -3429,22 +3623,41 @@ def build_handler(cfg: dict) -> ActionHandler:
 
 
 async def scan_all_tickers(
-    client: httpx.AsyncClient, args, prev_close_cache: PrevCloseCache | None = None,
+    client: httpx.AsyncClient, args,
+    prev_close_cache: PrevCloseCache | None = None,
+    tier_data_cache: "TierDataCache | None" = None,
 ) -> dict:
     """Perform a full scan of all tickers and DTEs.
 
     Fetches quotes, expirations, tier data, and all option chains in parallel.
     Previous-close prices come from `prev_close_cache` (refreshed at startup
-    and at 04:00 PT on trading days). If no cache is supplied, falls back to
-    the legacy per-scan fetch so single-shot test invocations keep working.
+    and at 04:00 PT on trading days). Tier data comes from `tier_data_cache`
+    (refreshed at most once per ~2h, since `/range_percentiles` returns
+    ~120KB and takes 7-8s to compute on a cold cache, but the underlying
+    model only changes a few times per day). If no cache is supplied,
+    falls back to the legacy per-scan fetch so single-shot test
+    invocations keep working.
     """
     result: dict[str, Any] = {"quotes": {}, "dte_sections": {}}
+
+    # Decide whether to fetch tier data this cycle. The cache amortizes
+    # the slow fetch across 2h; without it (legacy --once / test path)
+    # we always fetch. `should_fetch_tier` controls inclusion in the
+    # parallel gather below — when the cache is fresh, we skip the
+    # network call entirely on this cycle.
+    needs_tiers = args.tiers or args.min_tier or args.min_tier_close
+    if needs_tiers and tier_data_cache is not None:
+        should_fetch_tier = tier_data_cache.should_refresh()
+    else:
+        should_fetch_tier = bool(needs_tiers)
 
     # Phase 1: Fetch quotes + expirations + tier data in parallel
     quote_coros = [fetch_quote(client, args.daemon_url, sym) for sym in args.tickers]
     exp_coro = fetch_expirations(client, args.daemon_url, args.tickers[0])
-    needs_tiers = args.tiers or args.min_tier or args.min_tier_close
-    tier_coro = fetch_tier_data(client, args.percentile_url, args.tickers, args.dte) if needs_tiers else asyncio.sleep(0)
+    tier_coro = (
+        fetch_tier_data(client, args.percentile_url, args.tickers, args.dte)
+        if should_fetch_tier else asyncio.sleep(0)
+    )
 
     phase1 = await asyncio.gather(*quote_coros, exp_coro, tier_coro, return_exceptions=True)
 
@@ -3457,7 +3670,24 @@ async def scan_all_tickers(
     result["quotes"] = quotes
 
     all_expirations = phase1[n_tickers] if not isinstance(phase1[n_tickers], BaseException) else []
-    tier_data = phase1[n_tickers + 1] if needs_tiers and not isinstance(phase1[n_tickers + 1], BaseException) else None
+
+    # Resolve tier_data: from this cycle's fetch (success or failure) +
+    # the cache (if any). The cache absorbs the result and decides
+    # whether to keep stale data; we then read the effective value.
+    if should_fetch_tier:
+        fetched = phase1[n_tickers + 1]
+        fresh_tier_data = fetched if isinstance(fetched, dict) else None
+    else:
+        fresh_tier_data = None  # didn't fetch this cycle
+
+    if needs_tiers and tier_data_cache is not None:
+        if should_fetch_tier:
+            tier_data_cache.absorb_fetch_result(fresh_tier_data)
+        tier_data = tier_data_cache.get()
+    else:
+        # No cache (legacy/test path): use whatever the fetch returned,
+        # or None when tiers weren't requested.
+        tier_data = fresh_tier_data if needs_tiers else None
 
     if prev_close_cache is not None:
         # Scheduled refresh — only fires after 04:00 PT on a trading day
@@ -3523,6 +3753,38 @@ async def scan_all_tickers(
                 dte_section["spreads"][sym] = []
 
         result["dte_sections"][dte] = dte_section
+
+    # Tier-filter state. The user can configure tier filtering three ways:
+    #   1) `tiers: true` (or --tiers) — fetch tier data, no implicit filter,
+    #      but downstream filters (min_tier / min_tier_close) need this.
+    #   2) `min_tier: <named>|pN` — server-recommended named tier or a raw
+    #      percentile, applied to the intraday model.
+    #   3) `min_tier_close: <named>|pN` — same but for the close-to-close
+    #      model.
+    #
+    # If ANY of those is requested but the percentile server is unreachable
+    # (tier_data is None), the filter silently disengages — and the user
+    # sees Top-N picks that violate the filter without realizing it. We
+    # record the state here so:
+    #   - `_collect_filtered_candidates` can suppress picks (fail-safe).
+    #   - `_render_top_picks` can show a prominent "tier filter offline"
+    #     banner instead of the misleading green TOP-N header.
+    #   - `scan_loop` can drop a sticky activity entry so the operator
+    #     sees the issue every cycle until the percentile server is back.
+    if needs_tiers and tier_data is None:
+        result["tier_filter_state"] = "unavailable"
+        # Surface the actual failure reason captured by fetch_tier_data
+        # (HTTP code + body excerpt, exception type, etc.) so the
+        # offline banner can tell "server unreachable" from "server
+        # returned 500 because its upstream is down" — a hugely
+        # different debugging path for the operator.
+        result["tier_filter_error"] = (
+            _TIER_FETCH_LAST_ERROR.get("reason") or "no response"
+        )
+    elif needs_tiers:
+        result["tier_filter_state"] = "active"
+    else:
+        result["tier_filter_state"] = "off"
 
     return result
 
@@ -3835,8 +4097,16 @@ def _diagnose_quiet_reason(handlers: list, data: dict, candidates: list) -> str:
 def _maybe_log_quiet_heartbeat(
     args, handlers: list, data: dict, candidates: list, fired: bool,
 ) -> None:
-    """Append one heartbeat entry to args.activity_log iff nothing fired."""
+    """Append one heartbeat entry to args.activity_log iff nothing fired.
+
+    Suppressed when the tier filter is offline — that case has its own
+    sticky entry from `_maybe_log_tier_filter_unavailable`, and the
+    "no candidates passed screener filters" diagnosis a QUIET entry
+    would emit is misleading (the screener didn't reject them; the
+    fail-safe in `_collect_filtered_candidates` did)."""
     if fired:
+        return
+    if data.get("tier_filter_state") == "unavailable":
         return
     activity_log = getattr(args, "activity_log", None)
     if activity_log is None:
@@ -3848,6 +4118,34 @@ def _maybe_log_quiet_heartbeat(
         "outcome": "QUIET",
         "reason": _diagnose_quiet_reason(handlers, data, candidates),
         "candidate_count": len(candidates),
+    })
+
+
+def _maybe_log_tier_filter_unavailable(args, data: dict) -> None:
+    """Append a sticky activity entry every cycle the tier filter is
+    requested but the percentile server is unreachable.
+
+    Without this the Top-N banner is the only signal — and a user who
+    scrolls past it (or whose terminal clears between paints) can miss
+    the fact that their safety gate is offline. The activity panel
+    persists across paints, so a per-cycle entry there is hard to miss.
+    """
+    if data.get("tier_filter_state") != "unavailable":
+        return
+    activity_log = getattr(args, "activity_log", None)
+    if activity_log is None:
+        return
+    url = getattr(args, "percentile_url", None) or "?"
+    err = data.get("tier_filter_error")
+    # Prefer the captured error (HTTP 500 + body excerpt, etc.) over a
+    # generic "unreachable" phrasing — they imply different fixes.
+    detail = err if err else f"no response from {url}"
+    now = datetime.now()
+    args.activity_log.append({
+        "ts": now.strftime("%H:%M:%S"),
+        "_sort_key": now.timestamp(),
+        "outcome": "TIER_OFFLINE",
+        "reason": f"Top-N suppressed (tier filter requested) — {detail}",
     })
 
 
@@ -3883,6 +4181,7 @@ async def _run_scan_cycle(
     args,
     prev_close_cache: "PrevCloseCache",
     handlers: list,
+    tier_data_cache: "TierDataCache | None" = None,
 ) -> tuple[str | None, str | None]:
     """Execute one scan cycle: fetch chains, verify, fire handlers, render.
 
@@ -3896,7 +4195,11 @@ async def _run_scan_cycle(
     `asyncio.gather`.
     """
     try:
-        data = await scan_all_tickers(client, args, prev_close_cache=prev_close_cache)
+        data = await scan_all_tickers(
+            client, args,
+            prev_close_cache=prev_close_cache,
+            tier_data_cache=tier_data_cache,
+        )
 
         # Provider re-verify: before top-picks render AND before any
         # handler fires, re-fetch fresh quotes for the top candidates
@@ -3952,6 +4255,11 @@ async def _run_scan_cycle(
             fired=(submits_after > submits_before),
         )
 
+        # If the user configured tier filtering but tier_data wasn't
+        # returned, drop a sticky red entry so the activity panel
+        # reflects the issue every cycle.
+        _maybe_log_tier_filter_unavailable(args, data)
+
         rendered = render_dashboard(data, args)
         # Prefix the screen-clear so caller can `print(output)` directly
         # and the previous frame is fully replaced.
@@ -4004,6 +4312,18 @@ async def scan_loop(args):
         # Initial fetch at startup (tier_data not yet available — db_server only)
         await prev_close_cache.refresh(client)
 
+        # Tier data cache. The percentile-server `/range_percentiles`
+        # response is ~120KB and takes 7-8s to compute on a cold cache,
+        # but only changes a few times per day (when the upstream models
+        # retrain). Refreshing it on every scan was wasting both the
+        # local network and the server's CPU. The cache refreshes once
+        # every `ttl_seconds` (default 2h) on the success path, but
+        # retries every cycle while empty so a transient startup
+        # failure doesn't lock out tier filtering for the full TTL.
+        tier_data_cache = TierDataCache(
+            ttl_seconds=getattr(args, "tier_data_ttl_seconds", None),
+        )
+
         # Track recent scan durations so we can kick off each subsequent
         # scan early enough that it COMPLETES roughly when the displayed
         # countdown reaches 0. Bounded deque so a single slow scan early
@@ -4044,6 +4364,7 @@ async def scan_loop(args):
                 try:
                     return await _run_scan_cycle(
                         client, args, prev_close_cache, handlers,
+                        tier_data_cache=tier_data_cache,
                     )
                 finally:
                     scan_done.set()

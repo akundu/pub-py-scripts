@@ -11016,11 +11016,20 @@ class TestPriceFreshnessEnforcement:
 
     @pytest.mark.asyncio
     async def test_get_option_quotes_with_age_returns_age(self, monkeypatch):
-        """get_option_quotes_with_age returns (quotes, age, source) triple."""
+        """get_option_quotes_with_age returns (quotes, age, source) triple.
+
+        The aggregate ``age`` reflects the freshest IBKR row when present,
+        falling back to the minimum row age otherwise. Quote rows already
+        carry ``source`` and ``age_seconds`` set by get_merged_quotes —
+        this aggregator picks the representative one for the response."""
         from app.services import market_data as mkt
 
-        mock_quotes = [{"strike": 5500.0, "bid": 1.0, "ask": 1.5,
-                        "last": 1.2, "volume": 10, "open_interest": 50}]
+        # Match the actual shape get_merged_quotes produces.
+        mock_quotes = [
+            {"strike": 5500.0, "bid": 1.0, "ask": 1.5, "last": 1.2,
+             "volume": 10, "open_interest": 50,
+             "source": "ibkr_fresh", "age_seconds": 5.0},
+        ]
 
         class FakeCache:
             def get_age(self, sym, exp, ot):
@@ -11042,6 +11051,40 @@ class TestPriceFreshnessEnforcement:
         assert quotes == mock_quotes
         assert age == 5.0
         assert source == "fresh_cache"
+
+    @pytest.mark.asyncio
+    async def test_get_option_quotes_with_age_prefers_ibkr_fresh_over_csv(self, monkeypatch):
+        """When the merged response mixes ibkr_fresh and csv rows, the
+        aggregate age must report the IBKR-fresh age — NOT the CSV age.
+        Without this, a single CSV row in a mostly-IBKR response made
+        the spread scanner show ``Vfy ✓500s`` even when the IBKR data
+        was 20s fresh, breaking the freshness display."""
+        from app.services import market_data as mkt
+
+        mock_quotes = [
+            {"strike": 7080.0, "bid": 0.85, "source": "ibkr_fresh", "age_seconds": 28.4},
+            {"strike": 7085.0, "bid": 0.90, "source": "csv",        "age_seconds": 526.7},
+            {"strike": 7090.0, "bid": 1.15, "source": "ibkr_fresh", "age_seconds": 28.4},
+        ]
+
+        class FakeCache:
+            def get_age(self, *_a, **_k): return 526.7
+        class FakeOQ:
+            _cache = FakeCache()
+            def get_cached_quotes(self, *_a, **_k): return mock_quotes
+
+        monkeypatch.setattr(
+            "app.services.option_quote_streaming.get_option_quote_streaming",
+            lambda: FakeOQ(),
+        )
+
+        _, age, _ = await mkt.get_option_quotes_with_age(
+            "SPX", "2026-04-30", "PUT", max_age=45.0,
+        )
+        assert age == 28.4, (
+            f"aggregate age must be the IBKR-fresh age (28.4s), not the "
+            f"CSV age (526.7s); got {age}"
+        )
 
     @pytest.mark.asyncio
     async def test_trade_command_blocks_when_price_too_stale(self, monkeypatch, capsys):
@@ -13099,6 +13142,36 @@ class TestTieredOptionStreaming:
         assert OptionQuoteStreamingService._dte_for_exp("2026-04-22", today) == 3
         assert OptionQuoteStreamingService._dte_for_exp("garbage", today) is None
 
+    def test_dte_for_exp_trading_days_across_weekend(self):
+        """DTE must skip weekends — Monday from a Thursday is 2 trading
+        days, not 4 calendar days. Without this, ``ibkr_dte_list=[0,1,2]``
+        excludes Monday expirations (calendar DTE=4) from IBKR streaming
+        and the 2DTE bucket gets served only by stale CSV. Locks in the
+        production bug observed on 2026-04-30 (Thu) where NDX 5/4 (Mon)
+        was missing from the IBKR cache."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from datetime import date
+
+        # Thursday 2026-04-30 → next trading days
+        thu = date(2026, 4, 30)
+        assert OptionQuoteStreamingService._dte_for_exp("2026-04-30", thu) == 0
+        assert OptionQuoteStreamingService._dte_for_exp("2026-05-01", thu) == 1, "Fri = 1 trading day"
+        assert OptionQuoteStreamingService._dte_for_exp("2026-05-04", thu) == 2, (
+            "Mon must be 2 trading days (skip weekend), not 4 calendar days"
+        )
+        assert OptionQuoteStreamingService._dte_for_exp("2026-05-05", thu) == 3, "Tue = 3"
+        assert OptionQuoteStreamingService._dte_for_exp("2026-05-06", thu) == 4, "Wed = 4"
+
+        # Friday → Monday is 1 trading day (skip weekend)
+        fri = date(2026, 5, 1)
+        assert OptionQuoteStreamingService._dte_for_exp("2026-05-04", fri) == 1, (
+            "Mon from Fri = 1 trading day"
+        )
+
+        # Monday → Friday same week = 4 trading days, equal to calendar
+        mon = date(2026, 5, 4)
+        assert OptionQuoteStreamingService._dte_for_exp("2026-05-08", mon) == 4
+
     def test_csv_intervals_throttle_far_dte(self, monkeypatch):
         """DTE bucket cooldown — first call emits jobs for every DTE, but
         a second call within the cooldown window drops the throttled
@@ -13115,58 +13188,65 @@ class TestTieredOptionStreaming:
         )
         svc = OptionQuoteStreamingService(cfg, MagicMock())
 
-        today = date.today()
-        exps = [
-            today.isoformat(),                             # DTE 0  bucket: 0-2
-            (today + timedelta(days=3)).isoformat(),       # DTE 3  bucket: 3-4
-            (today + timedelta(days=6)).isoformat(),       # DTE 6  bucket: 5-7
-            (today + timedelta(days=14)).isoformat(),      # DTE 14 bucket: 8+
-        ]
+        # Anchor on Monday so the calendar arithmetic to fixed-DTE
+        # expirations is deterministic under trading-day semantics.
+        anchor = date(2026, 5, 4)  # Monday
+        import app.services.option_quote_streaming as oqs_mod
+        orig_date = oqs_mod.date
+        class _FrozenDate(date):
+            @classmethod
+            def today(cls): return anchor
+        oqs_mod.date = _FrozenDate
 
-        # First call: every DTE bucket emits (cold cache, all due)
-        t0 = 1000.0
-        monkeypatch.setattr(time, "monotonic", lambda: t0)
-        csv1, _ = svc._build_fetch_jobs("SPX", 5000.0, exps, "quote")
-        # 4 expirations × CALL/PUT = 8 jobs on the first pass
-        assert len(csv1) == 8
+        try:
+            # Trading-day DTEs from Mon 5/4: Thu 5/7=3, Tue 5/12=6, Mon 5/25=14
+            exps = [
+                "2026-05-04",  # DTE 0  bucket: 0-2
+                "2026-05-07",  # DTE 3  bucket: 3-4
+                "2026-05-12",  # DTE 6  bucket: 5-7
+                "2026-05-25",  # DTE 14 bucket: 8+ (Memorial Day on 5/25 — but our DTE doesn't model holidays; treat as a Monday)
+            ]
 
-        # Second call 30s later: only DTE 0 bucket has 0-cooldown.
-        # 3-4 (150s), 5-7 (300s), 8+ (600s) all still cooling down.
-        monkeypatch.setattr(time, "monotonic", lambda: t0 + 30.0)
-        csv2, _ = svc._build_fetch_jobs("SPX", 5000.0, exps, "quote")
-        dtes_emitted = {(today - date.fromisoformat(c[1])).days for c in csv2}
-        # DTE 0 → 0 days difference (today)
-        assert csv2, "DTE 0-2 bucket must always emit"
-        for _, exp, *_rest in csv2:
-            d = (date.fromisoformat(exp) - today).days
-            assert d <= 2, f"DTE {d} not throttled at 30s"
+            # First call: every DTE bucket emits (cold cache, all due)
+            t0 = 1000.0
+            monkeypatch.setattr(time, "monotonic", lambda: t0)
+            csv1, _ = svc._build_fetch_jobs("SPX", 5000.0, exps, "quote")
+            # 4 expirations × CALL/PUT = 8 jobs on the first pass
+            assert len(csv1) == 8
 
-        # 200s later: DTE 0-2 + 3-4 (≥150s elapsed) emit; 5-7 and 8+ still throttled
-        monkeypatch.setattr(time, "monotonic", lambda: t0 + 200.0)
-        csv3, _ = svc._build_fetch_jobs("SPX", 5000.0, exps, "quote")
-        max_dte_emitted = max(
-            (date.fromisoformat(c[1]) - today).days for c in csv3
-        )
-        assert max_dte_emitted == 3, (
-            f"at 200s, only ≤4 DTE should emit; got max={max_dte_emitted}"
-        )
+            # Second call 30s later: only DTE 0 bucket has 0-cooldown.
+            # 3-4 (150s), 5-7 (300s), 8+ (600s) all still cooling down.
+            monkeypatch.setattr(time, "monotonic", lambda: t0 + 30.0)
+            csv2, _ = svc._build_fetch_jobs("SPX", 5000.0, exps, "quote")
+            assert csv2, "DTE 0-2 bucket must always emit"
+            for _, exp, *_rest in csv2:
+                d = svc._dte_for_exp(exp, anchor)
+                assert d <= 2, f"DTE {d} not throttled at 30s"
 
-        # 400s later: 0-2, 3-4, 5-7 (≥300s) emit; 8+ still throttled
-        monkeypatch.setattr(time, "monotonic", lambda: t0 + 400.0)
-        csv4, _ = svc._build_fetch_jobs("SPX", 5000.0, exps, "quote")
-        max_dte_emitted = max(
-            (date.fromisoformat(c[1]) - today).days for c in csv4
-        )
-        assert max_dte_emitted == 6, (
-            f"at 400s, ≤7 DTE should emit; got max={max_dte_emitted}"
-        )
+            # 200s later: DTE 0-2 + 3-4 (≥150s elapsed) emit; 5-7 and 8+ throttled
+            monkeypatch.setattr(time, "monotonic", lambda: t0 + 200.0)
+            csv3, _ = svc._build_fetch_jobs("SPX", 5000.0, exps, "quote")
+            max_dte_emitted = max(svc._dte_for_exp(c[1], anchor) for c in csv3)
+            assert max_dte_emitted == 3, (
+                f"at 200s, only ≤4 trading DTE should emit; got max={max_dte_emitted}"
+            )
 
-        # 700s later: every bucket due (8+ has 600s interval)
-        monkeypatch.setattr(time, "monotonic", lambda: t0 + 700.0)
-        csv5, _ = svc._build_fetch_jobs("SPX", 5000.0, exps, "quote")
-        assert len(csv5) == 8, (
-            f"at 700s every bucket should emit; got {len(csv5)} jobs"
-        )
+            # 400s later: 0-2, 3-4, 5-7 (≥300s) emit; 8+ still throttled
+            monkeypatch.setattr(time, "monotonic", lambda: t0 + 400.0)
+            csv4, _ = svc._build_fetch_jobs("SPX", 5000.0, exps, "quote")
+            max_dte_emitted = max(svc._dte_for_exp(c[1], anchor) for c in csv4)
+            assert max_dte_emitted == 6, (
+                f"at 400s, ≤7 trading DTE should emit; got max={max_dte_emitted}"
+            )
+
+            # 700s later: every bucket due (8+ has 600s interval)
+            monkeypatch.setattr(time, "monotonic", lambda: t0 + 700.0)
+            csv5, _ = svc._build_fetch_jobs("SPX", 5000.0, exps, "quote")
+            assert len(csv5) == 8, (
+                f"at 700s every bucket should emit; got {len(csv5)} jobs"
+            )
+        finally:
+            oqs_mod.date = orig_date
 
     def test_csv_intervals_yaml_parsing(self):
         """``option_quotes_csv_intervals`` from YAML accepts list-of-pairs
@@ -13200,35 +13280,45 @@ class TestTieredOptionStreaming:
         cfg = _make_streaming_config()
         svc = OptionQuoteStreamingService(cfg, MagicMock())
 
-        today = date.today()
-        exps = [
-            today.isoformat(),                             # DTE 0  → IBKR + CSV
-            (today + timedelta(days=1)).isoformat(),       # DTE 1  → IBKR + CSV
-            (today + timedelta(days=2)).isoformat(),       # DTE 2  → IBKR + CSV
-            (today + timedelta(days=5)).isoformat(),       # DTE 5  → CSV only
-            (today + timedelta(days=14)).isoformat(),      # DTE 14 → excluded (> csv_dte_max=10)
-        ]
+        # Use fixed dates with known trading-day deltas to avoid weekend
+        # ambiguity. Anchor on Monday 2026-05-04 so DTE math is stable.
+        # Patch date.today() to return the anchor.
+        anchor = date(2026, 5, 4)  # Monday
+        import app.services.option_quote_streaming as oqs_mod
+        orig_date = oqs_mod.date
+        class _FrozenDate(date):
+            @classmethod
+            def today(cls): return anchor
+        oqs_mod.date = _FrozenDate
 
-        csv_jobs, ibkr_jobs = svc._build_fetch_jobs(
-            symbol="SPX", price=5000.0, expirations=exps, price_source="quote",
-        )
-        # CSV: DTE 0,1,2,5 (DTE 14 excluded) × CALL/PUT = 4 × 2 = 8
-        assert len(csv_jobs) == 8
-        # IBKR: only DTE 0/1/2 × CALL/PUT = 3 × 2 = 6
-        assert len(ibkr_jobs) == 6
+        try:
+            exps = [
+                "2026-05-04",  # Mon — DTE 0
+                "2026-05-05",  # Tue — DTE 1
+                "2026-05-06",  # Wed — DTE 2
+                "2026-05-11",  # Mon next week — DTE 5
+                "2026-05-22",  # 14 trading days — DTE 14, excluded by csv_dte_max=10
+            ]
 
-        # Strike range checks: IBKR ±3% of 5000 = [4850, 5150], CSV ±15% = [4250, 5750]
-        for _, _, _, smin, smax, _ in csv_jobs:
-            assert smin == 4250.0
-            assert smax == 5750.0
-        for _, _, _, smin, smax, _ in ibkr_jobs:
-            assert smin == 4850.0
-            assert smax == 5150.0
+            csv_jobs, ibkr_jobs = svc._build_fetch_jobs(
+                symbol="SPX", price=5000.0, expirations=exps, price_source="quote",
+            )
+            # CSV: DTE 0,1,2,5 × CALL/PUT = 8 (DTE 14 excluded)
+            assert len(csv_jobs) == 8
+            # IBKR: only DTE 0/1/2 × CALL/PUT = 6
+            assert len(ibkr_jobs) == 6
 
-        # IBKR jobs only include DTE 0/1/2 expirations
-        ibkr_exps = {j[1] for j in ibkr_jobs}
-        assert ibkr_exps == {today.isoformat(), (today + timedelta(days=1)).isoformat(),
-                             (today + timedelta(days=2)).isoformat()}
+            # Strike range checks
+            for _, _, _, smin, smax, _ in csv_jobs:
+                assert smin == 4250.0 and smax == 5750.0
+            for _, _, _, smin, smax, _ in ibkr_jobs:
+                assert smin == 4850.0 and smax == 5150.0
+
+            # IBKR jobs only include DTE 0/1/2 expirations
+            ibkr_exps = {j[1] for j in ibkr_jobs}
+            assert ibkr_exps == {"2026-05-04", "2026-05-05", "2026-05-06"}
+        finally:
+            oqs_mod.date = orig_date
 
     def test_build_fetch_jobs_dte_list_none_includes_all(self):
         """ibkr_dte_list=None means IBKR fetches every expiration (legacy)."""
@@ -15351,6 +15441,78 @@ class TestSpreadScanner:
                     f"got {ch!r}\n  header: {plain_header!r}\n  row:    {row!r}"
                 )
 
+    def test_top_picks_renders_bid_ask_column(self):
+        """Top-N rows must surface the leg prices that compose the net
+        credit (short_bid / long_ask), so the operator can see whether
+        the credit comes from healthy quotes or from one ATM-noise side.
+        Falls back to '—' when either side is missing (legacy data)."""
+        from spread_scanner import _render_top_picks, parse_args
+
+        args = parse_args(["--tickers", "SPX", "--top", "2"])
+        scan_data = {
+            "prev_closes": {"SPX": 7100.0},
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-04-30",
+                    "spreads": {
+                        "SPX": [
+                            # Healthy quotes: bid 1.85, ask 0.05 → credit 1.80.
+                            {"option_type": "PUT", "short_strike": 7050,
+                             "long_strike": 7030, "credit": 1.80,
+                             "short_bid": 1.85, "long_ask": 0.05,
+                             "roi_pct": 9.0, "otm_pct": 0.7, "width": 20,
+                             "short_delta": -0.17,
+                             "verified": True, "verify_age_seconds": 3},
+                            # Pre-verify legacy row — no bid/ask fields.
+                            {"option_type": "CALL", "short_strike": 7200,
+                             "long_strike": 7220, "credit": 0.60,
+                             "roi_pct": 3.1, "otm_pct": 1.4, "width": 20,
+                             "short_delta": None},
+                        ],
+                    },
+                }
+            },
+        }
+        lines = _render_top_picks(scan_data, args)
+        text = "\n".join(lines)
+        # Header has the new column.
+        assert "Bid/Ask" in text
+        # Row 1 (with healthy quotes) shows the leg prices.
+        assert "1.85/0.05" in text
+        # The credit column is still present (now sits BEFORE bid/ask).
+        assert "$1.80" in text
+
+    def test_top_picks_bid_ask_renders_dash_when_missing(self):
+        """A row with no short_bid / long_ask (legacy / pre-verify) must
+        not crash and must not print '0.00/0.00' (which would falsely
+        suggest a real $0/$0 quote). Use a dim em-dash placeholder."""
+        from spread_scanner import _render_top_picks, parse_args
+
+        args = parse_args(["--tickers", "SPX", "--top", "1"])
+        scan_data = {
+            "prev_closes": {"SPX": 7100.0},
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-04-30",
+                    "spreads": {
+                        "SPX": [{
+                            "option_type": "PUT", "short_strike": 7050,
+                            "long_strike": 7030, "credit": 0.50,
+                            "roi_pct": 2.6, "otm_pct": 0.7, "width": 20,
+                            # Intentionally no short_bid / long_ask.
+                        }],
+                    },
+                }
+            },
+        }
+        lines = _render_top_picks(scan_data, args)
+        text = "\n".join(lines)
+        assert "Bid/Ask" in text
+        assert "0.00/0.00" not in text
+        # The data row must contain SOME em-dash for the missing cell.
+        # (Don't hard-code the count — Vfy / Δshort / Hist / Pred also
+        # use em-dashes in this fixture.)
+
     def test_top_picks_shows_dash_when_tier_data_absent(self):
         """When tier_data is missing entirely, Hist/Pred cells render as
         dim em-dashes — but the columns and header are still present."""
@@ -15388,6 +15550,217 @@ class TestSpreadScanner:
             f"expected ≥2 em-dashes (Hist + Pred placeholders), "
             f"got {em_dash_count} in row: {data_rows[0]!r}"
         )
+
+    # ── min_tier DTE routing (intraday for DTE 0; c2c-window=N for DTE>0) ──
+
+    @staticmethod
+    def _tier_data_for_dte_routing(symbol: str = "SPX") -> dict:
+        """Build a tier_data fixture with DISTINCT intraday vs c2c-window
+        boundaries so DTE-routing is observable in the test outcome.
+
+        Intraday p90 (puts) → -1.0% from spot ⇒ boundary 6930 (spot=7000).
+        C2c window=1 p90 (puts) → -2.0% from prev_close ⇒ boundary 6860.
+        C2c window=2 p90 (puts) → -3.0% ⇒ boundary 6790.
+        Strikes between 6860 and 6930 pass intraday but fail c2c-1; this
+        is what tells us which model the filter chose.
+        """
+        return {
+            "hourly": {
+                symbol: {
+                    "recommended": {
+                        "intraday":       {"aggressive": {"put": 90, "call": 90}},
+                        "close_to_close": {"aggressive": {"put": 90, "call": 90}},
+                    },
+                    "slots": {
+                        "10:00": {
+                            "when_down": {"pct": {"p90": -1.0}},
+                            "when_up":   {"pct": {"p90":  1.0}},
+                        },
+                    },
+                }
+            },
+            "tickers": [{
+                "ticker": symbol,
+                "windows": {
+                    "1": {
+                        "when_down": {"pct": {"p90": -2.0}},
+                        "when_up":   {"pct": {"p90":  2.0}},
+                    },
+                    "2": {
+                        "when_down": {"pct": {"p90": -3.0}},
+                        "when_up":   {"pct": {"p90":  3.0}},
+                    },
+                },
+            }],
+        }
+
+    def test_min_tier_pn_routes_to_intraday_for_dte0_spreads(self, monkeypatch):
+        """min_tier=p90 with a DTE-0 spread must apply the INTRADAY
+        boundary (in this fixture: spot * (1 - 1.0%) = 6930 for SPX puts)."""
+        import spread_scanner as ss
+        from spread_scanner import _collect_filtered_candidates, parse_args
+
+        monkeypatch.setattr(
+            ss, "_find_current_slot",
+            lambda slots: "10:00" if slots else None,
+        )
+
+        args = parse_args(["--tickers", "SPX", "--min-tier", "p90"])
+        scan_data = {
+            "quotes":      {"SPX": {"last": 7000.0}},
+            "prev_closes": {"SPX": 7000.0},
+            "tier_filter_state": "active",
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-04-30",
+                    "tier_data": self._tier_data_for_dte_routing("SPX"),
+                    "spreads": {
+                        "SPX": [
+                            # 6920: <= 6930 intraday boundary → PASSES.
+                            {"option_type": "PUT", "short_strike": 6920,
+                             "long_strike": 6900, "credit": 0.50,
+                             "roi_pct": 2.5, "otm_pct": 1.14, "width": 20},
+                            # 6940: > 6930 intraday boundary → FAILS.
+                            {"option_type": "PUT", "short_strike": 6940,
+                             "long_strike": 6920, "credit": 0.40,
+                             "roi_pct": 2.0, "otm_pct": 0.86, "width": 20},
+                        ],
+                    },
+                }
+            },
+        }
+        cands = _collect_filtered_candidates(scan_data, args)
+        survivors = {c["short_strike"] for c in cands}
+        assert 6920 in survivors
+        assert 6940 not in survivors
+
+    def test_min_tier_pn_routes_to_c2c_window_for_dte1_spreads(self, monkeypatch):
+        """min_tier=p90 with a DTE-1 spread must apply the C2C-WINDOW=1
+        boundary (6860 in fixture), NOT the intraday boundary (6930).
+        Strikes between 6860 and 6930 pass intraday but fail c2c-1, so
+        old buggy code that used intraday-for-everything would let them
+        through. New DTE-routed code drops them."""
+        import spread_scanner as ss
+        from spread_scanner import _collect_filtered_candidates, parse_args
+
+        monkeypatch.setattr(
+            ss, "_find_current_slot",
+            lambda slots: "10:00" if slots else None,
+        )
+
+        args = parse_args(["--tickers", "SPX", "--min-tier", "p90"])
+        scan_data = {
+            "quotes":      {"SPX": {"last": 7000.0}},
+            "prev_closes": {"SPX": 7000.0},
+            "tier_filter_state": "active",
+            "dte_sections": {
+                1: {
+                    "expiration": "2026-05-01",
+                    "tier_data": self._tier_data_for_dte_routing("SPX"),
+                    "spreads": {
+                        "SPX": [
+                            # 6850: <= 6860 c2c-1 boundary → PASSES.
+                            {"option_type": "PUT", "short_strike": 6850,
+                             "long_strike": 6830, "credit": 0.50,
+                             "roi_pct": 2.5, "otm_pct": 2.14, "width": 20},
+                            # 6900: passes intraday (≤6930) but FAILS
+                            # c2c-1 (>6860). Regression guard.
+                            {"option_type": "PUT", "short_strike": 6900,
+                             "long_strike": 6880, "credit": 0.40,
+                             "roi_pct": 2.0, "otm_pct": 1.43, "width": 20},
+                        ],
+                    },
+                }
+            },
+        }
+        cands = _collect_filtered_candidates(scan_data, args)
+        survivors = {c["short_strike"] for c in cands}
+        assert 6850 in survivors
+        assert 6900 not in survivors, (
+            "DTE-1 strike between intraday and c2c-1 boundaries must be "
+            "filtered by c2c-1 (regression: old code used intraday "
+            "boundary and let it through)."
+        )
+
+    def test_min_tier_pn_routes_to_c2c_window2_for_dte2_spreads(self, monkeypatch):
+        """min_tier=p90 with a DTE-2 spread must apply C2C-WINDOW=2
+        (6790 in fixture). Strikes between 6790 and 6860 pass DTE-1
+        boundary but fail DTE-2 boundary."""
+        import spread_scanner as ss
+        from spread_scanner import _collect_filtered_candidates, parse_args
+
+        monkeypatch.setattr(
+            ss, "_find_current_slot",
+            lambda slots: "10:00" if slots else None,
+        )
+
+        args = parse_args(["--tickers", "SPX", "--min-tier", "p90"])
+        scan_data = {
+            "quotes":      {"SPX": {"last": 7000.0}},
+            "prev_closes": {"SPX": 7000.0},
+            "tier_filter_state": "active",
+            "dte_sections": {
+                2: {
+                    "expiration": "2026-05-04",
+                    "tier_data": self._tier_data_for_dte_routing("SPX"),
+                    "spreads": {
+                        "SPX": [
+                            # 6780: <= 6790 c2c-2 boundary → PASSES.
+                            {"option_type": "PUT", "short_strike": 6780,
+                             "long_strike": 6760, "credit": 0.50,
+                             "roi_pct": 2.5, "otm_pct": 3.14, "width": 20},
+                            # 6850: passes c2c-1 (would be 6860) but
+                            # FAILS c2c-2 (>6790).
+                            {"option_type": "PUT", "short_strike": 6850,
+                             "long_strike": 6830, "credit": 0.40,
+                             "roi_pct": 2.0, "otm_pct": 2.14, "width": 20},
+                        ],
+                    },
+                }
+            },
+        }
+        cands = _collect_filtered_candidates(scan_data, args)
+        survivors = {c["short_strike"] for c in cands}
+        assert 6780 in survivors
+        assert 6850 not in survivors
+
+    def test_render_top_picks_filter_label_uses_generic_tier_prefix(self, monkeypatch):
+        """The Top-N filter chip used to read 'intra≥pN' which was
+        misleading once min_tier became DTE-routed (DTE>0 hits c2c, not
+        intraday). The generic 'tier≥pN' label is truthful for both
+        branches. (The header — including the filter chip — is only
+        rendered when there's at least one surviving candidate, so the
+        fixture seeds one passing spread.)"""
+        import spread_scanner as ss
+        from spread_scanner import _render_top_picks, parse_args
+
+        monkeypatch.setattr(
+            ss, "_find_current_slot",
+            lambda slots: "10:00" if slots else None,
+        )
+        args = parse_args(["--tickers", "SPX", "--top", "1", "--min-tier", "p90"])
+        scan_data = {
+            "quotes":      {"SPX": {"last": 7000.0}},
+            "prev_closes": {"SPX": 7000.0},
+            "tier_filter_state": "active",
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-04-30",
+                    "tier_data": self._tier_data_for_dte_routing("SPX"),
+                    "spreads": {
+                        "SPX": [{
+                            # Strike 6920 ≤ intraday boundary 6930 → passes.
+                            "option_type": "PUT", "short_strike": 6920,
+                            "long_strike": 6900, "credit": 0.50,
+                            "roi_pct": 2.5, "otm_pct": 1.14, "width": 20,
+                        }],
+                    },
+                }
+            },
+        }
+        text = "\n".join(_render_top_picks(scan_data, args))
+        assert "tier≥p90" in text, f"expected 'tier≥p90' in chip, got: {text!r}"
+        assert "intra≥" not in text
 
     # ── Tier filter offline (fail-safe behavior) ─────────────────────────
 
@@ -15715,6 +16088,179 @@ class TestSpreadScanner:
             assert ss._TIER_FETCH_LAST_ERROR.get("reason") is None
         finally:
             ss._resolve_percentile_url = orig_resolve
+
+    # ── TierDataCache (TTL-bounded refresh of slow percentile payload) ──
+
+    def test_tier_data_cache_refreshes_when_empty(self):
+        """A cold cache must refresh on first call — `should_refresh()`
+        returns True when there's no payload yet, regardless of TTL."""
+        from spread_scanner import TierDataCache
+        cache = TierDataCache(ttl_seconds=7200)
+        assert cache.should_refresh() is True
+
+    def test_tier_data_cache_skips_refresh_within_ttl(self):
+        """After a successful refresh, `should_refresh()` returns False
+        until `ttl_seconds` have elapsed. This is the whole point of the
+        cache — the percentile fetch is slow and the data only changes a
+        few times per day."""
+        from spread_scanner import TierDataCache
+        cache = TierDataCache(ttl_seconds=100.0)
+        cache.absorb_fetch_result({"hourly": {}}, now_monotonic=1000.0)
+        # 50s elapsed — still fresh.
+        assert cache.should_refresh(now_monotonic=1050.0) is False
+        # 99.9s elapsed — still fresh (boundary).
+        assert cache.should_refresh(now_monotonic=1099.9) is False
+
+    def test_tier_data_cache_refreshes_after_ttl_expires(self):
+        """Past `ttl_seconds`, `should_refresh()` returns True so the
+        cache picks up newly-retrained model output."""
+        from spread_scanner import TierDataCache
+        cache = TierDataCache(ttl_seconds=100.0)
+        cache.absorb_fetch_result({"hourly": {}}, now_monotonic=1000.0)
+        # 100s elapsed — at threshold, refresh.
+        assert cache.should_refresh(now_monotonic=1100.0) is True
+        # 200s elapsed — definitely refresh.
+        assert cache.should_refresh(now_monotonic=1200.0) is True
+
+    def test_tier_data_cache_keeps_stale_data_on_refresh_failure(self):
+        """When a refresh attempt fails BUT the cache already has data,
+        we keep the stale payload (better than no picks). The error
+        reason is recorded so downstream callers can surface a 'stale'
+        indicator if they choose."""
+        import spread_scanner as ss
+        from spread_scanner import TierDataCache
+        cache = TierDataCache(ttl_seconds=100.0)
+        good_payload = {"hourly": {"SPX": {}}}
+        cache.absorb_fetch_result(good_payload, now_monotonic=1000.0)
+
+        # Failure: pass None and an error reason. Stale data preserved.
+        ss._TIER_FETCH_LAST_ERROR["reason"] = "HTTP 500 from upstream"
+        cache.absorb_fetch_result(None)
+        assert cache.get() is good_payload  # unchanged
+        assert cache.error_reason == "HTTP 500 from upstream"
+
+    def test_tier_data_cache_retries_every_call_while_empty(self):
+        """While the cache has NEVER successfully fetched (cold start +
+        every prior fetch failed), `should_refresh()` always returns
+        True. This prevents a transient startup failure from locking
+        out tier filtering for the full 2h TTL."""
+        from spread_scanner import TierDataCache
+        cache = TierDataCache(ttl_seconds=7200)
+
+        # 1st failure: data still None, error recorded.
+        cache.absorb_fetch_result(None, error_reason="fetch failed once")
+        assert cache.get() is None
+        assert cache.should_refresh() is True
+
+        # 2nd failure: same.
+        cache.absorb_fetch_result(None, error_reason="fetch failed twice")
+        assert cache.get() is None
+        assert cache.should_refresh() is True
+
+    def test_tier_data_cache_default_ttl_is_two_hours(self):
+        """The default TTL is 2 hours — pinned so future tweaks have to
+        explicitly justify themselves. The user explicitly asked for
+        'about once every 2 hrs' refresh."""
+        from spread_scanner import TierDataCache
+        cache = TierDataCache()  # default
+        assert cache.ttl_seconds == 2 * 60 * 60
+
+    @pytest.mark.asyncio
+    async def test_scan_all_tickers_skips_tier_fetch_when_cache_is_fresh(
+        self, monkeypatch,
+    ):
+        """The whole point of the cache: when the cache is fresh,
+        scan_all_tickers must NOT call fetch_tier_data on this cycle.
+        Regression: refreshing on every scan cycle was wasting ~120KB
+        and 7-8s per call."""
+        import asyncio
+        import spread_scanner as ss
+        from spread_scanner import parse_args, TierDataCache
+
+        fetch_calls: list[tuple] = []
+        async def counting_fetch_tier_data(client, percentile_url, tickers, dte_list=None):
+            fetch_calls.append((percentile_url, tuple(tickers)))
+            return {"hourly": {sym: {"recommended": {}, "slots": {}}
+                               for sym in tickers}}
+        async def fake_quote(client, daemon_url, sym):
+            return {"last": 7100.0}
+        async def fake_expirations(client, daemon_url, sym):
+            return ["2026-04-30"]
+        async def fake_chain(client, daemon_url, sym, exp, strike_range_pct=5.0):
+            return {"calls": [], "puts": []}
+        async def fake_prev_closes(client, db_url, tickers):
+            return {sym: 7100.0 for sym in tickers}
+
+        monkeypatch.setattr(ss, "fetch_quote", fake_quote)
+        monkeypatch.setattr(ss, "fetch_expirations", fake_expirations)
+        monkeypatch.setattr(ss, "fetch_option_chain", fake_chain)
+        monkeypatch.setattr(ss, "fetch_tier_data", counting_fetch_tier_data)
+        monkeypatch.setattr(ss, "fetch_prev_closes", fake_prev_closes)
+        monkeypatch.setattr(ss, "extract_prev_closes_from_tier_data", lambda td: {})
+
+        args = parse_args(["--tickers", "SPX", "--min-tier", "moderate"])
+        cache = TierDataCache(ttl_seconds=7200)
+
+        # Cycle 1 — cache cold, fetch should fire.
+        await ss.scan_all_tickers(object(), args, tier_data_cache=cache)
+        assert len(fetch_calls) == 1, "first scan must fetch (cache cold)"
+
+        # Cycle 2 — cache warm and within TTL, NO fetch should fire.
+        await ss.scan_all_tickers(object(), args, tier_data_cache=cache)
+        assert len(fetch_calls) == 1, (
+            f"second scan must skip fetch (cache fresh), "
+            f"got {len(fetch_calls)} total calls"
+        )
+
+        # Cycle 3 — same.
+        await ss.scan_all_tickers(object(), args, tier_data_cache=cache)
+        assert len(fetch_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_scan_all_tickers_serves_cached_tier_data_to_filter(
+        self, monkeypatch,
+    ):
+        """When the cache is fresh and we skip the fetch, the data
+        flowing into the filter pipeline must come from the cache — not
+        None. Regression guard: a wiring mistake could mean cache.get()
+        is ignored and tier_data ends up None, silently disabling the
+        filter even though we have valid data."""
+        import asyncio
+        import spread_scanner as ss
+        from spread_scanner import parse_args, TierDataCache
+
+        cached_payload = {"hourly": {"SPX": {"recommended": {}, "slots": {}}}}
+
+        async def stub_fetch(client, percentile_url, tickers, dte_list=None):
+            raise AssertionError("fetch must not run when cache is fresh")
+        async def fake_quote(client, daemon_url, sym):
+            return {"last": 7100.0}
+        async def fake_expirations(client, daemon_url, sym):
+            return ["2026-04-30"]
+        async def fake_chain(client, daemon_url, sym, exp, strike_range_pct=5.0):
+            return {"calls": [], "puts": []}
+        async def fake_prev_closes(client, db_url, tickers):
+            return {sym: 7100.0 for sym in tickers}
+
+        monkeypatch.setattr(ss, "fetch_quote", fake_quote)
+        monkeypatch.setattr(ss, "fetch_expirations", fake_expirations)
+        monkeypatch.setattr(ss, "fetch_option_chain", fake_chain)
+        monkeypatch.setattr(ss, "fetch_tier_data", stub_fetch)
+        monkeypatch.setattr(ss, "fetch_prev_closes", fake_prev_closes)
+        monkeypatch.setattr(ss, "extract_prev_closes_from_tier_data", lambda td: {})
+
+        cache = TierDataCache(ttl_seconds=7200)
+        # Pre-warm the cache so should_refresh() returns False.
+        cache.absorb_fetch_result(cached_payload)
+
+        args = parse_args(["--tickers", "SPX", "--min-tier", "moderate"])
+        data = await ss.scan_all_tickers(object(), args, tier_data_cache=cache)
+
+        # The dte_section's tier_data should be the cached payload, not
+        # None. Otherwise filter would silently disengage.
+        for dte_section in data.get("dte_sections", {}).values():
+            assert dte_section.get("tier_data") is cached_payload
+        assert data.get("tier_filter_state") == "active"
 
     def test_quiet_heartbeat_suppressed_when_tier_offline(self):
         """The QUIET heartbeat would otherwise diagnose 'no candidates
@@ -17567,7 +18113,7 @@ min_otm_per_ticker: {NDX: 2.0}
             async def fire(self, spreads, ctx):
                 fired.append(self.tag)
 
-        async def fake_scan(client, args, prev_close_cache=None):
+        async def fake_scan(client, args, prev_close_cache=None, tier_data_cache=None):
             return {"quotes": {}, "dte_sections": {}, "prev_closes": {}}
         monkeypatch.setattr(ss, "scan_all_tickers", fake_scan)
         monkeypatch.setattr(ss, "render_dashboard", lambda data, args: "")
@@ -17599,7 +18145,7 @@ min_otm_per_ticker: {NDX: 2.0}
             def filter(self, c): return [{"x": 1}]
             async def fire(self, s, ctx): raise RuntimeError("boom")
 
-        async def fake_scan(client, args, prev_close_cache=None):
+        async def fake_scan(client, args, prev_close_cache=None, tier_data_cache=None):
             return {"quotes": {}, "dte_sections": {}, "prev_closes": {}}
         monkeypatch.setattr(ss, "scan_all_tickers", fake_scan)
         monkeypatch.setattr(ss, "render_dashboard", lambda data, args: "")

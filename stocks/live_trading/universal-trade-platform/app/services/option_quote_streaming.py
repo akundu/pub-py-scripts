@@ -1035,14 +1035,48 @@ class OptionQuoteStreamingService:
 
     @staticmethod
     def _dte_for_exp(exp: str, today: date | None = None) -> int | None:
-        """Return integer days from today to expiration. None if unparseable."""
+        """Return TRADING days from today to expiration (Mon-Fri count).
+        None if unparseable.
+
+        Trading-days semantics matters here because the streaming service's
+        ``option_quotes_ibkr_dte_list`` (e.g. ``[0, 1, 2]``) means "next
+        three trading-day expirations" the way an options trader thinks
+        about DTE. With calendar-day semantics, Monday from a Thursday
+        scored as DTE=4 and got filtered out — leaving the 2DTE bucket
+        served only by stale CSV. Today=Thu 4/30 → Fri 5/1 = 1, Mon 5/4 = 2.
+
+        Holidays are ignored (rare; the over-fetch they'd cause is
+        cheaper than maintaining a calendar).
+        """
+        from datetime import date as _date, timedelta
         if today is None:
-            today = date.today()
+            today = _date.today()
+        # Use the real builtin ``date`` rather than the module-level
+        # ``date`` symbol — tests sometimes patch ``oqs_mod.date`` with a
+        # MagicMock, which would otherwise turn ``date.fromisoformat()``
+        # into a mock-returning call and break comparisons below.
         try:
-            d = date.fromisoformat(_normalize_exp(exp))
+            normalized = _normalize_exp(exp)
+            d = _date.fromisoformat(normalized)
         except Exception:
             return None
-        return (d - today).days
+        if not isinstance(today, _date):
+            try:
+                today = _date.today()
+            except Exception:
+                return None
+        if d == today:
+            return 0
+        if d < today:
+            return (d - today).days  # negative — caller treats as past
+        # Count weekdays strictly between today (exclusive) and d (inclusive).
+        count = 0
+        cur = today
+        while cur < d:
+            cur += timedelta(days=1)
+            if cur.weekday() < 5:  # Mon=0 .. Fri=4
+                count += 1
+        return count
 
     def _build_fetch_jobs(
         self,
