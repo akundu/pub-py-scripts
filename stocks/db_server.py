@@ -15552,8 +15552,23 @@ def _inject_range_percentiles_ws_script(html: str, tickers: list[str]) -> str:
         }});
     }}
 
-    if (isMarketOpen()) {{
-        tickers.forEach(connectWS);
+    var connectedTickers = {{}};
+    function tryConnectAll() {{
+        if (!isMarketOpen()) return false;
+        tickers.forEach(function(t) {{
+            if (!connectedTickers[t]) {{
+                connectedTickers[t] = true;
+                connectWS(t);
+            }}
+        }});
+        return true;
+    }}
+
+    if (!tryConnectAll()) {{
+        /* Page loaded pre-market — poll every 30s and connect once market opens */
+        var marketOpenPoll = setInterval(function() {{
+            if (tryConnectAll()) clearInterval(marketOpenPoll);
+        }}, 30000);
     }}
 
     window.addEventListener('beforeunload', function() {{

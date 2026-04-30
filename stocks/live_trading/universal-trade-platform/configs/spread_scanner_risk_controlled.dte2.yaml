@@ -39,14 +39,9 @@ tickers: [SPX, NDX, RUT]
 dte: [2]
 types: [put, call]
 widths:
-  # DTE=2 strike grids are coarser than DTE=0/1 — SPX lists 10-pt multiples
-  # at moderate-OTM, NDX only publishes 50-pt multiples at far-OTM. Widths
-  # MUST be multiples of the exchange grid or `build_spread_from_chain`
-  # returns "missing" because the long-leg strike literally isn't listed.
-  # (At DTE=0/1 strikes are finer, so width=25/60 works there.)
-  SPX: 30        # lands on 10-pt multiples; DTE=2 grid has them
-  NDX: 60        # NDX DTE=2 far-OTM publishes only 50-pt multiples
-  RUT: 30        # RUT still on 5-pt grid — unchanged
+  SPX: 30
+  NDX: 60
+  RUT: 30
 #otm_pcts: [0.75, 1.0, 1.5, 2.0]
 interval: 60
 top: 5
@@ -57,8 +52,8 @@ top: 5
 # have an IBKR-cached quote at most this many seconds old, otherwise the
 # daemon refreshes from the broker. CSV-sourced fallback quotes are always
 # rejected at this gate (require_provider_source=True is enforced internally).
-# 2DTE: gap risk over multiple sessions dominates; intraday quote freshness
-# is least critical here. 60s threshold matches DTE=1.
+# 1DTE: tolerates slightly older quotes than 0DTE — overnight gap risk is the
+# primary driver, intraday tick-by-tick price action matters less.
 verify_max_age_sec: 45
 verify_require_provider_source: false
 
@@ -82,36 +77,37 @@ verify_require_provider_source: false
 #   min_tier_close — close-to-close historical model (anchored to prev close)
 # Leaving them null = no tier filter.
 tiers: true
-#min_tier: moderate         # or a percentile e.g. p95, p75, p40
+#min_tier: m         # or a percentile e.g. p95, p75, p40
 min_tier_close: p90          # close-to-close variant
 
 # ── Absolute OTM floor (scanner-level) ───────────────────────────────────────
-# 2DTE has more time for mean reversion than 1DTE, but that also means two
-# overnight sessions of gap risk. We set a slightly TIGHTER-than-DTE-1 floor
-# on NDX because a 2-day adverse move can be larger in absolute terms.
-# Effective floor = max(min_otm, min_otm_per_ticker[sym]).
-min_otm: 2.0                   # baseline: 2% OTM
-#min_otm_per_ticker:            # per-ticker overrides — higher wins
-#  NDX: 3.0                     # NDX needs more buffer on a 2-day horizon
-#  RUT: 2.25
+# 1DTE gives more time for mean reversion than 0DTE, but an intraday breach is
+# still expensive. Intraday tiers on calm days can sit around 1% OTM; these
+# floors prevent top-picks and trade handlers from acting on anything closer.
+# Effective floor per sym = max(min_otm, min_otm_per_ticker[sym]).
+#min_otm: 2                   # baseline: no spread closer than 1.5% OTM
+min_otm_per_ticker:            # per-ticker overrides — higher wins
+  NDX: 2.5                     # NDX's % moves ~2x SPX's → need more buffer
+  RUT: 2.5
+  SPX: 2.1
 
 # ── Action handlers ──────────────────────────────────────────────────────────
 handlers:
   # Always-on: append every scan's qualifying spreads to JSONL for replay/analysis.
   - type: log
-    min_norm_roi: 2.5
+    min_norm_roi: 2
     path: nROI.log.jsonl
 
   # Email on higher-threshold hits, gated to market hours.
-  #- type: notify
-  #  min_norm_roi: 3.5
-  #  email: anirbankundu@gmail.com
-  #  gate_market_hours: true
-  #  # Per-handler pre-fire price validation (default false). When true, the
-  #  # handler re-fetches a fresh quote from the daemon for every candidate
-  #  # immediately before sending the email; failed verifications are dropped.
-  #  # Reuses the global `verify_max_age_sec` and `verify_require_provider_source`.
-  #  validate_prices: false
+  - type: notify
+    min_norm_roi: 3
+    email: anirbankundu@gmail.com
+    gate_market_hours: true
+    # Per-handler pre-fire price validation (default false). When true, the
+    # handler re-fetches a fresh quote from the daemon for every candidate
+    # immediately before sending the email; failed verifications are dropped.
+    # Reuses the global `verify_max_age_sec` and `verify_require_provider_source`.
+    #validate_prices: false
 
   # Shadow-mode: margin-check every would-have-traded spread; never submits.
   # Same policy as the live `trade` handler so the two logs are directly
@@ -123,34 +119,33 @@ handlers:
     # any risk reservation. Useful when you want the simulate log to be
     # faithful to what a live handler would have seen post-validation.
     #validate_prices: true
-    # Flat nROI floor tuned from 2026-04-22 session analysis. DTE=2 had
-    # the healthiest inherent ratio (~9.3% credit/risk — a 91.5%
-    # break-even WR, quite forgiving) but today's session traded
-    # NDX-only because the threshold was 3.0 and SPX/RUT max out well
-    # below that. Today's p75 nROI: NDX=3.23, SPX=1.67, RUT=1.67.
-    # 2.25 catches the top quartile of NDX and the upper tail of SPX/RUT.
-    # Remember nROI = ROI / 3 at DTE=2, so 2.25 ≈ 6.75% ROI floor.
+    # Flat nROI floor tuned from 2026-04-22 session analysis. DTE=1 has
+    # better inherent risk/reward (~7% credit/risk ratio vs DTE=0's ~4%),
+    # so we can afford a slightly lower bar than DTE=0's 2.0. Data from
+    # today showed p75 nROI across tickers: NDX=2.70, SPX=2.00, RUT=1.65
+    # — so 2.0 catches the top ~25% of SPX/NDX and a smaller slice of RUT.
     #
     # The schedule + per-ticker resolver fields still work — swap the
     # scalar for `min_norm_roi_schedule: [...]` to get time-of-day
     # behavior, or populate `min_norm_roi_per_ticker` to tune per ticker
-    # (SPX/RUT would benefit — their p75 is only 1.67).
-    min_norm_roi: 2.5
+    # (RUT routinely maxes around 1.65 p75 at DTE=1 so you'll likely
+    # want RUT: 1.0-1.25 there to include it).
+    min_norm_roi: 2.25
     # Per-ticker overrides — feature plumbed in but OFF.
     # When ready, e.g.:
     #   min_norm_roi_per_ticker:
-    #     NDX: 2.5             # NDX has headroom; stay picky
-    #     SPX: 1.5             # SPX p75=1.67 — otherwise nearly excluded
-    #     RUT: 1.0             # RUT p75=1.67 too — include upper tail
+    #     NDX: 2.5             # NDX p75=2.70, can be pickier
+    #     SPX: 2.0             # matches the scalar
+    #     RUT: 1.25            # RUT p75=1.65 — otherwise never fires
     # Values may be scalars OR their own schedules.
     min_norm_roi_per_ticker: {}
-    log_file: trades_sim_dte2.jsonl
+    log_file: trades_sim_dte1.jsonl
     daemon_url: http://localhost:8000
     policy: &trade_policy
       roi_pct: [3, 10.0]
       min_otm_pct:  {SPX: 2.5, NDX: 2.75, RUT: 4.0}
       min_credit:   {SPX: 0.5, NDX: 1.0, RUT: 0.35}
-      max_total_risk: 300000
+      max_total_risk: 400000
       max_per_ticker_risk: {SPX: 140000, NDX: 180000, RUT: 120000}
       # Dollar cap on RISK PER TRADE. The handler computes
       #   contracts = max(1, floor(max_risk_per_trade / per_contract_max_loss))
@@ -159,9 +154,9 @@ handlers:
       # is `spread.width * 100` (≈ 1 contract's worst-case loss).
       # One trade per ticker fires per scan cycle; `contracts` is the knob.
       max_risk_per_trade:
-        SPX: 5000        # ≈ 2-3 contracts (SPX width 20 → $2000/contract max loss)
-        NDX: 12000       # ≈ 2 contracts (NDX width 50 → $5000/contract)
-        RUT: 5000        # ≈ 2 contracts (RUT width 25 → $2500/contract)
+        SPX: 5000        # ≈ 2-3 contracts (SPX width 25 → 2500/contract max loss)
+        NDX: 12000       # ≈ 2 contracts (NDX width 60 → 6000/contract)
+        RUT: 5000        # ≈ 2 contracts (RUT width 25 → 2500/contract)
       require_prev_close: true
       # MARKET: immediate fill at the prevailing NBBO credit.
       # LIMIT:  submit at the observed credit; may not fill.

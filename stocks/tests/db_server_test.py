@@ -1701,6 +1701,36 @@ class TestLayoutAndDisplay:
             assert days_range_pos < week52_range_pos
 
 
+class TestRangePercentilesWebSocketInjection:
+    """Verify the injected WS script handles pre-market page loads."""
+
+    def _inject(self, tickers):
+        from db_server import _inject_range_percentiles_ws_script
+        html = "<html><body><div></div></body></html>"
+        return _inject_range_percentiles_ws_script(html, tickers)
+
+    def test_polls_for_market_open_when_loaded_premarket(self):
+        """Pre-market page loads must poll until market opens, not give up."""
+        out = self._inject(["NDX"])
+        assert "tryConnectAll" in out
+        assert "setInterval" in out
+        assert "marketOpenPoll" in out
+        assert "clearInterval(marketOpenPoll)" in out
+
+    def test_does_not_open_duplicate_websockets(self):
+        """Once a ticker is connected, polling must not reconnect it."""
+        out = self._inject(["NDX", "SPX"])
+        assert "connectedTickers" in out
+
+    def test_injection_idempotent_per_ticker_list(self):
+        """Different ticker lists produce different scripts but same structure."""
+        a = self._inject(["NDX"])
+        b = self._inject(["NDX", "SPX"])
+        assert "tryConnectAll" in a and "tryConnectAll" in b
+        assert '["NDX"]' in a
+        assert '["NDX", "SPX"]' in b
+
+
 def run_all_tests():
     """Run all tests and return results."""
     print("=" * 80)

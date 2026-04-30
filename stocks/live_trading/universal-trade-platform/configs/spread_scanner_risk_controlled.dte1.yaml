@@ -86,9 +86,10 @@ min_tier_close: p90          # close-to-close variant
 # floors prevent top-picks and trade handlers from acting on anything closer.
 # Effective floor per sym = max(min_otm, min_otm_per_ticker[sym]).
 #min_otm: 2                   # baseline: no spread closer than 1.5% OTM
-#min_otm_per_ticker:            # per-ticker overrides — higher wins
-#  NDX: 2.5                     # NDX's % moves ~2x SPX's → need more buffer
-#  RUT: 1.75
+min_otm_per_ticker:            # per-ticker overrides — higher wins
+  NDX: 2.25                     # NDX's % moves ~2x SPX's → need more buffer
+  RUT: 2.25
+  SPX: 2
 
 # ── Action handlers ──────────────────────────────────────────────────────────
 handlers:
