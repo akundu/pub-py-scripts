@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -62,8 +62,16 @@ class Settings(BaseSettings):
     position_sync_enabled: bool = True
 
     # Order fill tracking
-    order_poll_interval_seconds: float = 1.0
+    # Poll interval is floored at 2.0s — sub-2s polls hit IBKR's pacing
+    # limits and don't actually surface fills any sooner (TWS only ticks
+    # status updates at ~1Hz). Two seconds is the documented contract.
+    order_poll_interval_seconds: float = 2.0
     order_poll_timeout_seconds: float = 60.0
+
+    @field_validator("order_poll_interval_seconds")
+    @classmethod
+    def _floor_poll_interval(cls, v: float) -> float:
+        return max(float(v), 2.0)
 
     # Trade defaults — applied to ANY caller (CLI `utp trade`, playbook,
     # spread_scanner handlers, future integrations) that doesn't explicitly

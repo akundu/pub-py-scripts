@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from math import gcd
 from typing import ClassVar
 
@@ -38,6 +39,59 @@ _INDEX_EXCHANGES = {
     "DJX": "CBOE",
     "VIX": "CBOE",
 }
+
+
+_DEFAULT_FORCE_TRADING_CLASS = {
+    # SPX needs SPXW — without it, daily SPX expirations don't qualify
+    # under TWS qualifyContractsAsync and the streaming cache goes stale.
+    "SPX": "SPXW",
+    # RUT same story — RUTW for the PM-settled weekly variant.
+    "RUT": "RUTW",
+    # NDX is intentionally NOT forced. Empirically (verified live on this
+    # account 2026-04-29): forcing NDXP makes 3 of 6 (sym, exp, type)
+    # combinations fail to qualify and pushes cycle latency from <1s to
+    # ~22s due to TWS's per-contract qualify timeout. The default ``NDX``
+    # class qualifies daily and weekly NDX cleanly. Override on a
+    # per-trade basis with ``--trading-class NDXP`` if you really want it.
+}
+
+
+def _force_option_trading_class(symbol: str, override: str | None = None) -> str | None:
+    """Return the ``tradingClass`` to force on every Option contract for a
+    given underlying.
+
+    Policy (per-deployment trading preference) — favors PM-settled
+    daily/weekly variants for the indices where TWS's default
+    qualification fails:
+
+      * SPX → **SPXW** (PM-settled, listed every weekday). The default
+        SPX class is AM-settled monthly only; daily SPX needs SPXW or
+        ``qualifyContractsAsync`` returns empty.
+      * RUT → **RUTW** (PM-settled weekly). Same rationale.
+      * NDX → ``None`` (default class). Forcing NDXP empirically broke
+        qualifications for half the NDX expirations on this account
+        and inflated cycle latency by ~15s. The default class works.
+      * Everything else → ``None``.
+
+    When an explicit ``override`` is supplied (e.g. via ``OptionLeg.trading_class``,
+    the ``--trading-class`` CLI flag, or the ``UTP_OPTION_TC_<SYMBOL>`` env var),
+    it wins over the default. Pass ``override=""`` (empty string) to *disable*
+    class forcing for this call — useful when you want the parent class
+    (AM-settled monthly SPX, etc.). Pass ``None`` to use the default.
+    """
+    if override is not None:
+        # "" means "no force" (use ib_insync default disambiguation).
+        # Any other value is the explicit class to set.
+        return override or None
+
+    # Per-symbol env override — handy when running the daemon and you need
+    # to flip behavior without restarting the CLI. Empty value disables force.
+    env_key = f"UTP_OPTION_TC_{symbol.upper()}"
+    env_val = os.environ.get(env_key)
+    if env_val is not None:
+        return env_val or None
+
+    return _DEFAULT_FORCE_TRADING_CLASS.get(symbol.upper())
 
 
 class IBKRProvider(BrokerProvider):
@@ -177,6 +231,33 @@ class IBKRLiveProvider(BrokerProvider):
         self._max_reconnect_retries = 10
         self._reconnect_backoff_cap = 10.0
 
+        # Persistent option market-data subscriptions (TWS mode).
+        # The previous code subscribed → polled 11s → cancelled every
+        # `get_option_quotes` call, which can't keep up with a 2-second
+        # streaming poll interval across hundreds of strikes. Now we
+        # subscribe once per (symbol, exp, right, strike) and reuse the
+        # ib_insync Ticker across calls so tick data flows continuously.
+        # CPG behaves equivalently at the server level — its
+        # ``/iserver/marketdata/snapshot`` endpoint maintains subscription
+        # state across calls — so this keeps both providers symmetric.
+        import os as _os
+        self._option_subs: dict[tuple[str, str, str, float], object] = {}
+        self._option_subs_last_used: dict[tuple[str, str, str, float], float] = {}
+        # Default 2000 fits the typical option-quote streaming workload
+        # (3 indices × 3 expirations × 2 types × ~110 strikes/each ≈ 1980).
+        # The streaming service overrides this from
+        # ``StreamingConfig.option_quotes_ibkr_sub_budget`` at start; this env
+        # var (UTP_TWS_OPTION_SUB_BUDGET) is the fallback for daemons running
+        # without a streaming config. Earlier we used 300 — that exhausted on
+        # the first three (sym, exp, type) combos and forced LRU churn that
+        # drove cycle latency to 22+ seconds.
+        try:
+            self._option_subs_budget: int = int(
+                _os.environ.get("UTP_TWS_OPTION_SUB_BUDGET", "2000")
+            )
+        except ValueError:
+            self._option_subs_budget = 2000
+
     @property
     def cache_stats(self) -> dict:
         """Return cache hit/miss statistics."""
@@ -225,7 +306,10 @@ class IBKRLiveProvider(BrokerProvider):
                 self._ib.disconnectedEvent -= self._on_disconnect
             except Exception as e:
                 logger.debug("Failed to remove disconnect event handler: %s", e)
+            # Cancel persistent option subscriptions before tearing down the
+            # ib_insync client so we free IBKR's market-data lines cleanly.
             if self._connected:
+                self._cancel_all_option_subs()
                 self._ib.disconnect()
         self._connected = False
         logger.info("IBKR LIVE disconnected")
@@ -233,6 +317,12 @@ class IBKRLiveProvider(BrokerProvider):
     def _on_disconnect(self) -> None:
         """Handle unexpected disconnection by spawning a reconnect task."""
         self._connected = False
+        # Drop the option subscription registry — the underlying tickers are
+        # tied to the now-dead ib_insync client and will never tick again.
+        # On the next get_option_quotes call (after reconnect), fresh
+        # subscriptions get created.
+        self._option_subs.clear()
+        self._option_subs_last_used.clear()
         logger.warning("IBKR connection lost — starting reconnect loop")
         try:
             loop = asyncio.get_running_loop()
@@ -269,6 +359,51 @@ class IBKRLiveProvider(BrokerProvider):
         """Return True if connected and IB client is available."""
         return self._connected and self._ib is not None
 
+    # ── Persistent option market-data subscriptions ──────────────────────────
+
+    def _evict_option_subs_lru(self, needed: int) -> None:
+        """Evict least-recently-used option subscriptions to fit ``needed`` new
+        ones inside ``self._option_subs_budget``. Cancels mktData on evicted
+        tickers so IBKR's market-data line count is freed."""
+        excess = (len(self._option_subs) + needed) - self._option_subs_budget
+        if excess <= 0:
+            return
+        # Sort by last_used ascending — oldest first
+        ordered = sorted(self._option_subs_last_used.items(), key=lambda kv: kv[1])
+        evicted = 0
+        for key, _ in ordered:
+            if evicted >= excess:
+                break
+            ticker = self._option_subs.pop(key, None)
+            self._option_subs_last_used.pop(key, None)
+            if ticker is not None and self._ib is not None:
+                try:
+                    self._ib.cancelMktData(ticker.contract)
+                except Exception as e:
+                    logger.debug("LRU cancelMktData failed: %s", e)
+            evicted += 1
+        if evicted:
+            logger.info(
+                "Evicted %d LRU option subscriptions (budget=%d, current=%d)",
+                evicted, self._option_subs_budget, len(self._option_subs),
+            )
+
+    def _cancel_all_option_subs(self) -> None:
+        """Cancel every persistent option subscription and clear state.
+        Called on disconnect so orphaned tickers don't leak across reconnects."""
+        if not self._option_subs:
+            return
+        for key, ticker in list(self._option_subs.items()):
+            if self._ib is not None and ticker is not None:
+                try:
+                    self._ib.cancelMktData(ticker.contract)
+                except Exception:
+                    pass
+        n = len(self._option_subs)
+        self._option_subs.clear()
+        self._option_subs_last_used.clear()
+        logger.info("Cleared %d persistent option subscriptions", n)
+
     # ── Contract Qualification (cached) ───────────────────────────────────────
 
     async def _qualify_contract_cached(self, contract) -> list:
@@ -299,25 +434,44 @@ class IBKRLiveProvider(BrokerProvider):
             return qualified
         return []
 
-    async def _qualify_option(self, symbol: str, exp_str: str, strike: float, right: str) -> list:
+    async def _qualify_option(
+        self,
+        symbol: str,
+        exp_str: str,
+        strike: float,
+        right: str,
+        *,
+        trading_class_override: str | None = None,
+    ) -> list:
         """Qualify an option contract, handling ambiguous contracts.
 
-        Index options (RUT, SPX) may be ambiguous: monthly (RUT) vs weekly (RUTW).
-        When ambiguous, IBKR returns multiple possibles. We pick the one whose
-        localSymbol expiration matches the requested date.
+        SPX/RUT/NDX are forced to their "W" classes (SPXW, RUTW, NDXP) per the
+        deployment policy in ``_force_option_trading_class`` so the trade
+        execution path lands on the same PM-settled contract that the
+        streaming/quote path uses. Without forcing, ``qualifyContractsAsync``
+        can return empty for daily expirations and the trade fails.
+
+        Pass ``trading_class_override`` to override the default — e.g. ``"SPX"``
+        for AM-settled monthly, or ``""`` to skip forcing entirely. ``None``
+        uses the default policy.
         """
         from ib_insync import Option
 
         # Normalize expiration: remove dashes if present
         exp_clean = exp_str.replace("-", "")
+        forced_tc = _force_option_trading_class(symbol, override=trading_class_override)
 
         for exchange in ["SMART", "CBOE", ""]:
             opt = Option(symbol, exp_clean, strike, right, exchange)
+            if forced_tc:
+                opt.tradingClass = forced_tc
             try:
                 qualified = await self._qualify_contract_cached(opt)
                 if qualified and qualified[0].conId > 0:
-                    logger.debug("Qualified %s %s %s%s on %s (conId=%d)",
-                                symbol, exp_clean, strike, right, exchange or "ANY", qualified[0].conId)
+                    logger.debug("Qualified %s %s %s%s on %s (tc=%s, conId=%d)",
+                                symbol, exp_clean, strike, right,
+                                exchange or "ANY", forced_tc or "default",
+                                qualified[0].conId)
                     # Persist to the cross-provider store so CPG can use it.
                     try:
                         self._cache.option_conids.put(
@@ -327,8 +481,9 @@ class IBKRLiveProvider(BrokerProvider):
                         logger.debug("OptionConidStore write failed: %s", e)
                     return qualified
             except Exception as e:
-                logger.debug("Qualify failed for %s %s %s%s on %s: %s",
-                            symbol, exp_clean, strike, right, exchange or "ANY", e)
+                logger.debug("Qualify failed for %s %s %s%s on %s (tc=%s): %s",
+                            symbol, exp_clean, strike, right,
+                            exchange or "ANY", forced_tc or "default", e)
 
         # If all failed, try resolving ambiguous contracts manually
         # IBKR returns ambiguous when multiple trading classes match (e.g. RUT vs RUTW)
@@ -725,7 +880,10 @@ class IBKRLiveProvider(BrokerProvider):
         for leg in order.legs:
             right = "C" if leg.option_type.value == "CALL" else "P"
             exp_str = leg.expiration.replace("-", "")  # YYYYMMDD
-            qualified = await self._qualify_option(leg.symbol, exp_str, leg.strike, right)
+            qualified = await self._qualify_option(
+                leg.symbol, exp_str, leg.strike, right,
+                trading_class_override=getattr(leg, "trading_class", None),
+            )
             if not qualified:
                 return OrderResult(
                     broker=Broker.IBKR,
@@ -995,28 +1153,113 @@ class IBKRLiveProvider(BrokerProvider):
             symbol, "", sec_type, con_id
         )
 
-        if not chains:
-            return {"expirations": [], "strikes": []}
-
         # Merge all chain definitions (may come from multiple exchanges)
         all_expirations: set[str] = set()
         all_strikes: set[float] = set()
-        for chain in chains:
+        for chain in (chains or []):
             all_expirations.update(chain.expirations)
             all_strikes.update(chain.strikes)
+
+        # Augment with the forced trading-class chain via reqContractDetails.
+        # ``reqSecDefOptParamsAsync`` for SPX has been observed to return the
+        # parent-class chain (limited strikes, monthly expirations) rather
+        # than the SPXW chain we actually trade against — leaving streaming
+        # with a chain that doesn't bracket current price. Querying contract
+        # details for the W class with ``strike=0`` enumerates every strike
+        # IBKR has listed for that class, filling in the gaps.
+        forced_tc = _force_option_trading_class(symbol)
+        if forced_tc:
+            try:
+                augmented = await self._fetch_strikes_for_trading_class(
+                    symbol, forced_tc, all_expirations,
+                )
+                if augmented:
+                    aug_exps, aug_strikes = augmented
+                    new_strikes = aug_strikes - all_strikes
+                    new_exps = aug_exps - all_expirations
+                    all_strikes.update(aug_strikes)
+                    all_expirations.update(aug_exps)
+                    if new_strikes or new_exps:
+                        logger.info(
+                            "Chain augmented via %s: +%d strikes, +%d expirations",
+                            forced_tc, len(new_strikes), len(new_exps),
+                        )
+            except Exception as e:
+                logger.debug("Chain augmentation via %s failed: %s", forced_tc, e)
+
+        if not all_strikes:
+            logger.warning("Option chain for %s: empty after fetch + augment", symbol)
+            return {"expirations": [], "strikes": []}
 
         expirations = sorted(all_expirations)
         strikes = sorted(all_strikes)
 
-        # Cache to disk + memory
+        # Cache to disk + memory. ``put()`` performs the same strike-span
+        # validation as ``get()`` and refuses to persist obviously-broken
+        # chains so the next get() falls through to a fresh fetch.
         self._cache.option_chains.put(symbol, expirations, strikes)
 
         logger.info(
-            "Option chain for %s: %d expirations, %d strikes (cached for today)",
+            "Option chain for %s: %d expirations, %d strikes "
+            "(min=%.0f max=%.0f, cached for today)",
             symbol, len(expirations), len(strikes),
+            min(strikes), max(strikes),
         )
 
         return {"expirations": expirations, "strikes": strikes}
+
+    async def _fetch_strikes_for_trading_class(
+        self,
+        symbol: str,
+        trading_class: str,
+        candidate_expirations: set[str],
+    ) -> tuple[set[str], set[float]] | None:
+        """Enumerate strikes for a specific tradingClass via reqContractDetails.
+
+        Used to repair partial responses from ``reqSecDefOptParamsAsync``.
+        Strategy: pick a near-term expiration we believe exists, build an
+        Option contract with ``strike=0`` and the target tradingClass, and
+        let TWS return every contract that matches — which gives us the
+        full strike list under that class.
+
+        Returns ``(expirations, strikes)`` sets, or ``None`` if the call
+        produced no usable details.
+        """
+        from ib_insync import Option
+
+        # Pick a near-term expiration — prefer one already in the chain
+        # (most likely to actually exist for the target class). Fall back
+        # to today + 1 if the chain is empty.
+        today_str = date.today().strftime("%Y%m%d")
+        future_exps = sorted(e for e in candidate_expirations if e >= today_str)
+        anchor = future_exps[0] if future_exps else today_str
+
+        sample = Option(symbol, anchor, 0, "P", "SMART")
+        sample.tradingClass = trading_class
+
+        await self._cache.rate_limiter.acquire()
+        details = await self._ib.reqContractDetailsAsync(sample)
+        if not details:
+            return None
+
+        strikes: set[float] = set()
+        exps: set[str] = set()
+        for cd in details:
+            c = getattr(cd, "contract", None)
+            if c is None:
+                continue
+            try:
+                strikes.add(float(c.strike))
+            except (TypeError, ValueError):
+                pass
+            try:
+                exp = getattr(c, "lastTradeDateOrContractMonth", "") or ""
+                exp = exp.replace("-", "")
+                if exp:
+                    exps.add(exp)
+            except Exception:
+                pass
+        return exps, strikes
 
     async def get_option_quotes(
         self,
@@ -1095,9 +1338,17 @@ class IBKRLiveProvider(BrokerProvider):
         chain = await self.get_option_chain(symbol)
         strikes = sorted(chain.get("strikes", []))
 
-        if exp_yyyymmdd not in [e.replace("-", "") for e in chain.get("expirations", [])]:
-            raise ValueError(f"Expiration {expiration} not available for {symbol}")
-
+        # NOTE: we used to raise ``ValueError("Expiration … not available")``
+        # when ``exp_yyyymmdd`` wasn't in ``chain["expirations"]``, but TWS's
+        # ``reqSecDefOptParamsAsync`` does NOT enumerate near-term daily
+        # expirations (SPXW 0DTE/1DTE/2DTE in particular). Those contracts
+        # genuinely exist — CPG returns them, and ``qualifyContractsAsync``
+        # qualifies them. Pre-validating the expiration was producing
+        # ~40% spurious failures in the option-quote streaming cycle for
+        # SPX/RUT 1-2DTE. Now we skip the gate and let ``qualifyContractsAsync``
+        # decide: if the contract qualifies it gets used; if not it's
+        # silently dropped from the result. Matches CPG's per-contract
+        # ``secdef/info`` flow.
         if strike_min is not None:
             strikes = [s for s in strikes if s >= strike_min]
         if strike_max is not None:
@@ -1106,6 +1357,16 @@ class IBKRLiveProvider(BrokerProvider):
         # Options always use SMART exchange for routing — the index exchange
         # (RUSSELL, CBOE, etc.) is for the underlying, not the option contracts
         opt_exchange = "SMART"
+
+        # Force the canonical "W" trading class for SPX/RUT. See
+        # ``_force_option_trading_class`` for the per-symbol policy.
+        forced_trading_class = _force_option_trading_class(symbol)
+
+        def _build_option(strike: float):
+            opt = Option(symbol, exp_yyyymmdd, strike, right, opt_exchange)
+            if forced_trading_class:
+                opt.tradingClass = forced_trading_class
+            return opt
 
         # Check contract cache first, only qualify uncached contracts
         cached_contracts = []
@@ -1117,7 +1378,7 @@ class IBKRLiveProvider(BrokerProvider):
             if contract is not None:
                 cached_contracts.append(contract)
             else:
-                uncached.append(Option(symbol, exp_yyyymmdd, strike, right, opt_exchange))
+                uncached.append(_build_option(strike))
 
         # Qualify uncached contracts in a single call. qualifyContractsAsync
         # already uses asyncio.gather internally — it sends all reqContractDetails
@@ -1174,30 +1435,65 @@ class IBKRLiveProvider(BrokerProvider):
             len(newly_qualified), len(uncached),
         )
 
-        # Fetch market data using reqMktData(snapshot=False) + poll instead of
-        # reqTickersAsync (which uses snapshot=True with 11s timeout per contract).
-        # Subscribe to all contracts, wait for data to stream in, then cancel.
+        # ── Persistent market-data subscriptions ─────────────────────────────
+        # Reuse Ticker objects across calls so tick data streams in
+        # continuously. Only subscribe contracts we don't already have, and
+        # only wait for first-tick on those. Existing tickers are read
+        # directly — their bid/ask/last are kept current by ib_insync's
+        # event loop in the background. This matches CPG's behaviour: its
+        # ``/iserver/marketdata/snapshot`` endpoint maintains a server-side
+        # subscription so subsequent calls return immediately.
         import asyncio as _aio
-        await self._cache.rate_limiter.acquire()
-        tickers_map = {}
-        for c in all_qualified:
-            tickers_map[c.conId] = self._ib.reqMktData(c, genericTickList="", snapshot=False)
-
-        # Poll until ALL tickers have data or timeout (11s, same as old reqTickersAsync).
         import math as _math
-        total_expected = len(tickers_map)
-        for _ in range(37):  # up to ~11s in 0.3s increments
-            await _aio.sleep(0.3)
-            got = sum(1 for t in tickers_map.values()
-                      if (t.last and t.last > 0 and not (isinstance(t.last, float) and _math.isnan(t.last)))
-                      or (t.bid and t.bid > 0 and not (isinstance(t.bid, float) and _math.isnan(t.bid))))
-            if got >= total_expected:  # all results in
-                break
+        import time as _time
 
-        all_tickers = list(tickers_map.values())
-        # Cancel all subscriptions
+        new_tickers: dict[int, object] = {}     # conId → Ticker (just-subscribed)
+        all_tickers: list[object] = []          # every ticker we'll return data for
+
+        # First, evict stale subscriptions if needed to make room.
+        new_count_estimate = sum(
+            1 for c in all_qualified
+            if (symbol, exp_yyyymmdd, right, float(c.strike)) not in self._option_subs
+        )
+        if new_count_estimate:
+            self._evict_option_subs_lru(new_count_estimate)
+
+        await self._cache.rate_limiter.acquire()
+        now_mono = _time.monotonic()
         for c in all_qualified:
-            self._ib.cancelMktData(c)
+            key = (symbol, exp_yyyymmdd, right, float(c.strike))
+            existing = self._option_subs.get(key)
+            if existing is not None:
+                # Persistent subscription — read its current state.
+                self._option_subs_last_used[key] = now_mono
+                all_tickers.append(existing)
+                continue
+            # New subscription — store and track for first-tick wait.
+            try:
+                ticker = self._ib.reqMktData(c, genericTickList="", snapshot=False)
+            except Exception as e:
+                logger.debug("reqMktData failed for %s %s%s: %s",
+                             symbol, c.strike, right, e)
+                continue
+            self._option_subs[key] = ticker
+            self._option_subs_last_used[key] = now_mono
+            new_tickers[c.conId] = ticker
+            all_tickers.append(ticker)
+
+        # Wait briefly for newly-subscribed contracts to receive first tick.
+        # Existing tickers already have data, so we only need to wait on the
+        # new ones — and only up to ~3s (was 11s when we waited for all of
+        # them on every call).
+        if new_tickers:
+            for _ in range(10):  # up to ~3s in 0.3s increments
+                await _aio.sleep(0.3)
+                got = sum(
+                    1 for t in new_tickers.values()
+                    if (t.last and t.last > 0 and not (isinstance(t.last, float) and _math.isnan(t.last)))
+                    or (t.bid and t.bid > 0 and not (isinstance(t.bid, float) and _math.isnan(t.bid)))
+                )
+                if got >= len(new_tickers):
+                    break
 
         results = []
         for ticker in all_tickers:
@@ -1268,7 +1564,10 @@ class IBKRLiveProvider(BrokerProvider):
         for leg in order.legs:
             right = "C" if leg.option_type.value == "CALL" else "P"
             exp_str = leg.expiration.replace("-", "")
-            qualified = await self._qualify_option(leg.symbol, exp_str, leg.strike, right)
+            qualified = await self._qualify_option(
+                leg.symbol, exp_str, leg.strike, right,
+                trading_class_override=getattr(leg, "trading_class", None),
+            )
             if not qualified:
                 return {
                     "error": f"Failed to qualify: {leg.symbol} {leg.strike}{right} {leg.expiration}",

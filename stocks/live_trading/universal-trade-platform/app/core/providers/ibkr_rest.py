@@ -162,11 +162,28 @@ class IBKRRestProvider(BrokerProvider):
         return f"{self._gateway_url}/v1/api{path}"
 
     async def _get(self, path: str, **kwargs: Any) -> dict | list:
-        """GET with rate limiting. Returns parsed JSON."""
+        """GET with rate limiting. Returns parsed JSON.
+
+        On HTTP errors, reads the response body and includes it in the exception
+        so callers see CPG's actual diagnostic (matching ``_post``). Without
+        this, ``raise_for_status`` raises a bare ``ClientResponseError`` whose
+        message contains only the URL — useless when CPG reports e.g. session
+        expiry, rate limits, or "No contracts retrieved".
+        """
         await self._cache.rate_limiter.acquire()
         assert self._session is not None
         async with self._session.get(self._url(path), **kwargs) as resp:
-            resp.raise_for_status()
+            try:
+                resp.raise_for_status()
+            except Exception:
+                try:
+                    body_text = await resp.text()
+                except Exception:
+                    body_text = ""
+                status = getattr(resp, "status", "?")
+                raise RuntimeError(
+                    f"HTTP {status} from {path}: {body_text[:500]}"
+                )
             return await resp.json()
 
     async def _post(self, path: str, **kwargs: Any) -> dict | list:
@@ -204,22 +221,47 @@ class IBKRRestProvider(BrokerProvider):
     _INDEX_SYMBOLS = {"SPX", "NDX", "RUT", "DJX", "VIX", "XSP", "OEX"}
 
     async def _resolve_conid(self, symbol: str) -> int:
-        """Resolve underlying symbol → conId via CPG search. Cached."""
+        """Resolve underlying symbol → conId via CPG search. Cached.
+
+        Uses ``name: False`` (exact-symbol match) and post-filters the results
+        to entries whose ``symbol`` field equals the requested ticker exactly.
+        ``name: True`` previously caused NDX to resolve to conid 416843 (an
+        adjacent NDX-prefixed instrument with no listed options for the
+        current month), breaking every NDX option lookup. The exact-match
+        post-filter is belt-and-suspenders: if CPG ever returns multiple
+        candidates we always prefer the canonical symbol.
+        """
         if symbol in self._conid_cache:
             return self._conid_cache[symbol]
 
-        # Try IND first for known indices, then fall back to STK
-        sec_types = ["IND", "STK"] if symbol.upper() in self._INDEX_SYMBOLS else ["STK"]
+        sym_upper = symbol.upper()
+        sec_types = ["IND", "STK"] if sym_upper in self._INDEX_SYMBOLS else ["STK"]
         for sec_type in sec_types:
             data = await self._post(
                 "/iserver/secdef/search",
-                json={"symbol": symbol, "secType": sec_type, "name": True},
+                json={"symbol": symbol, "secType": sec_type, "name": False},
             )
-            if isinstance(data, list) and data:
-                con_id = data[0].get("conid", 0)
-                if con_id:
-                    self._conid_cache[symbol] = int(con_id)
-                    return int(con_id)
+            if not (isinstance(data, list) and data):
+                continue
+
+            picked: dict | None = None
+            for item in data:
+                if str(item.get("symbol", "")).upper() == sym_upper and item.get("conid"):
+                    picked = item
+                    break
+            if picked is None:
+                # No exact-symbol hit; fall back to the first entry that has a
+                # conid. CPG occasionally omits the symbol field for index
+                # search results, so this keeps non-index symbols working.
+                for item in data:
+                    if item.get("conid"):
+                        picked = item
+                        break
+
+            if picked is not None:
+                con_id = int(picked["conid"])
+                self._conid_cache[symbol] = con_id
+                return con_id
 
         raise RuntimeError(f"Failed to resolve conId for {symbol}")
 
@@ -270,7 +312,11 @@ class IBKRRestProvider(BrokerProvider):
         last_error = None
         attempt_summary: list[str] = []
         primed = False
-        for round_num in (1, 2):
+        # Round 1: baseline; Round 2: post-priming retry; Round 3: post-backoff
+        # retry to ride out transient CPG 500 windows (rate limits, session
+        # re-auth in flight, IBKR backend hiccups). Without this, all six R1+R2
+        # attempts can land inside a sub-second 500 window and the trade fails.
+        for round_num in (1, 2, 3):
             for exch in exchange_attempts:
                 try:
                     params = {
@@ -324,18 +370,21 @@ class IBKRRestProvider(BrokerProvider):
                         f"r{round_num} exch={exch}: non-list response {type(data).__name__}"
                     )
 
-            # If round 1 saw nothing but HTTP errors, prime the underlying via a
-            # snapshot request and retry once. CPG can refuse option-chain
-            # queries until the underlying conid has been "touched" in the
-            # current session — the snapshot fixes that without needing the
-            # caller to manage session warm-up.
+            # Inter-round recovery: priming after R1, sleep-backoff after R2.
+            only_http_errors = attempt_summary and all(
+                "Error" in s and "results" not in s and "empty" not in s
+                for s in attempt_summary
+            )
+            if not only_http_errors:
+                # Saw a structured response (empty list / unmatched maturity);
+                # more attempts won't help — the contract genuinely isn't
+                # there at the requested strike/month.
+                break
+
             if round_num == 1 and not primed:
-                only_http_errors = attempt_summary and all(
-                    "Error" in s and "results" not in s and "empty" not in s
-                    for s in attempt_summary
-                )
-                if not only_http_errors:
-                    break
+                # CPG can refuse option-chain queries until the underlying
+                # conid has been "touched" in the current session — a
+                # snapshot fixes that without making the caller warm it up.
                 try:
                     await self._get(
                         "/iserver/marketdata/snapshot",
@@ -349,6 +398,20 @@ class IBKRRestProvider(BrokerProvider):
                 except Exception as snap_err:
                     attempt_summary.append(f"prime: {type(snap_err).__name__}")
                     break
+            elif round_num == 2:
+                # Session-recovery before the final attempt. CPG can return
+                # HTTP 500 + body ``{"error":"No Contracts retrieved "}`` when
+                # the daemon's aiohttp session has gone stale even though the
+                # gateway-level auth is still valid (verified by curl from a
+                # second client returning the same query successfully). The
+                # /tickle + /iserver/reauthenticate sequence is IBKR's
+                # documented recovery, then one second to let the new auth
+                # propagate.
+                await self._recover_cpg_session()
+                logger.info(
+                    "CPG conId resolution: post-reauth retry for %s %s %s%s",
+                    symbol, expiration, strike_str, right,
+                )
 
         # Do NOT cache negative results — transient CPG failures should not
         # block future resolution attempts
@@ -400,6 +463,39 @@ class IBKRRestProvider(BrokerProvider):
         return data if isinstance(data, dict) else {}
 
     # ── Keepalive ─────────────────────────────────────────────────────────────
+
+    async def _recover_cpg_session(self) -> bool:
+        """Best-effort CPG session recovery.
+
+        Issues ``POST /tickle`` followed by ``POST /iserver/reauthenticate``
+        and a one-second propagation wait, then probes ``/iserver/auth/status``.
+        Used by the option-conID resolver when secdef/info has returned
+        ``{"error":"No Contracts retrieved "}`` across all retries despite
+        the gateway-level auth still showing healthy — a classic symptom of
+        a stale aiohttp session in the daemon.
+
+        Returns True if auth/status reports ``authenticated`` after the
+        recovery attempt; False otherwise. Failure is non-fatal — the
+        caller still gets a retry; this is just to maximise its odds.
+        """
+        try:
+            await self._post("/tickle")
+        except Exception as e:
+            logger.debug("CPG recover: tickle failed: %s", e)
+        try:
+            await self._post("/iserver/reauthenticate")
+        except Exception as e:
+            logger.debug("CPG recover: reauthenticate failed: %s", e)
+        import asyncio as _asyncio
+        await _asyncio.sleep(1.0)
+        try:
+            status = await self._post("/iserver/auth/status")
+            authed = bool(status.get("authenticated"))
+            logger.info("CPG session recover → authenticated=%s", authed)
+            return authed
+        except Exception as e:
+            logger.warning("CPG recover: auth/status check failed: %s", e)
+            return False
 
     async def _keepalive_loop(self) -> None:
         """POST /tickle every 60 seconds to keep the CPG session alive.
@@ -1100,28 +1196,50 @@ class IBKRRestProvider(BrokerProvider):
             return []
 
         # Batch snapshot — CPG limits to ~100 conIds per request.
-        # CPG quirk: first snapshot request for a conId "subscribes" it and may
-        # return empty fields.  We request twice with a short delay to get data.
+        # CPG quirk: the first snapshot request for a *cold* conId
+        # "subscribes" it and may return rows with empty bid/ask/last
+        # fields. On warm conIDs (already subscribed earlier in this
+        # session) the first call comes back populated, so we only pay
+        # the second-call cost when needed. This is what makes CPG
+        # behaviour match the new persistent-subscription TWS path:
+        # first call slow (subscribe), subsequent calls fast (warm read).
         BATCH_SIZE = 80
+        SNAPSHOT_FIELDS = "31,84,86,87,7283,7308,7309,7310,7311"
+
+        def _is_cold_response(rows: list[dict]) -> bool:
+            """A response is cold if NO row has a usable price.  Treats
+            ``"-1"``, ``""``, ``None``, and ``0`` as missing."""
+            if not rows:
+                return True
+            for r in rows:
+                for fld in ("31", "84", "86"):  # last, bid, ask
+                    v = r.get(fld)
+                    if v in (None, "", "-1", "0", 0, 0.0):
+                        continue
+                    return False
+            return True
+
         all_conids = list(conid_map.keys())
         all_snaps: list[dict] = []
         for i in range(0, len(all_conids), BATCH_SIZE):
             batch = all_conids[i:i + BATCH_SIZE]
             conids_str = ",".join(str(c) for c in batch)
             try:
-                # First request — subscribes conIds, may return empty fields
-                await self._get(
-                    "/iserver/marketdata/snapshot",
-                    params={"conids": conids_str, "fields": "31,84,86,87,7283,7308,7309,7310,7311"},
-                )
-                # Short delay for CPG to populate
-                import asyncio as _aio
-                await _aio.sleep(0.3)
-                # Second request — should have data
                 data = await self._get(
                     "/iserver/marketdata/snapshot",
-                    params={"conids": conids_str, "fields": "31,84,86,87,7283,7308,7309,7310,7311"},
+                    params={"conids": conids_str, "fields": SNAPSHOT_FIELDS},
                 )
+                # Re-poll only if every row looks cold (no prices). When the
+                # streaming service hits us repeatedly with the same conids,
+                # this branch typically fires only on the first cycle of the
+                # daemon's lifetime or after a long idle gap.
+                if isinstance(data, list) and _is_cold_response(data):
+                    import asyncio as _aio
+                    await _aio.sleep(0.3)
+                    data = await self._get(
+                        "/iserver/marketdata/snapshot",
+                        params={"conids": conids_str, "fields": SNAPSHOT_FIELDS},
+                    )
                 if isinstance(data, list):
                     all_snaps.extend(data)
             except Exception as e:

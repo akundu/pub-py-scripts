@@ -104,6 +104,18 @@ class StreamingConfig:
     # in p95/p99 — that's a sign IBKR is starting to queue at the wire.
     option_quotes_ibkr_max_parallel: int = 6
 
+    # Persistent option-subscription budget for the TWS provider's
+    # ``IBKRLiveProvider._option_subs`` registry. Each contract IBKR streams
+    # for us consumes one "market data line" — IBKR's hard limit is account
+    # tier dependent (100 lines free, more with paid subscription). When this
+    # budget is exceeded, the provider LRU-evicts oldest subs and resubscribes
+    # next call, which throws cycle latency through the roof. Size it for:
+    #   sum_over_(symbol, exp, type) of strikes_in_range
+    # Default 2000 fits ~3 indices × 3 expirations × 2 types × ~110 strikes/each.
+    # Ignored when running CPG mode. Override per-deployment via streaming YAML
+    # or via UTP_TWS_OPTION_SUB_BUDGET env var.
+    option_quotes_ibkr_sub_budget: int = 2000
+
     # ── Tiered fetch ─────────────────────────────────────────────────────────
     # Split what we ask from IBKR (hot, frequent, narrow) vs CSV (warm, slower,
     # broad).  IBKR option quote latency is ~5s p50 / ~10s p95 per call, so a
@@ -118,6 +130,22 @@ class StreamingConfig:
     # Max DTE for CSV tier.  CSV loads expirations up to this many trading days
     # out (or whatever is available).  IBKR is independently capped by ibkr_dte_list.
     option_quotes_csv_dte_max: int = 10
+
+    # Per-DTE-bucket cooldown between CSV reads. Pairs of
+    # ``(max_dte_inclusive, min_seconds_between_reads)`` ordered by
+    # ascending max_dte. The first matching bucket wins.
+    #
+    # Default policy: read near-term every cycle (no throttle), and slow
+    # down for further-out expirations whose upstream files only update
+    # every few minutes anyway. Reading them every 5s when the file
+    # changes every 10 min is wasted work.
+    #   DTE 0-2 → every cycle (0s gate)
+    #   DTE 3-4 → at most every 150s
+    #   DTE 5-7 → at most every 300s
+    #   DTE 8+  → every 600s (cheap fallback for the long tail)
+    option_quotes_csv_intervals: list[tuple[int, float]] = field(
+        default_factory=lambda: [(2, 0.0), (4, 150.0), (7, 300.0), (999, 600.0)],
+    )
 
     # ── Read-time merge ──────────────────────────────────────────────────────
     # IBKR data is preferred for any strike where the IBKR cache is fresher
@@ -183,6 +211,39 @@ _INDEX_EXCHANGES = {
     "DJX": "CBOE",
     "VIX": "CBOE",
 }
+
+
+def _parse_csv_intervals(raw: object | None) -> list[tuple[int, float]]:
+    """Parse the ``option_quotes_csv_intervals`` YAML field into a sorted
+    list of ``(max_dte_inclusive, min_seconds_between_reads)`` tuples.
+
+    YAML can express this as either a list of two-element lists or a list
+    of dicts ``[{max_dte: 4, interval: 150}]``. Bad input falls back to
+    the default policy.
+    """
+    if raw is None:
+        return [(2, 0.0), (4, 150.0), (7, 300.0), (999, 600.0)]
+    out: list[tuple[int, float]] = []
+    try:
+        for entry in raw:
+            if isinstance(entry, dict):
+                max_dte = int(entry.get("max_dte", entry.get("dte", -1)))
+                interval = float(entry.get("interval", entry.get("seconds", 0)))
+            else:
+                # list/tuple form
+                max_dte = int(entry[0])
+                interval = float(entry[1])
+            if max_dte < 0 or interval < 0:
+                continue
+            out.append((max_dte, interval))
+    except (TypeError, ValueError, KeyError, IndexError) as e:
+        logging.getLogger(__name__).warning(
+            "Bad option_quotes_csv_intervals (%s); using default", e,
+        )
+        return [(2, 0.0), (4, 150.0), (7, 300.0), (999, 600.0)]
+    if not out:
+        return [(2, 0.0), (4, 150.0), (7, 300.0), (999, 600.0)]
+    return sorted(out, key=lambda kv: kv[0])
 
 
 def _resolve_symbol(raw: dict | str) -> StreamingSymbolConfig:
@@ -264,6 +325,7 @@ def load_streaming_config(path: str | Path) -> StreamingConfig:
         option_quotes_csv_dir=raw.get("option_quotes_csv_dir", ""),
         option_quotes_greeks_interval=float(raw.get("option_quotes_greeks_interval", 25.0)),
         option_quotes_ibkr_max_parallel=int(raw.get("option_quotes_ibkr_max_parallel", 6)),
+        option_quotes_ibkr_sub_budget=int(raw.get("option_quotes_ibkr_sub_budget", 2000)),
         # Strike ranges — both default to 5%.  Legacy field used as fallback.
         option_quotes_ibkr_strike_range_pct=float(
             raw.get(
@@ -279,6 +341,9 @@ def load_streaming_config(path: str | Path) -> StreamingConfig:
         ),
         option_quotes_ibkr_dte_list=raw.get("option_quotes_ibkr_dte_list", None),
         option_quotes_csv_dte_max=int(raw.get("option_quotes_csv_dte_max", 10)),
+        option_quotes_csv_intervals=_parse_csv_intervals(
+            raw.get("option_quotes_csv_intervals", None)
+        ),
         option_quotes_ibkr_max_age_sec=float(
             raw.get("option_quotes_ibkr_max_age_sec", 90.0)
         ),

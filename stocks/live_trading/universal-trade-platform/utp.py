@@ -177,6 +177,43 @@ def _trade_price_block_max_age() -> float:
         return 60.0
 
 
+def _broker_poll_timeout() -> float:
+    """Daemon's broker-fill poll timeout (seconds). Source of truth for the
+    client-side HTTP timeout, which must always exceed it."""
+    try:
+        return float(os.environ.get("ORDER_POLL_TIMEOUT_SECONDS", "60"))
+    except (TypeError, ValueError):
+        return 60.0
+
+
+# Margin between client-side HTTP timeout and the daemon's broker-fill poll
+# timeout. Ensures the CLI never gives up while the daemon is still legitimately
+# waiting on the broker. "+ at least 2%" per project policy.
+_TRADE_HTTP_TIMEOUT_MARGIN: float = 1.02
+
+
+def _trade_http_timeout() -> float:
+    """Client-side HTTP timeout for ``POST /trade/execute`` (seconds).
+
+    Always at least ``broker_poll_timeout × 1.02`` so the CLI never reads-times
+    out before the daemon finishes waiting on the broker. Override with
+    ``UTP_TRADE_HTTP_TIMEOUT`` (the override is itself floored to the +2% rule
+    — you can ask for *more* slack but never less).
+
+    Practically: with the default 60s daemon poll, the client waits 61.2s.
+    Set ``ORDER_POLL_TIMEOUT_SECONDS=120`` and the client auto-scales to 122.4s
+    without needing a second env var.
+    """
+    floor = _broker_poll_timeout() * _TRADE_HTTP_TIMEOUT_MARGIN
+    override = os.environ.get("UTP_TRADE_HTTP_TIMEOUT")
+    if override:
+        try:
+            return max(float(override), floor)
+        except (TypeError, ValueError):
+            pass
+    return floor
+
+
 def _classify_price_age(age_seconds: float | None) -> tuple[str, bool]:
     """Classify a cache-age (seconds) into (annotation, blocked).
 
@@ -302,7 +339,7 @@ class TradingClient:
             }
         }
         self._ensure_connected()
-        resp = await self._client.post("/trade/execute", json=payload)
+        resp = await self._client.post("/trade/execute", json=payload, timeout=_trade_http_timeout())
         resp.raise_for_status()
         return resp.json()
 
@@ -701,7 +738,7 @@ class TradingClient:
             }
         }
         self._ensure_connected()
-        resp = await self._client.post("/trade/execute", json=payload)
+        resp = await self._client.post("/trade/execute", json=payload, timeout=_trade_http_timeout())
         resp.raise_for_status()
         return resp.json()
 
@@ -748,7 +785,7 @@ class TradingClient:
             }
         }
         self._ensure_connected()
-        resp = await self._client.post("/trade/execute", json=payload)
+        resp = await self._client.post("/trade/execute", json=payload, timeout=_trade_http_timeout())
         resp.raise_for_status()
         return resp.json()
 
@@ -775,7 +812,7 @@ class TradingClient:
             }
         }
         self._ensure_connected()
-        resp = await self._client.post("/trade/execute", json=payload)
+        resp = await self._client.post("/trade/execute", json=payload, timeout=_trade_http_timeout())
         resp.raise_for_status()
         return resp.json()
 
@@ -798,7 +835,7 @@ class TradingClient:
             }
         }
         self._ensure_connected()
-        resp = await self._client.post("/trade/execute", json=payload)
+        resp = await self._client.post("/trade/execute", json=payload, timeout=_trade_http_timeout())
         resp.raise_for_status()
         return resp.json()
 
@@ -1048,7 +1085,12 @@ async def _try_daemon(server: str, http_func, args) -> int | None:
 
         if "timeout" in err_name.lower():
             print(f"  Daemon request timed out ({err_name}). The daemon may be busy.")
-            print(f"  Retry the command or check daemon logs.")
+            print(f"  The order may still have been submitted — check:")
+            print(f"    python utp.py orders --live")
+            print(f"    python utp.py trades --live")
+            print(f"  Override the client-side wait with UTP_TRADE_HTTP_TIMEOUT=<seconds>"
+                  f" or raise ORDER_POLL_TIMEOUT_SECONDS on the daemon "
+                  f"(client auto-scales to broker_timeout × 1.02).")
             return 1
         raise
 
@@ -4888,7 +4930,7 @@ async def _cmd_trade_http(args, server: str) -> int:
     mode = _get_mode(args)
     nocheck = getattr(args, "nocheck", False)
 
-    async with httpx.AsyncClient(base_url=server, timeout=90.0) as client:
+    async with httpx.AsyncClient(base_url=server, timeout=_trade_http_timeout()) as client:
         # Show order summary before executing
         confirm = getattr(args, "confirm", False)
 
@@ -5769,40 +5811,50 @@ def _build_margin_order(subcommand: str, args):
     expiration = args.expiration
     quantity = getattr(args, "quantity", 1)
     net_price = getattr(args, "net_price", 1.00) or 1.00
+    # Optional per-trade override of the auto-selected trading class. Empty
+    # string disables forcing entirely; any other value (e.g. "SPX" for
+    # AM-settled monthly) overrides the SPXW/RUTW/NDXP defaults. Stamped
+    # onto every leg so the provider can pick it up at qualify time.
+    trading_class_override = getattr(args, "trading_class", None)
+
+    def _leg(**kw):
+        if trading_class_override is not None:
+            kw["trading_class"] = trading_class_override
+        return OptionLeg(**kw)
 
     if subcommand == "credit-spread":
         option_type = OptionType(args.option_type.upper())
         legs = [
-            OptionLeg(symbol=args.symbol, expiration=expiration, strike=args.short_strike,
-                      option_type=option_type, action=OptionAction.SELL_TO_OPEN, quantity=1),
-            OptionLeg(symbol=args.symbol, expiration=expiration, strike=args.long_strike,
-                      option_type=option_type, action=OptionAction.BUY_TO_OPEN, quantity=1),
+            _leg(symbol=args.symbol, expiration=expiration, strike=args.short_strike,
+                 option_type=option_type, action=OptionAction.SELL_TO_OPEN, quantity=1),
+            _leg(symbol=args.symbol, expiration=expiration, strike=args.long_strike,
+                 option_type=option_type, action=OptionAction.BUY_TO_OPEN, quantity=1),
         ]
     elif subcommand == "debit-spread":
         option_type = OptionType(args.option_type.upper())
         legs = [
-            OptionLeg(symbol=args.symbol, expiration=expiration, strike=args.long_strike,
-                      option_type=option_type, action=OptionAction.BUY_TO_OPEN, quantity=1),
-            OptionLeg(symbol=args.symbol, expiration=expiration, strike=args.short_strike,
-                      option_type=option_type, action=OptionAction.SELL_TO_OPEN, quantity=1),
+            _leg(symbol=args.symbol, expiration=expiration, strike=args.long_strike,
+                 option_type=option_type, action=OptionAction.BUY_TO_OPEN, quantity=1),
+            _leg(symbol=args.symbol, expiration=expiration, strike=args.short_strike,
+                 option_type=option_type, action=OptionAction.SELL_TO_OPEN, quantity=1),
         ]
     elif subcommand == "iron-condor":
         legs = [
-            OptionLeg(symbol=args.symbol, expiration=expiration, strike=args.put_short,
-                      option_type=OptionType.PUT, action=OptionAction.SELL_TO_OPEN, quantity=1),
-            OptionLeg(symbol=args.symbol, expiration=expiration, strike=args.put_long,
-                      option_type=OptionType.PUT, action=OptionAction.BUY_TO_OPEN, quantity=1),
-            OptionLeg(symbol=args.symbol, expiration=expiration, strike=args.call_short,
-                      option_type=OptionType.CALL, action=OptionAction.SELL_TO_OPEN, quantity=1),
-            OptionLeg(symbol=args.symbol, expiration=expiration, strike=args.call_long,
-                      option_type=OptionType.CALL, action=OptionAction.BUY_TO_OPEN, quantity=1),
+            _leg(symbol=args.symbol, expiration=expiration, strike=args.put_short,
+                 option_type=OptionType.PUT, action=OptionAction.SELL_TO_OPEN, quantity=1),
+            _leg(symbol=args.symbol, expiration=expiration, strike=args.put_long,
+                 option_type=OptionType.PUT, action=OptionAction.BUY_TO_OPEN, quantity=1),
+            _leg(symbol=args.symbol, expiration=expiration, strike=args.call_short,
+                 option_type=OptionType.CALL, action=OptionAction.SELL_TO_OPEN, quantity=1),
+            _leg(symbol=args.symbol, expiration=expiration, strike=args.call_long,
+                 option_type=OptionType.CALL, action=OptionAction.BUY_TO_OPEN, quantity=1),
         ]
     elif subcommand == "option":
         option_type = OptionType(args.option_type.upper())
         action = OptionAction(getattr(args, "action", "BUY_TO_OPEN").upper())
         legs = [
-            OptionLeg(symbol=args.symbol, expiration=expiration, strike=args.strike,
-                      option_type=option_type, action=action, quantity=1),
+            _leg(symbol=args.symbol, expiration=expiration, strike=args.strike,
+                 option_type=option_type, action=action, quantity=1),
         ]
     else:
         raise ValueError(f"Unknown margin subcommand: {subcommand}")
@@ -6558,8 +6610,89 @@ async def _cmd_status(args) -> int:
 
 # ── flush ─────────────────────────────────────────────────────────────────────
 
+async def _cmd_flush_conid_cache(args) -> int:
+    """Purge the IBKR option/underlying conID cache (on-disk JSON + Redis).
+
+    Refuses to run while a daemon is active — the daemon's in-memory cache
+    would keep re-saving stale entries to disk/Redis after the purge.
+    """
+    import os
+
+    server = _detect_server(args)
+    if server:
+        print(f"  Error: daemon is running at {server}.")
+        print(f"  Stop it first (Ctrl-C in its terminal), then re-run:")
+        print(f"    python utp.py flush conid-cache")
+        return 1
+
+    base_dir = Path(getattr(args, "data_dir", "data/utp"))
+    env_dir = os.environ.get("UTP_OPTION_CONID_CACHE_DIR")
+    cache_dir = Path(env_dir) if env_dir else base_dir / "cache" / "option_conids"
+
+    files_removed = 0
+    bytes_freed = 0
+    if cache_dir.exists():
+        for f in cache_dir.glob("*.json"):
+            try:
+                bytes_freed += f.stat().st_size
+                f.unlink()
+                files_removed += 1
+            except Exception as e:
+                print(f"  Warning: failed to remove {f}: {e}")
+
+    redis_url = (
+        getattr(args, "redis_url", None)
+        or os.environ.get("REDIS_URL")
+        or "redis://localhost:6379/0"
+    )
+    redis_keys_removed = 0
+    redis_status = "skipped"
+    try:
+        import redis.asyncio as aioredis
+        r = aioredis.from_url(
+            redis_url, decode_responses=True,
+            socket_connect_timeout=3, socket_timeout=3,
+        )
+        try:
+            await r.ping()
+            keys_to_delete: list[str] = []
+            async for key in r.scan_iter(match="utp:option_conid_cache:*"):
+                keys_to_delete.append(key)
+            if await r.exists("utp:underlying_conid_cache"):
+                keys_to_delete.append("utp:underlying_conid_cache")
+            if keys_to_delete:
+                await r.delete(*keys_to_delete)
+                redis_keys_removed = len(keys_to_delete)
+            redis_status = f"connected ({redis_url})"
+        finally:
+            try:
+                await r.aclose()
+            except Exception:
+                pass
+    except Exception as e:
+        redis_status = f"unreachable ({type(e).__name__}): {e}"
+
+    _print_header("ConID Cache Purge Complete")
+    print(f"  {_color('✓', '92')} On-disk files removed: {files_removed}"
+          f" ({bytes_freed} bytes)")
+    print(f"     dir: {cache_dir}")
+    if redis_keys_removed > 0:
+        print(f"  {_color('✓', '92')} Redis keys removed:    {redis_keys_removed}")
+        print(f"     {redis_status}")
+    elif "connected" in redis_status:
+        print(f"  Redis keys removed:    0 (none present)")
+        print(f"     {redis_status}")
+    else:
+        print(f"  Redis purge skipped:   {redis_status}")
+    print(f"\n  Restart the daemon to pick up fresh conIDs.\n")
+    return 0
+
+
 async def _cmd_flush(args) -> int:
-    """Flush local position store and/or ledger."""
+    """Flush local position store, ledger, and/or conID cache."""
+    if getattr(args, "what", "all") == "conid-cache":
+        return await _cmd_flush_conid_cache(args)
+
     server = _detect_server(args)
     if server:
         # Route through daemon's flush endpoint (clears in-memory + disk)
@@ -9429,6 +9562,11 @@ Actions:
                        help="Limit price per contract (required for LIMIT orders)")
     t_opt.add_argument("--nocheck", action="store_true",
                        help="Skip IBKR margin validation — show cached prices only")
+    t_opt.add_argument("--trading-class", default=None,
+                       help="Override the default trading class. Defaults: SPX→SPXW, "
+                            "RUT→RUTW, NDX→NDXP (PM-settled, daily-listed). Pass an "
+                            "explicit class (e.g. 'SPX' for AM-settled monthly) or "
+                            "'' (empty) to disable forcing.")
     _add_connection_args(t_opt)
 
     # trade credit-spread
@@ -9503,6 +9641,10 @@ P&L: credit_received - cost_to_close (max profit = full credit, max loss = width
                       help="Close an existing position (BUY_TO_CLOSE / SELL_TO_CLOSE)")
     t_cs.add_argument("--nocheck", action="store_true",
                       help="Skip IBKR margin validation — show cached prices only")
+    t_cs.add_argument("--trading-class", default=None,
+                      help="Override the default trading class (SPX→SPXW, RUT→RUTW, "
+                           "NDX→NDXP). Pass 'SPX'/'RUT'/'NDX' for AM-settled monthly, "
+                           "or '' to disable forcing entirely.")
     t_cs.add_argument("--confirm", action="store_true",
                       help="Confirm and execute (without this, shows order summary only)")
     _add_connection_args(t_cs)
@@ -9534,6 +9676,10 @@ P&L: value_on_close - debit_paid (max profit = width - debit, max loss = debit p
                       help="Close an existing position (SELL_TO_CLOSE / BUY_TO_CLOSE)")
     t_ds.add_argument("--nocheck", action="store_true",
                       help="Skip IBKR margin validation — show cached prices only")
+    t_ds.add_argument("--trading-class", default=None,
+                      help="Override the default trading class (SPX→SPXW, RUT→RUTW, "
+                           "NDX→NDXP). Pass 'SPX'/'RUT'/'NDX' for AM-settled monthly, "
+                           "or '' to disable forcing entirely.")
     t_ds.add_argument("--confirm", action="store_true",
                       help="Confirm and execute (without this, shows order summary only)")
     _add_connection_args(t_ds)
@@ -9605,6 +9751,10 @@ P&L: combined credit - cost_to_close (max profit = total credit, max loss = wide
                       help="Close an existing position (reverses all legs)")
     t_ic.add_argument("--nocheck", action="store_true",
                       help="Skip IBKR margin validation — show cached prices only")
+    t_ic.add_argument("--trading-class", default=None,
+                      help="Override the default trading class (SPX→SPXW, RUT→RUTW, "
+                           "NDX→NDXP). Pass 'SPX'/'RUT'/'NDX' for AM-settled monthly, "
+                           "or '' to disable forcing entirely.")
     t_ic.add_argument("--confirm", action="store_true",
                       help="Confirm and execute (without this, shows order summary only)")
     _add_connection_args(t_ic)
@@ -9761,33 +9911,50 @@ Aliases: st, dash
 
     # ── flush ──
     p_flush = subparsers.add_parser("flush",
-                                     help="Clear local position store and/or ledger",
+                                     help="Clear local position store, ledger, and/or conID cache",
                                      aliases=["reset"],
                                      description='''
-Clear local persisted data (positions, ledger, or both). This is a local-only
-operation that does NOT affect the broker. BLOCKED when a daemon is running —
-use 'reconcile --flush' instead to flush through the daemon safely.
+Clear local persisted data (positions, ledger, or the IBKR conID cache).
+This is a local-only operation that does NOT affect the broker. BLOCKED
+when a daemon is running — use 'reconcile --flush' instead to flush
+positions/ledger through the daemon safely.
+
+The 'conid-cache' target removes the on-disk option-conID JSON files and
+(best-effort) the Redis copies. Use it after a bad conID resolution
+poisons the cache (e.g. an index symbol resolved to the wrong underlying
+contract). Stop the daemon before running this — the in-memory cache in
+the running provider will keep re-saving stale entries otherwise.
 
 For a full system reset including closed P&L history, use 'reconcile --hard-reset'.
                                      ''',
                                      epilog='''
 Examples:
-  %(prog)s                         Flush all local data (positions + ledger)
-  %(prog)s positions               Flush positions only (keep ledger)
-  %(prog)s ledger                  Flush ledger only (keep positions)
-  %(prog)s --data-dir data/custom  Flush from custom data directory
+  %(prog)s                            Flush all local data (positions + ledger)
+  %(prog)s positions                  Flush positions only (keep ledger)
+  %(prog)s ledger                     Flush ledger only (keep positions)
+  %(prog)s conid-cache                Purge IBKR conID cache (disk + Redis)
+  %(prog)s conid-cache --redis-url \\
+      redis://lin1.kundu.dev:6379/0   Purge with custom Redis URL
+  %(prog)s --data-dir data/custom     Flush from custom data directory
 
-Note: This command is BLOCKED when a daemon is running to prevent
-data conflicts. Use 'reconcile --flush' or 'reconcile --hard-reset'
-to manage data through the daemon.
+Note: positions/ledger flushes are BLOCKED when a daemon is running.
+'conid-cache' is also blocked when a daemon is running — stop the daemon
+first, run the purge, then restart the daemon.
 
 Aliases: reset
                                      ''',
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     p_flush.add_argument("what", nargs="?", default="all",
-                         choices=["positions", "ledger", "all"],
-                         help="What to flush (default: all)")
+                         choices=["positions", "ledger", "all", "conid-cache"],
+                         help="What to flush (default: all). 'conid-cache' purges "
+                              "the IBKR option/underlying conID cache.")
     p_flush.add_argument("--data-dir", default="data/utp", help="Data directory")
+    p_flush.add_argument("--redis-url", default=None,
+                         help="Redis URL for conid-cache purge "
+                              "(default: $REDIS_URL or redis://localhost:6379/0). "
+                              "Failure to reach Redis is non-fatal.")
+    p_flush.add_argument("--server-port", type=int, default=8000,
+                         help="Daemon port for the running-daemon check (default 8000)")
 
     # ── reconcile ──
     p_recon = subparsers.add_parser("reconcile",

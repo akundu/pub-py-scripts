@@ -268,6 +268,26 @@ def _next_n_trading_days(n: int, start: date | None = None) -> list[str]:
     return result
 
 
+def _tws_option_subs_stats(provider) -> dict:
+    """Return TWS persistent option-subscription registry stats for the
+    streaming status endpoint. Tolerates non-IBKR providers (CPG, stub) by
+    returning zeros instead of raising. Coerces values defensively because
+    test fixtures sometimes pass a ``MagicMock`` whose attribute access
+    auto-creates non-comparable mocks."""
+    subs = getattr(provider, "_option_subs", None)
+    budget_raw = getattr(provider, "_option_subs_budget", 0)
+    try:
+        current = len(subs) if isinstance(subs, dict) else 0
+    except Exception:
+        current = 0
+    try:
+        budget = int(budget_raw)
+    except (TypeError, ValueError):
+        budget = 0
+    util = round(100.0 * current / budget, 1) if budget > 0 else 0.0
+    return {"current": current, "budget": budget, "util_pct": util}
+
+
 # ── Streaming service ────────────────────────────────────────────────────────
 
 class OptionQuoteStreamingService:
@@ -344,6 +364,9 @@ class OptionQuoteStreamingService:
         self._csv_reads_failed = 0
         self._csv_latest_snapshot_age: float = 0
         self._greeks_cache_entries = 0
+        # Per-(symbol, exp, type) last-read timestamp (time.monotonic) for
+        # the DTE-bucket cooldown enforced by ``_csv_job_due``.
+        self._csv_last_read_mono: dict[tuple[str, str, str], float] = {}
 
         # Redis for conID cache persistence across restarts
         self._redis = None
@@ -422,6 +445,12 @@ class OptionQuoteStreamingService:
                 "loaded": self._conid_cache_loaded,
                 "provider_conid_cache_size": len(getattr(self._provider, '_option_conid_cache', {})),
             },
+            # TWS persistent-subscription registry. ``util_pct`` of 100% means
+            # every new strike forces an LRU eviction of an existing one — the
+            # symptom is cycles taking 20+ seconds because every "cached"
+            # strike has to re-subscribe and wait 3s for first tick. If
+            # util_pct stays >85%, raise ``option_quotes_ibkr_sub_budget``.
+            "tws_option_subs": _tws_option_subs_stats(self._provider),
             "redis_quote_cache": {
                 "enabled": self._redis is not None,
             },
@@ -433,6 +462,10 @@ class OptionQuoteStreamingService:
                 "csv_strike_range_pct": self._config.option_quotes_csv_strike_range_pct,
                 "ibkr_dte_list": self._config.option_quotes_ibkr_dte_list,
                 "csv_dte_max": self._config.option_quotes_csv_dte_max,
+                "csv_intervals": [
+                    {"max_dte": d, "interval_sec": s}
+                    for d, s in self._config.option_quotes_csv_intervals
+                ],
                 "ibkr_max_parallel_configured": self._config.option_quotes_ibkr_max_parallel,
                 "ibkr_max_parallel_effective": self._effective_max_parallel(),
                 "ibkr_provider_kind": type(self._provider).__name__,
@@ -478,6 +511,22 @@ class OptionQuoteStreamingService:
 
         # Warm quote cache from Redis — instant prices on restart
         await self._redis_load_quotes()
+
+        # Apply the configured TWS persistent-subscription budget. Without
+        # this, the provider's default (300) gets exhausted by 3 indices ×
+        # 3 expirations × 2 types × ~150 strikes/each ≈ 2700 contracts, and
+        # every cycle LRU-evicts subscriptions just to re-subscribe them
+        # next call — driving cycle latency to 22+ seconds.
+        configured = getattr(self._config, "option_quotes_ibkr_sub_budget", None)
+        if configured and hasattr(self._provider, "_option_subs_budget"):
+            try:
+                self._provider._option_subs_budget = int(configured)
+                logger.info(
+                    "TWS option-subscription budget set to %d (from streaming config)",
+                    int(configured),
+                )
+            except (TypeError, ValueError) as e:
+                logger.warning("Invalid option_quotes_ibkr_sub_budget: %s", e)
 
         logger.info("Option quote streaming started")
 
@@ -1017,20 +1066,55 @@ class OptionQuoteStreamingService:
 
         ibkr_dtes = self._config.option_quotes_ibkr_dte_list
         csv_dte_max = self._config.option_quotes_csv_dte_max
+        csv_intervals = self._config.option_quotes_csv_intervals
         today = date.today()
+        now_mono = time.monotonic()
 
         csv_jobs: list[tuple] = []
         ibkr_jobs: list[tuple] = []
         for exp in expirations:
             dte = self._dte_for_exp(exp, today)
             for opt_type in ("CALL", "PUT"):
-                # CSV tier: include if DTE unknown or within csv_dte_max
+                # CSV tier: include if DTE unknown or within csv_dte_max,
+                # AND the per-DTE-bucket cooldown has elapsed since the
+                # last read for this (symbol, exp, type). The cooldown
+                # avoids re-reading 5DTE-7DTE files every 5s when the
+                # upstream only updates them every ~10 min.
                 if dte is None or (isinstance(dte, int) and dte <= csv_dte_max):
-                    csv_jobs.append((symbol, exp, opt_type, csv_min, csv_max, price_source))
+                    if self._csv_job_due(symbol, exp, opt_type, dte, csv_intervals, now_mono):
+                        csv_jobs.append((symbol, exp, opt_type, csv_min, csv_max, price_source))
                 # IBKR tier: include if no DTE filter, or if DTE is in filter list
                 if ibkr_dtes is None or (dte is not None and dte in ibkr_dtes):
                     ibkr_jobs.append((symbol, exp, opt_type, ibkr_min, ibkr_max, price_source))
         return csv_jobs, ibkr_jobs
+
+    def _csv_job_due(
+        self,
+        symbol: str,
+        expiration: str,
+        opt_type: str,
+        dte: int | None,
+        intervals: list[tuple[int, float]],
+        now_mono: float,
+    ) -> bool:
+        """Return True iff the cooldown for this DTE bucket has elapsed."""
+        # Pick the bucket interval — first ``max_dte >= dte`` in the
+        # sorted list. Unknown DTE → no throttle (treat as near-term).
+        if dte is None:
+            return True
+        interval = 0.0
+        for max_dte, sec in intervals:
+            if dte <= max_dte:
+                interval = sec
+                break
+        if interval <= 0:
+            return True
+        key = (symbol, expiration, opt_type)
+        last = self._csv_last_read_mono.get(key, 0.0)
+        if now_mono - last >= interval:
+            self._csv_last_read_mono[key] = now_mono
+            return True
+        return False
 
     async def _run_one_cycle(self) -> None:
         """Fetch option quotes for all configured symbols.

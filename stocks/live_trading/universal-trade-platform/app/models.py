@@ -80,6 +80,14 @@ class OptionLeg(BaseModel):
     option_type: OptionType
     action: OptionAction
     quantity: int = Field(ge=1)
+    trading_class: Optional[str] = Field(
+        None,
+        description=(
+            "Override the per-symbol default trading class (e.g. 'SPX' for "
+            "AM-settled monthly instead of the default 'SPXW' weekly). Only "
+            "needed when the auto-policy doesn't match what you want."
+        ),
+    )
 
 
 class MultiLegOrder(BaseModel):

@@ -243,10 +243,13 @@ async def execute_trade(request: TradeRequest, dry_run: bool = False) -> OrderRe
     return result
 
 
+_MIN_POLL_INTERVAL = 2.0  # broker pacing floor — see app.config
+
+
 async def await_order_fill(
     broker: Broker,
     order_id: str,
-    poll_interval: float = 1.0,
+    poll_interval: float = _MIN_POLL_INTERVAL,
     timeout: float = 30.0,
     on_status_update: Optional[Callable[[OrderResult, float], Awaitable[None]]] = None,
 ) -> OrderResult:
@@ -255,7 +258,10 @@ async def await_order_fill(
     Args:
         broker: The broker that received the order.
         order_id: The order ID to track.
-        poll_interval: Seconds between status checks.
+        poll_interval: Seconds between status checks. Floored to
+            ``_MIN_POLL_INTERVAL`` (2s) — sub-2s polls hit IBKR's pacing
+            limits without delivering fills any sooner because TWS only
+            ticks status updates at ~1Hz.
         timeout: Maximum seconds to wait before giving up.
         on_status_update: Optional async callback invoked on each poll with
             (order_result, elapsed_seconds). Used for WebSocket broadcast,
@@ -269,6 +275,7 @@ async def await_order_fill(
     from app.services.ledger import get_ledger
     from app.services.position_store import get_position_store
 
+    poll_interval = max(float(poll_interval), _MIN_POLL_INTERVAL)
     provider = ProviderRegistry.get(broker)
     start = time.monotonic()
     last_result: Optional[OrderResult] = None

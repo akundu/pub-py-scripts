@@ -87,11 +87,39 @@ class OptionChainCache:
         today = date.today()
 
         def _is_valid(data: dict) -> bool:
-            """Reject cache entries with too few strikes, past expirations, or missing today."""
+            """Reject cache entries with too few strikes, past expirations,
+            missing today, or strikes clustered too narrowly to be plausible.
+
+            The strike-span check guards against a pathological state we hit
+            on 2026-04-29: ``reqSecDefOptParamsAsync`` for SPX returned only
+            60 strikes spanning 5000-5590 while the actual market price was
+            $7130. The cache passed all other checks (≥50 strikes, today's
+            expiration present), so streaming served zero quotes for SPX
+            because the requested ±3% strike range had nothing in it.
+            """
             strikes = data.get("strikes", [])
             expirations = data.get("expirations", [])
             if len(strikes) < 50:
                 logger.info("Option chain cache rejected for %s: only %d strikes (need 50+)", symbol, len(strikes))
+                return False
+            # Strike-span sanity. A real index option chain spans at least
+            # ±50% of the underlying price, so min/max should be well below
+            # 0.6. If min/max > 0.6 the strikes are tightly clustered —
+            # either a partial fetch or a chain frozen at a different price.
+            try:
+                s_min = float(min(strikes))
+                s_max = float(max(strikes))
+            except (TypeError, ValueError):
+                logger.info("Option chain cache rejected for %s: strikes not numeric", symbol)
+                return False
+            if s_max > 0 and s_min / s_max > 0.6:
+                logger.warning(
+                    "Option chain cache rejected for %s: strikes clustered "
+                    "in narrow band [%.0f-%.0f] (min/max=%.2f, expected <0.6) "
+                    "— likely a partial fetch or stale chain at a different "
+                    "underlying price",
+                    symbol, s_min, s_max, s_min / s_max,
+                )
                 return False
             # Check if all expirations are in the past
             today_str = today.isoformat().replace("-", "")
@@ -137,8 +165,42 @@ class OptionChainCache:
         return None
 
     def put(self, symbol: str, expirations: list[str], strikes: list[float]) -> None:
-        """Store chain data for today, persisting to disk."""
+        """Store chain data for today, persisting to disk.
+
+        Refuses to persist obviously-broken chains: too few strikes, or
+        strikes clustered in a narrow band (a sign of a partial
+        ``reqSecDefOptParamsAsync`` response). Saving a bad chain pollutes
+        the daily cache and silently breaks the streaming service for the
+        rest of the day. Letting put() reject the bad data forces the
+        caller to retry the fetch instead.
+        """
         today = date.today()
+
+        if len(strikes) < 50:
+            logger.warning(
+                "OptionChainCache.put refusing to cache %s: only %d strikes",
+                symbol, len(strikes),
+            )
+            return
+        try:
+            s_min = float(min(strikes))
+            s_max = float(max(strikes))
+        except (TypeError, ValueError):
+            logger.warning(
+                "OptionChainCache.put refusing to cache %s: non-numeric strikes",
+                symbol,
+            )
+            return
+        if s_max > 0 and s_min / s_max > 0.6:
+            logger.warning(
+                "OptionChainCache.put refusing to cache %s: strikes "
+                "clustered in narrow band [%.0f-%.0f] (min/max=%.2f). "
+                "Likely a partial reqSecDefOptParamsAsync response. The "
+                "caller should retry.",
+                symbol, s_min, s_max, s_min / s_max,
+            )
+            return
+
         data = {
             "symbol": symbol,
             "date": today.isoformat(),

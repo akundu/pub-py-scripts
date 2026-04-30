@@ -2708,7 +2708,7 @@ class TestIBKRProvider:
         assert store.get("SPX", "20260427", 7075.0, "P") == 700075
 
     @pytest.mark.asyncio
-    async def test_get_option_chain_augments_via_contract_details_for_spx(self):
+    async def test_get_option_chain_augments_via_contract_details_for_spx(self, tmp_path):
         """When ``reqSecDefOptParamsAsync`` returns a partial SPX chain (only
         the parent class's strikes, missing the SPXW chain), get_option_chain
         must augment via ``reqContractDetails`` for the SPXW class. Locks in
@@ -2716,7 +2716,9 @@ class TestIBKRProvider:
         strikes clustered around $5000-$5590 while the market was at $7130."""
         from unittest.mock import MagicMock, AsyncMock
         from app.core.providers.ibkr import IBKRLiveProvider
-        provider = IBKRLiveProvider()
+        # Isolate the chain cache to a tmp dir so we don't read whatever
+        # the running daemon last wrote to data/utp/cache/option_chains.
+        provider = IBKRLiveProvider(option_chain_cache_dir=str(tmp_path))
         provider._connected = True
         provider._ib = MagicMock()
 
@@ -12964,6 +12966,98 @@ class TestTieredOptionStreaming:
         assert OptionQuoteStreamingService._dte_for_exp("2026-04-20", today) == 1
         assert OptionQuoteStreamingService._dte_for_exp("2026-04-22", today) == 3
         assert OptionQuoteStreamingService._dte_for_exp("garbage", today) is None
+
+    def test_csv_intervals_throttle_far_dte(self, monkeypatch):
+        """DTE bucket cooldown — first call emits jobs for every DTE, but
+        a second call within the cooldown window drops the throttled
+        buckets. Locks in: 0-2 DTE every cycle, 3-4 DTE every 150s,
+        5-7 DTE every 300s, 8+ DTE every 600s."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from unittest.mock import MagicMock
+        from datetime import date, timedelta
+        import time
+
+        cfg = _make_streaming_config(
+            option_quotes_csv_intervals=[(2, 0.0), (4, 150.0), (7, 300.0), (999, 600.0)],
+            option_quotes_csv_dte_max=20,  # admit DTE 14 so we can test the 8+ tail
+        )
+        svc = OptionQuoteStreamingService(cfg, MagicMock())
+
+        today = date.today()
+        exps = [
+            today.isoformat(),                             # DTE 0  bucket: 0-2
+            (today + timedelta(days=3)).isoformat(),       # DTE 3  bucket: 3-4
+            (today + timedelta(days=6)).isoformat(),       # DTE 6  bucket: 5-7
+            (today + timedelta(days=14)).isoformat(),      # DTE 14 bucket: 8+
+        ]
+
+        # First call: every DTE bucket emits (cold cache, all due)
+        t0 = 1000.0
+        monkeypatch.setattr(time, "monotonic", lambda: t0)
+        csv1, _ = svc._build_fetch_jobs("SPX", 5000.0, exps, "quote")
+        # 4 expirations × CALL/PUT = 8 jobs on the first pass
+        assert len(csv1) == 8
+
+        # Second call 30s later: only DTE 0 bucket has 0-cooldown.
+        # 3-4 (150s), 5-7 (300s), 8+ (600s) all still cooling down.
+        monkeypatch.setattr(time, "monotonic", lambda: t0 + 30.0)
+        csv2, _ = svc._build_fetch_jobs("SPX", 5000.0, exps, "quote")
+        dtes_emitted = {(today - date.fromisoformat(c[1])).days for c in csv2}
+        # DTE 0 → 0 days difference (today)
+        assert csv2, "DTE 0-2 bucket must always emit"
+        for _, exp, *_rest in csv2:
+            d = (date.fromisoformat(exp) - today).days
+            assert d <= 2, f"DTE {d} not throttled at 30s"
+
+        # 200s later: DTE 0-2 + 3-4 (≥150s elapsed) emit; 5-7 and 8+ still throttled
+        monkeypatch.setattr(time, "monotonic", lambda: t0 + 200.0)
+        csv3, _ = svc._build_fetch_jobs("SPX", 5000.0, exps, "quote")
+        max_dte_emitted = max(
+            (date.fromisoformat(c[1]) - today).days for c in csv3
+        )
+        assert max_dte_emitted == 3, (
+            f"at 200s, only ≤4 DTE should emit; got max={max_dte_emitted}"
+        )
+
+        # 400s later: 0-2, 3-4, 5-7 (≥300s) emit; 8+ still throttled
+        monkeypatch.setattr(time, "monotonic", lambda: t0 + 400.0)
+        csv4, _ = svc._build_fetch_jobs("SPX", 5000.0, exps, "quote")
+        max_dte_emitted = max(
+            (date.fromisoformat(c[1]) - today).days for c in csv4
+        )
+        assert max_dte_emitted == 6, (
+            f"at 400s, ≤7 DTE should emit; got max={max_dte_emitted}"
+        )
+
+        # 700s later: every bucket due (8+ has 600s interval)
+        monkeypatch.setattr(time, "monotonic", lambda: t0 + 700.0)
+        csv5, _ = svc._build_fetch_jobs("SPX", 5000.0, exps, "quote")
+        assert len(csv5) == 8, (
+            f"at 700s every bucket should emit; got {len(csv5)} jobs"
+        )
+
+    def test_csv_intervals_yaml_parsing(self):
+        """``option_quotes_csv_intervals`` from YAML accepts list-of-pairs
+        and list-of-dicts forms; bad input falls back to default."""
+        from app.services.streaming_config import _parse_csv_intervals
+        # List of pairs
+        assert _parse_csv_intervals([[2, 0], [4, 150], [7, 300]]) == [
+            (2, 0.0), (4, 150.0), (7, 300.0),
+        ]
+        # List of dicts
+        assert _parse_csv_intervals([
+            {"max_dte": 2, "interval": 0},
+            {"max_dte": 7, "interval": 300},
+            {"max_dte": 4, "interval": 150},  # out of order — gets sorted
+        ]) == [(2, 0.0), (4, 150.0), (7, 300.0)]
+        # None → default
+        assert _parse_csv_intervals(None) == [
+            (2, 0.0), (4, 150.0), (7, 300.0), (999, 600.0)
+        ]
+        # Bad input → default
+        assert _parse_csv_intervals("garbage") == [
+            (2, 0.0), (4, 150.0), (7, 300.0), (999, 600.0)
+        ]
 
     def test_build_fetch_jobs_splits_csv_and_ibkr(self):
         """Two job lists with different strike ranges and DTE filters."""
