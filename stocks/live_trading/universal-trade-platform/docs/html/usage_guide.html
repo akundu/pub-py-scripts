@@ -486,6 +486,121 @@ python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"
 </code></pre></div>
 
 <hr />
+<h2 id="workflow-6b-replay-a-previous-trade">Workflow 6b: Replay a Previous Trade</h2>
+<p><code>trade replay</code> looks up an open or closed position by ID prefix, extracts symbol / strikes / option-type / action from its legs, and re-submits the same shape of trade. Works for credit-spread, debit-spread, iron-condor, and single-option positions. Accepts both <strong>local</strong> position IDs (from <code>python utp.py portfolio --live</code>) and <strong>synthetic spread-grouped IDs</strong> from the daemon's portfolio view.</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Replay by short ID prefix — uses the original quantity / expiration</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"> </span>replay<span class="w"> </span>2dadab<span class="w"> </span>--live<span class="w"> </span>--confirm
+
+<span class="c1"># Override the quantity (e.g. size up)</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"> </span>replay<span class="w"> </span>2dadab<span class="w"> </span>--quantity<span class="w"> </span><span class="m">10</span><span class="w"> </span>--live<span class="w"> </span>--confirm
+
+<span class="c1"># Roll forward to a new expiration</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"> </span>replay<span class="w"> </span>2dadab<span class="w"> </span>--expiration<span class="w"> </span><span class="m">2026</span>-05-01<span class="w"> </span>--live<span class="w"> </span>--confirm
+
+<span class="c1"># Submit as LIMIT (default is MARKET when --net-price is omitted)</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"> </span>replay<span class="w"> </span>2dadab<span class="w"> </span>--net-price<span class="w"> </span><span class="m">0</span>.50<span class="w"> </span>--live<span class="w"> </span>--confirm
+
+<span class="c1"># Dry-run preview (no --live)</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"> </span>replay<span class="w"> </span>2dadab
+</code></pre></div>
+
+<p>Position lookup order:
+1. Local position store (open + closed)
+2. Daemon's <code>/dashboard/portfolio</code> (synthetic spread-grouped MD5 IDs)</p>
+<p>The trade-execution path is identical to a typed-out <code>credit-spread</code> / <code>iron-condor</code> trade — including the pre-submit safety guards below.</p>
+<hr />
+<h2 id="workflow-6c-order-safety-guards-credit-spread-iron-condor">Workflow 6c: Order Safety Guards (credit-spread / iron-condor)</h2>
+<p>Two client-side guards run after the order summary and before the daemon submit. <strong>Debit-spread is exempt</strong> (paying debit IS the design).</p>
+<table>
+<thead>
+<tr>
+<th>Guard</th>
+<th>Trigger</th>
+<th>Bypass flag</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Min ROI</strong></td>
+<td><code>(credit / max_loss) × 100 &lt; 0.2%</code></td>
+<td><code>--override-min-roi</code></td>
+</tr>
+<tr>
+<td><strong>Credit direction</strong></td>
+<td>net price ≤ 0 (you'd be paying debit)</td>
+<td><code>--override-spend-credit</code></td>
+</tr>
+</tbody>
+</table>
+<p>Each guard refuses the trade with a clear <code>BLOCKED</code> message naming its bypass flag. Both flags are also available on <code>trade replay</code>.</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Tiny credit (commissions/slippage would eat it) — BLOCKED</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"> </span>credit-spread<span class="w"> </span>--symbol<span class="w"> </span>SPX<span class="w"> </span>--short-strike<span class="w"> </span><span class="m">5500</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--long-strike<span class="w"> </span><span class="m">5475</span><span class="w"> </span>--option-type<span class="w"> </span>PUT<span class="w"> </span>--expiration<span class="w"> </span><span class="m">2026</span>-03-20<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--quantity<span class="w"> </span><span class="m">1</span><span class="w"> </span>--net-price<span class="w"> </span><span class="m">0</span>.04<span class="w"> </span>--live<span class="w"> </span>--confirm
+<span class="c1">#   ⛔ Trade BLOCKED: ROI 0.16% &lt; 0.2% minimum.</span>
+<span class="c1">#      Pass --override-min-roi to bypass this safety check.</span>
+
+<span class="c1"># Same trade with override (loud warning printed)</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"> </span>credit-spread<span class="w"> </span>…<span class="w"> </span>--net-price<span class="w"> </span><span class="m">0</span>.04<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--override-min-roi<span class="w"> </span>--live<span class="w"> </span>--confirm
+
+<span class="c1"># Negative net price = you&#39;d be spending — BLOCKED</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"> </span>iron-condor<span class="w"> </span>--symbol<span class="w"> </span>SPX<span class="w"> </span>…<span class="w"> </span>--net-price<span class="w"> </span>-0.50<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--live<span class="w"> </span>--confirm
+<span class="c1">#   ⛔ Trade BLOCKED: net price $-0.50/spread is a DEBIT.</span>
+<span class="c1">#      Pass --override-spend-credit to bypass this safety check.</span>
+</code></pre></div>
+
+<p>When the order is MARKET without a live quote estimate (rare), ROI/credit can't be computed and the guard prints a yellow <code>⚠ ROI/credit unverified</code> warning rather than blocking — the daemon's pre-submit margin check is the next safety layer.</p>
+<hr />
+<h2 id="workflow-6d-trading-class-auto-selection-spx-rut-ndx">Workflow 6d: Trading-Class Auto-Selection (SPX / RUT / NDX)</h2>
+<p>For SPX and RUT, every option-related call is auto-routed to the PM-settled, daily-listed <strong>W class</strong> so daily expirations qualify reliably:</p>
+<table>
+<thead>
+<tr>
+<th>Symbol</th>
+<th>Default class</th>
+<th>Reason</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>SPX</code></td>
+<td><code>SPXW</code></td>
+<td>Co-listed with SPX on every weekday — daily expirations</td>
+</tr>
+<tr>
+<td><code>RUT</code></td>
+<td><code>RUTW</code></td>
+<td>PM-settled weekly variant</td>
+</tr>
+<tr>
+<td><code>NDX</code></td>
+<td><code>NDX</code> (no force)</td>
+<td>Default class qualifies daily/weekly NDX cleanly</td>
+</tr>
+</tbody>
+</table>
+<p>You <strong>keep typing <code>--symbol SPX</code></strong> — the provider does the class mapping internally. Use <code>--trading-class</code> only when you specifically want the AM-settled monthly or want to disable forcing entirely:</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Want the AM-settled monthly SPX on its 3rd Friday? — opt in</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"> </span>credit-spread<span class="w"> </span>--symbol<span class="w"> </span>SPX<span class="w"> </span>--trading-class<span class="w"> </span>SPX<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--short-strike<span class="w"> </span><span class="m">5500</span><span class="w"> </span>--long-strike<span class="w"> </span><span class="m">5475</span><span class="w"> </span>--option-type<span class="w"> </span>PUT<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--expiration<span class="w"> </span><span class="m">2026</span>-05-15<span class="w"> </span>--quantity<span class="w"> </span><span class="m">1</span><span class="w"> </span>--live<span class="w"> </span>--confirm
+
+<span class="c1"># Disable trading-class forcing entirely (let TWS pick)</span>
+python<span class="w"> </span>utp.py<span class="w"> </span>trade<span class="w"> </span>credit-spread<span class="w"> </span>--symbol<span class="w"> </span>SPX<span class="w"> </span>--trading-class<span class="w"> </span><span class="s2">&quot;&quot;</span><span class="w"> </span>…
+</code></pre></div>
+
+<p>Per-deployment override via env var (active for the daemon's lifetime):</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Daemon-wide: use AM-settled monthly SPX globally</span>
+<span class="nv">UTP_OPTION_TC_SPX</span><span class="o">=</span>SPX<span class="w"> </span>python<span class="w"> </span>utp.py<span class="w"> </span>daemon<span class="w"> </span>--live
+
+<span class="c1"># Disable forcing for SPX entirely</span>
+<span class="nv">UTP_OPTION_TC_SPX</span><span class="o">=</span><span class="s2">&quot;&quot;</span><span class="w"> </span>python<span class="w"> </span>utp.py<span class="w"> </span>daemon<span class="w"> </span>--live
+</code></pre></div>
+
+<p>Available on <code>trade option</code>, <code>trade credit-spread</code>, <code>trade debit-spread</code>, <code>trade iron-condor</code>, and <code>trade replay</code>.</p>
+<hr />
 <h2 id="workflow-7-trade-playbooks-batch-execution">Workflow 7: Trade Playbooks (Batch Execution)</h2>
 <div class="codehilite"><pre><span></span><code><span class="c1"># List available playbooks</span>
 python<span class="w"> </span>utp.py<span class="w"> </span>playbook<span class="w"> </span>list

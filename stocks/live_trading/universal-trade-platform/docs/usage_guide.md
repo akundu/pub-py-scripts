@@ -223,6 +223,105 @@ python utp.py trade debit-spread --symbol QQQ --long-strike 480 \
 
 ---
 
+## Workflow 6b: Replay a Previous Trade
+
+`trade replay` looks up an open or closed position by ID prefix, extracts symbol / strikes / option-type / action from its legs, and re-submits the same shape of trade. Works for credit-spread, debit-spread, iron-condor, and single-option positions. Accepts both **local** position IDs (from `python utp.py portfolio --live`) and **synthetic spread-grouped IDs** from the daemon's portfolio view.
+
+```bash
+# Replay by short ID prefix — uses the original quantity / expiration
+python utp.py trade replay 2dadab --live --confirm
+
+# Override the quantity (e.g. size up)
+python utp.py trade replay 2dadab --quantity 10 --live --confirm
+
+# Roll forward to a new expiration
+python utp.py trade replay 2dadab --expiration 2026-05-01 --live --confirm
+
+# Submit as LIMIT (default is MARKET when --net-price is omitted)
+python utp.py trade replay 2dadab --net-price 0.50 --live --confirm
+
+# Dry-run preview (no --live)
+python utp.py trade replay 2dadab
+```
+
+Position lookup order:
+1. Local position store (open + closed)
+2. Daemon's `/dashboard/portfolio` (synthetic spread-grouped MD5 IDs)
+
+The trade-execution path is identical to a typed-out `credit-spread` / `iron-condor` trade — including the pre-submit safety guards below.
+
+---
+
+## Workflow 6c: Order Safety Guards (credit-spread / iron-condor)
+
+Two client-side guards run after the order summary and before the daemon submit. **Debit-spread is exempt** (paying debit IS the design).
+
+| Guard | Trigger | Bypass flag |
+|---|---|---|
+| **Min ROI** | `(credit / max_loss) × 100 < 0.2%` | `--override-min-roi` |
+| **Credit direction** | net price ≤ 0 (you'd be paying debit) | `--override-spend-credit` |
+
+Each guard refuses the trade with a clear `BLOCKED` message naming its bypass flag. Both flags are also available on `trade replay`.
+
+```bash
+# Tiny credit (commissions/slippage would eat it) — BLOCKED
+python utp.py trade credit-spread --symbol SPX --short-strike 5500 \
+  --long-strike 5475 --option-type PUT --expiration 2026-03-20 \
+  --quantity 1 --net-price 0.04 --live --confirm
+#   ⛔ Trade BLOCKED: ROI 0.16% < 0.2% minimum.
+#      Pass --override-min-roi to bypass this safety check.
+
+# Same trade with override (loud warning printed)
+python utp.py trade credit-spread … --net-price 0.04 \
+  --override-min-roi --live --confirm
+
+# Negative net price = you'd be spending — BLOCKED
+python utp.py trade iron-condor --symbol SPX … --net-price -0.50 \
+  --live --confirm
+#   ⛔ Trade BLOCKED: net price $-0.50/spread is a DEBIT.
+#      Pass --override-spend-credit to bypass this safety check.
+```
+
+When the order is MARKET without a live quote estimate (rare), ROI/credit can't be computed and the guard prints a yellow `⚠ ROI/credit unverified` warning rather than blocking — the daemon's pre-submit margin check is the next safety layer.
+
+---
+
+## Workflow 6d: Trading-Class Auto-Selection (SPX / RUT / NDX)
+
+For SPX and RUT, every option-related call is auto-routed to the PM-settled, daily-listed **W class** so daily expirations qualify reliably:
+
+| Symbol | Default class | Reason |
+|---|---|---|
+| `SPX` | `SPXW` | Co-listed with SPX on every weekday — daily expirations |
+| `RUT` | `RUTW` | PM-settled weekly variant |
+| `NDX` | `NDX` (no force) | Default class qualifies daily/weekly NDX cleanly |
+
+You **keep typing `--symbol SPX`** — the provider does the class mapping internally. Use `--trading-class` only when you specifically want the AM-settled monthly or want to disable forcing entirely:
+
+```bash
+# Want the AM-settled monthly SPX on its 3rd Friday? — opt in
+python utp.py trade credit-spread --symbol SPX --trading-class SPX \
+  --short-strike 5500 --long-strike 5475 --option-type PUT \
+  --expiration 2026-05-15 --quantity 1 --live --confirm
+
+# Disable trading-class forcing entirely (let TWS pick)
+python utp.py trade credit-spread --symbol SPX --trading-class "" …
+```
+
+Per-deployment override via env var (active for the daemon's lifetime):
+
+```bash
+# Daemon-wide: use AM-settled monthly SPX globally
+UTP_OPTION_TC_SPX=SPX python utp.py daemon --live
+
+# Disable forcing for SPX entirely
+UTP_OPTION_TC_SPX="" python utp.py daemon --live
+```
+
+Available on `trade option`, `trade credit-spread`, `trade debit-spread`, `trade iron-condor`, and `trade replay`.
+
+---
+
 ## Workflow 7: Trade Playbooks (Batch Execution)
 
 ```bash

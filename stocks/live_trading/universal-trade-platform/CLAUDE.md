@@ -640,6 +640,56 @@ python utp.py repl --server http://192.168.1.50:8000     # Explicit server
 
 All trade commands (`trade credit-spread`, `trade debit-spread`, `trade iron-condor`, `trade option`) and the `close` command default to **MARKET order** when `--net-price` is not specified. When `--net-price` is provided, the order is submitted as a **LIMIT order** at the specified price. This also applies to playbook execution and the `TradingClient` API -- omitting `net_price` results in a MARKET order.
 
+### Pre-submit safety guards (credit-spread / iron-condor)
+
+After the order summary, before the daemon submit, the CLI runs two guards on credit-spread and iron-condor trades. **Debit-spread is exempt** — paying debit IS the design. Each guard refuses the trade with a clear `BLOCKED` message naming its bypass flag:
+
+| Guard | Trigger | Bypass flag |
+|---|---|---|
+| Min ROI | `(credit / max_loss) × 100 < 0.2%` | `--override-min-roi` |
+| Credit direction | net price ≤ 0 (you'd be paying debit) | `--override-spend-credit` |
+
+Both flags are also available on `trade replay` (replays of credit-spread / iron-condor go through the same guard).
+
+```bash
+# Tiny credit (would be eaten by commission/slippage) — BLOCKED
+python utp.py trade credit-spread --symbol SPX --short-strike 5500 \
+    --long-strike 5475 --option-type PUT --expiration 2026-03-20 \
+    --quantity 1 --net-price 0.05 --live --confirm
+#   ⛔ Trade BLOCKED: ROI 0.20% < 0.2% minimum.
+#      Pass --override-min-roi to bypass this safety check.
+
+# Same trade with the override — proceeds with a loud warning
+python utp.py trade credit-spread … --net-price 0.05 \
+    --override-min-roi --live --confirm
+
+# Negative net price = you'd be paying — BLOCKED
+python utp.py trade iron-condor --symbol SPX --put-short 5500 \
+    --put-long 5475 --call-short 5700 --call-long 5725 \
+    --expiration 2026-03-20 --quantity 1 --net-price -0.50 --live --confirm
+#   ⛔ Trade BLOCKED: net price $-0.50/spread is a DEBIT.
+#      Pass --override-spend-credit to bypass this safety check.
+```
+
+### Trading-class auto-selection (SPX / RUT / NDX)
+
+For SPX and RUT, every option-related call (streaming, qualification, trade execution) is auto-routed to the PM-settled, daily-listed **W class** so daily expirations qualify reliably:
+
+| Symbol | Default class | Why |
+|---|---|---|
+| `SPX` | `SPXW` | PM-settled, listed every weekday |
+| `RUT` | `RUTW` | PM-settled weekly variant |
+| `NDX` | `NDX` (no force) | Default class qualifies dailies cleanly; forcing NDXP empirically broke half the NDX expirations on TWS |
+
+Override per-trade with `--trading-class CLASS` on `trade credit-spread`, `trade debit-spread`, `trade iron-condor`, `trade option`, and `trade replay`. Pass `''` (empty) to disable forcing entirely. Per-symbol env var: `UTP_OPTION_TC_<SYMBOL>=<class>` (or empty to disable).
+
+```bash
+# Want the AM-settled monthly SPX on its 3rd Friday? — opt in
+python utp.py trade credit-spread --symbol SPX --trading-class SPX \
+    --short-strike 5500 --long-strike 5475 --option-type PUT \
+    --expiration 2026-05-15 --live --confirm
+```
+
 ### Common Flags (all subcommands)
 
 | Flag | Default | Description |

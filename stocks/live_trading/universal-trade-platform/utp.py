@@ -5213,6 +5213,45 @@ async def _cmd_trade_http(args, server: str) -> int:
             print(f"\n  {_color('NOT EXECUTED', '93')} — add --confirm to place the order")
             return 0
 
+        # ── Pre-submit safety guards (credit-spread / iron-condor only) ───
+        # Two checks the user explicitly opted into:
+        #   1. ROI ≥ 0.2% — refuse vanishingly-small-credit trades that
+        #      barely cover commission. Override with --override-min-roi.
+        #   2. Net credit > 0 — refuse credit-spread / iron-condor orders
+        #      where the legs sum to a debit (would be spending, not
+        #      receiving). Override with --override-spend-credit.
+        # Debit spreads are explicitly excluded — spending IS the design.
+        if (subcommand in ("credit-spread", "iron-condor")
+                and trade_request.multi_leg_order is not None):
+            order = trade_request.multi_leg_order
+            override_spend = getattr(args, "override_spend_credit", False)
+            override_roi = getattr(args, "override_min_roi", False)
+
+            if credit_per_spread is None:
+                # MARKET without live quotes — couldn't compute. Warn but
+                # allow (pre-submit margin check + user's --confirm is on
+                # the hook). This is rare in practice.
+                print(f"  {_color('⚠ ROI/credit unverified — no quote estimate available', '93')}")
+            elif credit_per_spread <= 0:
+                if not override_spend:
+                    print(f"\n  {_color(f'⛔ Trade BLOCKED: net price ${credit_per_spread:.2f}/spread is a DEBIT.', '91')}")
+                    print(f"     A {subcommand} should receive credit, not pay debit.")
+                    print(f"     Pass --override-spend-credit to bypass this safety check.")
+                    return 1
+                print(f"  {_color('⚠ Net debit allowed by --override-spend-credit', '93')}")
+            else:
+                max_loss_per = _compute_max_loss_per_spread(order.legs, credit_per_spread)
+                if max_loss_per and max_loss_per > 0:
+                    roi_pct = (credit_per_spread / max_loss_per) * 100
+                    if roi_pct < 0.2 and not override_roi:
+                        print(f"\n  {_color(f'⛔ Trade BLOCKED: ROI {roi_pct:.2f}% < 0.2% minimum.', '91')}")
+                        print(f"     Credit ${credit_per_spread:.2f}/spread vs max-loss ${max_loss_per:.2f}/spread.")
+                        print(f"     At this size, commissions/slippage likely eat the credit.")
+                        print(f"     Pass --override-min-roi to bypass this safety check.")
+                        return 1
+                    if roi_pct < 0.2:
+                        print(f"  {_color(f'⚠ Sub-0.2% ROI ({roi_pct:.2f}%) allowed by --override-min-roi', '93')}")
+
         headers = {}
         if mode == "dry-run":
             headers["X-Dry-Run"] = "true"
@@ -9426,17 +9465,60 @@ Aliases: m
                                      aliases=["t"],
                                      description='''
 Execute equity, option, or multi-leg options trades. Choose a trade type
-subcommand (equity, option, credit-spread, debit-spread, iron-condor).
+subcommand (equity, option, credit-spread, debit-spread, iron-condor, replay).
 Default mode is dry-run (no broker). Use --paper or --live for real execution.
 
-Special flags:
-  --nocheck       Skip IBKR margin validation — show cached prices only (fast).
-  --close         Reverse a spread position (BUY_TO_CLOSE / SELL_TO_CLOSE).
+Subcommands:
+  equity          Buy or sell stocks (--side BUY or SELL).
+  option          Buy or sell a single option contract.
+  credit-spread   Sell a vertical spread to collect premium.
+  debit-spread    Buy a vertical spread for directional exposure.
+  iron-condor     Sell a 4-leg neutral strategy (put + call spread).
+  replay          Re-submit a previous trade by position ID (open or closed).
+
+Strike-placement options (credit-spread / iron-condor):
+  --short-strike / --long-strike   Explicit strikes.
+  --otm-pct N                       Place short strike N% OTM from current spot.
+  --close-pct N                     Place short strike N% from yesterday's close.
+                                    Iron-condor accepts 'put_pct:call_pct' for
+                                    asymmetric wings (e.g. 2:3).
+  --width N                         Spread width in points (auto-default per
+                                    symbol if omitted).
+  --trading-class CLS               Override the auto-selected trading class.
+                                    Defaults: SPX→SPXW, RUT→RUTW, NDX→NDXP
+                                    (PM-settled, daily-listed). Pass 'SPX'/
+                                    'RUT'/'NDX' for AM-settled monthly, or ''
+                                    to disable forcing.
+
+Pre-submit safety guards (credit-spread / iron-condor only):
+  Both checks run client-side after the order summary, before the daemon submit.
+  Each emits a clear "BLOCKED" message naming its bypass flag. Debit-spread
+  is exempt from the credit-direction check (paying debit IS the design).
+
+  ROI minimum (0.2%):
+    --override-min-roi          Allow trades with ROI < 0.2%. Without this,
+                                tiny-credit trades that commission/slippage
+                                would consume are refused.
+  Credit direction:
+    --override-spend-credit     Allow a credit-spread / iron-condor that
+                                nets out as a debit (you spending). Without
+                                this, the trade is refused — the leg setup
+                                is almost certainly a mistake.
+
+Other flags:
+  --confirm       Required to actually submit. Without it, only the summary
+                  is shown (a "preview").
+  --nocheck       Skip the auto IBKR margin check before submit.
+  --close         Reverse an open spread (BUY_TO_CLOSE / SELL_TO_CLOSE).
                   Available on credit-spread, debit-spread, and iron-condor.
   --validate-all  Run all 5 trade types as a validation suite (no real trades).
   --cleanup       Close positions created by --validate-all.
 
-Auto-detects a running daemon and routes through HTTP if available.
+Routing & timeouts:
+  Auto-detects a running daemon and routes through HTTP if available. The
+  client-side HTTP timeout is broker_poll_timeout × 1.02 (auto-scales when
+  ORDER_POLL_TIMEOUT_SECONDS is bumped on the daemon). Override with
+  UTP_TRADE_HTTP_TIMEOUT (silently floored to the +2% rule).
                                      ''',
                                      epilog='''
 Examples:
@@ -9448,9 +9530,13 @@ Examples:
   # Single option
   %(prog)s option --symbol SPY --strike 550 --option-type PUT --action BUY_TO_OPEN --quantity 1 --paper
 
-  # Credit spread (sell premium)
+  # Credit spread (sell premium) at explicit strikes
   %(prog)s credit-spread --symbol SPX --short-strike 5500 --long-strike 5475 \\
     --option-type PUT --expiration 2026-03-20 --quantity 1 --net-price 3.50 --paper
+
+  # Credit spread by OTM%% (auto-pick strikes from current spot)
+  %(prog)s credit-spread --symbol SPX --otm-pct 2 --option-type PUT \\
+    --expiration 2026-03-20 --quantity 5 --live --confirm
 
   # Close a credit spread
   %(prog)s credit-spread --symbol SPX --short-strike 5500 --long-strike 5475 \\
@@ -9460,24 +9546,38 @@ Examples:
   %(prog)s debit-spread --symbol QQQ --long-strike 480 --short-strike 490 \\
     --option-type CALL --expiration 2026-03-20 --quantity 3 --net-price 4.00 --paper
 
-  # Iron condor
+  # Iron condor (symmetric wings)
   %(prog)s iron-condor --symbol SPX --put-short 5500 --put-long 5475 \\
     --call-short 5700 --call-long 5725 --expiration 2026-03-20 --quantity 1 --paper
+
+  # Iron condor with asymmetric OTM%% (2%% put / 3%% call)
+  %(prog)s iron-condor --symbol SPX --otm-pct 2:3 --width 20 \\
+    --expiration 2026-03-20 --quantity 5 --live --confirm
+
+  # Force the AM-settled SPX monthly contract (override the SPXW default)
+  %(prog)s credit-spread --symbol SPX --trading-class SPX \\
+    --short-strike 5500 --long-strike 5475 --option-type PUT \\
+    --expiration 2026-05-15 --quantity 1 --live --confirm
+
+  # Bypass safety guards when you know what you're doing
+  %(prog)s credit-spread --symbol SPX --short-strike 5500 --long-strike 5475 \\
+    --option-type PUT --expiration 2026-03-20 --net-price 0.05 \\
+    --override-min-roi --live --confirm
+  %(prog)s iron-condor … --net-price -0.50 \\
+    --override-spend-credit --live --confirm
 
   # Quick preview without IBKR margin check (cached prices only)
   %(prog)s credit-spread --symbol RUT --short-strike 2460 --long-strike 2440 \\
     --option-type PUT --expiration 2026-03-18 --quantity 1 --live --nocheck
 
+  # Replay a previous trade by position-ID prefix
+  %(prog)s replay 2dadab --live --confirm
+  %(prog)s replay 2dadab --quantity 10 --live --confirm   # Different size
+  %(prog)s replay 2dadab --expiration 2026-05-01 --live --confirm   # Roll forward
+
   # Validate all 5 trade types (safe, no real execution)
   %(prog)s --validate-all --paper
   %(prog)s --validate-all --cleanup --paper    # Validate + clean up after
-
-Trade types:
-  equity          Buy or sell stocks (--side BUY or SELL)
-  option          Buy or sell a single option contract
-  credit-spread   Sell a vertical spread to collect premium
-  debit-spread    Buy a vertical spread for directional exposure
-  iron-condor     Sell a 4-leg neutral strategy (put spread + call spread)
 
 Aliases: t
                                      ''',
@@ -9645,6 +9745,14 @@ P&L: credit_received - cost_to_close (max profit = full credit, max loss = width
                       help="Override the default trading class (SPX→SPXW, RUT→RUTW, "
                            "NDX→NDXP). Pass 'SPX'/'RUT'/'NDX' for AM-settled monthly, "
                            "or '' to disable forcing entirely.")
+    t_cs.add_argument("--override-min-roi", action="store_true",
+                      help="Bypass the 0.2%% minimum-ROI safety check. Sub-0.2%% "
+                           "credit trades are normally blocked at the client because "
+                           "commissions/slippage likely eat the credit.")
+    t_cs.add_argument("--override-spend-credit", action="store_true",
+                      help="Bypass the credit-direction safety check. Normally a "
+                           "credit-spread that nets out as a debit (you spending) "
+                           "is blocked because that's almost certainly a mistake.")
     t_cs.add_argument("--confirm", action="store_true",
                       help="Confirm and execute (without this, shows order summary only)")
     _add_connection_args(t_cs)
@@ -9755,6 +9863,14 @@ P&L: combined credit - cost_to_close (max profit = total credit, max loss = wide
                       help="Override the default trading class (SPX→SPXW, RUT→RUTW, "
                            "NDX→NDXP). Pass 'SPX'/'RUT'/'NDX' for AM-settled monthly, "
                            "or '' to disable forcing entirely.")
+    t_ic.add_argument("--override-min-roi", action="store_true",
+                      help="Bypass the 0.2%% minimum-ROI safety check. Sub-0.2%% "
+                           "credit trades are normally blocked at the client because "
+                           "commissions/slippage likely eat the credit.")
+    t_ic.add_argument("--override-spend-credit", action="store_true",
+                      help="Bypass the credit-direction safety check. Normally an "
+                           "iron-condor that nets out as a debit (you spending) "
+                           "is blocked because that's almost certainly a mistake.")
     t_ic.add_argument("--confirm", action="store_true",
                       help="Confirm and execute (without this, shows order summary only)")
     _add_connection_args(t_ic)
@@ -9797,6 +9913,15 @@ Supported position types:
                       help="Use mid-point pricing")
     t_rp.add_argument("--nocheck", action="store_true",
                       help="Skip IBKR margin validation")
+    t_rp.add_argument("--trading-class", default=None,
+                      help="Override the default trading class on the rebuilt "
+                           "order. See `trade --help`.")
+    t_rp.add_argument("--override-min-roi", action="store_true",
+                      help="Bypass the 0.2%% minimum-ROI safety check on "
+                           "credit-spread / iron-condor replays.")
+    t_rp.add_argument("--override-spend-credit", action="store_true",
+                      help="Bypass the credit-direction safety check on "
+                           "credit-spread / iron-condor replays.")
     t_rp.add_argument("--confirm", action="store_true",
                       help="Confirm and execute (without this, shows order summary only)")
     _add_connection_args(t_rp)
