@@ -3148,18 +3148,14 @@ class TestIBKRProvider:
         assert cancelled_contract is old_t.contract
 
     @pytest.mark.asyncio
-    async def test_streaming_service_applies_sub_budget_from_config(self, tmp_path, monkeypatch):
-        """``OptionQuoteStreamingService.start()`` must override the provider's
-        ``_option_subs_budget`` from ``option_quotes_ibkr_sub_budget``. The
-        production bug was the streaming workload (3 indices × 3 exps × 2
-        types × ~150 strikes ≈ 2700) blowing out the 300 default and
-        thrashing through LRU evictions every cycle."""
+    @staticmethod
+    def _make_provider_and_service_for_budget_test(monkeypatch, *, budget):
         from app.core.providers.ibkr import IBKRLiveProvider
         from app.services.option_quote_streaming import OptionQuoteStreamingService
         from app.services.streaming_config import StreamingConfig
 
         provider = IBKRLiveProvider()
-        provider._option_subs_budget = 300  # the old default
+        provider._option_subs_budget = 300  # the old default — anything start() sets must replace this
         config = StreamingConfig(
             symbols=[],
             redis_enabled=False,
@@ -3167,25 +3163,66 @@ class TestIBKRProvider:
             questdb_enabled=False,
             ws_broadcast_enabled=False,
             close_band_pct=0.35,
-            option_quotes_ibkr_sub_budget=2500,
+            option_quotes_ibkr_sub_budget=budget,
         )
-
         svc = OptionQuoteStreamingService(config, provider, streaming_svc=None)
-
-        # Avoid touching Redis or quote caches during this test
         async def _noop(*_a, **_k): return None
         monkeypatch.setattr(svc, "_redis_connect", _noop)
         monkeypatch.setattr(svc, "_redis_load_conid_cache", _noop)
         monkeypatch.setattr(svc, "_redis_load_quotes", _noop)
         monkeypatch.setattr(svc._cache, "set_redis", lambda *_: None)
         monkeypatch.setattr(svc._ibkr_cache, "set_redis", lambda *_: None)
+        return provider, svc
 
+    async def test_streaming_service_applies_sub_budget_from_config(self, tmp_path, monkeypatch):
+        """``OptionQuoteStreamingService.start()`` overrides the provider's
+        ``_option_subs_budget`` from ``option_quotes_ibkr_sub_budget`` when the
+        env var isn't set."""
+        monkeypatch.delenv("UTP_TWS_OPTION_SUB_BUDGET", raising=False)
+        provider, svc = self._make_provider_and_service_for_budget_test(monkeypatch, budget=2500)
         try:
             await svc.start()
             assert provider._option_subs_budget == 2500, (
-                f"streaming config budget should override provider default; "
+                f"YAML budget should win when env var unset; got {provider._option_subs_budget}"
+            )
+        finally:
+            svc._running = False
+
+    async def test_streaming_service_env_var_overrides_yaml_sub_budget(self, monkeypatch):
+        """``UTP_TWS_OPTION_SUB_BUDGET`` env var beats the YAML default. The
+        precedence was wrong before — operators setting the env var on a
+        daemon restart found their override silently overridden by the
+        streaming-config default."""
+        monkeypatch.setenv("UTP_TWS_OPTION_SUB_BUDGET", "3500")
+        provider, svc = self._make_provider_and_service_for_budget_test(monkeypatch, budget=2000)
+        try:
+            await svc.start()
+            assert provider._option_subs_budget == 3500, (
+                f"env var (3500) must beat YAML budget (2000); "
                 f"got {provider._option_subs_budget}"
             )
+        finally:
+            svc._running = False
+
+    async def test_streaming_service_invalid_env_falls_back_to_yaml(self, monkeypatch):
+        """Garbage env-var value is logged and ignored; YAML still applies."""
+        monkeypatch.setenv("UTP_TWS_OPTION_SUB_BUDGET", "not-a-number")
+        provider, svc = self._make_provider_and_service_for_budget_test(monkeypatch, budget=2500)
+        try:
+            await svc.start()
+            assert provider._option_subs_budget == 2500
+        finally:
+            svc._running = False
+
+    async def test_streaming_service_empty_env_falls_back_to_yaml(self, monkeypatch):
+        """Empty env-var value is treated as unset (so common shell
+        ``export UTP_TWS_OPTION_SUB_BUDGET=`` doesn't accidentally zero
+        the budget)."""
+        monkeypatch.setenv("UTP_TWS_OPTION_SUB_BUDGET", "")
+        provider, svc = self._make_provider_and_service_for_budget_test(monkeypatch, budget=2500)
+        try:
+            await svc.start()
+            assert provider._option_subs_budget == 2500
         finally:
             svc._running = False
 
@@ -11053,6 +11090,99 @@ class TestPriceFreshnessEnforcement:
         assert source == "fresh_cache"
 
     @pytest.mark.asyncio
+    async def test_get_option_quotes_with_age_falls_through_when_csv_exceeds_max_age(self, monkeypatch):
+        """When the only cached rows are CSV older than the caller's
+        ``max_age``, the daemon must fall through to the provider for a
+        fresh broker fetch — NOT serve the stale CSV with a misleading
+        ``fresh_cache`` source. Locks in the production bug where the
+        screener showed Vfy ✓765s for strikes outside the IBKR streaming
+        range because get_cached_quotes returned 800s-old CSV regardless
+        of the caller's max_age=45 request."""
+        from app.services import market_data as mkt
+
+        stale_csv_quotes = [
+            {"strike": 2690.0, "bid": 7.0, "ask": 8.7,
+             "source": "csv", "age_seconds": 800.0},
+        ]
+        provider_quotes = [
+            {"strike": 2690.0, "bid": 7.2, "ask": 8.5, "last": 7.8,
+             "volume": 50, "open_interest": 100},
+        ]
+
+        class FakeCache:
+            def get_age(self, *_a, **_k): return 800.0
+        class FakeOQ:
+            _cache = FakeCache()
+            def get_cached_quotes(self, *_a, **_k): return stale_csv_quotes
+
+        class FakeProvider:
+            def is_healthy(self): return True
+            async def get_option_quotes(self, *_a, **_k): return provider_quotes
+
+        monkeypatch.setattr(
+            "app.services.option_quote_streaming.get_option_quote_streaming",
+            lambda: FakeOQ(),
+        )
+        monkeypatch.setattr(mkt, "_is_market_active", lambda: True)
+        from app.core.provider import ProviderRegistry
+        monkeypatch.setattr(ProviderRegistry, "get",
+                            staticmethod(lambda b: FakeProvider()))
+
+        quotes, age, source = await mkt.get_option_quotes_with_age(
+            "RUT", "2026-05-01", "PUT", strike_min=2685, strike_max=2695,
+            max_age=45.0,
+        )
+        assert source == "provider", (
+            f"daemon must fall through to provider when cache age (800s) "
+            f"exceeds caller's max_age (45s); got source={source}"
+        )
+        assert age == 0.0
+        assert quotes[0]["last"] == 7.8
+
+    @pytest.mark.asyncio
+    async def test_get_option_quotes_with_age_serves_fresh_cache_when_within_max_age(self, monkeypatch):
+        """Symmetric check: when cached data is within max_age, we MUST
+        return it (no broker round-trip). This is the steady-state
+        streaming hit path — making it slower would defeat the streaming
+        cache's purpose."""
+        from app.services import market_data as mkt
+
+        fresh_quotes = [
+            {"strike": 2790.0, "bid": 1.0, "ask": 1.2,
+             "source": "ibkr_fresh", "age_seconds": 8.0},
+        ]
+        class FakeCache:
+            def get_age(self, *_a, **_k): return 8.0
+        class FakeOQ:
+            _cache = FakeCache()
+            def get_cached_quotes(self, *_a, **_k): return fresh_quotes
+
+        provider_called = {"count": 0}
+        class FakeProvider:
+            def is_healthy(self): return True
+            async def get_option_quotes(self, *_a, **_k):
+                provider_called["count"] += 1
+                return []
+
+        monkeypatch.setattr(
+            "app.services.option_quote_streaming.get_option_quote_streaming",
+            lambda: FakeOQ(),
+        )
+        monkeypatch.setattr(mkt, "_is_market_active", lambda: True)
+        from app.core.provider import ProviderRegistry
+        monkeypatch.setattr(ProviderRegistry, "get",
+                            staticmethod(lambda b: FakeProvider()))
+
+        quotes, age, source = await mkt.get_option_quotes_with_age(
+            "RUT", "2026-05-01", "PUT", max_age=45.0,
+        )
+        assert source == "fresh_cache"
+        assert age == 8.0
+        assert provider_called["count"] == 0, (
+            "must NOT hit the provider when cache is within max_age"
+        )
+
+    @pytest.mark.asyncio
     async def test_get_option_quotes_with_age_prefers_ibkr_fresh_over_csv(self, monkeypatch):
         """When the merged response mixes ibkr_fresh and csv rows, the
         aggregate age must report the IBKR-fresh age — NOT the CSV age.
@@ -11291,6 +11421,179 @@ class TestPriceFreshnessEnforcement:
         # the explicit "Trade blocked" gate should not fire.
         assert "Trade blocked" not in out
         assert rc == 0
+
+    # ── Pre-submit safety guards: ROI minimum + credit direction ───────────
+    # Helper: build a fake daemon HTTP client + standard args for credit-
+    # spread / iron-condor scenarios. Only the test for ROI / debit gating
+    # diverges; the rest is shared boilerplate.
+
+    def _build_fake_trade_client(self, monkeypatch):
+        import httpx
+
+        class FakeResp:
+            def __init__(self, status_code, data):
+                self.status_code = status_code
+                self._data = data
+            def json(self): return self._data
+            @property
+            def headers(self): return {"content-type": "application/json"}
+            @property
+            def text(self): return str(self._data)
+
+        class FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+
+            async def get(self, path, params=None):
+                if path.startswith("/market/quote"):
+                    return FakeResp(200, {
+                        "symbol": "SPX", "bid": 5499, "ask": 5501,
+                        "last": 5500, "volume": 0,
+                        "quote_age_seconds": 5.0, "quote_source": "fresh_cache",
+                    })
+                if path.startswith("/market/options"):
+                    ot = (params or {}).get("option_type", "PUT").lower()
+                    return FakeResp(200, {
+                        "symbol": "SPX",
+                        "quotes": {ot: [
+                            {"strike": 5500, "bid": 1.0, "ask": 1.2, "last": 1.1,
+                             "volume": 5, "source": "ibkr_fresh", "age_seconds": 5.0},
+                            {"strike": 5475, "bid": 0.95, "ask": 1.15, "last": 1.05,
+                             "volume": 3, "source": "ibkr_fresh", "age_seconds": 5.0},
+                        ]},
+                        "meta": {"age_seconds": 5.0, "source": "fresh_cache",
+                                 "per_type": {ot: {"age_seconds": 5.0, "source": "fresh_cache",
+                                                    "n_ibkr_fresh": 2, "n_csv": 0,
+                                                    "n_ibkr_stale": 0}}},
+                        "quote_age_seconds": 5.0, "quote_source": "fresh_cache",
+                    })
+                return FakeResp(200, {})
+
+            async def post(self, path, json=None, headers=None):
+                if path == "/trade/execute":
+                    # If we ever reach this path, the safety check let
+                    # the order through.
+                    return FakeResp(200, {"order_id": "test-1",
+                                          "status": "FILLED", "filled_price": 0.5})
+                return FakeResp(200, {})
+
+        monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+        return FakeClient
+
+    @staticmethod
+    def _trade_args(**overrides):
+        """Default args for credit-spread / iron-condor trade tests."""
+        defaults = dict(
+            subcommand="credit-spread",
+            symbol="SPX", short_strike=5500, long_strike=5475,
+            option_type="PUT", expiration="2026-04-17",
+            quantity=1, broker="ibkr",
+            dry_run=False, paper=False, live=True,
+            confirm=True, nocheck=True, otm_pct=None, close_pct=None,
+            close=False, override_min_roi=False, override_spend_credit=False,
+        )
+        defaults.update(overrides)
+        return argparse.Namespace(**defaults)
+
+    @pytest.mark.asyncio
+    async def test_credit_spread_blocked_when_roi_below_min(self, monkeypatch, capsys):
+        """Credit-spread with credit=$0.01 on $25 width gives ROI=0.04% —
+        should be blocked because commissions/slippage would eat the credit."""
+        from utp import _cmd_trade_http
+        self._build_fake_trade_client(monkeypatch)
+
+        args = self._trade_args(net_price=0.01)  # ROI = 0.01/24.99 ≈ 0.04%
+        rc = await _cmd_trade_http(args, "http://localhost:8000")
+        out = capsys.readouterr().out
+
+        assert rc == 1, "sub-0.2% ROI must block"
+        assert "BLOCKED" in out and "ROI" in out
+        assert "Submitting order" not in out, "must NOT submit when blocked"
+        assert "override-min-roi" in out, "must mention the override flag"
+
+    @pytest.mark.asyncio
+    async def test_credit_spread_allows_low_roi_with_override(self, monkeypatch, capsys):
+        """``--override-min-roi`` lets sub-0.2% ROI through with a warning."""
+        from utp import _cmd_trade_http
+        self._build_fake_trade_client(monkeypatch)
+
+        args = self._trade_args(net_price=0.01, override_min_roi=True)
+        rc = await _cmd_trade_http(args, "http://localhost:8000")
+        out = capsys.readouterr().out
+
+        assert rc == 0, "override should let trade through"
+        assert "Submitting order" in out, "submit must run when override is set"
+        assert "Sub-0.2% ROI" in out and "override-min-roi" in out, (
+            "must show the override-allowed warning so it's loud in the log"
+        )
+
+    @pytest.mark.asyncio
+    async def test_credit_spread_blocked_when_net_price_is_debit(self, monkeypatch, capsys):
+        """Credit-spread with negative net_price = paying debit. Almost
+        certainly a mistake — block unless override."""
+        from utp import _cmd_trade_http
+        self._build_fake_trade_client(monkeypatch)
+
+        args = self._trade_args(net_price=-0.50)  # debit, not credit
+        rc = await _cmd_trade_http(args, "http://localhost:8000")
+        out = capsys.readouterr().out
+
+        assert rc == 1
+        assert "BLOCKED" in out and "DEBIT" in out
+        assert "override-spend-credit" in out
+        assert "Submitting order" not in out
+
+    @pytest.mark.asyncio
+    async def test_credit_spread_allows_debit_with_override(self, monkeypatch, capsys):
+        """``--override-spend-credit`` lets a debit-direction credit-spread
+        through (e.g. legitimate roll-debit case where you accept paying)."""
+        from utp import _cmd_trade_http
+        self._build_fake_trade_client(monkeypatch)
+
+        args = self._trade_args(net_price=-0.50, override_spend_credit=True)
+        rc = await _cmd_trade_http(args, "http://localhost:8000")
+        out = capsys.readouterr().out
+
+        assert rc == 0
+        assert "Submitting order" in out
+        assert "Net debit allowed" in out and "override-spend-credit" in out, (
+            "must show the override-allowed warning"
+        )
+
+    @pytest.mark.asyncio
+    async def test_credit_spread_passes_when_roi_healthy(self, monkeypatch, capsys):
+        """Healthy ROI (5% on $25 width) sails through — no override needed."""
+        from utp import _cmd_trade_http
+        self._build_fake_trade_client(monkeypatch)
+
+        args = self._trade_args(net_price=1.20)  # ROI = 1.20/23.80 = 5%
+        rc = await _cmd_trade_http(args, "http://localhost:8000")
+        out = capsys.readouterr().out
+
+        assert rc == 0
+        assert "Submitting order" in out
+        assert "BLOCKED" not in out
+
+    @pytest.mark.asyncio
+    async def test_debit_spread_not_subject_to_credit_guard(self, monkeypatch, capsys):
+        """Debit-spread is supposed to spend (debit). The credit-direction
+        check must NOT apply — those orders should pass through with no
+        override needed."""
+        from utp import _cmd_trade_http
+        self._build_fake_trade_client(monkeypatch)
+
+        # Debit-spread: BUY long leg first (positive net_price = debit paid)
+        args = self._trade_args(
+            subcommand="debit-spread", net_price=2.00,
+        )
+        rc = await _cmd_trade_http(args, "http://localhost:8000")
+        out = capsys.readouterr().out
+
+        # Should not be blocked by the credit guard
+        assert "DEBIT" not in out or "BLOCKED" not in out
+        # The summary path may still complete with rc 0; the key is no block
+        assert "BLOCKED: net price" not in out
 
     @pytest.mark.asyncio
     async def test_http_quote_endpoint_passes_max_age(self, client, api_key_headers, monkeypatch):
@@ -15635,11 +15938,13 @@ class TestSpreadScanner:
         assert 6940 not in survivors
 
     def test_min_tier_pn_routes_to_c2c_window_for_dte1_spreads(self, monkeypatch):
-        """min_tier=p90 with a DTE-1 spread must apply the C2C-WINDOW=1
-        boundary (6860 in fixture), NOT the intraday boundary (6930).
-        Strikes between 6860 and 6930 pass intraday but fail c2c-1, so
-        old buggy code that used intraday-for-everything would let them
-        through. New DTE-routed code drops them."""
+        """DTE-1 fallback path: when the percentile server didn't return
+        hourly_1dte data (older server, computation skipped), min_tier=p90
+        for a DTE-1 spread falls back to the C2C-WINDOW=1 boundary
+        (6860 in fixture), NOT the 0DTE intraday boundary (6930). The
+        fixture used here has no hourly_1dte, so this exercises the
+        fallback. The primary intraday_1dte path is covered by
+        test_min_tier_pn_routes_to_intraday_1dte_for_dte1_spreads."""
         import spread_scanner as ss
         from spread_scanner import _collect_filtered_candidates, parse_args
 
@@ -15680,6 +15985,261 @@ class TestSpreadScanner:
             "DTE-1 strike between intraday and c2c-1 boundaries must be "
             "filtered by c2c-1 (regression: old code used intraday "
             "boundary and let it through)."
+        )
+
+    @staticmethod
+    def _tier_data_with_hourly_1dte(symbol: str = "SPX") -> dict:
+        """Tier data fixture that ALSO carries hourly_1dte slot data.
+
+        Layout per request:
+          * hourly[sym].slots["10:00"].pct → -1.0% put move (0DTE intraday).
+            Boundary for puts when spot=7000 → 6930.
+          * hourly_1dte[sym].slots["10:00"].pct → -1.5% put move
+            (1DTE intraday — wider since horizon is next-day close).
+            Boundary for puts when spot=7000 → 6895.
+          * tickers[].windows["1"].pct → -2.5% put move (c2c window=1,
+            anchored to prev_close). Boundary when prev_close=7000 → 6825.
+          * tickers[].windows["2"].pct → -3.0%.
+
+        Distinct boundaries (6930 / 6895 / 6825 / 6790) let tests reveal
+        which model the filter chose by which strikes survive.
+        """
+        slot_block = {
+            "when_down": {"pct": {"p90": -1.0}},
+            "when_up":   {"pct": {"p90":  1.0}},
+        }
+        slot_block_1dte = {
+            "when_down": {"pct": {"p90": -1.5}},
+            "when_up":   {"pct": {"p90":  1.5}},
+        }
+        recommended = {"aggressive": {"put": 90, "call": 90}}
+        return {
+            "hourly": {
+                symbol: {
+                    "recommended": {
+                        "intraday":       recommended,
+                        "close_to_close": recommended,
+                    },
+                    "slots": {"10:00": slot_block},
+                }
+            },
+            "hourly_1dte": {
+                symbol: {
+                    "recommended": {"intraday": recommended},
+                    "slots": {"10:00": slot_block_1dte},
+                }
+            },
+            "tickers": [{
+                "ticker": symbol,
+                "windows": {
+                    "1": {
+                        "when_down": {"pct": {"p90": -2.5}},
+                        "when_up":   {"pct": {"p90":  2.5}},
+                    },
+                    "2": {
+                        "when_down": {"pct": {"p90": -3.0}},
+                        "when_up":   {"pct": {"p90":  3.0}},
+                    },
+                },
+            }],
+        }
+
+    def test_resolve_tier_strike_intraday_1dte_reads_hourly_1dte(self, monkeypatch):
+        """resolve_tier_strike with model='intraday_1dte' must read from
+        tier_data['hourly_1dte'][sym].slots — NOT 'hourly'. Anchors to
+        current_price (live spot), same as the 0DTE intraday model."""
+        import spread_scanner as ss
+        monkeypatch.setattr(
+            ss, "_find_current_slot",
+            lambda slots: "10:00" if slots else None,
+        )
+        td = self._tier_data_with_hourly_1dte("SPX")
+        result = ss.resolve_tier_strike(
+            td, "SPX", "put", "p90", "intraday_1dte",
+            prev_close=7000.0, current_price=7000.0, dte=1,
+        )
+        assert result is not None
+        strike, raw_price, percentile, pct_val = result
+        assert percentile == 90
+        # Boundary at -1.5% from spot 7000 → 6895; rounded down to nearest
+        # 5-strike SPX increment.
+        assert pct_val == -1.5
+        assert raw_price == 7000.0 * 0.985
+        # Strike floor is 6895 (=7000*0.985), rounded to 5-grid = 6895.
+        assert strike == 6895.0
+
+    def test_resolve_tier_strike_intraday_1dte_returns_none_when_no_hourly_1dte(self):
+        """When the percentile server doesn't ship hourly_1dte data,
+        resolve_tier_strike(model='intraday_1dte') must return None so
+        the caller can fall back to the close-to-close window=1 boundary."""
+        import spread_scanner as ss
+        td = {
+            "hourly": {"SPX": {"recommended": {}, "slots": {}}},
+            # No hourly_1dte key at all.
+        }
+        result = ss.resolve_tier_strike(
+            td, "SPX", "put", "p90", "intraday_1dte",
+            prev_close=7000.0, current_price=7000.0, dte=1,
+        )
+        assert result is None
+
+    def test_classify_strike_to_percentile_intraday_1dte(self, monkeypatch):
+        """classify_strike_to_percentile with model='intraday_1dte' must
+        read from hourly_1dte slots and anchor to current_price."""
+        import spread_scanner as ss
+        monkeypatch.setattr(
+            ss, "_find_current_slot",
+            lambda slots: "10:00" if slots else None,
+        )
+        td = self._tier_data_with_hourly_1dte("SPX")
+        # Strike at exactly the p90 boundary (-1.5% from spot 7000 = 6895).
+        pct, tier = ss.classify_strike_to_percentile(
+            td, "SPX", "put", "intraday_1dte",
+            prev_close=7000.0, current_price=7000.0,
+            short_strike=6895.0, dte=1,
+        )
+        assert pct == 90
+        assert tier == "aggressive"
+
+        # Strike CLOSER to spot (-1.0% = 6930) does NOT cover the p90 move
+        # (-1.5%). Should resolve to a smaller pN — but the fixture only
+        # has p90 in the map, so it falls below all available percentiles.
+        pct2, _ = ss.classify_strike_to_percentile(
+            td, "SPX", "put", "intraday_1dte",
+            prev_close=7000.0, current_price=7000.0,
+            short_strike=6930.0, dte=1,
+        )
+        assert pct2 is None
+
+    def test_min_tier_pn_routes_to_intraday_1dte_for_dte1_spreads(self, monkeypatch):
+        """PRIMARY DTE-1 path (when hourly_1dte data is available):
+        min_tier=p90 must apply the intraday_1dte boundary (6895 in
+        fixture) — NOT the c2c-window=1 boundary (6825). A strike at
+        6850 PASSES c2c-1 (≤6825 is required so 6850 fails c2c, but in
+        the OPPOSITE direction puts: 6850 > 6825 → fails) — wait, let me
+        re-do: c2c-1 boundary = 6825 means strikes ≤6825 pass. Strike
+        6850 > 6825 → fails c2c-1. Strike 6850 also fails intraday_1dte
+        (6850 > 6895 is FALSE → 6850 ≤ 6895 → passes intraday_1dte).
+        Pick a strike between c2c-1 (6825) and intraday_1dte (6895) so
+        the two models disagree, and assert the intraday_1dte verdict
+        wins."""
+        import spread_scanner as ss
+        from spread_scanner import _collect_filtered_candidates, parse_args
+
+        monkeypatch.setattr(
+            ss, "_find_current_slot",
+            lambda slots: "10:00" if slots else None,
+        )
+
+        args = parse_args(["--tickers", "SPX", "--min-tier", "p90"])
+        scan_data = {
+            "quotes":      {"SPX": {"last": 7000.0}},
+            "prev_closes": {"SPX": 7000.0},
+            "tier_filter_state": "active",
+            "dte_sections": {
+                1: {
+                    "expiration": "2026-05-04",
+                    "tier_data": self._tier_data_with_hourly_1dte("SPX"),
+                    "spreads": {
+                        "SPX": [
+                            # 6850: passes intraday_1dte (≤ 6895) but
+                            # FAILS c2c-1 (> 6825). With the new routing
+                            # the filter picks intraday_1dte → strike
+                            # SURVIVES. Old c2c-only routing would have
+                            # dropped it.
+                            {"option_type": "PUT", "short_strike": 6850,
+                             "long_strike": 6830, "credit": 0.50,
+                             "roi_pct": 2.5, "otm_pct": 2.14, "width": 20},
+                            # 6900: > 6895 intraday_1dte boundary → FAILS.
+                            {"option_type": "PUT", "short_strike": 6900,
+                             "long_strike": 6880, "credit": 0.40,
+                             "roi_pct": 2.0, "otm_pct": 1.43, "width": 20},
+                        ],
+                    },
+                }
+            },
+        }
+        cands = _collect_filtered_candidates(scan_data, args)
+        survivors = {c["short_strike"] for c in cands}
+        assert 6850 in survivors, (
+            "DTE-1 with hourly_1dte data must use the intraday_1dte "
+            "boundary (6895), not c2c-1 (6825). Strike 6850 ≤ 6895 → "
+            "should pass."
+        )
+        assert 6900 not in survivors
+
+    def test_top_picks_pred_column_uses_intraday_1dte_for_dte1(self, monkeypatch):
+        """The Pred column on Top-N rows is supposed to surface the
+        live-intraday percentile for the spread's holding period. For
+        DTE-1, that's intraday_1dte (anchored to current spot, projects
+        to next-day close). Regression: previously Pred always read
+        'intraday' (today's close), which is the WRONG horizon for DTE-1
+        and produced misleading classifications."""
+        import spread_scanner as ss
+        from spread_scanner import _render_top_picks, parse_args
+
+        monkeypatch.setattr(
+            ss, "_find_current_slot",
+            lambda slots: "10:00" if slots else None,
+        )
+
+        args = parse_args(["--tickers", "SPX", "--top", "1"])
+        # Fixture: hourly p90 = -1.0% (boundary 6930) for 0DTE.
+        # hourly_1dte p90 = -1.5% (boundary 6895) for 1DTE.
+        # Pick a strike at 6900 that:
+        #   - covers hourly's -1.0% (would resolve to p90 there)
+        #   - does NOT cover hourly_1dte's -1.5% (would resolve to None there).
+        # If Pred for DTE-1 is wired to "intraday" (old/wrong), strike 6900
+        # would show a "p90 agg" Pred. With correct wiring to "intraday_1dte"
+        # the cell renders "—" (strike too close to money for the 1DTE
+        # distribution).
+        scan_data = {
+            "quotes":      {"SPX": {"last": 7000.0}},
+            "prev_closes": {"SPX": 7000.0},
+            "tier_filter_state": "active",
+            "dte_sections": {
+                1: {
+                    "expiration": "2026-05-04",
+                    "tier_data": self._tier_data_with_hourly_1dte("SPX"),
+                    "spreads": {
+                        "SPX": [{
+                            "option_type": "PUT", "short_strike": 6900,
+                            "long_strike": 6880, "credit": 0.50,
+                            "roi_pct": 2.6, "otm_pct": 1.43, "width": 20,
+                        }],
+                    },
+                }
+            },
+        }
+        # Render uses _collect_filtered_candidates inside which applies
+        # the min_tier filter — but we don't set min_tier here, so the
+        # spread survives and Pred enrichment runs.
+        lines = _render_top_picks(scan_data, args)
+        text = "\n".join(lines)
+        # Find the data row.
+        import re
+        ANSI = re.compile(r"\033\[[0-9;]*m")
+        plain = ANSI.sub("", text)
+        # Locate the row starting with "  1 ".
+        data_rows = [ln for ln in plain.splitlines() if ln.startswith("  1 ")]
+        assert data_rows, f"expected one data row in: {plain!r}"
+        row = data_rows[0]
+        # Pred column for this DTE-1 spread should be "—" (strike too
+        # close to money for the 1DTE distribution). If Pred had been
+        # wired to "intraday", it would show "p90".
+        # Both Hist and Pred use em-dashes for "no data" — so we check
+        # by header column position. Find "Pred" in header.
+        plain_header = next(ln for ln in plain.splitlines() if "Hist" in ln and "Pred" in ln)
+        pred_idx = plain_header.index("Pred")
+        # In the data row, the cell starting at pred_idx must NOT begin
+        # with "p9" (which would mean the old "intraday" path classified
+        # the 6900 strike at p90 — the very regression we're guarding).
+        cell = row[pred_idx:pred_idx + 4]
+        assert not cell.startswith("p9"), (
+            f"Pred for DTE-1 must NOT use 'intraday' (would yield p90); "
+            f"expected '—' (intraday_1dte rejects 6900 as too close to "
+            f"money). Got cell starting at col {pred_idx}: {cell!r}\n"
+            f"Full row: {row!r}"
         )
 
     def test_min_tier_pn_routes_to_c2c_window2_for_dte2_spreads(self, monkeypatch):

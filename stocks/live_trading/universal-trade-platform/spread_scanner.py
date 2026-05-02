@@ -1163,7 +1163,7 @@ def resolve_tier_strike(
 ) -> tuple[float, float, int, float] | None:
     """Extract strike price from tier/percentile data.
 
-    model: "intraday" or "close_to_close"
+    model: "intraday" | "intraday_1dte" | "close_to_close"
     side: "put" or "call"
     tier_name: "aggressive" | "moderate" | "conservative" | "pN" (e.g., "p75")
     dte: days to expiration (used to select the right window for close_to_close)
@@ -1173,16 +1173,36 @@ def resolve_tier_strike(
     For "pN" form, the literal percentile N is used directly against the
     same pct map — no recommended lookup, no side distinction.
 
-    For "intraday" model: uses the pct field applied to current_price (the move
-    is relative to where price IS NOW, not previous close).
-
-    For "close_to_close" model: uses the close-to-close data from tickers field
-    at the matching window (dte), applied to previous_close.
+    Models:
+      * "intraday"      — slot-keyed pct map under tier_data["hourly"][sym].
+                          Each pct is the modeled move from CURRENT spot
+                          to TODAY'S close. Anchored to current_price.
+                          Use for 0DTE filtering / display.
+      * "intraday_1dte" — slot-keyed pct map under tier_data["hourly_1dte"][sym].
+                          Same shape as "intraday" but each pct is the
+                          modeled move from CURRENT spot to NEXT trading
+                          day's close. Anchored to current_price. Use for
+                          1DTE filtering / display.
+      * "close_to_close" — c2c per-window pct map under
+                          tier_data["tickers"][i].windows[dte]. Each pct
+                          is the modeled move from PRIOR close to close
+                          dte trading days from now. Anchored to prev_close.
 
     Returns (rounded_strike, raw_target_price, percentile_number, pct) or None.
     """
-    hourly = tier_data.get("hourly", {})
-    sym_data = hourly.get(symbol)
+    # Pick the symbol-data source based on the model. The "recommended"
+    # subkey for named-tier lookups is "intraday" for both hourly and
+    # hourly_1dte (the 1DTE response only has "intraday" + "max_move"
+    # under recommended; the 0DTE response also has "close_to_close").
+    if model == "intraday":
+        sym_data = tier_data.get("hourly", {}).get(symbol)
+        rec_subkey = "intraday"
+    elif model == "intraday_1dte":
+        sym_data = tier_data.get("hourly_1dte", {}).get(symbol)
+        rec_subkey = "intraday"
+    else:  # close_to_close
+        sym_data = tier_data.get("hourly", {}).get(symbol)
+        rec_subkey = "close_to_close"
     if not sym_data:
         return None
 
@@ -1192,15 +1212,17 @@ def resolve_tier_strike(
         percentile = int(m.group(1))
     else:
         recommended = sym_data.get("recommended", {})
-        model_rec = recommended.get(model, {})
+        model_rec = recommended.get(rec_subkey, {})
         tier_rec = model_rec.get(tier_name, {})
         percentile = tier_rec.get(side)
         if not percentile:
             return None
 
-    if model == "intraday":
-        # Intraday: pct represents move from current price to close.
-        # Apply to CURRENT price for live strike placement.
+    if model in ("intraday", "intraday_1dte"):
+        # Intraday: pct represents move from current price to close
+        # (today's close for "intraday", next-day's close for
+        # "intraday_1dte"). Apply to CURRENT price for live strike
+        # placement — both models anchor to live spot.
         slots = sym_data.get("slots", {})
         if not slots:
             return None
@@ -1327,6 +1349,9 @@ def classify_strike_to_percentile(
     """Inverse of resolve_tier_strike(): given a short strike, return
     (percentile, tier_name).
 
+    `model` is one of "intraday", "intraday_1dte", "close_to_close".
+    See `resolve_tier_strike` for the data-source layout per model.
+
     `percentile` is the largest pN in the model's pct map whose
     move-from-anchor is at-least-as-protective as `short_strike`'s actual
     offset. For puts, "more protective" = more negative offset; for calls,
@@ -1340,17 +1365,30 @@ def classify_strike_to_percentile(
     """
     if not tier_data or not symbol or current_price <= 0:
         return (None, None)
-    sym_data = tier_data.get("hourly", {}).get(symbol)
-    if not sym_data:
-        return (None, None)
     if side not in ("put", "call"):
         return (None, None)
     direction = "when_down" if side == "put" else "when_up"
 
+    # Pick sym_data + recommended-subkey by model. Mirrors resolve_tier_strike.
+    if model == "intraday":
+        sym_data = tier_data.get("hourly", {}).get(symbol)
+        rec_subkey = "intraday"
+    elif model == "intraday_1dte":
+        sym_data = tier_data.get("hourly_1dte", {}).get(symbol)
+        rec_subkey = "intraday"
+    else:  # close_to_close
+        sym_data = tier_data.get("hourly", {}).get(symbol)
+        rec_subkey = "close_to_close"
+    if not sym_data:
+        return (None, None)
+
     # Locate the model's pct map using the same access patterns as
     # resolve_tier_strike() — keep them in lock-step.
     pcts: dict | None = None
-    if model == "intraday":
+    if model in ("intraday", "intraday_1dte"):
+        # Both intraday models live in slot-keyed sym_data.slots and
+        # anchor to current_price; only the underlying horizon differs
+        # (today's close vs next-day close).
         slots = sym_data.get("slots", {})
         current_slot = _find_current_slot(slots) if slots else None
         if not current_slot:
@@ -1433,9 +1471,12 @@ def classify_strike_to_percentile(
     if chosen is None:
         return (None, None)
 
-    # Map to a named tier when the recommended pN matches.
+    # Map to a named tier when the recommended pN matches. Note that
+    # the recommended sub-key inside sym_data["recommended"] is "intraday"
+    # for both "intraday" and "intraday_1dte" models (both live in
+    # different top-level buckets but share the same recommended layout).
     tier_name: str | None = None
-    recommended = sym_data.get("recommended", {}).get(model, {})
+    recommended = sym_data.get("recommended", {}).get(rec_subkey, {})
     for tier_key in TIER_KEYS:
         rec = recommended.get(tier_key, {}).get(side)
         try:
@@ -1764,16 +1805,39 @@ def _collect_filtered_candidates(scan_data: dict, args) -> list[dict]:
     min_tier_close = args.min_tier_close
 
     # Boundaries for the `min_tier` filter, keyed by DTE.
-    #   - DTE 0 → intraday model (same data structure regardless of dte param)
-    #   - DTE N>0 → close-to-close model with window=N
+    #   - DTE 0 → intraday model (hourly slots → today's close)
+    #   - DTE 1 → intraday_1dte model (hourly_1dte slots → next-day close).
+    #            If the percentile server doesn't return hourly_1dte data
+    #            for this symbol (older server, computation skipped), fall
+    #            back to close-to-close window=1 — same protective horizon,
+    #            just anchored to prev_close instead of live spot.
+    #   - DTE N>1 → close-to-close model with window=N (no 2-DTE+ intraday
+    #            model exists yet; the c2c distribution is the right
+    #            holding-period horizon).
     # We compute both up-front so the per-spread loop is just a dict lookup.
     min_tier_boundaries_by_dte: dict[int, dict] = {}
     if min_tier:
         for dte_val in scan_data.get("dte_sections", {}).keys():
-            model = "intraday" if dte_val == 0 else "close_to_close"
-            min_tier_boundaries_by_dte[dte_val] = _resolve_tier_boundaries(
-                scan_data, args, model, dte=dte_val,
-            )
+            if dte_val == 0:
+                bounds = _resolve_tier_boundaries(
+                    scan_data, args, "intraday", dte=0,
+                )
+            elif dte_val == 1:
+                bounds = _resolve_tier_boundaries(
+                    scan_data, args, "intraday_1dte", dte=1,
+                )
+                # Fall back to c2c-window-1 when the server didn't supply
+                # hourly_1dte (every ticker resolves to an empty bounds
+                # dict in that case).
+                if not bounds:
+                    bounds = _resolve_tier_boundaries(
+                        scan_data, args, "close_to_close", dte=1,
+                    )
+            else:
+                bounds = _resolve_tier_boundaries(
+                    scan_data, args, "close_to_close", dte=dte_val,
+                )
+            min_tier_boundaries_by_dte[dte_val] = bounds
 
     # Boundaries for `min_tier_close` — always c2c model with the spread's DTE.
     tier_boundaries_c2c: dict[int, dict] = {}
@@ -1940,14 +2004,30 @@ def _render_top_picks(scan_data: dict, args) -> list[str]:
         price = q.get("last", 0) or 0
         td = tier_data_by_dte.get(dte_v)
         short_strike = p.get("short_strike", 0)
+        # Hist (close-to-close, anchored to prev_close) — same model for
+        # every DTE, just the window varies.
         p["hist_percentile"], p["hist_tier_name"] = classify_strike_to_percentile(
             td, sym, side, "close_to_close",
             prev_close, price, short_strike, dte=dte_v,
         )
-        p["pred_percentile"], p["pred_tier_name"] = classify_strike_to_percentile(
-            td, sym, side, "intraday",
-            prev_close, price, short_strike, dte=dte_v,
-        )
+        # Pred (live intraday, anchored to current spot) — DTE-routed:
+        #   DTE 0 → "intraday"      (hourly slots → today's close)
+        #   DTE 1 → "intraday_1dte" (hourly_1dte slots → next-day close)
+        #   DTE 2+ → no intraday model available yet; cell renders as "—".
+        if dte_v == 0:
+            pred_model: str | None = "intraday"
+        elif dte_v == 1:
+            pred_model = "intraday_1dte"
+        else:
+            pred_model = None
+        if pred_model is not None:
+            pct, tier = classify_strike_to_percentile(
+                td, sym, side, pred_model,
+                prev_close, price, short_strike, dte=dte_v,
+            )
+        else:
+            pct, tier = (None, None)
+        p["pred_percentile"], p["pred_tier_name"] = pct, tier
 
     lines = []
     # Build filter description

@@ -1147,6 +1147,281 @@ async def compute_hourly_moves_to_close(
         "slots_10min": slots_10min,
         "slots_5min": slots_5min,
         "has_fine_data": bool(slots_primary or slots_15min or slots_10min or slots_5min),
+        "mode": "0dte",
+    }
+
+
+async def compute_hourly_moves_to_next_close(
+    ticker: str,
+    lookback: int = DEFAULT_LOOKBACK,
+    percentiles: list[int] = None,
+    min_days: int = MIN_DAYS_DEFAULT,
+    min_direction_days: int = MIN_DIRECTION_DAYS_DEFAULT,
+    db_config: str = None,
+    enable_cache: bool = True,
+    ensure_tables: bool = False,
+    log_level: str = "WARNING",
+    override_close: float | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    exclude_outliers: bool = True,
+) -> dict:
+    """
+    Compute intraday moves to NEXT-day close for 1DTE analysis using 5-min CSV data.
+
+    For each intraday slot T on day D, computes the percentile distribution of
+    (close_of_D+1 - price_at_T) / price_at_T, split by up/down direction.
+
+    Mirrors :func:`compute_hourly_moves_to_close` but anchors on the *next*
+    trading day's close. The latest day in the lookback (no next-day close
+    yet) is excluded from the sample. Max-move (intraday excursion) is not
+    computed in this mode.
+
+    Returns:
+        Dict with the same shape as compute_hourly_moves_to_close —
+        ``ticker``, ``previous_close``, ``percentiles``, ``slots`` (half-hour),
+        ``slots_primary``, ``slots_15min``, ``slots_10min``, ``slots_5min``,
+        ``has_fine_data``, ``recommended``, plus ``mode: "1dte"``. Each slot
+        dict contains ``when_up``/``when_down`` percentile blocks and
+        ``max_move: None``.
+    """
+    import pandas as pd
+    import glob as _glob
+
+    if percentiles is None:
+        percentiles = DEFAULT_PERCENTILES.copy()
+
+    db_symbol, polygon_symbol, is_index, _ = parse_symbol(ticker)
+    display_ticker = ticker.replace("I:", "") if ticker.startswith("I:") else ticker
+
+    percentiles = _ensure_recommended_in_percentiles(percentiles, display_ticker)
+
+    logger = get_logger("range_percentiles", level=log_level) if DB_AVAILABLE else None
+
+    csv_dir = EQUITIES_OUTPUT_DIR / polygon_symbol
+    if not csv_dir.is_dir():
+        raise ValueError(
+            f"No equities_output directory for {polygon_symbol}. "
+            f"Intraday move-to-next-close analysis not available for this ticker."
+        )
+
+    if start_date and end_date:
+        _start = datetime.strptime(start_date, "%Y-%m-%d").date() if isinstance(start_date, str) else start_date
+        _end = datetime.strptime(end_date, "%Y-%m-%d").date() if isinstance(end_date, str) else end_date
+    else:
+        _end = datetime.now(timezone.utc).date()
+        calendar_days = int(lookback * 7 / 5) + 10
+        _start = _end - timedelta(days=calendar_days)
+    start_date_d = _start
+    end_date_d = _end
+
+    pattern = str(csv_dir / f"{polygon_symbol}_equities_*.csv")
+    csv_files = sorted(_glob.glob(pattern))
+    if not csv_files:
+        raise ValueError(f"No CSV files found in {csv_dir}")
+
+    try:
+        from zoneinfo import ZoneInfo
+        et_tz = ZoneInfo("America/New_York")
+    except ImportError:
+        import pytz
+        et_tz = pytz.timezone("America/New_York")
+
+    frames = []
+    for fpath in csv_files:
+        fname = Path(fpath).stem
+        date_part = fname.rsplit("_", 1)[-1]
+        try:
+            file_date = datetime.strptime(date_part, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if file_date < start_date_d or file_date > end_date_d:
+            continue
+        try:
+            df = pd.read_csv(fpath, parse_dates=["timestamp"])
+        except Exception:
+            continue
+        if df.empty or "close" not in df.columns:
+            continue
+        df["_file_date"] = file_date
+        frames.append(df)
+
+    if not frames:
+        raise ValueError(f"No CSV data within lookback period for {display_ticker}")
+
+    all_bars = pd.concat(frames, ignore_index=True)
+    all_bars["timestamp"] = pd.to_datetime(all_bars["timestamp"], utc=True)
+    all_bars["ts_et"] = all_bars["timestamp"].dt.tz_convert(et_tz)
+    all_bars["trading_date"] = all_bars["ts_et"].dt.date
+    all_bars["et_hour"] = all_bars["ts_et"].dt.hour
+    all_bars["et_minute"] = all_bars["ts_et"].dt.minute
+
+    # Day's final close: last bar of each trading day
+    day_closes = {}
+    for td, grp in all_bars.groupby("trading_date"):
+        last_bar = grp.sort_values("timestamp").iloc[-1]
+        day_closes[td] = float(last_bar["close"])
+
+    # Map each trading date -> next trading date's close. The latest day has no
+    # next-day close so its bars are dropped.
+    sorted_dates = sorted(day_closes.keys())
+    next_close_by_date = {
+        sorted_dates[i]: day_closes[sorted_dates[i + 1]]
+        for i in range(len(sorted_dates) - 1)
+    }
+
+    if override_close is not None:
+        previous_close = float(override_close)
+    else:
+        latest_date = max(day_closes.keys())
+        previous_close = day_closes[latest_date]
+
+    records = []
+    for _row_idx, row in all_bars.iterrows():
+        td = row["trading_date"]
+        next_close = next_close_by_date.get(td)
+        if next_close is None:
+            continue
+        price = float(row["close"])
+        if price <= 0:
+            continue
+        h = row["et_hour"]
+        m = row["et_minute"]
+        if h < 9 or (h == 9 and m < 30):
+            continue
+        if h >= 16:
+            continue
+
+        move_pct = (next_close - price) / price
+
+        m30 = (m // 30) * 30
+        hh_slot = f"{h}:{m30:02d}"
+        m15 = (m // 15) * 15
+        qh_slot = f"{h}:{m15:02d}"
+
+        if h <= 10:
+            if h == 9 and 35 <= m < 40:
+                primary_slot = "9:35"
+            else:
+                m10 = (m // 10) * 10
+                primary_slot = f"{h}:{m10:02d}"
+        elif h == 15 and m >= 30:
+            m10 = (m // 10) * 10
+            primary_slot = f"15:{m10:02d}"
+        else:
+            primary_slot = qh_slot
+
+        ten_slot = None
+        if h == 15 and m >= 30:
+            m10 = (m // 10) * 10
+            ten_slot = f"15:{m10:02d}"
+
+        five_slot = None
+        if h == 15 and m >= 50:
+            m5 = (m // 5) * 5
+            five_slot = f"15:{m5:02d}"
+
+        records.append({
+            "trading_date": td,
+            "price": price,
+            "next_close": next_close,
+            "move_pct": move_pct,
+            "slot_30": hh_slot,
+            "slot_15": qh_slot,
+            "slot_primary": primary_slot,
+            "slot_10": ten_slot,
+            "slot_5": five_slot,
+        })
+
+    if not records:
+        raise ValueError(f"No intraday records for {display_ticker}")
+
+    records_df = pd.DataFrame(records)
+
+    # Per-slot winsorization (matches 0DTE behavior)
+    if exclude_outliers:
+        for slot_col in ["slot_primary", "slot_30", "slot_15", "slot_10", "slot_5"]:
+            if slot_col not in records_df.columns:
+                continue
+            for slot_val in records_df[slot_col].dropna().unique():
+                mask = records_df[slot_col] == slot_val
+                if mask.sum() >= 20:
+                    records_df.loc[mask, "move_pct"] = _winsorize_iqr(records_df.loc[mask, "move_pct"].values)
+
+    def return_percentiles_from_series(return_series, ref_close: float, invert: bool = False) -> dict:
+        result = {}
+        for p in percentiles:
+            if invert:
+                q = float(return_series.quantile((100 - p) / 100.0))
+            else:
+                q = float(return_series.quantile(p / 100.0))
+            result[f"p{p}_pct"] = round(q * 100, 2)
+            result[f"p{p}_price"] = round(ref_close * (1 + q), 2)
+        return result
+
+    def build_block(returns_subset, n: int, invert: bool = False) -> dict | None:
+        if n < min_direction_days:
+            return None
+        r = return_percentiles_from_series(returns_subset, previous_close, invert=invert)
+        return {
+            "day_count": n,
+            "pct": {f"p{p}": r[f"p{p}_pct"] for p in percentiles},
+            "price": {f"p{p}": r[f"p{p}_price"] for p in percentiles},
+        }
+
+    def _aggregate(slot_col: str, slot_keys: list[str]) -> dict:
+        out = {}
+        for slot_key in slot_keys:
+            subset = records_df[records_df[slot_col] == slot_key]
+            if subset.empty:
+                continue
+            day_agg = subset.sort_values("trading_date").drop_duplicates(subset="trading_date", keep="first")
+            if len(day_agg) < min_days:
+                continue
+            moves = day_agg["move_pct"]
+            mask_up = moves > 0
+            mask_down = moves < 0
+            n_up = int(mask_up.sum())
+            n_down = int(mask_down.sum())
+            labels = _et_label(slot_key)
+            out[slot_key] = {
+                "label_et": labels[0],
+                "label_pt": labels[1],
+                "total_days": len(day_agg),
+                "when_up": build_block(moves[mask_up], n_up, invert=False),
+                "when_up_day_count": n_up,
+                "when_down": build_block(moves[mask_down], n_down, invert=True),
+                "when_down_day_count": n_down,
+                "max_move": None,
+            }
+        return out
+
+    slots_data = _aggregate("slot_30", HALF_HOUR_SLOTS)
+    slots_15min = _aggregate("slot_15", QUARTER_HOUR_SLOTS)
+    slots_primary = _aggregate("slot_primary", PRIMARY_SLOTS)
+    slots_10min = _aggregate("slot_10", TEN_MIN_SLOTS)
+    slots_5min = _aggregate("slot_5", FIVE_MIN_SLOTS)
+
+    rec = _load_recommended(display_ticker)
+    recommended = {
+        "close_to_close": rec["close_to_close"],
+        "intraday": rec["intraday"],
+        "max_move": rec["max_move"],
+    }
+
+    return {
+        "ticker": display_ticker,
+        "previous_close": previous_close,
+        "lookback_trading_days": lookback,
+        "percentiles": percentiles,
+        "recommended": recommended,
+        "slots": slots_data,
+        "slots_primary": slots_primary,
+        "slots_15min": slots_15min,
+        "slots_10min": slots_10min,
+        "slots_5min": slots_5min,
+        "has_fine_data": bool(slots_primary or slots_15min or slots_10min or slots_5min),
+        "mode": "1dte",
     }
 
 

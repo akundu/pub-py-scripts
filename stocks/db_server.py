@@ -15613,6 +15613,7 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
             compute_range_percentiles_multi_window,
             compute_range_percentiles_multi_window_batch,
             compute_hourly_moves_to_close,
+            compute_hourly_moves_to_next_close,
             parse_windows_arg,
             DEFAULT_LOOKBACK,
             DEFAULT_PERCENTILES,
@@ -15620,7 +15621,12 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
             MIN_DIRECTION_DAYS_DEFAULT,
             DEFAULT_WINDOW,
         )
-        from common.range_percentiles_formatter import format_as_html, format_multi_window_as_html, format_hourly_moves_as_html
+        from common.range_percentiles_formatter import (
+            format_as_html,
+            format_multi_window_as_html,
+            format_hourly_moves_as_html,
+            format_hourly_moves_to_next_close_as_html,
+        )
     except ImportError as e:
         logger.error(f"Failed to import range_percentiles modules: {e}")
         return web.Response(
@@ -15764,6 +15770,30 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                     except Exception as he:
                         logger.warning(f"Could not compute hourly moves for {ticker_name}: {he}")
 
+            # 1DTE intraday-to-next-close: gated on ?hourly and 1 in windows.
+            hourly_1dte = {}
+            if include_hourly and 1 in windows:
+                for ticker_name, _ in ticker_specs:
+                    try:
+                        data_1dte = await compute_hourly_moves_to_next_close(
+                            ticker=ticker_name,
+                            lookback=lookback,
+                            percentiles=percentiles,
+                            min_days=min_days,
+                            min_direction_days=min_direction_days,
+                            db_config=db_config,
+                            enable_cache=True,
+                            ensure_tables=False,
+                            log_level="WARNING",
+                            start_date=start_date,
+                            end_date=end_date,
+                            exclude_outliers=exclude_outliers,
+                        )
+                        display_t = ticker_name.replace("I:", "") if ticker_name.startswith("I:") else ticker_name
+                        hourly_1dte[display_t] = data_1dte
+                    except Exception as he:
+                        logger.warning(f"Could not compute 1DTE moves for {ticker_name}: {he}")
+
             if _wants_json_response(request):
                 params = {
                     "tickers": tickers,
@@ -15781,6 +15811,7 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                     "params": params,
                     "tickers": results,
                     "hourly": hourly,
+                    "hourly_1dte": hourly_1dte,
                     "tier_definitions": _TIER_DEFINITIONS,
                     "context_definitions": _CONTEXT_DEFINITIONS,
                     "asymmetry_note": _ASYMMETRY_NOTE,
@@ -15793,29 +15824,40 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                 buffer=buffer_pct,
             )
 
+            def _inject_hourly_section(html: str, display_t: str, hourly_html: str, is_multi: bool) -> str:
+                """Splice an hourly-section HTML chunk into the right place for the ticker."""
+                if not hourly_html:
+                    return html
+                if is_multi:
+                    tab_marker = f'id="tab_{display_t}">'
+                    tab_pos = html.find(tab_marker)
+                    if tab_pos >= 0:
+                        content_start = tab_pos + len(tab_marker)
+                        next_tab = html.find('<div class="tab-content', content_start)
+                        script_pos = html.find('<script>', content_start)
+                        end_search = min(
+                            next_tab if next_tab > 0 else len(html),
+                            script_pos if script_pos > 0 else len(html),
+                        )
+                        close_div_pos = html.rfind('</div>', content_start, end_search)
+                        if close_div_pos > 0:
+                            return html[:close_div_pos] + hourly_html + "\n" + html[close_div_pos:]
+                    return html
+                return html.replace("</body>", hourly_html + "\n</body>", 1)
+
             # If window 0 (0DTE) is included, inject hourly moves-to-close (already in hourly dict)
             if include_hourly and 0 in windows and hourly:
                 is_multi = len(tickers) > 1
                 for display_t, hourly_data in hourly.items():
                     hourly_html = format_hourly_moves_as_html(hourly_data, buffer=buffer_pct)
-                    if not hourly_html:
-                        continue
-                    if is_multi:
-                        tab_marker = f'id="tab_{display_t}">'
-                        tab_pos = html.find(tab_marker)
-                        if tab_pos >= 0:
-                            content_start = tab_pos + len(tab_marker)
-                            next_tab = html.find('<div class="tab-content', content_start)
-                            script_pos = html.find('<script>', content_start)
-                            end_search = min(
-                                next_tab if next_tab > 0 else len(html),
-                                script_pos if script_pos > 0 else len(html),
-                            )
-                            close_div_pos = html.rfind('</div>', content_start, end_search)
-                            if close_div_pos > 0:
-                                html = html[:close_div_pos] + hourly_html + "\n" + html[close_div_pos:]
-                    else:
-                        html = html.replace("</body>", hourly_html + "\n</body>", 1)
+                    html = _inject_hourly_section(html, display_t, hourly_html, is_multi)
+
+            # If window 1 (1DTE) is included, inject intraday moves-to-next-close after 0DTE.
+            if include_hourly and 1 in windows and hourly_1dte:
+                is_multi = len(tickers) > 1
+                for display_t, hourly_data in hourly_1dte.items():
+                    hourly_html = format_hourly_moves_to_next_close_as_html(hourly_data, buffer=buffer_pct)
+                    html = _inject_hourly_section(html, display_t, hourly_html, is_multi)
 
             # Inject WebSocket live-price script
             html = _inject_range_percentiles_ws_script(html, tickers)
@@ -15964,6 +16006,29 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                 except Exception as he:
                     logger.warning(f"Could not compute hourly moves for {ticker_name}: {he}")
 
+        hourly_1dte = {}
+        if window == 1:
+            for ticker_name, _ in ticker_specs:
+                try:
+                    data_1dte = await compute_hourly_moves_to_next_close(
+                        ticker=ticker_name,
+                        lookback=lookback,
+                        percentiles=percentiles,
+                        min_days=min_days,
+                        min_direction_days=min_direction_days,
+                        db_config=db_config,
+                        enable_cache=True,
+                        ensure_tables=False,
+                        log_level="WARNING",
+                        start_date=start_date,
+                        end_date=end_date,
+                        exclude_outliers=exclude_outliers,
+                    )
+                    display_t = ticker_name.replace("I:", "") if ticker_name.startswith("I:") else ticker_name
+                    hourly_1dte[display_t] = data_1dte
+                except Exception as he:
+                    logger.warning(f"Could not compute 1DTE moves for {ticker_name}: {he}")
+
         if _wants_json_response(request):
             return web.json_response({
                 "mode": "single_window",
@@ -15978,6 +16043,7 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                 },
                 "data": data_list,
                 "hourly": hourly,
+                "hourly_1dte": hourly_1dte,
                 "tier_definitions": _TIER_DEFINITIONS,
                 "context_definitions": _CONTEXT_DEFINITIONS,
                 "asymmetry_note": _ASYMMETRY_NOTE,
@@ -16000,6 +16066,13 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
             if hourly_sections:
                 hourly_combined = "\n".join(hourly_sections)
                 html = html.replace("</body>", hourly_combined + "\n</body>", 1)
+
+        if hourly_1dte:
+            sections_1dte = [format_hourly_moves_to_next_close_as_html(hd, buffer=buffer_pct) for hd in hourly_1dte.values()]
+            sections_1dte = [h for h in sections_1dte if h]
+            if sections_1dte:
+                combined_1dte = "\n".join(sections_1dte)
+                html = html.replace("</body>", combined_1dte + "\n</body>", 1)
 
         # Inject WebSocket live-price script
         html = _inject_range_percentiles_ws_script(html, tickers)

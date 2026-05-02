@@ -1731,6 +1731,60 @@ class TestRangePercentilesWebSocketInjection:
         assert '["NDX", "SPX"]' in b
 
 
+class TestRangePercentiles1DTEWiring:
+    """Verify the 1DTE intraday-to-next-close section is wired into the route.
+
+    These are static source checks: they assert that handle_range_percentiles_html
+    imports the new compute and formatter, populates a `hourly_1dte` payload,
+    and exposes that payload in JSON responses for both the multi-window and
+    legacy single-window code paths.
+    """
+
+    @classmethod
+    def setup_class(cls):
+        repo_root = Path(__file__).resolve().parent.parent
+        cls.src = (repo_root / "db_server.py").read_text()
+
+    def test_imports_new_compute_function(self):
+        assert "compute_hourly_moves_to_next_close" in self.src
+
+    def test_imports_new_formatter(self):
+        assert "format_hourly_moves_to_next_close_as_html" in self.src
+
+    def test_multiwindow_json_payload_includes_hourly_1dte(self):
+        """The multi-window JSON branch must expose `hourly_1dte` alongside `hourly`."""
+        # find the multi_window response block
+        start = self.src.find('"mode": "multi_window"')
+        assert start != -1
+        end = self.src.find("})", start) + 2
+        block = self.src[start:end]
+        assert '"hourly": hourly' in block
+        assert '"hourly_1dte": hourly_1dte' in block
+
+    def test_single_window_json_payload_includes_hourly_1dte(self):
+        """The legacy single-window JSON branch must expose `hourly_1dte` too."""
+        start = self.src.find('"mode": "single_window"')
+        assert start != -1
+        end = self.src.find("})", start) + 2
+        block = self.src[start:end]
+        assert '"hourly": hourly' in block
+        assert '"hourly_1dte": hourly_1dte' in block
+
+    def test_1dte_compute_gated_on_window_1(self):
+        """The hourly_1dte loop must trigger only when 1 is in windows / window == 1."""
+        # multi-window: gating is `1 in windows`
+        assert "if include_hourly and 1 in windows" in self.src
+        # legacy single-window: gating is `window == 1`
+        assert "if window == 1" in self.src
+
+    def test_1dte_html_injection_is_present(self):
+        """Both branches must render the 1DTE section into the HTML."""
+        # multi-window injection
+        assert "format_hourly_moves_to_next_close_as_html(hourly_data, buffer=buffer_pct)" in self.src
+        # legacy single-window injection
+        assert "format_hourly_moves_to_next_close_as_html(hd, buffer=buffer_pct)" in self.src
+
+
 def run_all_tests():
     """Run all tests and return results."""
     print("=" * 80)

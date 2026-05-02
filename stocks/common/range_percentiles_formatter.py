@@ -2495,3 +2495,175 @@ def format_hourly_moves_as_html(hourly_data: dict, buffer: float = 0.0) -> str:
 """)
 
     return "".join(html_parts)
+
+
+def format_hourly_moves_to_next_close_as_html(hourly_data: dict, buffer: float = 0.0) -> str:
+    """
+    Format intraday-moves-to-next-day-close (1DTE) data as an HTML section.
+
+    Same shape as :func:`format_hourly_moves_as_html` (tables only, no Max-Move
+    block). Uses ``data-section="hourly"`` so the existing range_percentiles
+    WebSocket live-price hook updates the cells without modification.
+    """
+    if not hourly_data or not hourly_data.get("slots"):
+        return ""
+
+    ticker = hourly_data["ticker"]
+    prev_close = hourly_data["previous_close"]
+    percentiles = hourly_data["percentiles"]
+    slots = hourly_data["slots"]
+    slots_primary = hourly_data.get("slots_primary", {})
+    slots_15min = hourly_data.get("slots_15min", {})
+    slots_10min = hourly_data.get("slots_10min", {})
+    slots_5min = hourly_data.get("slots_5min", {})
+    has_fine = hourly_data.get("has_fine_data", False)
+    recommended = hourly_data.get("recommended", {})
+    intraday_rec = recommended.get("intraday", {})
+
+    def _tier_vals(ctx_rec, side):
+        return {t: ctx_rec.get(t, {}).get(side, 0) for t in ("aggressive", "moderate", "conservative")}
+
+    intra_put_tiers = _tier_vals(intraday_rec, "put")
+    intra_call_tiers = _tier_vals(intraday_rec, "call")
+
+    try:
+        prev_close_fmt = f"${float(prev_close):,.2f}"
+    except (TypeError, ValueError):
+        prev_close_fmt = str(prev_close)
+
+    def _time_sort_key(s):
+        h, m = s.split(":")
+        return (int(h), int(m))
+
+    sorted_slots = sorted(slots.keys(), key=_time_sort_key)
+    if not sorted_slots:
+        return ""
+
+    html_parts = [_HOURLY_SECTION_STYLE]
+
+    html_parts.append(f"""
+    <div class="hourly-section">
+        <h2>Intraday Move to Next-Day Close - {ticker} (1DTE)</h2>
+        <div class="hourly-info">
+            <span class="ref-close" data-ticker="{ticker}" data-section="hourly" data-prev-close="{_raw_prev_close(prev_close)}"><strong>Reference Close:</strong> {prev_close_fmt}</span>
+            <span><strong>Source:</strong> 5-min bar data, anchored on next-day close</span>
+            <span class="price-basis" data-ticker="{ticker}" data-section="hourly" data-prev-close="{_raw_prev_close(prev_close)}" style="font-style:italic;opacity:0.85">$ prices based on previous close: {prev_close_fmt}</span>
+        </div>
+""")
+
+    sorted_primary = sorted(slots_primary.keys(), key=_time_sort_key)
+    if sorted_primary:
+        html_parts.append(_render_slot_table(slots_primary, sorted_primary, percentiles, "down",
+                                              "DOWN MOVES TO NEXT CLOSE", ticker=ticker,
+                                              highlight_tiers=intra_put_tiers,
+                                              buffer=buffer, prev_close=prev_close))
+        html_parts.append('        <div style="margin-top:30px"></div>\n')
+        html_parts.append(_render_slot_table(slots_primary, sorted_primary, percentiles, "up",
+                                              "UP MOVES TO NEXT CLOSE", ticker=ticker,
+                                              highlight_tiers=intra_call_tiers,
+                                              buffer=buffer, prev_close=prev_close))
+    else:
+        html_parts.append(_render_slot_table(slots, sorted_slots, percentiles, "down",
+                                              "DOWN MOVES TO NEXT CLOSE (per half-hour)", ticker=ticker,
+                                              highlight_tiers=intra_put_tiers,
+                                              buffer=buffer, prev_close=prev_close))
+        html_parts.append('        <div style="margin-top:30px"></div>\n')
+        html_parts.append(_render_slot_table(slots, sorted_slots, percentiles, "up",
+                                              "UP MOVES TO NEXT CLOSE (per half-hour)", ticker=ticker,
+                                              highlight_tiers=intra_call_tiers,
+                                              buffer=buffer, prev_close=prev_close))
+
+    sorted_10 = sorted(slots_10min.keys(), key=_time_sort_key)
+    if sorted_10:
+        html_parts.append('\n        <h3>Last 30 Minutes (10-min detail)</h3>\n')
+        html_parts.append(_render_slot_table(slots_10min, sorted_10, percentiles, "down",
+                                              "DOWN MOVES TO NEXT CLOSE (per 10-min)", ticker=ticker,
+                                              buffer=buffer, prev_close=prev_close))
+        html_parts.append('        <div style="margin-top:30px"></div>\n')
+        html_parts.append(_render_slot_table(slots_10min, sorted_10, percentiles, "up",
+                                              "UP MOVES TO NEXT CLOSE (per 10-min)", ticker=ticker,
+                                              buffer=buffer, prev_close=prev_close))
+
+    sorted_5 = sorted(slots_5min.keys(), key=_time_sort_key)
+    if sorted_5:
+        html_parts.append('\n        <h3>Last 10 Minutes (5-min detail)</h3>\n')
+        html_parts.append(_render_slot_table(slots_5min, sorted_5, percentiles, "down",
+                                              "DOWN MOVES TO NEXT CLOSE (per 5-min)", ticker=ticker,
+                                              buffer=buffer, prev_close=prev_close))
+        html_parts.append('        <div style="margin-top:30px"></div>\n')
+        html_parts.append(_render_slot_table(slots_5min, sorted_5, percentiles, "up",
+                                              "UP MOVES TO NEXT CLOSE (per 5-min)", ticker=ticker,
+                                              buffer=buffer, prev_close=prev_close))
+
+    if not has_fine:
+        html_parts.append("""
+        <div class="hourly-info" style="margin-top:20px;font-style:italic;">
+            Fine-grained data (10-min / 5-min) not available for this ticker.
+        </div>
+""")
+
+    html_parts.append('    </div>\n')
+
+    # Note: tz-conversion + auto-scroll JS blocks emitted by format_hourly_moves_as_html
+    # query the whole document for `.local-time-slot` and `.hourly-section .table-wrap`,
+    # so they cover this 1DTE section too when the 0DTE section is also rendered. When
+    # only 1DTE renders (?windows=1 with no 0), append minimal copies here so the page
+    # still gets timezone localization and auto-scroll.
+    html_parts.append("""
+    <script>
+    (function() {
+        if (window._rangePctHourlyJsAttached) return;
+        window._rangePctHourlyJsAttached = true;
+
+        var nowStr = new Date().toLocaleString('en-US', {timeZone: 'America/New_York', timeZoneName: 'short'});
+        var etOffset = nowStr.indexOf('EDT') >= 0 ? 4 : 5;
+
+        document.querySelectorAll('.local-time-slot').forEach(function(el) {
+            var h = parseInt(el.dataset.etHour, 10);
+            var m = parseInt(el.dataset.etMin, 10);
+            var n = el.dataset.n || '';
+            var etLabel = el.dataset.etLabel || '';
+            var today = new Date();
+            var utcDate = new Date(Date.UTC(today.getFullYear(), today.getMonth(), today.getDate(), h + etOffset, m, 0));
+            var localStr = utcDate.toLocaleTimeString('en-US', {hour: 'numeric', minute: '2-digit', timeZoneName: 'short'});
+            el.innerHTML = localStr + '<br><small style="font-weight:normal;font-size:11px;opacity:0.8">'
+                + etLabel + ' (n=' + n + ')</small>';
+        });
+
+        function scrollToCurrentTime() {
+            var nowET = new Date().toLocaleString('en-US', {timeZone: 'America/New_York',
+                hour12: false, hour: '2-digit', minute: '2-digit'});
+            var parts = nowET.match(/(\\d+):(\\d+)/);
+            if (!parts) return;
+            var nowMinutes = parseInt(parts[1]) * 60 + parseInt(parts[2]);
+            document.querySelectorAll('.hourly-section .table-wrap').forEach(function(wrap) {
+                var bestCol = null;
+                var bestDiff = Infinity;
+                var headers = wrap.querySelectorAll('th .local-time-slot');
+                headers.forEach(function(el) {
+                    var h = parseInt(el.dataset.etHour, 10);
+                    var m = parseInt(el.dataset.etMin, 10);
+                    var slotMinutes = h * 60 + m;
+                    var diff = nowMinutes - slotMinutes;
+                    if (diff >= 0 && diff < bestDiff) {
+                        bestDiff = diff;
+                        bestCol = el.closest('th');
+                    }
+                });
+                if (!bestCol && headers.length > 0) bestCol = headers[0].closest('th');
+                if (bestCol) {
+                    var colLeft = bestCol.offsetLeft;
+                    var colWidth = bestCol.offsetWidth;
+                    var wrapWidth = wrap.clientWidth;
+                    var scrollTarget = colLeft - (wrapWidth / 2) + (colWidth / 2);
+                    wrap.scrollTo({left: Math.max(0, scrollTarget), behavior: 'smooth'});
+                }
+            });
+        }
+        setTimeout(scrollToCurrentTime, 500);
+        setInterval(scrollToCurrentTime, 60000);
+    })();
+    </script>
+""")
+
+    return "".join(html_parts)

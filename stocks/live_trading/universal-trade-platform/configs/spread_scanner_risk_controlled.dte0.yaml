@@ -82,8 +82,17 @@ verify_max_age_sec: 30
 #        Useful when you want finer control than the three named tiers.
 #
 # Distinction between the two fields:
-#   min_tier       — intraday (today's price-path), updates through the day
-#   min_tier_close — close-to-close historical model (anchored to prev close)
+#   min_tier       — DTE-routed LIVE-INTRADAY model (anchored to live spot):
+#                      DTE 0 → `hourly` slots → move to TODAY'S close.
+#                      DTE 1 → `hourly_1dte` slots → move to NEXT-day close
+#                              (with c2c-window=1 as fallback).
+#                      DTE>1 → close-to-close window=DTE.
+#                    Updates through the day as the slot rolls forward.
+#                    For this DTE-0-only config, `min_tier` always uses
+#                    the `hourly` slot data.
+#   min_tier_close — close-to-close historical model (anchored to prev
+#                    close). Independent of `min_tier`; setting both
+#                    gives layered safety.
 # Leaving them null = no tier filter.
 tiers: true
 min_tier: moderate         # or a percentile e.g. p95, p75, p40
