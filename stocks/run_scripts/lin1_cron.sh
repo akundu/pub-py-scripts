@@ -2,24 +2,28 @@
 # ──────────────────────────────────────────────────────────────────────
 # lin1_cron.sh — daily data pipeline for the stocks repo (Linux host).
 #
-# Linux mirror of `ms1_cron.sh` — same pipeline, GNU `date` syntax instead
-# of BSD. Keep both in sync when adding pipeline steps.
+# Runs from cron at ~3:10 AM PT after market close. macOS variant lives in
+# `ms1_cron.sh` — keep both in sync when adding pipeline steps. The two
+# scripts are intentionally identical except for (a) the BSD-vs-GNU `date`
+# syntax and (b) the weekly-augment gate (Saturday on ms1, Sunday on lin1).
 #
 # What this script does, in order:
 #   1. Refresh per-symbol equity rows in QuestDB (`fetch_symbol_data.py`).
-#   2. Equity 5-min bars for the analysis universe → `equities_output/`.
-#   3. 30-day rolling options track → `options_csv_output_full_5/`.
-#   4. **Quote-augmented options chains for the moderate-tier OTM band →
+#   2. 0DTE same-day options chains → `options_csv_output/` (5-min bars).
+#   3. Equity 5-min bars for the analysis universe → `equities_output/`.
+#   4. 30-day rolling options track → `options_csv_output_full_5/`.
+#   5. **Quote-augmented options chains for the moderate-tier OTM band →
 #      `options_csv_output_full/`** (the directory the nROI analysis reads)
 #      — runs SUNDAYS ONLY for lin1 (Saturday for ms1). Covers the full
 #      previous Mon-Fri trading week with the wider 5% strike band. Manual
 #      backfill via START_DATE/END_DATE/DAYS_BACK env still works any day.
-#   5. Build the close-prediction models (daily).
-#   6. Calibrate recommended percentiles — same Sunday gate as step 4 so it
-#      always sees the freshly-augmented week.
+#   6. Build the close-prediction models (daily).
+#   7. Calibrate recommended percentiles — same Sunday gate as step 5 so
+#      it always sees the freshly-augmented week.
 #
 # Adding a new ticker to the augmented chain dataset:
-#   Append it to the `for tk in SPX RUT NDX; do` loop in step 4.
+#   Append it to the `for tk in SPX RUT NDX; do` loop in step 5.
+#   The output path will be `options_csv_output_full/<TICKER>/<TICKER>_options_<date>.csv`.
 #
 # Tuning the augmentation:
 #   --strike-range-percent N    : wider band → more strikes (and more API calls)
@@ -34,8 +38,10 @@
 #   script via `sh <path>` with cwd = repo root and env = os.environ.copy()
 #   plus any of `START_DATE` / `END_DATE` / `DAYS_BACK` that came in as
 #   query parameters. POLYGON_API_KEY must be in db_server's environment
-#   when it was launched.  Stdout/stderr are captured by the server and
-#   returned as JSON in the curl response.
+#   when it was launched (no other way to inject secrets into this path).
+#   Stdout/stderr are captured by the server and returned as JSON in the
+#   curl response — the cron line redirects that to /tmp/cron.download
+#   for inspection.
 #
 #   Trigger overrides via curl query params:
 #     /run_script?script=lin1_cron.sh                      # uses defaults below
@@ -72,17 +78,9 @@ python fetch_symbol_data.py I:SPX  --latest --db-path $QUEST_DB_STRING --timezon
 python fetch_symbol_data.py I:NDX --latest --db-path $QUEST_DB_STRING --timezone PST  --force-fetch
 
 
-#python3 scripts/options_chain_download.py SPX NDX RUT --zero-dte-date-start $start_date  --zero-dte-date-end $end_date  --max-connections 30 --num-processes 2  --interval 5min --format-chain-csv --output-dir options_csv_output/
-python3 scripts/equities_download.py I:VIX1D I:VIX SPY DJX I:DJX TQQQ QQQ I:NDX I:SPX I:RUT  --start $start_date  --end $end_date --output-dir ./equities_output 
+python3 scripts/options_chain_download.py SPX NDX RUT --zero-dte-date-start $start_date  --zero-dte-date-end $end_date  --max-connections 30 --num-processes 2  --interval 5min --format-chain-csv --output-dir options_csv_output/
 
-#for TICKER in RUT SPX NDX; do
-#    python3 scripts/options_chain_download.py $TICKER \
-#      --track-from $(date -v-10d +%Y-%m-%d) --track-end $(date +%Y-%m-%d) --track-days 7 --track-step 1 \
-#      --interval-minutes 5 --chunk-days 7 --max-connections 20 \
-#      --num-processes 12 --window-workers 5 \
-#      --format-chain-csv --output-dir ./options_csv_output_full_5/
-#done
-#wait
+python3 scripts/equities_download.py I:VIX1D I:VIX SPY DJX I:DJX TQQQ QQQ I:NDX I:SPX I:RUT  --start $start_date  --end $end_date --output-dir ./equities_output
 
 python3 scripts/options_chain_download.py SPX RUT NDX DJX \
   --track-from $(date -d '10 days ago' +%Y-%m-%d) --track-end $(date +%Y-%m-%d) --track-days 30 --track-step 1 \
@@ -90,13 +88,13 @@ python3 scripts/options_chain_download.py SPX RUT NDX DJX \
   --num-processes 12 --window-workers 5 \
   --format-chain-csv --output-dir ./options_csv_output_full_5/
 
-# ─── Weekly quote-augment + recommended-percentile calibration ──────────
+# ─── Step 5+6: weekly quote-augment + recommended-percentile calibration ──
 # Both blocks below are gated to **Sunday only** for lin1 (Saturday for the
-# ms1 mirror). Rationale: the per-contract NBBO quote pull is the slow step
-# in this pipeline and we want it to use the wider 5% strike band without
-# blowing up weekday wall-clock. Running it weekly on Sun gives us a full
-# Mon-Fri week of augmented data + freshly-recalibrated percentiles in one
-# place, ready for Monday's open.
+# ms1 mirror). Rationale: the per-contract NBBO quote pull is the slow
+# step in this pipeline and we want it to use the wider 5% strike band
+# without blowing up weekday wall-clock. Running it weekly on Sun gives
+# us a full Mon-Fri week of augmented data + freshly-recalibrated
+# percentiles in one place, ready for Monday's open.
 #
 # Manual backfill: setting START_DATE / END_DATE / DAYS_BACK on the cron
 # query string (or in the env) forces this block to run with that window
@@ -110,8 +108,8 @@ if [ -n "$START_DATE" ] || [ -n "$END_DATE" ] || [ -n "$DAYS_BACK" ]; then
     run_weekly=1
 elif [ "$DOW" -eq "$WEEKLY_DOW" ]; then
     # Sunday: previous week's Mon..Fri = 6..2 days back from today.
-    aug_start=$(date -d "$(date +%Y-%m-%d) - 6 days" +%Y-%m-%d)
-    aug_end=$(date -d "$(date +%Y-%m-%d) - 2 days" +%Y-%m-%d)
+    aug_start=$(date -d '6 days ago' +%Y-%m-%d)
+    aug_end=$(date -d '2 days ago' +%Y-%m-%d)
     run_weekly=1
 else
     run_weekly=0
@@ -123,41 +121,62 @@ if [ "$run_weekly" -eq 1 ]; then
     # Replaces `options_quotes_augment.py`. fetch_options.py with
     # --historical-mode auto pulls NBBO quote bars from /v3/quotes/{contract}
     # and writes per-trading-date CSVs the nROI analyzer reads.
-    # Note: no `local` keyword — `sh` (which db_server.py uses to exec this
-    # script) is not guaranteed to support it across platforms.
-    augment_one_date() {
-        # Run SPX/RUT/NDX in parallel — Polygon's per-key concurrency limit
-        # is well above 3 × 12 = 36, so 3 child processes don't conflict.
-        for tk in SPX RUT NDX; do
-            ( python3 scripts/fetch_options.py --symbols $tk \
-                --date "$1" \
-                --strike-range-percent 5 \
-                --max-days-to-expiry 5 \
-                --use-csv \
-                --data-dir options_csv_output_full \
-                --csv-layout per-trading-date \
-                --historical-mode auto \
-                --bar-interval-minutes 15 \
-                --snapshot-max-concurrent 12 \
-                --quote-max-pages 6 \
-                --quiet \
-              || echo "fetch_options $tk $1 failed (continuing)" ) &
+    #
+    # Parallelism: fan out across all (date, ticker) pairs at once via
+    # `xargs -P` rather than serial-by-date. A 5-day Mon-Fri × 3-ticker week
+    # is 15 jobs; with AUG_PAR=6 the per-date wall-clock floor disappears
+    # and we just cap total in-flight python processes. Effective HTTP
+    # concurrency is AUG_PAR × --snapshot-max-concurrent = 6×24 = 144,
+    # still well under Polygon's per-key limit.
+    #
+    # Skip-existing: fetch_options.py's --use-csv cache check looks at the
+    # legacy per-expiration path (data_dir/options/SYMBOL/{exp}.csv), not
+    # the per-trading-date layout we actually write to (verified in
+    # scripts/fetch_options.py:_get_csv_path), so the in-process cache never
+    # hits and every rerun redoes the full Polygon NBBO pull. The shell
+    # check below is the cheap fix: if the per-trading-date CSV already
+    # exists and is non-trivially sized, skip. Delete the file (or set
+    # AUG_FORCE=1) to force re-augment for a (date, ticker) pair.
+    AUG_PAR=${AUG_PAR:-6}
+    {
+        d="$aug_start"
+        sentinel=$(date -d "$aug_end + 1 day" +%Y-%m-%d)
+        while [ "$d" != "$sentinel" ]; do
+            # Skip weekends — markets are closed, no bars to fetch.
+            dow=$(date -d "$d" +%u)
+            if [ "$dow" -le 5 ]; then
+                for tk in SPX RUT NDX; do
+                    printf '%s %s\n' "$d" "$tk"
+                done
+            fi
+            d=$(date -d "$d + 1 day" +%Y-%m-%d)
         done
-        wait
-    }
-
-    d="$aug_start"
-    sentinel=$(date -d "$aug_end + 1 day" +%Y-%m-%d)
-    while [ "$d" != "$sentinel" ]; do
-        # Skip weekends — markets are closed, no bars to fetch.
-        dow=$(date -d "$d" +%u)
-        if [ "$dow" -le 5 ]; then
-            augment_one_date "$d"
+    } | AUG_FORCE="${AUG_FORCE:-0}" xargs -n 2 -P "$AUG_PAR" sh -c '
+        target_date=$1
+        tk=$2
+        out="options_csv_output_full/$tk/${tk}_options_$target_date.csv"
+        if [ "$AUG_FORCE" != "1" ] && [ -s "$out" ]; then
+            sz=$(wc -c < "$out" | tr -d " ")
+            if [ "$sz" -gt 100000 ]; then
+                echo "skip $tk $target_date (already augmented, $sz bytes)"
+                exit 0
+            fi
         fi
-        d=$(date -d "$d + 1 day" +%Y-%m-%d)
-    done
+        python3 scripts/fetch_options.py --symbols "$tk" \
+            --date "$target_date" \
+            --strike-range-percent 5 \
+            --max-days-to-expiry 5 \
+            --use-csv \
+            --data-dir options_csv_output_full \
+            --csv-layout per-trading-date \
+            --historical-mode auto \
+            --bar-interval-minutes 5 \
+            --snapshot-max-concurrent 24 \
+            --quote-max-pages 6 \
+            --quiet \
+          || echo "fetch_options $tk $target_date failed (continuing)"
+    ' _
 fi
-
 
 #build the close models (runs daily — independent of the weekly augment)
 rm /tmp/close_model.log /tmp/rebuild_prediction_data.log

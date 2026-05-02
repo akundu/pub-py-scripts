@@ -264,3 +264,124 @@ def test_csv_writer_uses_per_row_timestamp(tmp_path):
     assert df.iloc[1]["timestamp"] == "2026-04-21T13:45:00+00:00"
     # Third row: wall-clock — just confirm it's a parseable ISO format
     pd.to_datetime(df.iloc[2]["timestamp"])
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 4. Per-trading-date cache READ path
+#    The cron's weekly augment job writes per-trading-date CSVs, so the
+#    --use-csv cache check must read from that layout (not the legacy
+#    per-expiration path) and must treat historical files as immutable.
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _write_per_trading_date_file(tmp_path, symbol: str, trading_date: str, n_rows: int = 3):
+    """Helper: drop a populated per-trading-date CSV via the writer so the
+    on-disk format is exactly what the cron produces."""
+    f = fetch_options.HistoricalDataFetcher(
+        "k", data_dir=str(tmp_path), verbose=False,
+        csv_layout="per-trading-date", csv_trading_date=trading_date,
+    )
+    contracts = []
+    for i in range(n_rows):
+        contracts.append({
+            "ticker": f"O:{symbol}{trading_date.replace('-', '')[2:]}P0500{i}000",
+            "type": "put", "strike": 5000 + i, "expiration": trading_date,
+            "bid": 1.0 + i * 0.1, "ask": 1.1 + i * 0.1,
+            "timestamp": f"{trading_date}T13:{30 + i * 5:02d}:00+00:00",
+        })
+    f._save_options_to_csv(symbol, {"contracts": contracts})
+    return tmp_path / symbol / f"{symbol}_options_{trading_date}.csv"
+
+
+def test_load_options_from_csv_by_trading_date_returns_all_rows(tmp_path):
+    """The per-trading-date loader returns every row in the file — unlike
+    the legacy loader it does NOT collapse to the latest snapshot, because
+    historical NBBO bar files are full time series, not snapshots."""
+    csv_path = _write_per_trading_date_file(tmp_path, "NDX", "2026-04-21", n_rows=4)
+    assert csv_path.exists()
+
+    f = fetch_options.HistoricalDataFetcher(
+        "k", data_dir=str(tmp_path), verbose=False,
+        csv_layout="per-trading-date", csv_trading_date="2026-04-21",
+    )
+    contracts = f._load_options_from_csv_by_trading_date("NDX", "2026-04-21")
+    assert len(contracts) == 4
+    # Bars are kept in order; each carries its own timestamp.
+    assert contracts[0]["timestamp"] == "2026-04-21T13:30:00+00:00"
+    assert contracts[3]["timestamp"] == "2026-04-21T13:45:00+00:00"
+    assert all(c["expiration"] == "2026-04-21" for c in contracts)
+
+
+def test_load_options_from_csv_by_trading_date_missing_file(tmp_path):
+    """Missing file → empty list, no exception."""
+    f = fetch_options.HistoricalDataFetcher(
+        "k", data_dir=str(tmp_path), verbose=False,
+        csv_layout="per-trading-date",
+    )
+    assert f._load_options_from_csv_by_trading_date("NDX", "2026-04-21") == []
+
+
+def test_get_csv_path_by_trading_date_matches_writer_layout(tmp_path):
+    """Read-path resolves to the same file the writer produces — this is
+    the bug the cron's --use-csv flag was tripping on."""
+    f = fetch_options.HistoricalDataFetcher(
+        "k", data_dir=str(tmp_path), verbose=False,
+        csv_layout="per-trading-date",
+    )
+    expected = tmp_path / "NDX" / "NDX_options_2026-04-21.csv"
+    assert f._get_csv_path_by_trading_date("NDX", "2026-04-21") == expected
+
+
+def test_per_trading_date_cache_hit_skips_api_for_historical_date(tmp_path, monkeypatch):
+    """End-to-end: with --use-csv and per-trading-date layout, an existing
+    historical file short-circuits get_active_options_for_date — the
+    polygon client must NOT be hit. This is what makes the Saturday cron
+    rerun cheap."""
+    import asyncio
+
+    _write_per_trading_date_file(tmp_path, "NDX", "2026-04-21", n_rows=2)
+
+    f = fetch_options.HistoricalDataFetcher(
+        "k", data_dir=str(tmp_path), verbose=True,
+        csv_layout="per-trading-date", csv_trading_date="2026-04-21",
+    )
+
+    # If the cache path is wrong and the code falls through to the API,
+    # this raises and the test fails loudly instead of silently re-fetching.
+    def _explode(*a, **kw):
+        raise AssertionError("polygon client was called — cache miss when hit was expected")
+    monkeypatch.setattr(f.client, "list_options_contracts", _explode, raising=False)
+    monkeypatch.setattr(f.client, "get_quotes", _explode, raising=False)
+
+    # 2026-04-21 is in the past relative to any plausible test-run date,
+    # so the historical-immutable branch applies.
+    result = asyncio.run(f.get_active_options_for_date(
+        symbol="NDX",
+        target_date_str="2026-04-21",
+        option_type="all",
+        stock_close_price=None,
+        strike_range_percent=None,
+        max_days_to_expiry=5,
+        include_expired=False,
+        use_cache=True,
+        save_to_csv=False,
+    ))
+    assert result["success"] is True
+    assert len(result["data"]["contracts"]) == 2
+
+
+def test_per_trading_date_cache_miss_when_file_empty(tmp_path):
+    """Zero-byte file is treated as a miss — the shell-level skip-existing
+    in ms1_cron.sh uses size > 100KB, but the in-process check just needs
+    > 0 bytes plus loadable content. An empty file means a prior run aborted
+    before writing, and we should NOT serve that as cached."""
+    symbol_dir = tmp_path / "NDX"
+    symbol_dir.mkdir()
+    (symbol_dir / "NDX_options_2026-04-21.csv").write_text("")
+
+    f = fetch_options.HistoricalDataFetcher(
+        "k", data_dir=str(tmp_path), verbose=False,
+        csv_layout="per-trading-date",
+    )
+    # Loader returns [] for empty file.
+    assert f._load_options_from_csv_by_trading_date("NDX", "2026-04-21") == []

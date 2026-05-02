@@ -364,6 +364,13 @@ class HistoricalDataFetcher:
         symbol_dir.mkdir(parents=True, exist_ok=True)
         return symbol_dir / f"{expiration_date}.csv"
 
+    def _get_csv_path_by_trading_date(self, symbol: str, trading_date: str) -> Path:
+        """Per-trading-date layout: data_dir/SYMBOL/SYMBOL_options_{td}.csv.
+        Mirrors the path used by `_save_options_to_csv_by_trading_date`."""
+        norm_symbol = (symbol or "").strip().upper() or "UNKNOWN"
+        symbol_dir = self.data_dir / norm_symbol
+        return symbol_dir / f"{norm_symbol}_options_{trading_date}.csv"
+
     def _should_fetch_fresh_data(self, csv_path: Path) -> bool:
         """Check if we should fetch fresh data based on cache duration or refresh threshold."""
         if not csv_path.exists():
@@ -623,6 +630,53 @@ class HistoricalDataFetcher:
             print(f"Error loading CSV data: {e}")
             return []
 
+    def _load_options_from_csv_by_trading_date(
+        self, symbol: str, trading_date: str
+    ) -> List[Dict[str, Any]]:
+        """Load every contract row from a per-trading-date CSV.
+
+        Unlike `_load_options_from_csv` (which filters to the latest snapshot
+        timestamp because per-expiration files store live-snapshot rows),
+        per-trading-date files store the full NBBO bar time series for the
+        whole trading day and every row is meaningful.
+        """
+        csv_path = self._get_csv_path_by_trading_date(symbol, trading_date)
+        if not csv_path.exists():
+            return []
+        try:
+            df = pd.read_csv(csv_path)
+            if df.empty:
+                return []
+            contracts: List[Dict[str, Any]] = []
+            for _, row in df.iterrows():
+                def _g(col: str):
+                    return row[col] if col in row and pd.notna(row[col]) else None
+                contracts.append({
+                    'timestamp': _g('timestamp'),
+                    'ticker': row['ticker'] if 'ticker' in row else None,
+                    'type': row['type'] if 'type' in row else None,
+                    'strike': row['strike'] if 'strike' in row else None,
+                    'expiration': row['expiration'] if 'expiration' in row else None,
+                    'bid': _g('bid'),
+                    'ask': _g('ask'),
+                    'day_close': _g('day_close'),
+                    'vwap': _g('vwap'),
+                    'fmv': _g('fmv'),
+                    'delta': _g('delta'),
+                    'gamma': _g('gamma'),
+                    'theta': _g('theta'),
+                    'vega': _g('vega'),
+                    'implied_volatility': _g('implied_volatility'),
+                    'volume': _g('volume'),
+                })
+            return contracts
+        except Exception as e:
+            print(
+                f"Error loading per-trading-date CSV {csv_path}: {e}",
+                file=sys.stderr,
+            )
+            return []
+
     def _handle_api_error(self, error: Exception, data_type: str, symbol: str | None = None) -> Dict[str, Any]:
         """Handles API errors gracefully."""
         if symbol:
@@ -815,15 +869,40 @@ class HistoricalDataFetcher:
 
         # 2) Check if we should use cached CSV data (only when explicitly enabled and not force_fresh)
         if use_cache and not force_fresh:
-            # Try to load from cache for each potential expiration date
             cache_hit = False
-            if max_days_to_expiry is not None:
-                # Check cache for dates within the range
+            if self.csv_layout == "per-trading-date":
+                # Per-trading-date layout stores all expirations + the full
+                # NBBO bar time series for one trading day in a single file.
+                # The legacy per-expiration window-loop below would check the
+                # wrong path entirely, so route to the matching loader.
+                # For historical dates (target < today) the file is
+                # immutable — NBBO bars don't change retroactively — so we
+                # bypass the mtime-based freshness gate that's calibrated
+                # for live snapshots.
+                csv_path = self._get_csv_path_by_trading_date(symbol, target_date_str)
+                is_historical = target_date_dt.date() < datetime.now().date()
+                cache_ok = False
+                if csv_path.exists() and csv_path.stat().st_size > 0:
+                    cache_ok = is_historical or not self._should_fetch_fresh_data(csv_path)
+                if cache_ok:
+                    cached_contracts = self._load_options_from_csv_by_trading_date(
+                        symbol, target_date_str
+                    )
+                    if cached_contracts:
+                        options_data["contracts"] = cached_contracts
+                        cache_hit = True
+                        if not self.quiet:
+                            print(
+                                f"Loaded {len(cached_contracts)} contracts from "
+                                f"per-trading-date cache {csv_path}"
+                            )
+            elif max_days_to_expiry is not None:
+                # Per-expiration legacy layout: scan a window of expiration dates.
                 for days_offset in range(-max_days_to_expiry, max_days_to_expiry + 1):
                     check_date = target_date_dt + timedelta(days=days_offset)
                     exp_date_str = check_date.strftime('%Y-%m-%d')
                     csv_path = self._get_csv_path(symbol, exp_date_str)
-                    
+
                     if not self._should_fetch_fresh_data(csv_path):
                         cached_contracts = self._load_options_from_csv(symbol, exp_date_str)
                         if cached_contracts:
@@ -832,7 +911,7 @@ class HistoricalDataFetcher:
                             if not self.quiet:
                                 print(f"Loaded {len(cached_contracts)} contracts from cache for {exp_date_str}")
             else:
-                # Check cache for the target date
+                # Per-expiration legacy layout, single target date.
                 csv_path = self._get_csv_path(symbol, target_date_str)
                 if not self._should_fetch_fresh_data(csv_path):
                     cached_contracts = self._load_options_from_csv(symbol, target_date_str)
@@ -841,7 +920,7 @@ class HistoricalDataFetcher:
                         cache_hit = True
                         if not self.quiet:
                             print(f"Loaded {len(cached_contracts)} contracts from cache for {target_date_str}")
-            
+
             if cache_hit:
                 if not self.quiet:
                     print(f"Using cached data. Cache duration: {self._get_cache_duration_minutes()} minutes")
