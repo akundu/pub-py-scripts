@@ -512,21 +512,44 @@ class OptionQuoteStreamingService:
         # Warm quote cache from Redis — instant prices on restart
         await self._redis_load_quotes()
 
-        # Apply the configured TWS persistent-subscription budget. Without
-        # this, the provider's default (300) gets exhausted by 3 indices ×
-        # 3 expirations × 2 types × ~150 strikes/each ≈ 2700 contracts, and
-        # every cycle LRU-evicts subscriptions just to re-subscribe them
-        # next call — driving cycle latency to 22+ seconds.
-        configured = getattr(self._config, "option_quotes_ibkr_sub_budget", None)
+        # Apply the configured TWS persistent-subscription budget.
+        #
+        # Precedence (highest first):
+        #   1. UTP_TWS_OPTION_SUB_BUDGET env var — explicit operator
+        #      override at daemon-start time. Wins so a quick
+        #      `UTP_TWS_OPTION_SUB_BUDGET=3500 python utp.py daemon …`
+        #      actually does what it says, without needing to edit the
+        #      streaming YAML.
+        #   2. ``option_quotes_ibkr_sub_budget`` from streaming config.
+        #   3. Provider default (set in IBKRLiveProvider.__init__).
+        # When the env var is set we still log it so the operator sees
+        # which budget actually took effect.
+        import os as _os
+        env_budget = _os.environ.get("UTP_TWS_OPTION_SUB_BUDGET")
+        configured = None
+        source = "config-default"
+        if env_budget is not None and env_budget.strip():
+            try:
+                configured = int(env_budget)
+                source = "env"
+            except ValueError:
+                logger.warning(
+                    "UTP_TWS_OPTION_SUB_BUDGET=%r is not an integer; ignoring",
+                    env_budget,
+                )
+        if configured is None:
+            configured = getattr(self._config, "option_quotes_ibkr_sub_budget", None)
+            if configured is not None:
+                source = "yaml"
         if configured and hasattr(self._provider, "_option_subs_budget"):
             try:
                 self._provider._option_subs_budget = int(configured)
                 logger.info(
-                    "TWS option-subscription budget set to %d (from streaming config)",
-                    int(configured),
+                    "TWS option-subscription budget set to %d (source=%s)",
+                    int(configured), source,
                 )
             except (TypeError, ValueError) as e:
-                logger.warning("Invalid option_quotes_ibkr_sub_budget: %s", e)
+                logger.warning("Invalid option-subscription budget: %s", e)
 
         logger.info("Option quote streaming started")
 

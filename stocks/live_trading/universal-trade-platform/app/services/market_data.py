@@ -421,7 +421,21 @@ async def get_option_quotes_with_age(
         )
         if cached:
             age = _representative_age(cached)
-            return cached, age, "fresh_cache"
+            # Honor the caller's max_age across the WHOLE response, not
+            # just the IBKR-fresh tier. ``get_cached_quotes`` falls
+            # through to CSV (gated separately at 900s by default) when
+            # IBKR has no row for a requested strike. That makes a
+            # verifier asking for a strike outside the streaming range
+            # see CSV-aged data (10+ minutes old) even though it asked
+            # for max_age=30s. Detect that here and fall through to the
+            # provider so the verifier gets a fresh broker fetch.
+            cache_too_stale = (
+                max_age is not None
+                and age is not None
+                and age > max_age
+            )
+            if not cache_too_stale:
+                return cached, age, "fresh_cache"
 
     # 2. Stale cache capture (served only if provider is unavailable or when
     #    no max_age was provided — legacy behavior).  When a caller passes
