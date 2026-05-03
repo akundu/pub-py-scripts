@@ -376,16 +376,18 @@ def compute_range_dates(
 
 
 def pick_interval_for_span(start_date: str, end_date: str) -> str:
-    """Auto-pick a sensible interval for a (start, end) calendar-day span.
+    """Auto-pick the coarsest sensible interval for a (start, end) span.
 
-    Tuned so each chart shows 50–500 bars across the view — enough detail
-    to be useful, not so many that rendering chokes:
+    Tuned to minimize bytes-over-the-wire while still showing usable
+    granularity for each window. Anything beyond a calendar month uses
+    daily bars — finer would add a lot of payload without changing the
+    shape of a multi-month picture.
 
-      ≤  1 day  →  5m   (≈ 80 bars in a session)
-      ≤  5 days →  15m
-      ≤ 14 days →  30m
-      ≤ 31 days →  1h
-      otherwise →  D   (multi-month / yearly views use daily bars)
+      ≤  1 day  →  5m   (~80 bars per session — full intraday detail)
+      ≤  5 days →  30m  (~65 bars across the week)
+      ≤ 30 days →  1h   (≤ ~210 bars across a month)
+      > 30 days →  D    (one bar per trading day; matches the
+                          user-stated rule of >1 month → daily)
     """
     s = datetime.strptime(start_date, "%Y-%m-%d").date()
     e = datetime.strptime(end_date, "%Y-%m-%d").date()
@@ -393,10 +395,8 @@ def pick_interval_for_span(start_date: str, end_date: str) -> str:
     if span <= 1:
         return "5m"
     if span <= 5:
-        return "15m"
-    if span <= 14:
         return "30m"
-    if span <= 31:
+    if span <= 30:
         return "1h"
     return "D"
 

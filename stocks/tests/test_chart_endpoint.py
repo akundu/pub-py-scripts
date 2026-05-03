@@ -228,20 +228,32 @@ def test_api_chart_auto_interval_picks_5m_for_one_day(chart_fixtures):
 
 
 def test_api_chart_auto_interval_picks_1h_for_two_weeks(chart_fixtures):
-    """A 14-day span → auto picks 30m (boundary case in pick_interval_for_span)."""
+    """A 14-day span → auto picks 1h. The new auto-interval table leans
+    coarser than the original (which would have picked 30m here) so the
+    payload for typical 1-2 week views is roughly halved."""
     req = _MockRequest("NDX", query={
         "start": "2026-04-16", "end": "2026-04-29", "interval": "auto",
     })
     body = json.loads(_run(handle_chart_data_json(req)).body.decode())
-    assert body["interval"] == "30m"
+    assert body["interval"] == "1h"
 
 
-def test_api_chart_auto_interval_picks_daily_for_year(chart_fixtures):
-    req = _MockRequest("NDX", query={
+def test_api_chart_auto_interval_picks_daily_past_one_month(chart_fixtures):
+    """Anything past a calendar month should come back as daily — both
+    1-month-and-change and full-year spans. This is the ">1 month →
+    daily" rule users explicitly asked for."""
+    # 45-day span — just past the boundary
+    req_45d = _MockRequest("NDX", query={
+        "start": "2026-03-15", "end": "2026-04-29", "interval": "auto",
+    })
+    assert json.loads(_run(handle_chart_data_json(req_45d)).body.decode()
+                      )["interval"] == "D"
+    # 1-year span — well past the boundary
+    req_1y = _MockRequest("NDX", query={
         "start": "2025-04-29", "end": "2026-04-29", "interval": "auto",
     })
-    body = json.loads(_run(handle_chart_data_json(req)).body.decode())
-    assert body["interval"] == "D"
+    assert json.loads(_run(handle_chart_data_json(req_1y)).body.decode()
+                      )["interval"] == "D"
 
 
 def test_api_chart_rejects_inverted_range(chart_fixtures):

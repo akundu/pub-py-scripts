@@ -407,15 +407,38 @@ def test_compute_range_dates_unknown_preset_raises():
         compute_range_dates("not-a-preset", _date(2026, 5, 2))
 
 
-def test_pick_interval_for_span_picks_finer_for_short_windows():
-    """The sweet-spot mapping that keeps every chart at 50–500 bars."""
+def test_pick_interval_for_span_minimizes_data_transfer():
+    """Auto-interval leans coarser to minimize bytes-over-the-wire while
+    keeping usable detail. The boundaries pin the user-stated rule
+    (>1 month → daily) and reduce mid-range payloads vs the previous
+    tuning (5d went from 15m=130 bars to 30m=65 bars; 14d went from
+    30m=180 bars to 1h=98 bars)."""
+    # ≤1 day → 5m (full intraday)
     assert pick_interval_for_span("2026-04-29", "2026-04-29") == "5m"
-    assert pick_interval_for_span("2026-04-25", "2026-04-29") == "15m"
-    assert pick_interval_for_span("2026-04-15", "2026-04-29") == "30m"
+    assert pick_interval_for_span("2026-04-28", "2026-04-29") == "5m"
+    # 2-5 days → 30m (was 15m)
+    assert pick_interval_for_span("2026-04-25", "2026-04-29") == "30m"
+    # 6-30 days → 1h (was 30m for 6-14, 1h for 15-31)
+    assert pick_interval_for_span("2026-04-22", "2026-04-29") == "1h"
+    assert pick_interval_for_span("2026-04-15", "2026-04-29") == "1h"
     assert pick_interval_for_span("2026-04-01", "2026-04-29") == "1h"
-    # 32 days → daily kicks in (just past the 31-day cutoff)
+    # exactly-30-day span sits inside the 1h tier (boundary check)
+    assert pick_interval_for_span("2026-03-30", "2026-04-29") == "1h"
+    # >30 days → daily (matches "more than 1 month" rule)
+    assert pick_interval_for_span("2026-03-29", "2026-04-29") == "D"
     assert pick_interval_for_span("2026-03-28", "2026-04-29") == "D"
     assert pick_interval_for_span("2025-04-29", "2026-04-29") == "D"
+
+
+def test_pick_interval_for_span_pins_multi_month_to_daily():
+    """Regression pin: any span clearly past a month must come back as
+    daily — no exceptions, no mid-range hourly creep."""
+    for start in ("2026-03-15",  # 45 days
+                  "2026-02-01",  # 87 days
+                  "2025-11-01",  # ~6 months
+                  "2024-01-01"): # multi-year
+        assert pick_interval_for_span(start, "2026-04-29") == "D", \
+            f"span starting {start} should pick D but didn't"
 
 
 # ──────────────────────────────────────────────────────────────────────
