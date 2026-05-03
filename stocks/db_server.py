@@ -15587,6 +15587,295 @@ def _wants_json_response(request: web.Request) -> bool:
     return 'application/json' in accept
 
 
+# ──────────────────────────────────────────────────────────────────────
+# /chart endpoint — per-symbol intraday OHLC chart with RSI
+#
+# Two routes share one set of helpers in `common/chart_data.py`:
+#   GET /chart/{symbol}        → HTML page (TradingView Lightweight Charts)
+#   GET /api/chart/{symbol}    → JSON for the page (and for any other client)
+#
+# The JSON loader is CSV-backed (`equities_output/`) which gives us 5-min
+# bars natively; the resampler rolls them up to 15m/30m/1h/D on demand.
+# Today's date with finer-than-5m intervals is intentionally not supported
+# yet (would need realtime ticks via QuestDB) — we surface a 400 instead
+# of silently degrading.
+# ──────────────────────────────────────────────────────────────────────
+
+
+def _resolve_chart_date(date_str: str | None) -> str:
+    """Default chart date: yesterday (Pacific) so we always land on the most
+    recently closed trading day's data. Caller-supplied date wins."""
+    if date_str:
+        return date_str
+    # The Saturday cron already uses "yesterday"; mirror that so the chart
+    # opens on freshly-augmented data instead of today's incomplete day.
+    from zoneinfo import ZoneInfo
+    pt_now = datetime.now(ZoneInfo("America/Los_Angeles"))
+    return (pt_now.date() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+
+def _normalize_chart_symbol(symbol: str) -> tuple[str, str]:
+    """Return (display_symbol, db_symbol) — accept either `NDX` or `I:NDX`.
+
+    Mirrors the routine used by `handle_lazy_load_chart` (see this file
+    around line 12600) so the two endpoints behave consistently for index
+    inputs.
+    """
+    display = (symbol or "").upper().strip()
+    db_symbol = display
+    try:
+        from common.fetcher.factory import FetcherFactory
+        _, db_ticker, is_index, _ = FetcherFactory.parse_index_ticker(display)
+        if is_index and db_ticker:
+            db_symbol = db_ticker
+    except Exception:
+        # Fall back to lightweight normalization if the fetcher import
+        # is unavailable (test environments without polygon, etc.)
+        from common.symbol_utils import normalize_symbol_for_db
+        db_symbol = normalize_symbol_for_db(display)
+    return display, db_symbol
+
+
+async def handle_chart_data_json(request: web.Request) -> web.Response:
+    """
+    GET /api/chart/{symbol}
+
+    Range selection (any one of the three forms):
+      ?start=YYYY-MM-DD&end=YYYY-MM-DD   (canonical)
+      ?range=1d|1w|1m|3m|6m|ytd|1y|2y    (preset; resolved server-side)
+      ?date=YYYY-MM-DD&days=N            (legacy single-day form;
+                                          translated to start = date-days+1)
+
+    Other params:
+      ?interval=auto|5m|15m|30m|1h|D     (default: auto — based on span)
+      ?rsi=true|false                    (default: true)
+      ?rsi_window=14                     (default: 14)
+
+    Data source: per-trading-date CSVs in `equities_output/` first; for
+    days/dates not on disk we fall back to QuestDB via the StockDB
+    interface (`get_stock_data` for daily/hourly, dedup on overlap).
+    Daily intervals always come from the DB.
+
+    Returns:
+      {
+        symbol, db_symbol, interval (resolved), start, end,
+        source: "csv" | "db" | "csv+db" | "empty",
+        trading_days_returned: [...],
+        bars: [{time, open, high, low, close, volume}],
+        rsi:  [{time, value}],
+        stats: {prev_close, day_open, day_high, day_low, day_close,
+                change_vs_prev_close_abs, change_vs_prev_close_pct,
+                intraday_range_pct, vwap}
+      }
+    """
+    symbol = request.match_info.get("symbol", "")
+    if not symbol:
+        return web.json_response({"error": "missing symbol"}, status=400)
+    display_symbol, db_symbol = _normalize_chart_symbol(symbol)
+
+    try:
+        from common.chart_data import (
+            load_bars_with_db_fallback,
+            find_prev_close,
+            compute_chart_stats,
+            bars_to_lightweight_format,
+            rsi_to_lightweight_format,
+            slice_to_one_day,
+            compute_range_dates,
+            pick_interval_for_span,
+            INTERVAL_TO_RULE,
+        )
+    except ImportError as e:
+        return web.json_response(
+            {"error": f"chart_data module not available: {e}"},
+            status=500,
+        )
+
+    # ── Resolve start/end. Three forms, in priority order. ────────────
+    range_preset = (request.query.get("range") or "").strip().lower()
+    explicit_start = request.query.get("start")
+    explicit_end = request.query.get("end")
+    legacy_date = request.query.get("date")
+    try:
+        legacy_days = max(1, int(request.query.get("days", "1")))
+    except ValueError:
+        legacy_days = 1
+
+    if explicit_start and explicit_end:
+        start_date, end_date = explicit_start, explicit_end
+    elif range_preset:
+        try:
+            start_date, end_date = compute_range_dates(range_preset)
+        except ValueError as e:
+            return web.json_response({"error": str(e)}, status=400)
+    else:
+        # Legacy: derive a `[date - days + 1, date]` window so both the
+        # old single-day API and the new range API map onto the same
+        # underlying loader. Default: yesterday Pacific (one day).
+        end_date = _resolve_chart_date(legacy_date)
+        start_dt = datetime.strptime(end_date, "%Y-%m-%d").date() \
+                   - timedelta(days=legacy_days - 1)
+        start_date = start_dt.strftime("%Y-%m-%d")
+
+    # Sanity-check ordering — common copy-paste mistake.
+    try:
+        _s = datetime.strptime(start_date, "%Y-%m-%d").date()
+        _e = datetime.strptime(end_date, "%Y-%m-%d").date()
+        if _e < _s:
+            return web.json_response(
+                {"error": f"end ({end_date}) is before start ({start_date})"},
+                status=400,
+            )
+    except ValueError as e:
+        return web.json_response({"error": f"invalid date: {e}"}, status=400)
+
+    # ── Resolve interval. "auto" → span-based pick. ───────────────────
+    interval_raw = (request.query.get("interval") or "auto").strip()
+    if interval_raw.lower() == "auto":
+        interval = pick_interval_for_span(start_date, end_date)
+    else:
+        interval = interval_raw
+    if interval not in INTERVAL_TO_RULE:
+        return web.json_response(
+            {"error": f"unsupported interval {interval!r}; expected "
+                      f"one of {sorted(INTERVAL_TO_RULE)} or 'auto'"},
+            status=400,
+        )
+
+    rsi_enabled = (request.query.get("rsi", "true").lower() != "false")
+    try:
+        rsi_window = max(2, int(request.query.get("rsi_window", "14")))
+    except ValueError:
+        rsi_window = 14
+
+    db_instance = request.app.get("db_instance") if hasattr(request.app, "get") \
+                  else None
+
+    try:
+        bars_df, source = await load_bars_with_db_fallback(
+            db_symbol, start_date, end_date,
+            interval=interval, db_instance=db_instance,
+        )
+    except ValueError as e:
+        return web.json_response({"error": str(e)}, status=400)
+    except Exception as e:
+        logger.exception(f"[CHART] load failed for {display_symbol}")
+        return web.json_response({"error": f"load failed: {e}"}, status=500)
+
+    base_payload = {
+        "symbol": display_symbol,
+        "db_symbol": db_symbol,
+        "interval": interval,
+        "start": start_date,
+        "end": end_date,
+        "source": source,
+    }
+
+    if bars_df.empty:
+        base_payload.update({
+            "trading_days_returned": [],
+            "bars": [],
+            "rsi": [],
+            "stats": compute_chart_stats(bars_df, prev_close=None),
+            "error": (
+                f"no data found for {display_symbol} between {start_date} "
+                f"and {end_date} (checked equities_output/ and the DB)"
+            ),
+        })
+        return web.json_response(base_payload, status=200)
+
+    trading_days = sorted({ts.strftime("%Y-%m-%d") for ts in bars_df.index})
+
+    # Stats panel always summarizes a single day. For multi-day views we
+    # use the most recent day in the result (where "today" matters for
+    # most users); for single-day views it's just that day.
+    stats_day = trading_days[-1]
+    day_slice = slice_to_one_day(bars_df, stats_day)
+    if day_slice.empty:
+        # Daily-bar mode: every row is a "day"; just hand the whole frame
+        # to compute_chart_stats and let the day-stats compute against the
+        # last bar's close (intraday O/H/L/C aren't meaningful here).
+        day_slice = bars_df
+    prev_close = find_prev_close(db_symbol, stats_day)
+    stats = compute_chart_stats(day_slice, prev_close=prev_close)
+
+    base_payload.update({
+        "trading_days_returned": trading_days,
+        "bars": bars_to_lightweight_format(bars_df),
+        "rsi": rsi_to_lightweight_format(bars_df, window=rsi_window)
+                if rsi_enabled else [],
+        "stats": stats,
+    })
+    return web.json_response(base_payload)
+
+
+async def handle_chart_html(request: web.Request) -> web.Response:
+    """
+    GET /chart/{symbol}
+
+    Renders the HTML page that fetches /api/chart/{symbol} client-side
+    and draws OHLC + volume + RSI via TradingView Lightweight Charts.
+    Server-side substitutions seed the date pickers + interval selector
+    so deep links (e.g. /chart/NDX?range=1m or ?start=...&end=...) open
+    on the right view rather than always defaulting to "1 day".
+
+    Accepted query params (all optional):
+      ?range=1d|1w|1m|3m|6m|ytd|1y|2y   preset (resolved server-side)
+      ?start=YYYY-MM-DD&end=YYYY-MM-DD  explicit window
+      ?date=YYYY-MM-DD                   legacy single-date form (= end)
+      ?interval=auto|5m|15m|30m|1h|D    default: auto
+    """
+    symbol = request.match_info.get("symbol", "")
+    if not symbol:
+        return web.Response(
+            text="<h1>Missing symbol</h1>", content_type="text/html", status=400,
+        )
+    display_symbol, _ = _normalize_chart_symbol(symbol)
+
+    # Resolve the initial start/end the same way the JSON handler does
+    # so the page's date pickers reflect what would have been queried.
+    range_preset = (request.query.get("range") or "").strip().lower()
+    explicit_start = request.query.get("start")
+    explicit_end = request.query.get("end")
+    legacy_date = request.query.get("date")
+
+    if explicit_start and explicit_end:
+        start_date, end_date = explicit_start, explicit_end
+    elif range_preset:
+        try:
+            from common.chart_data import compute_range_dates
+            start_date, end_date = compute_range_dates(range_preset)
+        except Exception:
+            start_date = end_date = _resolve_chart_date(None)
+    else:
+        end_date = _resolve_chart_date(legacy_date)
+        start_date = end_date  # default single-day view
+
+    interval = (request.query.get("interval") or "auto").strip()
+
+    template_path = (
+        Path(__file__).parent / "common" / "web" / "chart" / "template.html"
+    )
+    try:
+        template_html = template_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return web.Response(
+            text="<h1>chart template not found</h1>",
+            content_type="text/html",
+            status=500,
+        )
+
+    html = (
+        template_html
+        .replace("{{SYMBOL}}", display_symbol)
+        .replace("{{START_DATE}}", start_date)
+        .replace("{{END_DATE}}", end_date)
+        .replace("{{SYMBOL_JSON}}", json.dumps(display_symbol))
+        .replace("{{INTERVAL_JSON}}", json.dumps(interval))
+    )
+    return web.Response(text=html, content_type="text/html")
+
+
 async def handle_range_percentiles_html(request: web.Request) -> web.Response:
     """
     Handle HTML page request for range percentiles analysis.

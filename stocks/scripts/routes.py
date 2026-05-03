@@ -65,6 +65,8 @@ def register_routes(app: web.Application) -> None:
         handle_range_percentiles_api,
         handle_range_percentiles_html,
         handle_range_percentiles_multi_window_api,
+        handle_chart_data_json,
+        handle_chart_html,
         handle_catch_all,
     )
     
@@ -137,6 +139,10 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/api/range_percentiles", handle_range_percentiles_api)
     app.router.add_get("/api/range_percentiles_multi_window", handle_range_percentiles_multi_window_api)
     app.router.add_get("/range_percentiles", handle_range_percentiles_html)
+
+    # Intraday chart endpoints (OHLC + RSI; per-symbol per-date; CSV-backed)
+    app.router.add_get("/api/chart/{symbol}", handle_chart_data_json)
+    app.router.add_get("/chart/{symbol}", handle_chart_html)
 
     # Notification endpoint (LAN-only, SMS/email)
     from common.notify import handle_notify
