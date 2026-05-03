@@ -194,6 +194,54 @@
     border: 1px solid var(--border);
     box-shadow: 0 4px 16px rgba(0,0,0,0.5);
   }
+  /* Big loading overlay — shows for any user-initiated reload (preset
+     click, range change, interval change). Sits between the chart and
+     the tooltip, so it dims the now-stale chart and signals work in
+     progress. Pan-to-load-more uses a quieter inline pill instead. */
+  #loading-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(13, 17, 23, 0.78);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 8;
+    flex-direction: column;
+    gap: 14px;
+    pointer-events: all;
+  }
+  #loading-overlay.visible { display: flex; }
+  #loading-overlay .spinner {
+    width: 48px;
+    height: 48px;
+    border: 3px solid rgba(255,255,255,0.15);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+  }
+  #loading-overlay .label {
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 500;
+    letter-spacing: 0.3px;
+    text-align: center;
+    max-width: 80%;
+    line-height: 1.5;
+  }
+  #loading-overlay .sublabel {
+    color: var(--muted);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  /* Dim controls + preset buttons while a load is in flight, so a slow
+     6-month fetch can't stack requests via repeated clicks. */
+  body.loading .preset-btn,
+  body.loading .controls-row button.apply,
+  body.loading .controls-row select {
+    opacity: 0.5;
+    pointer-events: none;
+  }
   @media (max-width: 700px) {
     header h1 { font-size: 16px; }
     .preset-btn { padding: 4px 8px; font-size: 11px; }
@@ -234,8 +282,13 @@
 <div id="chart-wrap">
   <div id="chart"></div>
   <div id="sel-overlay"><div id="sel-box"></div></div>
+  <div id="loading-overlay">
+    <div class="spinner"></div>
+    <div class="label" id="loading-label">Loading…</div>
+    <div class="sublabel" id="loading-sublabel"></div>
+  </div>
   <div id="tooltip"></div>
-  <div id="status">loading…</div>
+  <div id="status"></div>
   <div id="hint">Shift+drag = zoom into range · Drag past edges = load more</div>
 </div>
 
@@ -502,10 +555,36 @@
   }
   window.addEventListener("popstate", () => loadFromUrl());
 
+  // ── Loading overlay helpers ─────────────────────────────────────────
+  function describeLoad(params) {
+    // Friendly text for the spinner — "Loading 6M of NDX (1h bars)…" is
+    // more reassuring during a slow daily-table query than just "loading".
+    const presetNames = {
+      "1d": "Daily", "1w": "1 week", "1m": "1 month", "3m": "3 months",
+      "6m": "6 months", "ytd": "year-to-date", "1y": "1 year", "2y": "2 years",
+    };
+    let scope;
+    if (params.range && presetNames[params.range]) scope = presetNames[params.range];
+    else if (params.start && params.end) scope = `${params.start} → ${params.end}`;
+    else scope = "data";
+    return `Loading ${scope} of ${SYMBOL}`;
+  }
+  function showLoading(params) {
+    $("loading-label").textContent = describeLoad(params);
+    const iv = (params.interval && params.interval !== "auto")
+      ? `${params.interval} bars` : "interval: auto";
+    $("loading-sublabel").textContent = iv;
+    $("loading-overlay").classList.add("visible");
+    document.body.classList.add("loading");
+  }
+  function hideLoading() {
+    $("loading-overlay").classList.remove("visible");
+    document.body.classList.remove("loading");
+  }
+
   // ── Data fetching ───────────────────────────────────────────────────
   async function fetchAndRender(params) {
-    $("status").textContent = "loading…";
-    $("status").style.display = "block";
+    showLoading(params);
     const qs = new URLSearchParams(params).toString();
     // Push the params into the address bar before the network round-trip
     // so a copy-paste mid-load still produces a valid shareable URL.
@@ -516,6 +595,7 @@
       if (!resp.ok) {
         const txt = await resp.text();
         $("status").textContent = `Error ${resp.status}: ${txt.slice(0, 200)}`;
+        $("status").style.display = "block";
         candleSeries.setData([]); volumeSeries.setData([]); rsiSeries.setData([]);
         renderStats(null);
         return;
@@ -548,12 +628,19 @@
       rsiChart.timeScale().fitContent();
       $("source-pill").textContent = data.source
         ? `source: ${data.source}` : "";
+      // Tiny confirmation pill in the corner — "127 bars · 1h · 2026-04-01 → 2026-04-30"
+      // — fades after a moment so the chart isn't cluttered. The full
+      // loading overlay above is the primary "loaded" signal.
       $("status").textContent = lastBars.length
         ? `${lastBars.length} bars · ${currentInterval} · ${data.start} → ${data.end}`
         : `No data for ${data.start} → ${data.end}`;
+      $("status").style.display = "block";
       if (lastBars.length) setTimeout(() => { $("status").style.display = "none"; }, 1500);
     } catch (e) {
       $("status").textContent = `Error: ${e.message}`;
+      $("status").style.display = "block";
+    } finally {
+      hideLoading();
     }
   }
 
