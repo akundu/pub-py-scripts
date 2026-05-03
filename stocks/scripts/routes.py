@@ -67,6 +67,7 @@ def register_routes(app: web.Application) -> None:
         handle_range_percentiles_multi_window_api,
         handle_chart_data_json,
         handle_chart_html,
+        handle_ticker_search,
         handle_catch_all,
     )
     
@@ -143,6 +144,8 @@ def register_routes(app: web.Application) -> None:
     # Intraday chart endpoints (OHLC + RSI; per-symbol per-date; CSV-backed)
     app.router.add_get("/api/chart/{symbol}", handle_chart_data_json)
     app.router.add_get("/chart/{symbol}", handle_chart_html)
+    # Ticker autocomplete (backs the chart page's clickable header)
+    app.router.add_get("/api/tickers/search", handle_ticker_search)
 
     # Notification endpoint (LAN-only, SMS/email)
     from common.notify import handle_notify

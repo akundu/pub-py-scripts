@@ -15876,6 +15876,32 @@ async def handle_chart_html(request: web.Request) -> web.Response:
     return web.Response(text=html, content_type="text/html")
 
 
+async def handle_ticker_search(request: web.Request) -> web.Response:
+    """
+    GET /api/tickers/search?q=<query>&limit=10
+
+    Backs the chart page's clickable ticker header — the user clicks the
+    symbol, types ticker or company-name fragments, and gets ranked
+    matches back. See `common/ticker_search.py` for ranking rules.
+    """
+    q = request.query.get("q", "")
+    try:
+        limit = max(1, min(50, int(request.query.get("limit", "10"))))
+    except ValueError:
+        limit = 10
+    try:
+        from common.ticker_search import search_tickers
+    except ImportError as e:
+        return web.json_response(
+            {"error": f"ticker_search module not available: {e}"},
+            status=500,
+        )
+    return web.json_response({
+        "query": q,
+        "results": search_tickers(q, limit=limit),
+    })
+
+
 async def handle_range_percentiles_html(request: web.Request) -> web.Response:
     """
     Handle HTML page request for range percentiles analysis.

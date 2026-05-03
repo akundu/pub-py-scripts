@@ -187,6 +187,93 @@
     pointer-events: none;
     display: none;
   }
+  /* Clickable symbol header + autocomplete popover. The header swaps
+     with a search input on click; the popover under the input shows
+     ranked ticker/name matches from /api/tickers/search. */
+  #symbol-header {
+    cursor: pointer;
+    user-select: none;
+    transition: color 0.1s;
+    margin: 0;
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+  }
+  #symbol-header:hover { color: var(--accent); }
+  #symbol-header::after {
+    content: " ▾";
+    color: var(--muted);
+    font-size: 14px;
+    font-weight: 400;
+  }
+  #symbol-search {
+    position: relative;
+    display: none;
+  }
+  #symbol-search-input {
+    background: var(--bg);
+    color: var(--text);
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 16px;
+    font-weight: 600;
+    font-family: inherit;
+    width: 220px;
+    outline: none;
+  }
+  #symbol-search-results {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    min-width: 320px;
+    max-height: 360px;
+    overflow-y: auto;
+    z-index: 100;
+  }
+  #symbol-search-results:empty { display: none; }
+  .search-result {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 16px;
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 13px;
+    border-bottom: 1px solid rgba(255,255,255,0.03);
+  }
+  .search-result:last-child { border-bottom: none; }
+  .search-result:hover, .search-result.active {
+    background: var(--accent-active);
+    color: #fff;
+  }
+  .search-result .sym {
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.3px;
+    flex: 0 0 auto;
+  }
+  .search-result .name {
+    color: var(--muted);
+    font-size: 12px;
+    text-align: right;
+    flex: 1 1 auto;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .search-result.active .name,
+  .search-result:hover .name { color: rgba(255,255,255,0.85); }
+  .search-empty {
+    color: var(--muted);
+    padding: 8px 12px;
+    font-size: 12px;
+    font-style: italic;
+  }
   /* flatpickr in our dark theme — slightly tighter and matched colors */
   .flatpickr-input { width: 110px; }
   .flatpickr-calendar.dark {
@@ -251,7 +338,11 @@
 </head>
 <body>
 <header>
-  <h1>{{SYMBOL}}</h1>
+  <h1 id="symbol-header" tabindex="0" title="Click to change symbol — autocomplete on ticker or company name">{{SYMBOL}}</h1>
+  <div id="symbol-search">
+    <input type="text" id="symbol-search-input" placeholder="ticker or company name…" autocomplete="off">
+    <div id="symbol-search-results"></div>
+  </div>
   <label style="color: var(--muted); font-size: 12px;">
     <input type="checkbox" id="auto-refresh"> Auto-refresh (today, 30s)
   </label>
@@ -266,7 +357,10 @@
   <input type="text" id="end-input" value="{{END_DATE}}" placeholder="YYYY-MM-DD" autocomplete="off">
   <label for="interval-input">Interval</label>
   <select id="interval-input">
-    <option value="auto">Auto</option>
+    <!-- Auto is the default — server-side picks the coarsest interval
+         that still shows useful detail for the requested span. The
+         explicit picks below are the user's escape hatch. -->
+    <option value="auto" selected>Auto</option>
     <option value="5m">5m</option>
     <option value="15m">15m</option>
     <option value="30m">30m</option>
@@ -943,6 +1037,157 @@
     }
   }
   priceChart.timeScale().subscribeVisibleTimeRangeChange(debouncePrefetch);
+
+  // ── Symbol-search autocomplete ──────────────────────────────────────
+  // Click the symbol header → a search input pops up that hits
+  // /api/tickers/search?q=… on every keystroke (150ms debounce). Each
+  // result row is "TICKER" left, "Company name" right; clicking or
+  // pressing Enter on a row navigates to /chart/<symbol>. Esc cancels.
+  // Arrow keys move the highlight; Enter on the bare input (no result
+  // highlighted) submits whatever was typed (caps + trim) so power-users
+  // can skip the menu for known tickers.
+  const symHeader = $("symbol-header");
+  const symSearch = $("symbol-search");
+  const symInput  = $("symbol-search-input");
+  const symResults = $("symbol-search-results");
+  let symActive = -1;     // index of highlighted row in symLastResults
+  let symLastResults = [];
+  let symSearchTimer = null;
+  let symInFlight = null;  // AbortController for the current request
+
+  function openSymbolSearch() {
+    symHeader.style.display = "none";
+    symSearch.style.display = "inline-block";
+    symInput.value = "";
+    symActive = -1;
+    symLastResults = [];
+    symResults.innerHTML = "";
+    symInput.focus();
+  }
+  function closeSymbolSearch() {
+    symHeader.style.display = "";
+    symSearch.style.display = "none";
+    symResults.innerHTML = "";
+    symActive = -1;
+    if (symInFlight) { symInFlight.abort(); symInFlight = null; }
+  }
+  symHeader.addEventListener("click", openSymbolSearch);
+  symHeader.addEventListener("keydown", (e) => {
+    // Keyboard activation for accessibility (header has tabindex=0).
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      openSymbolSearch();
+    }
+  });
+
+  function navigateToSymbol(sym) {
+    if (!sym) return;
+    // Preserve the current view (range / start / end / interval) when
+    // changing symbols. The new chart loads on the same window so a
+    // user can scan ticker by ticker without losing their place.
+    const u = new URL(location.href);
+    u.pathname = `/chart/${encodeURIComponent(sym.toUpperCase())}`;
+    location.href = u.toString();
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      "&": "&amp;", "<": "&lt;", ">": "&gt;",
+      '"': "&quot;", "'": "&#39;",
+    }[c]));
+  }
+
+  function renderSymResults() {
+    if (!symLastResults.length) {
+      symResults.innerHTML =
+        `<div class="search-empty">No matches — press Enter to load anyway</div>`;
+      return;
+    }
+    symResults.innerHTML = symLastResults.map((r, i) =>
+      `<div class="search-result ${i === symActive ? "active" : ""}" ` +
+      `data-idx="${i}" data-sym="${escapeHtml(r.symbol)}">` +
+      `<span class="sym">${escapeHtml(r.symbol)}</span>` +
+      `<span class="name">${escapeHtml(r.name || "")}</span></div>`
+    ).join("");
+    symResults.querySelectorAll(".search-result").forEach(el => {
+      el.addEventListener("click", () => navigateToSymbol(el.dataset.sym));
+      el.addEventListener("mouseenter", () => {
+        symActive = parseInt(el.dataset.idx, 10);
+        [...symResults.children].forEach((c, i) =>
+          c.classList.toggle("active", i === symActive));
+      });
+    });
+  }
+
+  async function runSymbolSearch() {
+    const q = symInput.value.trim();
+    if (!q) {
+      symLastResults = [];
+      symResults.innerHTML = "";
+      symActive = -1;
+      return;
+    }
+    if (symInFlight) symInFlight.abort();
+    symInFlight = new AbortController();
+    try {
+      const resp = await fetch(
+        `/api/tickers/search?q=${encodeURIComponent(q)}&limit=10`,
+        { signal: symInFlight.signal },
+      );
+      symInFlight = null;
+      if (!resp.ok) return;
+      const data = await resp.json();
+      symLastResults = data.results || [];
+      symActive = symLastResults.length ? 0 : -1;
+      renderSymResults();
+    } catch (e) {
+      // AbortError on rapid keypress; ignore.
+      if (e.name !== "AbortError") console.error(e);
+    }
+  }
+
+  symInput.addEventListener("input", () => {
+    if (symSearchTimer) clearTimeout(symSearchTimer);
+    symSearchTimer = setTimeout(runSymbolSearch, 150);
+  });
+  symInput.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      closeSymbolSearch();
+      return;
+    }
+    if (e.key === "Enter") {
+      e.preventDefault();
+      if (symActive >= 0 && symLastResults[symActive]) {
+        navigateToSymbol(symLastResults[symActive].symbol);
+      } else {
+        // Empty results or no highlight → just trust whatever the user
+        // typed. Lets you go straight to /chart/AVGO without waiting
+        // for the search to populate.
+        const raw = symInput.value.trim();
+        if (raw) navigateToSymbol(raw);
+      }
+      return;
+    }
+    if (e.key === "ArrowDown" && symLastResults.length) {
+      e.preventDefault();
+      symActive = (symActive + 1) % symLastResults.length;
+      renderSymResults();
+    } else if (e.key === "ArrowUp" && symLastResults.length) {
+      e.preventDefault();
+      symActive = (symActive - 1 + symLastResults.length) % symLastResults.length;
+      renderSymResults();
+    }
+  });
+
+  // Click outside (anywhere not inside the search widget) closes the
+  // popover. Listen on mousedown so the click that lands on a result
+  // row still fires its own handler before the close.
+  document.addEventListener("mousedown", (e) => {
+    if (symSearch.style.display === "none") return;
+    if (symSearch.contains(e.target) || e.target === symHeader) return;
+    closeSymbolSearch();
+  });
 
   // Initial load: prefer URL params (so a deep-linked /chart/NDX?range=1m
   // opens on that view) and fall back to the server-supplied start/end
