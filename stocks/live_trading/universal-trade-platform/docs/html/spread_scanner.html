@@ -1,0 +1,910 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Spread Scanner — Universal Trade Platform</title>
+    <style>
+:root {
+    --bg-primary: #0d1117;
+    --bg-secondary: #161b22;
+    --bg-tertiary: #21262d;
+    --text-primary: #e6edf3;
+    --text-secondary: #8b949e;
+    --text-muted: #6e7681;
+    --border: #30363d;
+    --accent-blue: #58a6ff;
+    --accent-green: #3fb950;
+    --accent-red: #f85149;
+    --accent-orange: #d29922;
+    --accent-purple: #bc8cff;
+    --code-bg: #161b22;
+    --link: #58a6ff;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans', Helvetica, Arial, sans-serif;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.7;
+    padding: 0;
+    margin: 0;
+}
+
+.container {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 40px 32px;
+}
+
+/* Navigation bar */
+.nav-bar {
+    background: var(--bg-secondary);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 32px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    flex-wrap: wrap;
+}
+
+.nav-bar a {
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 14px;
+    padding: 4px 8px;
+    border-radius: 6px;
+    transition: all 0.2s;
+}
+
+.nav-bar a:hover {
+    color: var(--text-primary);
+    background: var(--bg-tertiary);
+}
+
+.nav-bar a.active {
+    color: var(--accent-blue);
+    background: rgba(88, 166, 255, 0.1);
+}
+
+.nav-bar .nav-title {
+    color: var(--text-primary);
+    font-weight: 600;
+    font-size: 15px;
+    margin-right: 8px;
+}
+
+/* Headings */
+h1 {
+    font-size: 2em;
+    font-weight: 600;
+    margin: 0 0 16px 0;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+h2 {
+    font-size: 1.5em;
+    font-weight: 600;
+    margin: 32px 0 16px 0;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+h3 {
+    font-size: 1.25em;
+    font-weight: 600;
+    margin: 24px 0 12px 0;
+    color: var(--text-primary);
+}
+
+h4 {
+    font-size: 1.1em;
+    font-weight: 600;
+    margin: 20px 0 8px 0;
+    color: var(--text-secondary);
+}
+
+/* Paragraphs and text */
+p {
+    margin: 0 0 16px 0;
+    color: var(--text-primary);
+}
+
+a {
+    color: var(--link);
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+strong {
+    color: var(--text-primary);
+    font-weight: 600;
+}
+
+em {
+    color: var(--text-secondary);
+}
+
+hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 32px 0;
+}
+
+/* Lists */
+ul, ol {
+    margin: 0 0 16px 0;
+    padding-left: 28px;
+}
+
+li {
+    margin: 4px 0;
+    color: var(--text-primary);
+}
+
+li > ul, li > ol {
+    margin: 4px 0 4px 0;
+}
+
+/* Code */
+code {
+    font-family: 'SF Mono', 'Fira Code', 'Fira Mono', Menlo, Consolas, monospace;
+    font-size: 0.88em;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 2px 6px;
+    color: var(--accent-blue);
+}
+
+pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin: 0 0 16px 0;
+    overflow-x: auto;
+    line-height: 1.5;
+}
+
+pre code {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 0.88em;
+    color: var(--text-primary);
+}
+
+/* Tables */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0 0 16px 0;
+    font-size: 0.95em;
+}
+
+thead {
+    background: var(--bg-secondary);
+}
+
+th {
+    text-align: left;
+    padding: 10px 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+    border-bottom: 2px solid var(--border);
+    white-space: nowrap;
+}
+
+td {
+    padding: 8px 14px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text-primary);
+}
+
+tr:hover {
+    background: var(--bg-secondary);
+}
+
+/* Blockquotes */
+blockquote {
+    border-left: 4px solid var(--accent-blue);
+    padding: 8px 16px;
+    margin: 0 0 16px 0;
+    background: var(--bg-secondary);
+    border-radius: 0 8px 8px 0;
+    color: var(--text-secondary);
+}
+
+blockquote p {
+    margin: 0;
+    color: var(--text-secondary);
+}
+
+/* Definition lists */
+dt {
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-top: 12px;
+}
+
+dd {
+    margin-left: 20px;
+    margin-bottom: 8px;
+    color: var(--text-secondary);
+}
+
+/* Footer */
+.footer {
+    margin-top: 48px;
+    padding-top: 16px;
+    border-top: 1px solid var(--border);
+    color: var(--text-muted);
+    font-size: 0.85em;
+    text-align: center;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .container { padding: 20px 16px; }
+    .nav-bar { padding: 10px 16px; }
+    table { font-size: 0.85em; }
+    th, td { padding: 6px 8px; }
+}
+</style>
+</head>
+<body>
+    <nav class="nav-bar">
+    <span class="nav-title">UTP Docs</span>
+    <a href="index.html">Home</a>
+    <a href="usage_guide.html">Usage Guide</a>
+    <a href="architecture.html">Architecture</a>
+    <a href="api_reference.html">API Reference</a>
+    <a href="playbook.html">Playbook</a>
+    <a href="providers.html">Providers</a>
+    <a href="configuration.html">Configuration</a>
+    <a href="authentication.html">Authentication</a>
+    <a href="testing.html">Testing</a>
+    <a href="ibkr_setup_guide.html">IBKR Setup</a>
+    <a href="etrade_setup_guide.html">E*TRADE Setup</a>
+    <a href="symbology.html">Symbology</a>
+    <a href="websockets.html">WebSockets</a>
+    </nav>
+    <div class="container">
+    <h1 id="spread-scanner-design-extension-guide">Spread Scanner — Design &amp; Extension Guide</h1>
+<p><code>spread_scanner.py</code> is a single-file terminal dashboard + live ROI screener
+for credit spreads. This doc captures the non-obvious design decisions
+and integration points so future sessions can extend it without
+re-discovering the same trade-offs.</p>
+<p>The scanner is intentionally one large file (with a tests counterpart in
+<code>tests/test_utp.py</code>); the UTP rules forbid splitting it. Treat this doc
+as the architectural map.</p>
+<hr />
+<h2 id="data-flow">Data flow</h2>
+<div class="codehilite"><pre><span></span><code><span class="w">                  </span><span class="err">┌──────────────────────┐</span>
+<span class="w">                  </span><span class="err">│</span><span class="w">  </span><span class="n">percentile</span><span class="w"> </span><span class="n">server</span><span class="w">   </span><span class="err">│</span>
+<span class="w">                  </span><span class="err">│</span><span class="w">  </span><span class="o">/</span><span class="n">range_percentiles</span><span class="w">  </span><span class="err">│</span><span class="w">   </span><span class="p">(</span><span class="nl">heavy</span><span class="p">:</span><span class="w"> </span><span class="o">~</span><span class="mi">120</span><span class="n">KB</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="mi">7</span><span class="o">-</span><span class="mi">8</span><span class="n">s</span><span class="p">)</span>
+<span class="w">                  </span><span class="err">└────────────┬─────────┘</span>
+<span class="w">                               </span><span class="err">│</span><span class="w">  </span><span class="n">fetch_tier_data</span><span class="p">()</span>
+<span class="w">                               </span><span class="err">│</span><span class="w">  </span><span class="n">cached</span><span class="w"> </span><span class="mi">2</span><span class="n">h</span><span class="w"> </span><span class="n">via</span><span class="w"> </span><span class="n">TierDataCache</span>
+<span class="w">                               </span><span class="err">▼</span>
+<span class="w">   </span><span class="err">┌──────────────────────────────────────────────────────┐</span>
+<span class="w">   </span><span class="err">│</span><span class="w"> </span><span class="n">scan_all_tickers</span><span class="p">()</span><span class="w">                                   </span><span class="err">│</span>
+<span class="w">   </span><span class="err">│</span><span class="w">   </span><span class="nl">gather</span><span class="p">:</span><span class="w"> </span><span class="n">fetch_quote</span><span class="w"> </span><span class="err">×</span><span class="w"> </span><span class="n">N</span><span class="w"> </span><span class="p">(</span><span class="n">per</span><span class="w"> </span><span class="n">ticker</span><span class="p">)</span><span class="w">               </span><span class="err">│</span>
+<span class="w">   </span><span class="err">│</span><span class="w">           </span><span class="n">fetch_expirations</span><span class="w">  </span><span class="p">(</span><span class="mi">1</span><span class="p">)</span><span class="w">                     </span><span class="err">│</span>
+<span class="w">   </span><span class="err">│</span><span class="w">           </span><span class="n">fetch_tier_data</span><span class="w">    </span><span class="p">(</span><span class="n">cached</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="err">–</span><span class="mi">1</span><span class="err">×</span><span class="o">/</span><span class="k">cycle</span><span class="p">)</span><span class="w">    </span><span class="err">│</span>
+<span class="w">   </span><span class="err">│</span><span class="w">   </span><span class="k">then</span><span class="w">  </span><span class="err">:</span><span class="w"> </span><span class="n">fetch_option_chain</span><span class="w"> </span><span class="err">×</span><span class="w"> </span><span class="p">(</span><span class="n">DTE</span><span class="w"> </span><span class="err">×</span><span class="w"> </span><span class="n">ticker</span><span class="p">)</span><span class="w">        </span><span class="err">│</span>
+<span class="w">   </span><span class="err">│</span><span class="w">   </span><span class="n">build</span><span class="w"> </span><span class="err">:</span><span class="w"> </span><span class="k">data</span><span class="o">[</span><span class="n">&quot;dte_sections&quot;</span><span class="o">][</span><span class="n">dte</span><span class="o">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="err">{</span><span class="p">...</span><span class="err">}</span><span class="w">          </span><span class="err">│</span>
+<span class="w">   </span><span class="err">│</span><span class="w">   </span><span class="k">set</span><span class="w">   </span><span class="err">:</span><span class="w"> </span><span class="k">data</span><span class="o">[</span><span class="n">&quot;tier_filter_state&quot;</span><span class="o">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">active</span><span class="o">|</span><span class="w">        </span><span class="err">│</span>
+<span class="w">   </span><span class="err">│</span><span class="w">            </span><span class="n">unavailable</span><span class="o">|</span><span class="k">off</span><span class="w">                           </span><span class="err">│</span>
+<span class="w">   </span><span class="err">└────────────────────────┬─────────────────────────────┘</span>
+<span class="w">                            </span><span class="err">│</span>
+<span class="w">                            </span><span class="err">▼</span>
+<span class="w">   </span><span class="err">┌──────────────────────────────────────────────────────┐</span>
+<span class="w">   </span><span class="err">│</span><span class="w"> </span><span class="n">_verify_top_candidates_with_provider</span><span class="p">()</span><span class="w">               </span><span class="err">│</span>
+<span class="w">   </span><span class="err">│</span><span class="w">   </span><span class="n">batched</span><span class="w"> </span><span class="n">verify_spread_pricing</span><span class="w"> </span><span class="err">→</span><span class="w"> </span><span class="n">mark</span><span class="w"> </span><span class="n">verified</span><span class="o">=</span><span class="w">     </span><span class="err">│</span>
+<span class="w">   </span><span class="err">│</span><span class="w">   </span><span class="k">True</span><span class="o">/</span><span class="k">False</span><span class="w"> </span><span class="k">on</span><span class="w"> </span><span class="k">each</span><span class="w"> </span><span class="n">spread</span><span class="w"> </span><span class="p">(</span><span class="n">NON</span><span class="o">-</span><span class="n">DESTRUCTIVE</span><span class="p">).</span><span class="w">       </span><span class="err">│</span>
+<span class="w">   </span><span class="err">└────────────────────────┬─────────────────────────────┘</span>
+<span class="w">                            </span><span class="err">│</span>
+<span class="w">                            </span><span class="err">▼</span>
+<span class="w">   </span><span class="err">┌──────────────────────────────────────────────────────┐</span>
+<span class="w">   </span><span class="err">│</span><span class="w"> </span><span class="n">_collect_filtered_candidates</span><span class="p">()</span><span class="w"> </span><span class="err">—</span><span class="w"> </span><span class="n">fail</span><span class="o">-</span><span class="nl">safe</span><span class="p">:</span><span class="w">          </span><span class="err">│</span>
+<span class="w">   </span><span class="err">│</span><span class="w">   </span><span class="n">tier_filter_state</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="ss">&quot;unavailable&quot;</span><span class="w"> </span><span class="err">→</span><span class="w"> </span><span class="k">return</span><span class="w"> </span><span class="err">[]</span><span class="w">     </span><span class="err">│</span>
+<span class="w">   </span><span class="err">│</span><span class="w">   </span><span class="k">else</span><span class="err">:</span><span class="w"> </span><span class="k">drop</span><span class="w"> </span><span class="n">verified</span><span class="o">=</span><span class="k">False</span><span class="p">,</span><span class="w"> </span><span class="k">then</span><span class="w"> </span><span class="n">per</span><span class="o">-</span><span class="n">spread</span><span class="w"> </span><span class="n">gates</span><span class="w">   </span><span class="err">│</span>
+<span class="w">   </span><span class="err">│</span><span class="w">   </span><span class="p">(</span><span class="n">min_credit</span><span class="p">,</span><span class="w"> </span><span class="n">min_roi</span><span class="p">,</span><span class="w"> </span><span class="n">min_norm_roi</span><span class="p">,</span><span class="w"> </span><span class="n">min_otm</span><span class="p">,</span><span class="w">       </span><span class="err">│</span>
+<span class="w">   </span><span class="err">│</span><span class="w">    </span><span class="n">min_tier</span><span class="w"> </span><span class="o">[</span><span class="n">DTE-routed</span><span class="o">]</span><span class="p">,</span><span class="w"> </span><span class="n">min_tier_close</span><span class="w"> </span><span class="o">[</span><span class="n">c2c</span><span class="o">]</span><span class="p">)</span><span class="w">      </span><span class="err">│</span>
+<span class="w">   </span><span class="err">└────────────────────────┬─────────────────────────────┘</span>
+<span class="w">                            </span><span class="err">│</span>
+<span class="w">                </span><span class="err">┌───────────┴────────────┐</span>
+<span class="w">                </span><span class="err">▼</span><span class="w">                        </span><span class="err">▼</span>
+<span class="w">      </span><span class="err">┌───────────────────┐</span><span class="w">    </span><span class="err">┌────────────────────┐</span>
+<span class="w">      </span><span class="err">│</span><span class="w"> </span><span class="n">_render_top_picks</span><span class="w"> </span><span class="err">│</span><span class="w">    </span><span class="err">│</span><span class="w"> </span><span class="n">ActionHandler</span><span class="p">.</span><span class="n">fire</span><span class="w"> </span><span class="err">│</span>
+<span class="w">      </span><span class="err">│</span><span class="w"> </span><span class="p">(</span><span class="k">Top</span><span class="o">-</span><span class="n">N</span><span class="w"> </span><span class="n">display</span><span class="w"> </span><span class="o">+</span><span class="w">  </span><span class="err">│</span><span class="w">    </span><span class="err">│</span><span class="w"> </span><span class="p">(</span><span class="nf">log</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">notify</span><span class="w"> </span><span class="o">/</span><span class="w">    </span><span class="err">│</span>
+<span class="w">      </span><span class="err">│</span><span class="w">  </span><span class="n">Hist</span><span class="o">+</span><span class="n">Pred</span><span class="w"> </span><span class="n">enrich</span><span class="p">)</span><span class="err">│</span><span class="w">    </span><span class="err">│</span><span class="w">  </span><span class="n">simulate_trade</span><span class="w"> </span><span class="o">/</span><span class="w">  </span><span class="err">│</span>
+<span class="w">      </span><span class="err">└───────────────────┘</span><span class="w">    </span><span class="err">│</span><span class="w">  </span><span class="n">trade</span><span class="p">)</span><span class="w">            </span><span class="err">│</span>
+<span class="w">                               </span><span class="err">└────────────────────┘</span>
+</code></pre></div>
+
+<p>Key endpoints, all with primary/backup probe via <code>_resolve_url_with_backup</code>:</p>
+<table>
+<thead>
+<tr>
+<th>URL</th>
+<th>Probe path</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>daemon_url</code> (default <code>:8000</code>)</td>
+<td><code>/health</code></td>
+<td>Quotes, option chains, verify, trade</td>
+</tr>
+<tr>
+<td><code>db_url</code> (default <code>:9102</code>)</td>
+<td><code>/health</code></td>
+<td>Previous-day closes</td>
+</tr>
+<tr>
+<td><code>percentile_url</code> (default <code>:9100</code>)</td>
+<td><code>/health</code></td>
+<td>Tier / hourly / hourly_1dte data</td>
+</tr>
+</tbody>
+</table>
+<p>The probe path is <code>/health</code> everywhere — sub-millisecond on every server
+in the fleet. <strong>Do not</strong> revert to a heavyweight data endpoint
+(<code>/dashboard/summary</code> or <code>/range_percentiles</code> were the previous offenders);
+those legitimately take 1-8s on a healthy server, exceed the 4s probe
+timeout, and silently lock the resolver into the unreachable backup.</p>
+<hr />
+<h2 id="top-n-picks-layout">Top-N picks layout</h2>
+<p>Each row is a fixed-width column composition rendered through visible-
+length-aware <code>_pad()</code> so ANSI colors don't break alignment.</p>
+<div class="codehilite"><pre><span></span><code> #  Sym  Type DTE Short/Long   Credit   Bid/Ask     nROI   OTM%  Cl%   Δshort Vfy   Hist        Pred
+ 1  SPX  PUT  D0  7050/7030    $0.50    1.85/0.05   2.5%  ot1.4 cl-0.8 Δ-0.13 ✓3s   p95 mod    p98 cons
+</code></pre></div>
+
+<table>
+<thead>
+<tr>
+<th>Cell</th>
+<th>Source</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Credit</td>
+<td><code>spread.credit</code> (verify-refreshed)</td>
+<td>Net spread credit</td>
+</tr>
+<tr>
+<td>Bid/Ask</td>
+<td><code>short_bid</code> / <code>long_ask</code></td>
+<td>Leg prices that compose the credit. <code>—</code> when missing</td>
+</tr>
+<tr>
+<td>nROI</td>
+<td><code>roi_pct / (dte+1)</code></td>
+<td>Normalized ROI; <code>color_roi()</code> highlights ≥ 2%</td>
+</tr>
+<tr>
+<td>OTM%</td>
+<td>distance from current spot</td>
+<td>Geometric, not statistical</td>
+</tr>
+<tr>
+<td>Cl%</td>
+<td><code>(short - prev_close)/prev_close × 100</code></td>
+<td>Geometric distance from prior close</td>
+</tr>
+<tr>
+<td>Δshort</td>
+<td><code>spread.short_delta</code></td>
+<td>Short leg delta if Greeks present</td>
+</tr>
+<tr>
+<td>Vfy</td>
+<td>post-<code>verify_spread_pricing</code> annotation</td>
+<td><code>✓Ns</code> (age-of-quote) when verified, <code>—</code> otherwise</td>
+</tr>
+<tr>
+<td><strong>Hist</strong></td>
+<td><code>classify_strike_to_percentile(model="close_to_close", dte=N)</code></td>
+<td><strong>Statistical</strong> distance from prev_close, anchored historical</td>
+</tr>
+<tr>
+<td><strong>Pred</strong></td>
+<td><code>classify_strike_to_percentile(model=...)</code> — DTE-routed</td>
+<td><strong>Statistical</strong> distance from current spot, live</td>
+</tr>
+</tbody>
+</table>
+<p>The Hist / Pred cells render percentile + optional named-tier marker
+(<code>pNN [agg|mod|cons]</code>). Coloring: agg→red, mod→yellow, cons→green.</p>
+<h3 id="hist-vs-pred-what-the-columns-actually-mean">Hist vs Pred — what the columns actually mean</h3>
+<ul>
+<li><strong>Hist</strong> is anchored to <em>yesterday's close</em>. It tells you "given the
+  past distribution of N-DTE moves from prior close, what percentile is
+  this short strike at?" Stable across the day.</li>
+<li><strong>Pred</strong> is anchored to <em>current spot</em>, slot-aware. It tells you
+  "given the live intraday distribution from the current half-hour slot
+  to the relevant horizon, what percentile is this short strike at?"
+  Updates through the day as the slot rolls forward.</li>
+</ul>
+<p>For DTE 0, both columns are populated (Hist=c2c-0, Pred=intraday).
+For DTE 1, both populated (Hist=c2c-1, Pred=intraday_1dte — see below).
+For DTE ≥ 2, Pred renders <code>—</code> (no intraday-to-DTE-N model exists yet).</p>
+<hr />
+<h2 id="dte-routing-matrix">DTE routing matrix</h2>
+<p><code>min_tier: pN</code> (and the Pred column) routes to the appropriate model
+based on the spread's DTE. This is the single most important mental
+model in the scanner — every bug in this area has been because someone
+applied a same-day-only distribution to a multi-day holding period.</p>
+<table>
+<thead>
+<tr>
+<th>Spread DTE</th>
+<th><code>min_tier</code> filter model</th>
+<th>Pred column model</th>
+<th>Anchor</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>0</td>
+<td><code>intraday</code> (hourly slots → today's close)</td>
+<td><code>intraday</code></td>
+<td>live spot</td>
+</tr>
+<tr>
+<td>1</td>
+<td><code>intraday_1dte</code> (hourly_1dte slots → next-day close)</td>
+<td><code>intraday_1dte</code></td>
+<td>live spot</td>
+</tr>
+<tr>
+<td>2+</td>
+<td><code>close_to_close</code> window=N</td>
+<td><code>—</code> (no intraday model)</td>
+<td>prev_close</td>
+</tr>
+</tbody>
+</table>
+<p>When the percentile server doesn't ship <code>hourly_1dte</code> for a symbol
+(older server / computation skipped), DTE 1 transparently falls back to
+<code>close_to_close</code> window=1 — same protective horizon, just anchored to
+prev_close instead of live spot. No banner, no error; the fallback is
+silent because both produce coherent boundaries.</p>
+<p><code>min_tier_close: pN</code> is INDEPENDENT of <code>min_tier</code> and always applies
+the close-to-close model with window=DTE. Setting both gives layered
+safety (live intraday gate + historical c2c gate) — a spread must pass
+both.</p>
+<h3 id="server-side-data-shape-from-range_percentilesformatjson">Server-side data shape (from <code>/range_percentiles?format=json</code>)</h3>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;tickers&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span>
+<span class="w">    </span><span class="p">{</span><span class="nt">&quot;ticker&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;SPX&quot;</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;windows&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">       </span><span class="nt">&quot;0&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;when_down&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;pct&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;p90&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">-1.0</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;p95&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">-1.5</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;p98&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">-2.0</span><span class="p">}},</span>
+<span class="w">             </span><span class="nt">&quot;when_up&quot;</span><span class="p">:</span><span class="w">   </span><span class="p">{</span><span class="err">...</span><span class="p">}},</span>
+<span class="w">       </span><span class="nt">&quot;1&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="err">...</span><span class="p">},</span><span class="w"> </span><span class="nt">&quot;2&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="err">...</span><span class="p">}}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">],</span>
+<span class="w">  </span><span class="nt">&quot;hourly&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w">                          </span><span class="c1">// 0DTE intraday-to-EOD</span>
+<span class="w">    </span><span class="nt">&quot;SPX&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;recommended&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">        </span><span class="nt">&quot;intraday&quot;</span><span class="p">:</span><span class="w">       </span><span class="p">{</span><span class="nt">&quot;aggressive&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;put&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">90</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;call&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">90</span><span class="p">},</span><span class="w"> </span><span class="err">...</span><span class="p">},</span>
+<span class="w">        </span><span class="nt">&quot;close_to_close&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;aggressive&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;put&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">90</span><span class="p">,</span><span class="w"> </span><span class="nt">&quot;call&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">90</span><span class="p">},</span><span class="w"> </span><span class="err">...</span><span class="p">}</span>
+<span class="w">      </span><span class="p">},</span>
+<span class="w">      </span><span class="nt">&quot;slots&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;10:00&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;when_down&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;pct&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;p90&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">-0.8</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="p">}},</span><span class="w"> </span><span class="err">...</span><span class="p">}}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">},</span>
+<span class="w">  </span><span class="nt">&quot;hourly_1dte&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="w">                     </span><span class="c1">// 1DTE intraday-to-next-close (NEW)</span>
+<span class="w">    </span><span class="nt">&quot;SPX&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;recommended&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;intraday&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;aggressive&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;put&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">90</span><span class="p">,</span><span class="w"> </span><span class="err">...</span><span class="p">}}},</span>
+<span class="w">      </span><span class="nt">&quot;slots&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="nt">&quot;10:00&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span><span class="err">...</span><span class="p">}}</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p>The two helpers that read this data:</p>
+<ul>
+<li><strong><code>resolve_tier_strike(tier_data, sym, side, tier, model, prev_close, current_price, dte)</code></strong>
+  — forward direction (tier name → strike). Used by the dashboard's tier-row renderer and by the tier filter boundary computation.</li>
+<li><strong><code>classify_strike_to_percentile(tier_data, sym, side, model, prev_close, current_price, short_strike, dte)</code></strong>
+  — inverse (strike → percentile + matching tier name). Used by the Top-N Hist / Pred enrichment.</li>
+</ul>
+<p>Both helpers dispatch by model:</p>
+<table>
+<thead>
+<tr>
+<th><code>model</code> argument</th>
+<th>Reads from</th>
+<th>Anchor</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>"intraday"</code></td>
+<td><code>tier_data["hourly"][sym].slots</code></td>
+<td><code>current_price</code></td>
+</tr>
+<tr>
+<td><code>"intraday_1dte"</code></td>
+<td><code>tier_data["hourly_1dte"][sym].slots</code></td>
+<td><code>current_price</code></td>
+</tr>
+<tr>
+<td><code>"close_to_close"</code></td>
+<td><code>tier_data["tickers"][i].windows[dte]</code></td>
+<td><code>prev_close</code></td>
+</tr>
+</tbody>
+</table>
+<p>Adding a new model = add a branch in both helpers + tests. Keep them in
+lock-step; they're currently structured so each model has parallel
+intraday-style and c2c-style cases, sharing the strike-rounding tail.</p>
+<hr />
+<h2 id="caches">Caches</h2>
+<p>Three caches, all in-process, with different lifetimes:</p>
+<table>
+<thead>
+<tr>
+<th>Cache</th>
+<th>Lifetime</th>
+<th>Retry-while-empty</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>_resolved_url_cache</code></td>
+<td>process</td>
+<td>n/a (probed once at startup)</td>
+<td>Pin which of (primary, backup) responded to the <code>/health</code> probe</td>
+</tr>
+<tr>
+<td><code>PrevCloseCache</code></td>
+<td>process; refresh after 04:00 PT once stale ≥ 24h, plus 60s incomplete-retry</td>
+<td>yes, until every ticker has a value</td>
+<td>Yesterday's settlement (db_server <code>/api/range_percentiles</code>)</td>
+</tr>
+<tr>
+<td><code>TierDataCache</code></td>
+<td>2h TTL on success path</td>
+<td>yes (every cycle while <code>data is None</code>)</td>
+<td>The full <code>/range_percentiles</code> payload (~120KB); refresh policy is <code>should_refresh()</code> returns True when <code>data is None</code> OR age &gt; <code>ttl_seconds</code></td>
+</tr>
+</tbody>
+</table>
+<p><strong>Why TierDataCache exists</strong>: <code>/range_percentiles?ticker=SPX,NDX,RUT&amp;windows=0,1</code>
+takes 7-8s to compute on a cold server (it scans many 5-min CSVs). The
+underlying model only retrains a few times per day, so once-every-2h
+refresh is plenty. Without the cache, every scan cycle (interval=20s)
+was eating 7-8s of wall time on a useless re-fetch.</p>
+<p><strong>Cold-start retry semantics</strong>: while the cache has never successfully
+fetched (<code>data is None</code>), <code>should_refresh()</code> always returns True — so
+a transient server failure at scanner startup doesn't lock out tier
+filtering for the full TTL. Once a fetch succeeds, the timer starts
+and the next refresh is at +2h.</p>
+<p><strong>Stale-data preservation</strong>: if a refresh fails BUT <code>data</code> is already
+populated, the stale payload is preserved (better than no picks). The
+error reason is recorded in <code>cache.error_reason</code> for any UI surface
+that wants to show "stale: <reason>" — currently none does, but it's
+there.</p>
+<hr />
+<h2 id="probe-endpoint-resolution">Probe + endpoint resolution</h2>
+<p><code>resolve_endpoint_urls(client, args)</code> runs once at scanner startup and
+overwrites <code>args.daemon_url / db_url / percentile_url</code> with whichever of
+(primary, backup) responded to a <code>GET /health</code> within 4 seconds.</p>
+<p>The resolved URLs are also cached on <code>args.resolved_endpoints</code> so the
+dashboard's dim-grey footer can display them — making it obvious from
+the dashboard alone which servers the scanner is talking to. (Failure
+mode: if both primary and backup were down at startup, the resolver
+caches <code>backup</code> as the "winner" — every subsequent fetch fails. The
+endpoints line tells you which URL was picked, so you can spot it.)</p>
+<p><strong>Critical invariants</strong>:</p>
+<ul>
+<li>Probe path = <code>/health</code> everywhere. Status &lt; 500 is treated as "up".</li>
+<li>Default timeout = 4s. Pinned by
+  <code>test_resolve_url_with_backup_default_timeout_tolerates_slow_probe</code>.</li>
+<li>The <code>_resolve_url_with_backup</code> cache is keyed on <code>(primary, backup)</code>,
+  so it survives multiple calls to <code>resolve_endpoint_urls</code> within one
+  process — the probe runs once.</li>
+</ul>
+<hr />
+<h2 id="refresh-cadence-anticipatory-kickoff">Refresh cadence (anticipatory kickoff)</h2>
+<p>Naïve loops do <code>[scan → render → sleep(interval)]</code> and the dashboard
+sits stuck at "+0s" / "+1s" while the next scan crunches HTTP for
+several seconds. The current loop kicks off the next scan
+<strong><code>predicted_duration + 0.5s</code> before the next paint deadline</strong>, runs
+the scan and the per-second countdown ticker concurrently via
+<code>asyncio.gather</code>, so the visible countdown reaches 0 just as the new
+dashboard appears.</p>
+<p>Helpers:</p>
+<ul>
+<li><strong><code>_compute_kickoff_lead(predicted_dur, interval, *, buffer=0.5)</code></strong> —
+  pure function. Lead = <code>predicted_dur + buffer</code>, floor <code>buffer</code>,
+  ceiling <code>max(interval - 1, buffer)</code> (always at least 1s of visible
+  countdown above 0).</li>
+<li><strong><code>_run_scan_cycle(client, args, prev_close_cache, handlers, tier_data_cache)</code></strong> —
+  one cycle's body, returns <code>(output, error)</code> for asyncio.gather use.</li>
+</ul>
+<p>Recent scan durations are tracked in a <code>deque(maxlen=5)</code> on the loop's
+local <code>scan_duration_history</code>; predicted duration = <code>max(history)</code> so a
+single slow scan early in the session doesn't permanently inflate the
+lead.</p>
+<hr />
+<h2 id="fail-safe-behavior">Fail-safe behavior</h2>
+<p>Two surfaces refuse to proceed when the safety gates haven't run:</p>
+<ol>
+<li>
+<p><strong>Tier filter offline</strong> — when <code>tier_filter_state == "unavailable"</code>
+   (user requested <code>--tiers</code> / <code>--min-tier</code> but <code>fetch_tier_data</code>
+   returned None for a reason), <code>_collect_filtered_candidates</code>
+   returns <code>[]</code> and <code>_render_top_picks</code> shows a red banner instead of
+   misleading picks. Also drops a sticky <code>TIER_OFFLINE</code> activity entry
+   every cycle so the warning persists in the bottom panel. The DTE
+   matrix below is unaffected — operator can still see what's in the
+   chain. The actual error (HTTP code + body excerpt, exception type)
+   is captured in <code>_TIER_FETCH_LAST_ERROR["reason"]</code> and surfaced
+   verbatim in the banner — distinguishes "server unreachable" from
+   "server up but its upstream is down".</p>
+</li>
+<li>
+<p><strong>Verify gate</strong> — every Top-N candidate goes through
+   <code>verify_spread_pricing</code> against the IBKR provider before display.
+   Failed candidates (<code>csv_source_rejected</code>, <code>non_monotonic</code>,
+   <code>no_edge</code>, etc.) get <code>verified=False</code> annotated on the spread —
+   non-destructively, so the regular DTE matrix still shows them in
+   dim grey. <code>_collect_filtered_candidates</code> drops <code>verified=False</code>
+   from the Top-N pipeline.</p>
+</li>
+</ol>
+<p>The verify pass uses a wall-clock batch timeout (<code>verify_batch_timeout_sec</code>,
+default 8s) wrapped in <code>asyncio.wait_for</code> so a hung daemon connection
+pool can't freeze the whole loop.</p>
+<hr />
+<h2 id="yaml-config-reference">YAML config reference</h2>
+<p>Top-level fields read by <code>ScannerConfig</code> (loaded via
+<code>_load_config()</code> two-pass: peek for <code>--config</code>, load YAML, run
+argparse with YAML values as defaults so CLI flags still win).</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>daemon_url</code> / <code>db_url</code> / <code>percentile_url</code></td>
+<td>string OR <code>{primary, backup}</code> mapping</td>
+<td>Mapping form triggers the <code>/health</code> probe at startup</td>
+</tr>
+<tr>
+<td><code>tickers</code></td>
+<td>list[str]</td>
+<td>e.g. <code>[SPX, NDX, RUT]</code></td>
+</tr>
+<tr>
+<td><code>dte</code></td>
+<td>list[int]</td>
+<td>Spread expirations to scan (DTE 0 = today, etc.)</td>
+</tr>
+<tr>
+<td><code>types</code></td>
+<td>list[str]</td>
+<td>Subset of <code>[put, call, iron-condor]</code></td>
+</tr>
+<tr>
+<td><code>widths</code></td>
+<td><code>{symbol: int}</code></td>
+<td>Spread width per ticker</td>
+</tr>
+<tr>
+<td><code>interval</code></td>
+<td>int (seconds)</td>
+<td>Refresh cadence</td>
+</tr>
+<tr>
+<td><code>top</code></td>
+<td>int</td>
+<td>Top-N picks count</td>
+</tr>
+<tr>
+<td><code>verify_max_age_sec</code></td>
+<td>int</td>
+<td>Per-leg quote freshness for verify; default 30s</td>
+</tr>
+<tr>
+<td><code>verify_require_provider_source</code></td>
+<td>bool</td>
+<td>True = reject CSV-sourced quotes; default True</td>
+</tr>
+<tr>
+<td><code>verify_batch_timeout_sec</code></td>
+<td>float</td>
+<td>Wall-clock cap on the verify gather; default 8s</td>
+</tr>
+<tr>
+<td><code>tiers</code></td>
+<td>bool</td>
+<td>True = fetch <code>/range_percentiles</code> (required by tier filters)</td>
+</tr>
+<tr>
+<td><code>min_tier</code></td>
+<td><code>aggressive\|moderate\|conservative\|pN</code></td>
+<td>DTE-routed live-intraday gate (see matrix above)</td>
+</tr>
+<tr>
+<td><code>min_tier_close</code></td>
+<td>same</td>
+<td>Always close-to-close window=DTE; independent of <code>min_tier</code></td>
+</tr>
+<tr>
+<td><code>min_otm</code></td>
+<td>float</td>
+<td>Absolute OTM% floor across all tickers</td>
+</tr>
+<tr>
+<td><code>min_otm_per_ticker</code></td>
+<td><code>{symbol: float}</code></td>
+<td>Per-symbol overrides; effective floor = <code>max(scalar, per_ticker)</code></td>
+</tr>
+<tr>
+<td><code>max_otm</code> / <code>max_otm_per_ticker</code></td>
+<td>float / dict</td>
+<td>OTM ceiling (rare)</td>
+</tr>
+<tr>
+<td><code>handlers</code></td>
+<td>list of handler dicts</td>
+<td>See playbook.md for handler schema</td>
+</tr>
+</tbody>
+</table>
+<p>Reference configs in <code>configs/</code>:</p>
+<ul>
+<li><code>spread_scanner_risk_controlled.yaml</code> — base / generic</li>
+<li><code>spread_scanner_risk_controlled.dte0.yaml</code> — 0DTE-tuned</li>
+<li><code>spread_scanner_risk_controlled.dte1.yaml</code> — 1DTE-tuned (uses <code>hourly_1dte</code> automatically)</li>
+<li><code>spread_scanner_risk_controlled.dte2.yaml</code> — 2DTE-tuned</li>
+</ul>
+<hr />
+<h2 id="adding-a-new-model-horizon">Adding a new model / horizon</h2>
+<p>Suppose the percentile server gains a <code>hourly_2dte</code> field (intraday
+slots → close-of-day-after-tomorrow). To wire it in:</p>
+<ol>
+<li>Add a <code>intraday_2dte</code> model branch in <strong><code>resolve_tier_strike</code></strong> and
+   <strong><code>classify_strike_to_percentile</code></strong> — both functions dispatch by
+   model name:
+   <code>python
+   elif model == "intraday_2dte":
+       sym_data = tier_data.get("hourly_2dte", {}).get(symbol)
+       rec_subkey = "intraday"</code></li>
+<li>Update DTE routing in <strong><code>_collect_filtered_candidates</code></strong>: the
+   <code>min_tier_boundaries_by_dte</code> block currently has a per-DTE
+   if/elif chain. Add a branch:
+   <code>python
+   elif dte_val == 2:
+       bounds = _resolve_tier_boundaries(scan_data, args, "intraday_2dte", dte=2)
+       if not bounds:
+           bounds = _resolve_tier_boundaries(scan_data, args, "close_to_close", dte=2)</code></li>
+<li>Update the Pred column enrichment in <strong><code>_render_top_picks</code></strong>:
+   <code>python
+   if dte_v == 0: pred_model = "intraday"
+   elif dte_v == 1: pred_model = "intraday_1dte"
+   elif dte_v == 2: pred_model = "intraday_2dte"
+   else: pred_model = None</code></li>
+<li>Add tests in <code>tests/test_utp.py</code> mirroring
+   <code>test_resolve_tier_strike_intraday_1dte_*</code> and
+   <code>test_min_tier_pn_routes_to_intraday_1dte_for_dte1_spreads</code>.</li>
+</ol>
+<p>Same pattern for any new percentile-source field — the dispatch is the
+only thing that needs touching; the strike-rounding, comparison logic,
+and named-tier resolution already work model-agnostically.</p>
+<hr />
+<h2 id="testing">Testing</h2>
+<p>All tests live in <code>tests/test_utp.py</code> per the UTP rule. Spread-scanner
+tests are in <code>TestSpreadScanner</code> (~100 tests) and <code>TestActionHandlers</code>
+(~50 tests). Run with:</p>
+<div class="codehilite"><pre><span></span><code>python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span>tests/test_utp.py::TestSpreadScanner<span class="w"> </span>-q
+python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span>tests/test_utp.py::TestActionHandlers<span class="w"> </span>-q
+
+<span class="c1"># Just the live-data-routing tests:</span>
+python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> </span>tests/test_utp.py<span class="w"> </span>-k<span class="w"> </span><span class="s2">&quot;min_tier or tier_filter or routes or classify_strike&quot;</span><span class="w"> </span>-v
+</code></pre></div>
+
+<p>Key pinned behaviors (regression guards):</p>
+<table>
+<thead>
+<tr>
+<th>Test</th>
+<th>Pins</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>test_top_picks_columns_align_with_header</code></td>
+<td>header / data row visible widths match cell-by-cell</td>
+</tr>
+<tr>
+<td><code>test_resolve_url_with_backup_default_timeout_tolerates_slow_probe</code></td>
+<td>probe timeout ≥ 4.0s</td>
+</tr>
+<tr>
+<td><code>test_resolve_endpoint_urls_uses_lightweight_health_probe</code></td>
+<td>probe path = <code>/health</code> for all three endpoints</td>
+</tr>
+<tr>
+<td><code>test_compute_kickoff_lead_*</code></td>
+<td>anticipatory kickoff arithmetic</td>
+</tr>
+<tr>
+<td><code>test_collect_filtered_candidates_returns_empty_when_tier_filter_unavailable</code></td>
+<td>fail-safe Top-N suppression</td>
+</tr>
+<tr>
+<td><code>test_min_tier_pn_routes_to_*</code></td>
+<td>DTE routing matrix (one test per branch)</td>
+</tr>
+<tr>
+<td><code>test_resolve_tier_strike_intraday_1dte_reads_hourly_1dte</code></td>
+<td>model dispatch for the new 1DTE intraday model</td>
+</tr>
+<tr>
+<td><code>test_top_picks_pred_column_uses_intraday_1dte_for_dte1</code></td>
+<td>Pred column DTE routing</td>
+</tr>
+<tr>
+<td><code>test_scan_all_tickers_skips_tier_fetch_when_cache_is_fresh</code></td>
+<td>TierDataCache TTL semantics</td>
+</tr>
+<tr>
+<td><code>test_fetch_tier_data_captures_*</code></td>
+<td>error-reason capture for offline banner</td>
+</tr>
+</tbody>
+</table>
+<hr />
+<h2 id="live-verification">Live verification</h2>
+<p>Quick smoke runs during development:</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Run once and exit (no scan loop, no countdown).</span>
+python<span class="w"> </span>spread_scanner.py<span class="w"> </span>--config<span class="w"> </span>configs/spread_scanner_risk_controlled.dte0.yaml<span class="w"> </span>--once
+python<span class="w"> </span>spread_scanner.py<span class="w"> </span>--config<span class="w"> </span>configs/spread_scanner_risk_controlled.dte1.yaml<span class="w"> </span>--once
+python<span class="w"> </span>spread_scanner.py<span class="w"> </span>--config<span class="w"> </span>configs/spread_scanner_risk_controlled.dte2.yaml<span class="w"> </span>--once
+
+<span class="c1"># What to verify:</span>
+<span class="c1">#  - &quot;endpoints:&quot; footer line shows expected URLs (not falling back to lin1).</span>
+<span class="c1">#  - Top-N header has all 14 columns (#, Sym, Type, DTE, Short/Long,</span>
+<span class="c1">#    Credit, Bid/Ask, nROI, OTM%, Cl%, Δshort, Vfy, Hist, Pred).</span>
+<span class="c1">#  - For DTE 0: Pred shows pNN values (intraday model engaged).</span>
+<span class="c1">#  - For DTE 1: Pred shows pNN values from hourly_1dte (different from</span>
+<span class="c1">#    Hist=c2c-1).</span>
+<span class="c1">#  - When percentile server is down: red TIER FILTER OFFLINE banner with</span>
+<span class="c1">#    the actual error captured (HTTP code + body excerpt).</span>
+</code></pre></div>
+
+<p>When tweaking the kickoff / countdown logic, the regression sanity is to
+run with <code>--interval 8</code> and confirm the displayed countdown ticks
+smoothly <code>+8 → +7 → ... → +1 → repaint</code> without freezing at +0/+1.</p>
+    <div class="footer">
+        Universal Trade Platform Documentation — Generated from Markdown sources in <code>docs/</code>
+    </div>
+    </div>
+</body>
+</html>

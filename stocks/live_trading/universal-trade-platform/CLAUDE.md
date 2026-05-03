@@ -84,6 +84,10 @@ python spread_scanner.py --config cfg.yaml \
 
 The bottom panel shows the last N (default 3; `--recent-actions N`) trade / simulate actions, each with a timestamp, outcome icon, spread identity, credit, risk, nROI, and OTM. Colors: TRADE rows bold-green, SIM rows cyan, risk auto-color by magnitude. When a scan cycle doesn't produce any trade, a dim "QUIET" heartbeat line appears with a diagnosed reason (e.g. `166 rejected by gates: below_min_norm_roi (128), below_otm_floor (25), roi_outside_band (13)`) so you can tell at a glance that the system is alive and which gate is binding.
 
+### Architecture & extension guide
+
+**Read `docs/spread_scanner.md` before making non-trivial changes to the scanner.** It captures the things that aren't obvious from reading `spread_scanner.py` cold — the DTE routing matrix (intraday for DTE 0, intraday_1dte for DTE 1, c2c for DTE>1), the `/health` probe / 4s timeout invariants, the `TierDataCache` 2h TTL with cold-start retry semantics, the anticipatory scan kickoff that aligns the visible countdown with the next paint, the fail-safe Top-N suppression when the percentile server is down, and a step-by-step recipe for adding a new percentile model (e.g. a future `hourly_2dte`).
+
 ## Mandatory Rules
 
 1. **Tests must be updated with every code change.** Any new feature, bug fix, or refactor must include corresponding test additions or updates in `tests/test_utp.py`. Run `python -m pytest tests/ -v` and confirm all tests pass before considering the change complete.
@@ -1212,6 +1216,7 @@ Add to `PositionSource` enum in `models.py`. Set when creating positions. Dashbo
 | `docs/symbology.md` | Symbol mapping across brokers |
 | `docs/websockets.md` | Real-time streaming |
 | `docs/playbook.md` | Trade playbook system, reconciliation, status dashboard |
+| `docs/spread_scanner.md` | Spread scanner architecture: DTE routing matrix, percentile-server data shapes, caches, probe invariants, kickoff cadence, fail-safe behavior, extension recipe |
 
 ### HTML Documentation
 
