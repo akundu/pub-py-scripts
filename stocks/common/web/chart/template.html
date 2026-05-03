@@ -354,24 +354,41 @@
       borderColor: "#30363d",
       timeVisible: true,
       secondsVisible: false,
+      // Axis tick labels use Lightweight Charts' `tickMarkType` to
+      // pick the right format per tick: LC tells us whether *this* tick
+      // is a year/month/day boundary or a sub-day time tick, and we
+      // format accordingly. So a multi-day intraday chart shows day
+      // labels at midnight crossings and time labels in between — the
+      // user can always tell what day they're hovering over.
+      //   tickMarkType: 0=Year, 1=Month, 2=DayOfMonth, 3=Time, 4=TimeWithSeconds
       // Lightweight Charts handles drag-to-pan and wheel/pinch-to-zoom
       // natively. The user's "drag w/in a chart to get the detailed view"
       // is just that — once a wide preset is loaded, drag-zoom drills in
       // without needing a server round-trip.
-      tickMarkFormatter: (time) => {
+      tickMarkFormatter: (time, tickMarkType) => {
         const d = new Date(time * 1000);
-        // For wide ranges (daily bars), label the date; for intraday,
-        // label the clock time. We pick by inspecting the bar interval.
-        return currentInterval === "D"
-          ? d.toLocaleDateString("en-US", {
-              timeZone: "America/New_York",
-              month: "short", day: "numeric",
-              year: lastSpan > 365 ? "numeric" : undefined,
-            })
-          : d.toLocaleTimeString("en-US", {
-              timeZone: "America/New_York",
-              hour: "2-digit", minute: "2-digit", hour12: false,
-            });
+        const fmtDate = (withYear) => d.toLocaleDateString("en-US", {
+          timeZone: "America/New_York",
+          month: "short", day: "numeric",
+          year: withYear ? "numeric" : undefined,
+        });
+        const fmtTime = () => d.toLocaleTimeString("en-US", {
+          timeZone: "America/New_York",
+          hour: "2-digit", minute: "2-digit", hour12: false,
+        });
+        // Year boundaries (and >1y spans) include the year for context.
+        const longSpan = lastSpan > 365;
+        if (tickMarkType === 0) return fmtDate(true);                // Year
+        if (tickMarkType === 1) return fmtDate(longSpan);            // Month
+        if (tickMarkType === 2) return fmtDate(false);               // Day
+        // Sub-day time ticks: usually just HH:MM, but on multi-day
+        // intraday charts a "13:30" alone is ambiguous — it could be
+        // any of the days on screen. So we prepend an abbreviated date
+        // when the loaded span is more than one day. This is exactly
+        // the "show hours but also the date" behavior the user asked
+        // for.
+        if (lastSpan > 1) return `${fmtDate(false)} ${fmtTime()}`;
+        return fmtTime();
       },
     },
     crosshair: { mode: 1 /* Magnet */ },
@@ -556,9 +573,42 @@
   window.addEventListener("popstate", () => loadFromUrl());
 
   // ── Loading overlay helpers ─────────────────────────────────────────
+  // Mirror of common/chart_data.py::pick_interval_for_span so the loading
+  // screen can predict what the server is about to send. Keep these two
+  // tables in sync — the unit test in test_chart_data.py pins the Python
+  // side, so client/server divergence shows up as a visible mismatch.
+  function autoIntervalForSpan(spanDays) {
+    if (spanDays <= 1) return "5m";
+    if (spanDays <= 5) return "30m";
+    if (spanDays <= 30) return "1h";
+    return "D";
+  }
+  // Best-effort estimate from the request params (range preset OR
+  // start/end). Returns null if we can't tell — caller falls back to a
+  // generic "auto" label.
+  function predictAutoInterval(params) {
+    if (params.range) {
+      const days = {
+        "1d": 1, "1w": 7, "1m": 30, "3m": 90, "6m": 180,
+        "1y": 365, "2y": 730,
+      }[params.range];
+      if (days != null) return autoIntervalForSpan(days);
+      if (params.range === "ytd") {
+        const now = new Date();
+        const jan1 = new Date(now.getFullYear(), 0, 1);
+        return autoIntervalForSpan(Math.round((now - jan1) / 86400000));
+      }
+    }
+    if (params.start && params.end) {
+      const s = new Date(params.start), e = new Date(params.end);
+      const days = Math.max(0, Math.round((e - s) / 86400000));
+      return autoIntervalForSpan(days);
+    }
+    return null;
+  }
   function describeLoad(params) {
-    // Friendly text for the spinner — "Loading 6M of NDX (1h bars)…" is
-    // more reassuring during a slow daily-table query than just "loading".
+    // Friendly text for the spinner — "Loading 6M of NDX (D bars)" is
+    // more reassuring during a slow daily-table query than "loading".
     const presetNames = {
       "1d": "Daily", "1w": "1 week", "1m": "1 month", "3m": "3 months",
       "6m": "6 months", "ytd": "year-to-date", "1y": "1 year", "2y": "2 years",
@@ -571,9 +621,16 @@
   }
   function showLoading(params) {
     $("loading-label").textContent = describeLoad(params);
-    const iv = (params.interval && params.interval !== "auto")
-      ? `${params.interval} bars` : "interval: auto";
-    $("loading-sublabel").textContent = iv;
+    let sublabel;
+    if (!params.interval || params.interval === "auto") {
+      const predicted = predictAutoInterval(params);
+      sublabel = predicted
+        ? `auto · ~${predicted} bars expected`
+        : "interval: auto";
+    } else {
+      sublabel = `${params.interval} bars`;
+    }
+    $("loading-sublabel").textContent = sublabel;
     $("loading-overlay").classList.add("visible");
     document.body.classList.add("loading");
   }
@@ -613,8 +670,17 @@
       // `range=` presets and `interval=auto` server-side, then displays
       // back so the controls match the view). flatpickr owns the start/end
       // values so we go through its setter to avoid firing onChange.
+      //
+      // We deliberately do NOT overwrite the interval dropdown here.
+      // Doing so used to break this flow:
+      //   1. user clicks 1D → server resolves auto→5m → dropdown becomes "5m"
+      //   2. user clicks 3M → handler reads dropdown ("5m") and sends
+      //      interval=5m → server honors the explicit pick → fetches
+      //      thousands of 5m bars instead of daily.
+      // The actually-loaded interval shows up in the corner status pill
+      // ("179 bars · 1h · …") so the user can still see it; the dropdown
+      // stays as the user's *intent* ("Auto" or an explicit pick).
       setPickerDates(data.start, data.end);
-      $("interval-input").value = currentInterval;
 
       candleSeries.setData(lastBars);
       volumeSeries.setData(lastBars.map(b => ({
