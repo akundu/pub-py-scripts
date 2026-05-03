@@ -187,6 +187,49 @@
     pointer-events: none;
     display: none;
   }
+  /* Live-price block next to the symbol header. Updates via WebSocket
+     during market hours (mirrors the /stock_info pattern); falls back
+     to the most recent close when the market is closed. After-hours
+     section only shows when there's actual AH movement to report. */
+  #live-price {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+  }
+  #live-amount {
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+  }
+  #live-change {
+    font-size: 14px;
+    font-weight: 600;
+  }
+  #live-change.up { color: var(--up); }
+  #live-change.down { color: var(--down); }
+  #live-ah {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--muted);
+    padding: 2px 8px;
+    background: rgba(255,255,255,0.06);
+    border-radius: 4px;
+    border: 1px solid var(--border);
+  }
+  #live-ah.up { color: var(--up); border-color: rgba(38,166,154,0.4); }
+  #live-ah.down { color: var(--down); border-color: rgba(239,83,80,0.4); }
+  #live-status {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--muted);
+    display: inline-block;
+    transition: background 0.2s;
+  }
+  #live-status.connected { background: var(--up); box-shadow: 0 0 6px var(--up); }
+  #live-status.disconnected { background: var(--down); }
   /* Clickable symbol header + autocomplete popover. The header swaps
      with a search input on click; the popover under the input shows
      ranked ticker/name matches from /api/tickers/search. */
@@ -343,9 +386,12 @@
     <input type="text" id="symbol-search-input" placeholder="ticker or company name…" autocomplete="off">
     <div id="symbol-search-results"></div>
   </div>
-  <label style="color: var(--muted); font-size: 12px;">
-    <input type="checkbox" id="auto-refresh"> Auto-refresh (today, 30s)
-  </label>
+  <div id="live-price">
+    <span id="live-status" title="Live price status"></span>
+    <span id="live-amount">—</span>
+    <span id="live-change"></span>
+    <span id="live-ah" style="display:none"></span>
+  </div>
 </header>
 <div class="preset-row" id="preset-row">
   <!-- Buttons populated by JS so the active state stays in sync -->
@@ -865,16 +911,204 @@
     }
   }
 
-  // Auto-refresh — only re-fires when the end-date is today.
-  let refreshTimer = null;
-  $("auto-refresh").addEventListener("change", () => {
-    if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
-    if (!$("auto-refresh").checked) return;
-    refreshTimer = setInterval(() => {
-      const today = new Date().toISOString().slice(0, 10);
-      if ($("end-input").value === today) loadFromManualRange();
-    }, 30000);
-  });
+  // ── Live price (WebSocket) ──────────────────────────────────────────
+  // Mirrors the /stock_info pattern: connect to /ws?symbol=… and update
+  // the header price on every quote_update. The WebSocket emits an
+  // initial_price_update on connect so the header isn't blank for long.
+  // The change-vs-prev-close and after-hours diff need today's daily
+  // open/close as a reference, so we kick off a one-shot fetch to the
+  // chart endpoint for the most recent week of daily bars.
+  // ─────────────────────────────────────────────────────────────────
+  let liveWs = null;
+  let liveWsReconnectTimer = null;
+  let referencePrices = { prev_close: null, day_close: null,
+                          day_close_date: null };
+  let lastLivePrice = null;
+
+  function fmtMoney(n) {
+    if (n == null || !Number.isFinite(n)) return "—";
+    // Two-decimal places with thousands separators — mirrors the
+    // /stock_info ticker display.
+    return n.toLocaleString("en-US", {
+      minimumFractionDigits: 2, maximumFractionDigits: 2,
+    });
+  }
+  function fmtSignedPct(diff, base) {
+    if (diff == null || base == null || !Number.isFinite(base) || base === 0) return "";
+    const pct = (diff / base) * 100;
+    const sign = diff >= 0 ? "+" : "";
+    return `${sign}${diff.toFixed(2)} (${sign}${pct.toFixed(2)}%)`;
+  }
+
+  // ET market sessions:
+  //   regular: 09:30–16:00 weekdays (real-time price)
+  //   after-hours: 16:00–20:00 weekdays (AH section visible)
+  //   pre-market / overnight / weekend: just show prev close vs current
+  function _etTimeParts() {
+    const fmt = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York", hour12: false,
+      hour: "2-digit", minute: "2-digit", weekday: "short",
+    }).formatToParts(new Date());
+    const parts = {};
+    for (const p of fmt) parts[p.type] = p.value;
+    return {
+      hour: parseInt(parts.hour || "0", 10),
+      minute: parseInt(parts.minute || "0", 10),
+      isWeekday: !["Sat", "Sun"].includes(parts.weekday),
+    };
+  }
+  function isMarketOpen() {
+    const t = _etTimeParts();
+    if (!t.isWeekday) return false;
+    const m = t.hour * 60 + t.minute;
+    return m >= 9 * 60 + 30 && m < 16 * 60;
+  }
+  function isAfterHoursNow() {
+    const t = _etTimeParts();
+    if (!t.isWeekday) return false;
+    return t.hour >= 16 && t.hour < 20;
+  }
+  function todayET() {
+    // YYYY-MM-DD in ET (so we can tell if `referencePrices.day_close`
+    // is today's regular close or yesterday's stale entry).
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/New_York", year: "numeric",
+      month: "2-digit", day: "2-digit",
+    }).format(new Date());
+  }
+
+  function renderLivePrice() {
+    const elAmount = $("live-amount");
+    const elChange = $("live-change");
+    const elAh = $("live-ah");
+    if (lastLivePrice == null) {
+      elAmount.textContent = "—";
+      elChange.textContent = "";
+      elChange.className = "";
+      elAh.style.display = "none";
+      return;
+    }
+    elAmount.textContent = fmtMoney(lastLivePrice);
+
+    // Total change vs prior trading day's close. Always shown when we
+    // have prev_close — relevant whether the market is open or closed.
+    const pc = referencePrices.prev_close;
+    if (pc != null && pc > 0) {
+      const diff = lastLivePrice - pc;
+      elChange.textContent = fmtSignedPct(diff, pc);
+      elChange.className = diff >= 0 ? "up" : "down";
+    } else {
+      elChange.textContent = "";
+      elChange.className = "";
+    }
+
+    // After-hours pill — only shown when:
+    //   (a) we are in the AH window in ET, and
+    //   (b) we have today's regular close as reference (the daily bar
+    //       for today must already be in daily_prices, otherwise
+    //       day_close === prev_close and the AH math is meaningless).
+    const dc = referencePrices.day_close;
+    const dcDate = referencePrices.day_close_date;
+    const showAh = isAfterHoursNow()
+                 && dc != null && dc > 0
+                 && dcDate === todayET();
+    if (showAh) {
+      const ahDiff = lastLivePrice - dc;
+      elAh.textContent = `AH ${fmtSignedPct(ahDiff, dc)}`;
+      elAh.className = ahDiff >= 0 ? "up" : "down";
+      elAh.style.display = "inline-block";
+    } else {
+      elAh.style.display = "none";
+    }
+  }
+
+  async function loadReferencePrices() {
+    // One-shot fetch of last week's daily bars. Gives us prev_close and
+    // day_close (the most recent daily bar's close + the date that bar
+    // belongs to). Using interval=D & rsi=false keeps the payload tiny
+    // (~5 bars + stats); the chart's main fetch is unrelated to this.
+    try {
+      const u = new URL(`/api/chart/${encodeURIComponent(SYMBOL)}`,
+                          location.origin);
+      u.searchParams.set("range", "1m");      // wide enough to always have a recent daily bar
+      u.searchParams.set("interval", "D");
+      u.searchParams.set("rsi", "false");
+      const resp = await fetch(u.toString());
+      if (!resp.ok) return;
+      const data = await resp.json();
+      const stats = data.stats || {};
+      const days = data.trading_days_returned || [];
+      referencePrices = {
+        prev_close: stats.prev_close,
+        day_close:  stats.day_close,
+        day_close_date: days.length ? days[days.length - 1] : null,
+      };
+      renderLivePrice();
+    } catch (e) {
+      console.warn("loadReferencePrices failed", e);
+    }
+  }
+
+  function setLiveStatus(connected) {
+    const el = $("live-status");
+    if (connected) {
+      el.className = "connected";
+      el.title = "Live (WebSocket connected)";
+    } else {
+      el.className = "disconnected";
+      el.title = "Live (disconnected — reconnecting)";
+    }
+  }
+
+  function initLiveWebSocket() {
+    if (liveWs) {
+      try { liveWs.close(); } catch (e) {}
+      liveWs = null;
+    }
+    if (liveWsReconnectTimer) {
+      clearTimeout(liveWsReconnectTimer);
+      liveWsReconnectTimer = null;
+    }
+    try {
+      const wsProto = location.protocol === "https:" ? "wss:" : "ws:";
+      const url = `${wsProto}//${location.host}/ws?symbol=${encodeURIComponent(SYMBOL)}`;
+      liveWs = new WebSocket(url);
+      liveWs.onopen = () => setLiveStatus(true);
+      liveWs.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          // Server shape: {symbol, data: {payload: [{price, timestamp}, …]}}
+          // Subscribed as "NDX" but the broadcaster sends to both raw
+          // (I:NDX) and normalized (NDX) forms, so any form matches.
+          const payload = msg && msg.data && msg.data.payload;
+          if (Array.isArray(payload) && payload.length > 0) {
+            const p = parseFloat(payload[0].price);
+            if (Number.isFinite(p)) {
+              lastLivePrice = p;
+              renderLivePrice();
+            }
+          }
+        } catch (e) {}
+      };
+      liveWs.onerror = () => {};  // reported via onclose
+      liveWs.onclose = () => {
+        setLiveStatus(false);
+        // Auto-reconnect with a small backoff. Mirrors the /stock_info
+        // page's behavior so transient network blips heal silently.
+        liveWsReconnectTimer = setTimeout(initLiveWebSocket, 5000);
+      };
+    } catch (e) {
+      console.warn("initLiveWebSocket failed", e);
+    }
+  }
+
+  // Refresh the AH pill on a slow tick so it appears the moment we
+  // cross 4pm ET (otherwise we'd only repaint on the next quote).
+  setInterval(renderLivePrice, 60_000);
+
+  // Kick off both the reference-price fetch and the WS at page load.
+  loadReferencePrices();
+  initLiveWebSocket();
 
   // ── Shift+drag selection: pick a finer time window without leaving
   //    the chart. Lightweight Charts uses plain drag for pan, so we
