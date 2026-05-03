@@ -586,6 +586,14 @@
   let lastBars = [];
   let lastRsi = [];
   let lastStats = {};
+  // Per-day reference points built from `lastBars` after every fetch.
+  //   dayOpenByDate:  ET-date string → that day's first bar's open
+  //   prevCloseByDate: ET-date string → previous trading day's last close
+  // The crosshair tooltip uses these so "vs open" means *this bar's day's
+  // open*, not the window-wide first bar (which was the bug — on a 1M
+  // chart, every bar was being compared to April 2's open).
+  let dayOpenByDate = new Map();
+  let prevCloseByDate = new Map();
   let currentInterval = {{INTERVAL_JSON}};
   let lastSpan = 1;
 
@@ -594,6 +602,45 @@
   const fmtPct = (v) =>
     v == null || Number.isNaN(v) ? "—" : (v >= 0 ? "+" : "") + Number(v).toFixed(2) + "%";
   const dirClass = (v) => (v == null || v === 0) ? "" : (v > 0 ? "tt-up" : "tt-down");
+
+  // Convert a unix-second timestamp into the ET calendar date (YYYY-MM-DD).
+  // We use ET so day boundaries align with NYSE sessions regardless of
+  // the user's browser locale.
+  function etDateOf(unixSec) {
+    return new Intl.DateTimeFormat("en-CA", {
+      timeZone: "America/New_York", year: "numeric",
+      month: "2-digit", day: "2-digit",
+    }).format(new Date(unixSec * 1000));
+  }
+
+  // Walk the bars once after each fetch and capture, per ET date:
+  //   - the first bar's open      (= that day's "open")
+  //   - the last bar's close      (so the next day's prev_close = this)
+  // Bars come in chronological order from the server.
+  function rebuildDayRefs() {
+    dayOpenByDate = new Map();
+    const lastCloseByDate = new Map();
+    for (const b of lastBars) {
+      const d = etDateOf(b.time);
+      if (!dayOpenByDate.has(d)) dayOpenByDate.set(d, b.open);
+      lastCloseByDate.set(d, b.close);
+    }
+    // prev_close for day N = last close of day N-1 within the window.
+    // For the *first* day in the window we fall back to the window-level
+    // prev_close from the server's stats (close of the trading day right
+    // before the window started).
+    prevCloseByDate = new Map();
+    const dates = [...dayOpenByDate.keys()];
+    for (let i = 0; i < dates.length; i++) {
+      if (i === 0) {
+        if (lastStats && lastStats.prev_close != null) {
+          prevCloseByDate.set(dates[0], lastStats.prev_close);
+        }
+      } else {
+        prevCloseByDate.set(dates[i], lastCloseByDate.get(dates[i - 1]));
+      }
+    }
+  }
 
   function rsiAtTime(t) {
     let lo = 0, hi = lastRsi.length - 1, hit = null;
@@ -614,10 +661,17 @@
     if (!c) { tooltip.style.display = "none"; return; }
     const v = param.seriesData.get(volumeSeries);
     const rsi = rsiAtTime(param.time);
-    const dayOpen = lastStats.day_open;
-    const prev = lastStats.prev_close;
-    const vsOpen = (dayOpen != null) ? (c.close - dayOpen) / dayOpen * 100 : null;
-    const vsPrev = (prev != null) ? (c.close - prev) / prev * 100 : null;
+    // Per-day references — what most chart UIs (Yahoo, TradingView,
+    // ThinkOrSwim) use for tooltip percentages. "vs open" is this
+    // bar's day's open; "vs prev close" is the close of the trading
+    // day immediately before this bar's day.
+    const barDate = etDateOf(param.time);
+    const dayOpen = dayOpenByDate.get(barDate) ?? null;
+    const prev = prevCloseByDate.get(barDate) ?? null;
+    const vsOpen = (dayOpen != null && dayOpen > 0)
+      ? (c.close - dayOpen) / dayOpen * 100 : null;
+    const vsPrev = (prev != null && prev > 0)
+      ? (c.close - prev) / prev * 100 : null;
     const d = new Date(param.time * 1000);
     const tsFmt = currentInterval === "D"
       ? d.toLocaleDateString("en-US", { timeZone: "America/New_York",
@@ -804,6 +858,9 @@
       lastRsi = data.rsi || [];
       lastStats = data.stats || {};
       currentInterval = data.interval || "5m";
+      // Build per-day open / prev-close lookups now that lastBars and
+      // lastStats are settled — the crosshair tooltip reads from these.
+      rebuildDayRefs();
       // Span in days for the tick formatter to know date-vs-time labels.
       const sd = new Date(data.start), ed = new Date(data.end);
       lastSpan = Math.max(1, Math.round((ed - sd) / 86400000) + 1);
@@ -1249,6 +1306,9 @@
       const rsiByTime = new Map(lastRsi.map(r => [r.time, r]));
       for (const r of (data.rsi || [])) rsiByTime.set(r.time, r);
       lastRsi = [...rsiByTime.values()].sort((a, b) => a.time - b.time);
+      // Per-day refs need the union too — pan-to-load-more added new
+      // dates to the left/right edge.
+      rebuildDayRefs();
       candleSeries.setData(lastBars);
       volumeSeries.setData(lastBars.map(b => ({
         time: b.time, value: b.volume || 0,
