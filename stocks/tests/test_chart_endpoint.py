@@ -267,7 +267,9 @@ def test_api_chart_rejects_inverted_range(chart_fixtures):
 
 
 def test_api_chart_range_preset_1w(chart_fixtures, monkeypatch):
-    """`range=1w` resolves to a 7-day window ending yesterday."""
+    """`range=1w` resolves to a 7-day window ending on the most recent
+    trading day. With today=Thursday (a trading day), end is today
+    itself; for non-trading days end rolls back to the prior session."""
     # Pin "today" so the test is deterministic regardless of when it runs.
     import common.chart_data as cd
     real = cd.compute_range_dates
@@ -278,9 +280,27 @@ def test_api_chart_range_preset_1w(chart_fixtures, monkeypatch):
     )
     req = _MockRequest("NDX", query={"range": "1w"})
     body = json.loads(_run(handle_chart_data_json(req)).body.decode())
-    # end = 2026-04-29; start = end - 6 days = 2026-04-23
-    assert body["end"] == "2026-04-29"
-    assert body["start"] == "2026-04-23"
+    # 2026-04-30 is a Thursday (trading day) → end = today
+    # start = end - 6 days = 2026-04-24
+    assert body["end"] == "2026-04-30"
+    assert body["start"] == "2026-04-24"
+
+
+def test_api_chart_range_preset_1w_on_sunday(chart_fixtures, monkeypatch):
+    """Regression for the user-reported 'Daily on Sunday shows nothing'
+    bug: a Sunday `today` must resolve `end` to the prior Friday, not
+    Saturday."""
+    import common.chart_data as cd
+    real = cd.compute_range_dates
+    from datetime import date as dc
+    monkeypatch.setattr(
+        cd, "compute_range_dates",
+        lambda r, today=None: real(r, today=dc(2026, 5, 3)),  # Sunday
+    )
+    req = _MockRequest("NDX", query={"range": "1d"})
+    body = json.loads(_run(handle_chart_data_json(req)).body.decode())
+    assert body["end"] == "2026-05-01"   # Friday
+    assert body["start"] == "2026-05-01"
 
 
 def test_api_chart_range_preset_unknown_returns_400(chart_fixtures):

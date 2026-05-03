@@ -381,10 +381,11 @@ from datetime import date as _date
 
 
 def test_compute_range_dates_presets():
+    # 2026-05-02 is a Saturday; previous_trading_day → Friday May 1.
     today = _date(2026, 5, 2)
-    # 1d → just yesterday (start == end)
+    # 1d → end and start both pin to the most recent trading day.
     assert compute_range_dates("1d", today) == ("2026-05-01", "2026-05-01")
-    # 1w → 7 days ending yesterday
+    # 1w → 7 days ending on the most recent trading day
     assert compute_range_dates("1w", today) == ("2026-04-25", "2026-05-01")
     # 1m → 30 calendar days
     assert compute_range_dates("1m", today) == ("2026-04-02", "2026-05-01")
@@ -393,6 +394,26 @@ def test_compute_range_dates_presets():
     # 1y, 2y — counted inclusively so [start, end] spans exactly N days
     assert compute_range_dates("1y", today)[0] == "2025-05-02"  # 365 days
     assert compute_range_dates("2y", today)[0] == "2024-05-02"  # 730 days
+
+
+def test_compute_range_dates_anchors_on_friday_when_today_is_sunday():
+    """Regression for the 'Daily preset on Sunday shows nothing' bug:
+    Sunday isn't a trading day, so end must roll back to Friday's
+    session instead of Saturday (the previous calendar day, but no
+    data exists there)."""
+    today = _date(2026, 5, 3)  # Sunday
+    s, e = compute_range_dates("1d", today)
+    assert e == "2026-05-01"   # Friday — most recent trading day
+    assert s == "2026-05-01"
+
+
+def test_compute_range_dates_uses_today_when_today_is_a_trading_day():
+    """When `today` is a trading weekday, the daily preset should
+    anchor on today itself — that's the most recent trading day."""
+    today = _date(2026, 5, 1)  # Friday
+    s, e = compute_range_dates("1d", today)
+    assert e == "2026-05-01"
+    assert s == "2026-05-01"
 
 
 def test_compute_range_dates_ytd_anchors_to_jan_1():
@@ -405,6 +426,19 @@ def test_compute_range_dates_ytd_anchors_to_jan_1():
 def test_compute_range_dates_unknown_preset_raises():
     with pytest.raises(ValueError, match="unknown range preset"):
         compute_range_dates("not-a-preset", _date(2026, 5, 2))
+
+
+def test_most_recent_trading_day_passes_through_weekday():
+    """A weekday that's a trading day is returned as-is."""
+    from common.chart_data import most_recent_trading_day
+    assert most_recent_trading_day(_date(2026, 5, 1)) == _date(2026, 5, 1)
+
+
+def test_most_recent_trading_day_walks_back_from_weekend():
+    """Saturday and Sunday both roll back to Friday."""
+    from common.chart_data import most_recent_trading_day
+    assert most_recent_trading_day(_date(2026, 5, 2)) == _date(2026, 5, 1)
+    assert most_recent_trading_day(_date(2026, 5, 3)) == _date(2026, 5, 1)
 
 
 def test_pick_interval_for_span_minimizes_data_transfer():

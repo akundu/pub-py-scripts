@@ -347,19 +347,42 @@ RANGE_PRESETS: Dict[str, int] = {
 }
 
 
+def most_recent_trading_day(today: Optional[date_cls] = None) -> date_cls:
+    """Return today (if it's an NYSE trading day) or the most recent
+    prior trading day. Holiday-aware via `common.market_hours`.
+
+    Used by `compute_range_dates` so the chart's `Daily` preset on a
+    Sunday or holiday lands on the most recent session with data,
+    instead of a weekend/holiday with nothing to show.
+    """
+    # Lazy import — `market_hours` pulls in `exchange_calendars` which
+    # we don't want to require for callers that just want the resampler.
+    from common.market_hours import is_trading_day, previous_trading_day
+
+    if today is None:
+        today = datetime.now().date()
+    if isinstance(today, datetime):
+        today = today.date()
+    if is_trading_day(today):
+        return today
+    return previous_trading_day(today)
+
+
 def compute_range_dates(
     range_preset: str,
     today: Optional[date_cls] = None,
 ) -> Tuple[str, str]:
     """Translate a preset like `3m` or `ytd` to `(start_date, end_date)`.
 
-    `end_date` is yesterday — same default as the rest of the chart UI, so
-    we always anchor on a closed trading day. `today` is injectable for
-    deterministic tests.
+    `end_date` is the most recent NYSE trading day on or before `today`
+    — so on a Sunday or after a market holiday, the `Daily` preset
+    lands on the previous Friday / pre-holiday close instead of an
+    empty weekend/holiday slot. `today` is injectable for deterministic
+    tests.
     """
     if today is None:
         today = datetime.now().date()
-    end = today - timedelta(days=1)
+    end = most_recent_trading_day(today)
     end_str = end.strftime("%Y-%m-%d")
 
     rp = (range_preset or "").lower().strip()

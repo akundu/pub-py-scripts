@@ -15603,15 +15603,19 @@ def _wants_json_response(request: web.Request) -> bool:
 
 
 def _resolve_chart_date(date_str: str | None) -> str:
-    """Default chart date: yesterday (Pacific) so we always land on the most
-    recently closed trading day's data. Caller-supplied date wins."""
+    """Default chart date: the most recent NYSE trading day. Holiday-
+    aware via `common.market_hours.previous_trading_day`. Caller-
+    supplied date wins.
+
+    On a Sunday or after a market holiday we'd otherwise land on a
+    no-data weekend/holiday slot; the chart's `Daily` preset would
+    show "no data found". This helper keeps the default anchored on a
+    session that actually has bars on disk.
+    """
     if date_str:
         return date_str
-    # The Saturday cron already uses "yesterday"; mirror that so the chart
-    # opens on freshly-augmented data instead of today's incomplete day.
-    from zoneinfo import ZoneInfo
-    pt_now = datetime.now(ZoneInfo("America/Los_Angeles"))
-    return (pt_now.date() - timedelta(days=1)).strftime("%Y-%m-%d")
+    from common.chart_data import most_recent_trading_day
+    return most_recent_trading_day().strftime("%Y-%m-%d")
 
 
 def _normalize_chart_symbol(symbol: str) -> tuple[str, str]:
