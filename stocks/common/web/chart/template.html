@@ -195,8 +195,10 @@
     display: flex;
     align-items: baseline;
     gap: 10px;
-    margin-left: auto;
     font-variant-numeric: tabular-nums;
+    /* Sits right next to the symbol header — same flex `gap` (12px)
+       used by everything in the header. No `margin-left: auto`; the
+       price hugging the ticker reads as a single unit. */
   }
   #live-amount {
     font-size: 22px;
