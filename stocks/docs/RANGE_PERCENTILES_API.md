@@ -4,6 +4,14 @@
 
 The Range Percentiles feature analyzes historical price movements over configurable time windows, showing the distribution of up and down moves at various percentiles. This helps predict potential price ranges based on historical patterns.
 
+> **Intraday slot-based sections (0DTE + 1DTE)** — for the per-half-hour /
+> per-15-min / per-10-min / per-5-min tables that show distributions of
+> moves *from* an intraday point in time *to* a future close, see
+> [`RANGE_PERCENTILES_INTRADAY.md`](RANGE_PERCENTILES_INTRADAY.md). That
+> doc covers the `hourly` (0DTE — same-day close) and `hourly_1dte`
+> (1DTE — next-day close) JSON sections, the WebSocket live-update flow
+> with pre-market polling, and how to add new modes.
+
 ## Architecture
 
 The implementation is now modular:
