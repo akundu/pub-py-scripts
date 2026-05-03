@@ -207,10 +207,18 @@ def compute_chart_stats(
     bars_df: pd.DataFrame,
     prev_close: Optional[float] = None,
 ) -> Dict[str, Any]:
-    """Day-stats block: prev_close, day O/H/L/C, % moves, intraday range, VWAP.
+    """Aggregate stats for whatever bars are passed in: prev_close,
+    open, high, low, close, % moves, range %, VWAP.
 
-    `bars_df` is expected to cover a single trading day at any interval —
-    the caller decides which day to summarize.
+    The shape of `bars_df` decides what the stats describe:
+      * pass a single trading day → "day" stats (open at 9:30, etc.)
+      * pass the whole visible window → "window" stats (open of the
+        first bar, close of the last bar, max high / min low across
+        the entire range)
+    The field names retain the legacy `day_*` prefix for backwards
+    compatibility with the JSON API; both interpretations use the
+    same fields and the frontend labels them generically as
+    Open/High/Low/Close.
     """
     out: Dict[str, Any] = {
         "prev_close": prev_close,

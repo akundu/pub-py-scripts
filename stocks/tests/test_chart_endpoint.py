@@ -174,6 +174,46 @@ def test_api_chart_multi_day(chart_fixtures):
     assert body["trading_days_returned"] == ["2026-04-28", "2026-04-29"]
 
 
+def test_api_chart_stats_summarize_full_window_not_just_last_day(chart_fixtures):
+    """Stats reflect the entire visible window:
+      * open  = first bar's open across the whole window
+      * close = last bar's close across the whole window
+      * high  = max across all bars (any day)
+      * low   = min across all bars (any day)
+    Not just the most recent day's day-only summary.
+
+    Fixture: 04-28 has 2 bars (highs 101 → 102), 04-29 has 12 bars
+    starting at open 100 climbing by 1 per bar (highs reach 111.5).
+    Window stats should pick up 04-28's bars too.
+    """
+    req = _MockRequest("NDX", query={"start": "2026-04-28",
+                                       "end": "2026-04-29",
+                                       "interval": "5m"})
+    body = json.loads(_run(handle_chart_data_json(req)).body.decode())
+    s = body["stats"]
+    # Window-open = first bar of 04-28 (which had open=100)
+    assert s["day_open"] == 100.0
+    # Window-close = last bar of 04-29 (close climbs to 100 + 11 + 1 = 112)
+    assert s["day_close"] == 112.0
+    # Window-high = max across both days; 04-29 reaches 111.5
+    assert s["day_high"] == 111.5
+    # Window-low = min across both days; 04-28's first bar had low=99
+    assert s["day_low"] == 99.0
+
+
+def test_api_chart_stats_single_day_unchanged(chart_fixtures):
+    """A single-day window still produces day-stats — unchanged
+    behavior for the common case so the dashboard's "today's open"
+    reading isn't surprising."""
+    req = _MockRequest("NDX", query={"date": "2026-04-29", "interval": "5m"})
+    body = json.loads(_run(handle_chart_data_json(req)).body.decode())
+    s = body["stats"]
+    assert s["day_open"] == 100.0
+    assert s["day_close"] == 112.0
+    assert s["day_high"] == 111.5
+    assert s["day_low"] == 99.5    # only 04-29 bars; 04-28's 99 isn't in window
+
+
 def test_api_chart_disable_rsi(chart_fixtures):
     req = _MockRequest("NDX", query={"date": "2026-04-29", "rsi": "false"})
     body = json.loads(_run(handle_chart_data_json(req)).body.decode())

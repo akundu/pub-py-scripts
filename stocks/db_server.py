@@ -15684,7 +15684,6 @@ async def handle_chart_data_json(request: web.Request) -> web.Response:
             compute_chart_stats,
             bars_to_lightweight_format,
             rsi_to_lightweight_format,
-            slice_to_one_day,
             compute_range_dates,
             pick_interval_for_span,
             INTERVAL_TO_RULE,
@@ -15790,18 +15789,17 @@ async def handle_chart_data_json(request: web.Request) -> web.Response:
 
     trading_days = sorted({ts.strftime("%Y-%m-%d") for ts in bars_df.index})
 
-    # Stats panel always summarizes a single day. For multi-day views we
-    # use the most recent day in the result (where "today" matters for
-    # most users); for single-day views it's just that day.
-    stats_day = trading_days[-1]
-    day_slice = slice_to_one_day(bars_df, stats_day)
-    if day_slice.empty:
-        # Daily-bar mode: every row is a "day"; just hand the whole frame
-        # to compute_chart_stats and let the day-stats compute against the
-        # last bar's close (intraday O/H/L/C aren't meaningful here).
-        day_slice = bars_df
-    prev_close = find_prev_close(db_symbol, stats_day)
-    stats = compute_chart_stats(day_slice, prev_close=prev_close)
+    # Stats summarize the full visible window — open is the first bar's
+    # open, close is the last bar's close, high/low are the extremes
+    # across every bar on screen. So a 1-month chart shows the
+    # month's O/H/L/C, a 1-day chart shows that day's, etc. The
+    # change-vs-prev-close uses the close of the trading day immediately
+    # before the *first* bar (find_prev_close walks back from there),
+    # so the % move is "from window's start to window's end" — total
+    # change over the displayed range.
+    window_start = bars_df.index[0].strftime("%Y-%m-%d")
+    prev_close = find_prev_close(db_symbol, window_start)
+    stats = compute_chart_stats(bars_df, prev_close=prev_close)
 
     base_payload.update({
         "trading_days_returned": trading_days,
