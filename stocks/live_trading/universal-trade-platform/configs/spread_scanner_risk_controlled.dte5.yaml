@@ -167,13 +167,13 @@ handlers:
     #     RUT: 1.25            # RUT p75=1.65 — otherwise never fires
     # Values may be scalars OR their own schedules.
     min_norm_roi_per_ticker: {}
-    log_file: trades_sim_dte1.jsonl
+    log_file: trades_sim_dte5.jsonl
     daemon_url: http://localhost:8000
     policy: &trade_policy
       roi_pct: [3, 10.0]
       min_otm_pct:  {SPX: 2.5, NDX: 2.75, RUT: 4.0}
       min_credit:   {SPX: 0.5, NDX: 1.0, RUT: 0.35}
-      max_total_risk: 400000
+      max_total_risk: 500000
       max_per_ticker_risk: {SPX: 140000, NDX: 180000, RUT: 120000}
       # Dollar cap on RISK PER TRADE. The handler computes
       #   contracts = max(1, floor(max_risk_per_trade / per_contract_max_loss))
@@ -191,11 +191,11 @@ handlers:
       order_type: MARKET
       stop_loss_multiplier: 2.0
       # ── Per-cycle pacing — see dte0.yaml for full notes ──
-      max_trades_per_cycle: 1
+      max_trades_per_cycle: 3
       min_minutes_between_trades: 3.0
-      #trading_window_pt:
-      #  start: "06:31"
-      #  end:   "11:30"
+      trading_window_pt:
+        start: "06:31"
+        end:   "12:30"
 
   # Live trading — uncomment to activate. Uses the SAME policy as simulate_trade
   # via the YAML anchor above.
