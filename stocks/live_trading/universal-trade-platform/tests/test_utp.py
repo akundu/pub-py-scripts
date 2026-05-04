@@ -16988,6 +16988,57 @@ class TestSpreadScanner:
 
     # ── Top-N per-(symbol, option_type) cap ───────────────────────────
 
+    def test_top_per_combo_one_keeps_put_and_call_for_same_ticker(self):
+        """top_per_combo: 1 → BOTH a SPX put AND a SPX call survive,
+        because the combo key is (symbol, option_type) — different
+        sides are different combos. Pins the user's expected behavior:
+        'I should be able to see SPX put and SPX call if the number is
+        set to 1, right?' — yes."""
+        from spread_scanner import _render_top_picks, parse_args
+
+        args = parse_args([
+            "--tickers", "SPX", "--top", "10",
+            "--top-per-combo", "1",
+        ])
+        scan_data = {
+            "prev_closes": {"SPX": 7100.0},
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-05-04",
+                    "spreads": {
+                        "SPX": [
+                            # Two SPX PUTs (only the top-ROI one should survive).
+                            {"option_type": "PUT", "short_strike": 7050,
+                             "long_strike": 7030, "credit": 1.00,
+                             "roi_pct": 5.0, "otm_pct": 0.7, "width": 20},
+                            {"option_type": "PUT", "short_strike": 7045,
+                             "long_strike": 7025, "credit": 0.80,
+                             "roi_pct": 4.0, "otm_pct": 0.8, "width": 20},
+                            # Two SPX CALLs (only the top-ROI one should survive).
+                            {"option_type": "CALL", "short_strike": 7150,
+                             "long_strike": 7170, "credit": 1.20,
+                             "roi_pct": 6.0, "otm_pct": 0.7, "width": 20},
+                            {"option_type": "CALL", "short_strike": 7155,
+                             "long_strike": 7175, "credit": 0.90,
+                             "roi_pct": 4.5, "otm_pct": 0.8, "width": 20},
+                        ],
+                    },
+                }
+            },
+        }
+        text = "\n".join(_render_top_picks(scan_data, args))
+        # The top SPX PUT (7050) survives.
+        assert "SPX  PUT  D0  7050" in text
+        # The top SPX CALL (7150) ALSO survives — different combo.
+        assert "SPX  CALL D0  7150" in text
+        # The runner-up of EACH side is filtered.
+        assert "7045" not in text, (
+            "second-best SPX PUT must be filtered (same combo as 7050)"
+        )
+        assert "7155" not in text, (
+            "second-best SPX CALL must be filtered (same combo as 7150)"
+        )
+
     def test_top_per_combo_caps_one_per_combo_by_default(self):
         """top_per_combo: 1 — only the best put and best call per
         ticker survive. Multiple SPX puts with different strikes get
