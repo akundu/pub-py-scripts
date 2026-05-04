@@ -565,21 +565,116 @@ async def load_bars_with_db_fallback(
             # Surface the CSV slice anyway on DB error.
             db_df = pd.DataFrame()
 
-    if csv_df.empty and db_df.empty:
+    # ── Realtime-tick supplement for today ──────────────────────────
+    # Today's per-trading-date CSV doesn't exist yet (the cron writes
+    # it after market close), and hourly_prices typically lags by
+    # ~1 hour during the session. realtime_data carries the freshest
+    # tick stream for the live session — resample it to the chart's
+    # requested interval and treat it as authoritative for today.
+    # Outside today's session the realtime path returns nothing useful;
+    # fall back silently to whatever CSV / hourly we already have.
+    realtime_df = pd.DataFrame()
+    # ET-anchored "today" so the late-session window (after 8 PM ET, when
+    # UTC has already rolled to the next calendar day) still matches a
+    # chart range that the user thinks of as today.
+    from zoneinfo import ZoneInfo as _ZI
+    today_str = datetime.now(_ZI("America/New_York")).strftime("%Y-%m-%d")
+    if db_instance is not None and start_date <= today_str <= end_date:
+        try:
+            ticks = await db_instance.get_realtime_data(
+                symbol,
+                start_datetime=f"{today_str} 00:00:00",
+                end_datetime=f"{today_str} 23:59:59",
+            )
+            realtime_df = _resample_ticks_to_ohlc(ticks, interval)
+        except Exception:
+            realtime_df = pd.DataFrame()
+
+    # If realtime gave us data for today, drop today's rows from CSV /
+    # hourly so we're not mixing freshness levels. Stale hourly bars
+    # at 13:00, 14:00 next to live realtime bars at 13:30, 13:35 etc.
+    # would look wrong; realtime wins outright.
+    if not realtime_df.empty:
+        rt_dates = {ts.strftime("%Y-%m-%d") for ts in realtime_df.index}
+        def _drop_dates(df: pd.DataFrame) -> pd.DataFrame:
+            if df.empty:
+                return df
+            mask = ~df.index.to_series().dt.strftime("%Y-%m-%d").isin(rt_dates)
+            return df[mask.values]
+        csv_df = _drop_dates(csv_df)
+        db_df = _drop_dates(db_df)
+
+    parts: List[Tuple[pd.DataFrame, str]] = []
+    if not csv_df.empty:
+        parts.append((csv_df, "csv"))
+    if not db_df.empty:
+        parts.append((db_df, "db"))
+    if not realtime_df.empty:
+        parts.append((realtime_df, "rt"))
+
+    if not parts:
         return pd.DataFrame(), "empty"
-    if csv_df.empty:
-        merged = db_df
-        source = "db"
-    elif db_df.empty:
-        merged = csv_df
-        source = "csv"
+    if len(parts) == 1:
+        merged, source = parts[0]
     else:
-        merged = pd.concat([csv_df, db_df]).sort_index()
-        # Both sources may emit a row at the same hour boundary; CSV wins.
+        merged = pd.concat([p for p, _ in parts]).sort_index()
+        # On overlapping timestamps (rare; mostly hour boundaries between
+        # csv and hourly) keep the first occurrence — CSV wins on past
+        # dates because it appears first. Realtime rows are exclusive
+        # for today's dates per the drop above.
         merged = merged[~merged.index.duplicated(keep="first")]
-        source = "csv+db"
+        source = "+".join(label for _, label in parts)
 
     return _resample_5min_to(merged, interval), source
+
+
+def _resample_ticks_to_ohlc(ticks: pd.DataFrame | None, interval: str) -> pd.DataFrame:
+    """Convert a realtime-tick DataFrame (price-per-row) into OHLCV bars
+    at the requested interval. Returns an empty DataFrame on any error
+    or when the input has no usable price column.
+
+    The realtime_data table stores ticks indexed by timestamp with a
+    `price` column (and sometimes `size`). Pattern follows the
+    realtime_equity provider (`scripts/live_trading/providers/
+    realtime_equity.py:147`): `df['price'].resample(...).agg(['first',
+    'max', 'min', 'last', 'count'])`, with `count` standing in for
+    volume since indices' realtime rows don't carry sizes.
+    """
+    if ticks is None or ticks.empty:
+        return pd.DataFrame()
+    rule = INTERVAL_TO_RULE.get(interval)
+    if rule is None:
+        return pd.DataFrame()
+
+    df = ticks.copy()
+    # Index → UTC-aware DatetimeIndex named 'timestamp'.
+    idx = df.index
+    if not isinstance(idx, pd.DatetimeIndex):
+        idx = pd.to_datetime(idx, utc=True, errors="coerce")
+    elif idx.tz is None:
+        idx = idx.tz_localize("UTC")
+    df.index = idx
+    df = df[~df.index.isna()]
+    if df.empty:
+        return pd.DataFrame()
+    # Pick the price column. Realtime feeds have used both 'price' and
+    # 'close' historically; accept either.
+    if "price" in df.columns:
+        price = df["price"]
+    elif "close" in df.columns:
+        price = df["close"]
+    else:
+        return pd.DataFrame()
+    price = pd.to_numeric(price, errors="coerce").dropna()
+    if price.empty:
+        return pd.DataFrame()
+    rs = price.resample(rule, label="left", closed="left").agg(
+        ["first", "max", "min", "last", "count"]
+    )
+    rs.columns = ["open", "high", "low", "close", "volume"]
+    rs = rs.dropna(subset=["open", "high", "low", "close"], how="all")
+    rs.index.name = "timestamp"
+    return rs
 
 
 def _normalize_db_ohlc_df(df: pd.DataFrame) -> pd.DataFrame:

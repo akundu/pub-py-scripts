@@ -630,3 +630,112 @@ def test_db_fallback_daily_no_db_returns_empty(tmp_path: Path):
     ))
     assert out.empty
     assert src == "empty"
+
+
+# ── Realtime-tick supplement for today ─────────────────────────────
+
+
+class _FakeDBWithTicks:
+    """Stand-in DB that returns tick rows from get_realtime_data and
+    optionally also returns hourly bars from get_stock_data, so we can
+    test the realtime > hourly precedence rule for today."""
+    def __init__(self, ticks: pd.DataFrame | None = None,
+                 hourly: pd.DataFrame | None = None):
+        self._ticks = ticks
+        self._hourly = hourly
+
+    async def get_stock_data(self, ticker, start_date, end_date, interval):
+        if interval == "hourly" and self._hourly is not None:
+            return self._hourly
+        return pd.DataFrame()
+
+    async def get_realtime_data(self, ticker, start_datetime=None,
+                                  end_datetime=None, data_type="quote"):
+        return self._ticks if self._ticks is not None else pd.DataFrame()
+
+
+def test_realtime_ticks_supplement_today_when_csv_missing(tmp_path: Path):
+    """Today has no CSV (cron runs after close) — when the loader sees
+    today in the requested range, it queries realtime_data and resamples
+    the ticks into OHLC bars at the requested interval. Bars come back
+    with source label including `rt`."""
+    from datetime import datetime as _dt
+    today = _dt.utcnow().strftime("%Y-%m-%d")
+    # 12 ticks starting at 13:30 UTC (= market open ET in winter), one
+    # per minute, climbing prices.
+    ts = pd.date_range(f"{today} 13:30:00", periods=12, freq="1min", tz="UTC")
+    ticks = pd.DataFrame({"price": [100.0 + i * 0.1 for i in range(12)]},
+                          index=ts)
+    fake = _FakeDBWithTicks(ticks=ticks)
+    out, src = _run(load_bars_with_db_fallback(
+        "NDX", today, today, interval="5m",
+        db_instance=fake, equities_dir=tmp_path,
+    ))
+    assert not out.empty
+    assert "rt" in src
+    # 12 minutes of ticks at 5-min interval → 3 buckets (13:30, 13:35, 13:40)
+    assert len(out) >= 2
+    # First bar's open = first tick's price = 100.0
+    assert out.iloc[0]["open"] == 100.0
+
+
+def test_realtime_overrides_hourly_for_today(tmp_path: Path):
+    """When both realtime and hourly_prices have today's rows, the
+    realtime data wins (drop hourly rows for today). Otherwise the
+    chart would mix coarse hourly bars (13:00, 14:00) with finer
+    realtime bars (13:30, 13:35, …) — visually wrong."""
+    from datetime import datetime as _dt
+    today = _dt.utcnow().strftime("%Y-%m-%d")
+
+    # Realtime ticks: 5 ticks during the 13:30 5-min window.
+    rt_ts = pd.date_range(f"{today} 13:30:00", periods=5, freq="1min", tz="UTC")
+    ticks = pd.DataFrame({"price": [200.0, 201.0, 202.0, 203.0, 204.0]},
+                          index=rt_ts)
+
+    # Hourly bar at 13:00 with a clearly different (stale) close.
+    hourly_ts = pd.DatetimeIndex([pd.Timestamp(f"{today} 13:00:00", tz="UTC")])
+    hourly = pd.DataFrame({"open":[50.0], "high":[55.0], "low":[45.0],
+                            "close":[50.0], "volume":[100]}, index=hourly_ts)
+
+    fake = _FakeDBWithTicks(ticks=ticks, hourly=hourly)
+    out, src = _run(load_bars_with_db_fallback(
+        "NDX", today, today, interval="5m",
+        db_instance=fake, equities_dir=tmp_path,
+    ))
+    assert not out.empty
+    # Realtime data must dominate; the stale hourly close=50 should NOT
+    # appear in the merged output.
+    assert (out["close"] != 50.0).all(), \
+        f"Hourly stale row leaked through: closes = {out['close'].tolist()}"
+    assert "rt" in src
+
+
+def test_realtime_not_queried_for_past_only_range(tmp_path: Path):
+    """When the requested range is entirely in the past, realtime path
+    is skipped — no point querying ticks for 2026-04-25 → 2026-04-29."""
+    from datetime import datetime as _dt, timedelta
+    long_ago = (_dt.utcnow().date() - timedelta(days=30)).strftime("%Y-%m-%d")
+    long_ago_end = (_dt.utcnow().date() - timedelta(days=25)).strftime("%Y-%m-%d")
+    queried = {"realtime": False}
+    class _ProbeDB:
+        async def get_stock_data(self, *a, **kw):
+            return pd.DataFrame()
+        async def get_realtime_data(self, *a, **kw):
+            queried["realtime"] = True
+            return pd.DataFrame()
+    out, src = _run(load_bars_with_db_fallback(
+        "NDX", long_ago, long_ago_end, interval="5m",
+        db_instance=_ProbeDB(), equities_dir=tmp_path,
+    ))
+    assert queried["realtime"] is False, \
+        "Realtime path should not be invoked when range is entirely past"
+
+
+def test_realtime_resampler_handles_no_price_column(tmp_path: Path):
+    """If realtime_data ever returns rows without a price column, the
+    helper must return empty and the rest of the loader keeps working
+    instead of erroring out."""
+    from common.chart_data import _resample_ticks_to_ohlc
+    bad = pd.DataFrame({"foo": [1, 2, 3]},
+                        index=pd.date_range("2026-05-04", periods=3, freq="1min", tz="UTC"))
+    assert _resample_ticks_to_ohlc(bad, "5m").empty

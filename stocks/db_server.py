@@ -16089,12 +16089,24 @@ async def handle_chart_data_json(request: web.Request) -> web.Response:
         "source": source,
     }
 
+    # Anchor prev_close on the *most recent* trading day in the response
+    # — same convention `/range_percentiles` uses
+    # (`day_closes[max(day_closes)]`). So `prev_close` always means
+    # "the close of the trading day immediately before the freshest bar
+    # we have", regardless of whether the window is 1 day or 1 year.
+    # That's the value the live-price header diff and the stats strip
+    # both read; it stays correct on YTD / 1Y windows where the window-
+    # start was a year ago.
     if bars_df.empty:
+        # Even with no bars we can usually find a useful prev_close —
+        # the live-price header keeps working when, e.g., today's daily
+        # bar isn't yet in daily_prices because the cron hasn't run.
+        prev_close_empty = find_prev_close(db_symbol, end_date)
         base_payload.update({
             "trading_days_returned": [],
             "bars": [],
             "rsi": [],
-            "stats": compute_chart_stats(bars_df, prev_close=None),
+            "stats": compute_chart_stats(bars_df, prev_close=prev_close_empty),
             "error": (
                 f"no data found for {display_symbol} between {start_date} "
                 f"and {end_date} (checked equities_output/ and the DB)"
@@ -16104,16 +16116,16 @@ async def handle_chart_data_json(request: web.Request) -> web.Response:
 
     trading_days = sorted({ts.strftime("%Y-%m-%d") for ts in bars_df.index})
 
-    # Stats summarize the full visible window — open is the first bar's
-    # open, close is the last bar's close, high/low are the extremes
-    # across every bar on screen. So a 1-month chart shows the
-    # month's O/H/L/C, a 1-day chart shows that day's, etc. The
-    # change-vs-prev-close uses the close of the trading day immediately
-    # before the *first* bar (find_prev_close walks back from there),
-    # so the % move is "from window's start to window's end" — total
-    # change over the displayed range.
-    window_start = bars_df.index[0].strftime("%Y-%m-%d")
-    prev_close = find_prev_close(db_symbol, window_start)
+    # Stats: window-aggregated O/H/L/C (open = first bar's open across
+    # the entire window, etc.), but `prev_close` is the prior-session
+    # close — same rule as the range_percentiles endpoint. So:
+    #   * Open / High / Low / Close describe the visible window
+    #   * prev_close + change_vs_prev_close describe today vs yesterday
+    # Mixing window-O/H/L/C with single-day prev-close is a bit unusual
+    # but matches what users expect from the live-price header, which
+    # reads from this same payload.
+    most_recent_day = trading_days[-1]
+    prev_close = find_prev_close(db_symbol, most_recent_day)
     stats = compute_chart_stats(bars_df, prev_close=prev_close)
 
     base_payload.update({
