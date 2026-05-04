@@ -101,7 +101,15 @@ min_tier: conservative         # or a percentile e.g. p95, p75, p40
 # when "conservative" alone collapses too close to spot on a calm day.
 # Doesn't replace `min_otm` (which is a flat absolute floor); the two
 # stack independently.
-min_buf: 0.15
+min_buf: 0.07
+
+# ── Top-N per-combo cap ──────────────────────────────────────────────────────
+# Maximum number of Top-N picks per (ticker, option_type) combo. 1 means
+# only the highest-ROI put and the highest-ROI call per ticker survive,
+# keeping the Top-N list diverse instead of having multiple near-identical
+# picks crowd out everything else. Comment this out (or set to 0) to
+# disable the per-combo cap entirely; only `top` then governs.
+top_per_combo: 1
 
 # ── Absolute OTM floor/ceiling (scanner-level) ──────────────────────────────
 # Tier filter above is DYNAMIC to today's IV (on a calm day "conservative" can

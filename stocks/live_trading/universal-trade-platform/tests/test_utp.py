@@ -16828,6 +16828,300 @@ class TestSpreadScanner:
         assert args.min_buf == 0.15
         assert args.min_tier == "conservative"
 
+    # ── Tier-filter fail-safe + non-default percentile request ─────────
+
+    def test_extract_pn_percentiles_from_args_picks_up_pN_form(self):
+        """When `min_tier` / `min_tier_close` are pN form, the helper
+        must extract the integer N so the scanner can ask the percentile
+        server to actually compute that percentile."""
+        from argparse import Namespace
+        from spread_scanner import _extract_pn_percentiles_from_args
+
+        # Both fields, both pN — both Ns should be returned, sorted.
+        args = Namespace(min_tier="p93", min_tier_close="p87")
+        assert _extract_pn_percentiles_from_args(args) == [87, 93]
+
+        # Named tiers contribute nothing — server's recommended map
+        # already has the matching percentiles.
+        args = Namespace(min_tier="conservative", min_tier_close=None)
+        assert _extract_pn_percentiles_from_args(args) == []
+
+        # Mixed: pN extracts, named is ignored.
+        args = Namespace(min_tier="p82", min_tier_close="moderate")
+        assert _extract_pn_percentiles_from_args(args) == [82]
+
+        # Out of range / malformed — silently dropped.
+        args = Namespace(min_tier="p150", min_tier_close="garbage")
+        assert _extract_pn_percentiles_from_args(args) == []
+
+        # Missing attrs — no crash.
+        args = Namespace()
+        assert _extract_pn_percentiles_from_args(args) == []
+
+    @pytest.mark.asyncio
+    async def test_fetch_tier_data_passes_percentiles_to_server(self):
+        """When `percentiles=[93]` is passed, the HTTP request must
+        include `?percentiles=93` so the server returns that percentile
+        in the response. Without this, `min_tier: p93` would resolve to
+        a missing pct value and the gate would silently disengage."""
+        import spread_scanner as ss
+
+        async def fake_resolve(client, configured):
+            return configured
+        orig_resolve = ss._resolve_percentile_url
+        ss._resolve_percentile_url = fake_resolve
+        try:
+            captured: dict = {}
+            class FakeOK:
+                status_code = 200
+                def json(self):
+                    return {"hourly": {"SPX": {}}, "tickers": []}
+            class FakeClient:
+                async def get(self, url, *a, params=None, **kw):
+                    captured["url"] = url
+                    captured["params"] = params or {}
+                    return FakeOK()
+            await ss.fetch_tier_data(
+                FakeClient(), "http://localhost:9100", ["SPX"],
+                dte_list=[0, 1], percentiles=[93, 87],
+            )
+            # The params dict must carry a sorted, comma-separated list.
+            assert "percentiles" in captured["params"]
+            assert captured["params"]["percentiles"] == "87,93"
+        finally:
+            ss._resolve_percentile_url = orig_resolve
+
+    @pytest.mark.asyncio
+    async def test_fetch_tier_data_omits_percentiles_param_when_none(self):
+        """When `percentiles=None`, no `percentiles=` query param is
+        added — preserves the legacy behavior where the server uses
+        its default percentile set."""
+        import spread_scanner as ss
+
+        async def fake_resolve(client, configured):
+            return configured
+        orig_resolve = ss._resolve_percentile_url
+        ss._resolve_percentile_url = fake_resolve
+        try:
+            captured: dict = {}
+            class FakeOK:
+                status_code = 200
+                def json(self):
+                    return {"hourly": {}, "tickers": []}
+            class FakeClient:
+                async def get(self, url, *a, params=None, **kw):
+                    captured["params"] = params or {}
+                    return FakeOK()
+            await ss.fetch_tier_data(
+                FakeClient(), "http://localhost:9100", ["SPX"],
+                dte_list=[0],
+            )
+            assert "percentiles" not in captured["params"]
+        finally:
+            ss._resolve_percentile_url = orig_resolve
+
+    def test_min_tier_pn_drops_candidate_when_boundary_unavailable(self, monkeypatch):
+        """FAIL-SAFE: when `min_tier: pN` is configured but the
+        boundary lookup returns None (because the server didn't compute
+        that pN), the candidate must be DROPPED — not silently passed
+        through. Regression: the operator screenshot showed 0.0% OTM
+        picks surviving `min_tier: p93` because the model didn't have
+        p93 in its pct map and the filter check `if boundary is not
+        None and …` short-circuited."""
+        import spread_scanner as ss
+        from spread_scanner import _collect_filtered_candidates, parse_args
+
+        monkeypatch.setattr(
+            ss, "_find_current_slot",
+            lambda slots: "10:00" if slots else None,
+        )
+
+        # Tier_data has p90 but NOT p93 — same fixture as the
+        # routing tests, but the user is asking for p93.
+        td = {
+            "hourly": {
+                "SPX": {
+                    "recommended": {
+                        "intraday":       {"aggressive": {"put": 90, "call": 90}},
+                        "close_to_close": {"aggressive": {"put": 90, "call": 90}},
+                    },
+                    "slots": {
+                        "10:00": {
+                            "when_down": {"pct": {"p90": -1.0}},
+                            "when_up":   {"pct": {"p90":  1.0}},
+                        },
+                    },
+                }
+            },
+            "tickers": [],
+        }
+        args = parse_args(["--tickers", "SPX", "--min-tier", "p93"])
+        scan_data = {
+            "quotes":      {"SPX": {"last": 7000.0}},
+            "prev_closes": {"SPX": 7000.0},
+            "tier_filter_state": "active",
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-05-04",
+                    "tier_data": td,
+                    "spreads": {
+                        # Strike at 7220 (CALL): essentially ATM. Without
+                        # the fail-safe, the silent fall-through let it
+                        # pass. With the fail-safe, the missing p93
+                        # boundary causes a drop.
+                        "SPX": [{
+                            "option_type": "CALL", "short_strike": 7220,
+                            "long_strike": 7240, "credit": 2.40,
+                            "roi_pct": 13.6, "otm_pct": 3.14, "width": 20,
+                        }],
+                    },
+                }
+            },
+        }
+        cands = _collect_filtered_candidates(scan_data, args)
+        assert cands == [], (
+            "min_tier: p93 with no p93 in the pct map must DROP the "
+            "candidate, not silently pass it through. (The bug was: "
+            "0.0%-OTM picks surviving a 'cons-tier' filter because the "
+            "boundary resolved to None.)"
+        )
+
+    # ── Top-N per-(symbol, option_type) cap ───────────────────────────
+
+    def test_top_per_combo_caps_one_per_combo_by_default(self):
+        """top_per_combo: 1 — only the best put and best call per
+        ticker survive. Multiple SPX puts with different strikes get
+        deduped to just the highest-ROI one."""
+        from spread_scanner import _collect_filtered_candidates, parse_args, _render_top_picks
+
+        args = parse_args([
+            "--tickers", "SPX,NDX", "--top", "10",
+            "--top-per-combo", "1",
+        ])
+        scan_data = {
+            "prev_closes": {"SPX": 7100.0, "NDX": 27000.0},
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-05-04",
+                    "spreads": {
+                        # Three SPX PUTs; only the top-ROI one survives
+                        # the per-combo cap.
+                        "SPX": [
+                            {"option_type": "PUT", "short_strike": 7050,
+                             "long_strike": 7030, "credit": 1.00,
+                             "roi_pct": 5.0, "otm_pct": 0.7, "width": 20},
+                            {"option_type": "PUT", "short_strike": 7045,
+                             "long_strike": 7025, "credit": 0.80,
+                             "roi_pct": 4.0, "otm_pct": 0.8, "width": 20},
+                            {"option_type": "PUT", "short_strike": 7040,
+                             "long_strike": 7020, "credit": 0.60,
+                             "roi_pct": 3.0, "otm_pct": 0.85, "width": 20},
+                        ],
+                        "NDX": [
+                            {"option_type": "PUT", "short_strike": 26900,
+                             "long_strike": 26840, "credit": 4.00,
+                             "roi_pct": 7.1, "otm_pct": 0.4, "width": 60},
+                        ],
+                    },
+                }
+            },
+        }
+        lines = _render_top_picks(scan_data, args)
+        text = "\n".join(lines)
+        # Exactly one SPX PUT (the top-ROI one at 7050) and one NDX PUT.
+        # The two lower-ROI SPX puts must be filtered.
+        spx_puts = sum(1 for ln in lines if "SPX  PUT  D0" in ln and "7050" in ln)
+        spx_other = sum(1 for ln in lines if "SPX  PUT" in ln and "7045" in ln)
+        spx_other2 = sum(1 for ln in lines if "SPX  PUT" in ln and "7040" in ln)
+        assert spx_puts == 1
+        assert spx_other == 0, "second-best SPX PUT must be filtered out"
+        assert spx_other2 == 0, "third-best SPX PUT must be filtered out"
+        # NDX PUT also survives (different ticker → different combo).
+        assert "NDX  PUT  D0  26900" in text
+
+    def test_top_per_combo_none_disables_cap(self):
+        """top_per_combo=None (YAML field commented out) → no cap; all
+        picks pass through to the `top_n` limit."""
+        from spread_scanner import _collect_filtered_candidates, parse_args, _render_top_picks
+        args = parse_args(["--tickers", "SPX", "--top", "10"])
+        # CLI default is None → no cap.
+        assert getattr(args, "top_per_combo", None) is None
+
+        scan_data = {
+            "prev_closes": {"SPX": 7100.0},
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-05-04",
+                    "spreads": {
+                        "SPX": [
+                            {"option_type": "PUT", "short_strike": 7050,
+                             "long_strike": 7030, "credit": 1.00,
+                             "roi_pct": 5.0, "otm_pct": 0.7, "width": 20},
+                            {"option_type": "PUT", "short_strike": 7045,
+                             "long_strike": 7025, "credit": 0.80,
+                             "roi_pct": 4.0, "otm_pct": 0.8, "width": 20},
+                            {"option_type": "PUT", "short_strike": 7040,
+                             "long_strike": 7020, "credit": 0.60,
+                             "roi_pct": 3.0, "otm_pct": 0.85, "width": 20},
+                        ],
+                    },
+                }
+            },
+        }
+        lines = _render_top_picks(scan_data, args)
+        text = "\n".join(lines)
+        # All three SPX puts present (no per-combo cap).
+        assert "7050" in text
+        assert "7045" in text
+        assert "7040" in text
+
+    def test_top_per_combo_zero_disables_cap(self):
+        """`--top-per-combo 0` is equivalent to None — disables the cap.
+        Lets the operator turn the cap off via CLI even if YAML set it."""
+        from spread_scanner import _render_top_picks, parse_args
+        args = parse_args([
+            "--tickers", "SPX", "--top", "10", "--top-per-combo", "0",
+        ])
+        assert args.top_per_combo == 0
+        scan_data = {
+            "prev_closes": {"SPX": 7100.0},
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-05-04",
+                    "spreads": {
+                        "SPX": [
+                            {"option_type": "PUT", "short_strike": 7050,
+                             "long_strike": 7030, "credit": 1.00,
+                             "roi_pct": 5.0, "otm_pct": 0.7, "width": 20},
+                            {"option_type": "PUT", "short_strike": 7045,
+                             "long_strike": 7025, "credit": 0.80,
+                             "roi_pct": 4.0, "otm_pct": 0.8, "width": 20},
+                        ],
+                    },
+                }
+            },
+        }
+        text = "\n".join(_render_top_picks(scan_data, args))
+        assert "7050" in text and "7045" in text
+
+    def test_top_per_combo_via_yaml_config(self, tmp_path):
+        """top_per_combo round-trips through YAML: explicit value
+        overrides the (None) default; commented-out leaves it None."""
+        from spread_scanner import _load_config
+
+        cfg_set = tmp_path / "set.yaml"
+        cfg_set.write_text(
+            "tickers: [SPX]\ndte: [0]\n"
+            "top_per_combo: 2\n"
+        )
+        args, _ = _load_config(["--config", str(cfg_set)])
+        assert args.top_per_combo == 2
+
+        cfg_omit = tmp_path / "omit.yaml"
+        cfg_omit.write_text("tickers: [SPX]\ndte: [0]\n")
+        args2, _ = _load_config(["--config", str(cfg_omit)])
+        assert args2.top_per_combo is None
+
     def test_min_tier_pn_routes_to_intraday_for_dte0_spreads(self, monkeypatch):
         """min_tier=p90 with a DTE-0 spread must apply the INTRADAY
         boundary (in this fixture: spot * (1 - 1.0%) = 6930 for SPX puts)."""
@@ -17748,6 +18042,7 @@ class TestSpreadScanner:
         async def fake_failover_fetch(
             client, percentile_url, tickers, dte_list=None,
             fallback_url=None, on_swap_to_fallback=None,
+            **kwargs,
         ):
             assert fallback_url is not None, (
                 "scan_all_tickers must pass fallback_url to fetch_tier_data"

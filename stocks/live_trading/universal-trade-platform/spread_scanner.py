@@ -143,6 +143,27 @@ def _is_percentile_tier(tier_name: str) -> bool:
     """True iff tier_name is a pN form (e.g., 'p75')."""
     return bool(tier_name) and _TIER_PERCENTILE_RE.match(tier_name) is not None
 
+
+def _extract_pn_percentiles_from_args(args) -> list[int]:
+    """Pull out the integer N from any `pN`-form `min_tier` /
+    `min_tier_close` on `args`. Used to ask the percentile server to
+    compute exactly those percentiles — otherwise non-default values
+    (e.g. p93) wouldn't be in the response and the tier-boundary
+    lookup would silently return None."""
+    out: set[int] = set()
+    for flag in ("min_tier", "min_tier_close"):
+        v = getattr(args, flag, None)
+        if v and _is_percentile_tier(v):
+            m = _TIER_PERCENTILE_RE.match(v)
+            if m:
+                try:
+                    n = int(m.group(1))
+                    if 1 <= n <= 99:
+                        out.add(n)
+                except (TypeError, ValueError):
+                    continue
+    return sorted(out)
+
 # ANSI colors
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
@@ -210,6 +231,17 @@ class ScannerConfig:
     max_otm_per_ticker: dict[str, float] = field(default_factory=dict)
     min_tier: str | None = None
     min_tier_close: str | None = None
+    # Cap on the number of Top-N picks per (ticker, option_type) combo.
+    # 1 = only the single best put (and best call) per ticker — keeps
+    # the Top-N list diverse instead of having 5 near-identical SPX puts
+    # crowding out everything else.
+    #
+    # None = NO CAP — the field is treated as "don't apply the per-
+    # combo dedup at all". This is the default here so a config that
+    # omits / comments out the field gets no cap. The reference YAMLs
+    # set `top_per_combo: 1` explicitly to opt into the diverse-list
+    # default; commenting that line out reverts to "no cap".
+    top_per_combo: int | None = None
     # Additive buffer (in absolute percentage points) layered on top of
     # the dynamic tier boundary. The tier filter resolves a strike from
     # the modeled percentile move; `min_buf` shifts that boundary
@@ -341,6 +373,7 @@ class ScannerConfig:
         d["min_tier"] = self.min_tier
         d["min_tier_close"] = self.min_tier_close
         d["min_buf"] = self.min_buf
+        d["top_per_combo"] = self.top_per_combo
         d["recent_actions_count"] = self.recent_actions_count
         d["verify_max_age_sec"] = self.verify_max_age_sec
         d["verify_require_provider_source"] = self.verify_require_provider_source
@@ -539,21 +572,36 @@ _TIER_FETCH_LAST_ERROR: dict[str, str | None] = {"reason": None}
 async def _try_fetch_tier_data_one_url(
     client: httpx.AsyncClient, percentile_url: str, tickers: list[str],
     dte_list: list[int] | None = None,
+    percentiles: list[int] | None = None,
 ) -> dict | None:
     """Single-URL fetch attempt. Returns the JSON dict on HTTP 200 or
     None on any failure. On failure, writes a diagnostic into
     `_TIER_FETCH_LAST_ERROR["reason"]`. Caller is responsible for any
-    URL resolution / cache / failover."""
+    URL resolution / cache / failover.
+
+    `percentiles`: when supplied, requests the server compute exactly
+    these percentile values (passed as `?percentiles=…`). Without this,
+    the server uses its default set (typically p1/5/10/25/50/75/90/95/
+    98/99) — so a user-configured `min_tier: p93` would silently
+    disengage because `pcts.get("p93")` would be None."""
     windows = sorted(set([0] + (dte_list or [0])))
     windows_str = ",".join(str(w) for w in windows)
+    params = {
+        "ticker": ",".join(tickers),
+        "windows": windows_str,
+        "format": "json",
+    }
+    if percentiles:
+        params["percentiles"] = ",".join(str(int(p)) for p in sorted(set(percentiles)))
     target = (
         f"{percentile_url}/range_percentiles"
         f"?ticker={','.join(tickers)}&windows={windows_str}"
+        + (f"&percentiles={params['percentiles']}" if percentiles else "")
     )
     try:
         resp = await client.get(
             f"{percentile_url}/range_percentiles",
-            params={"ticker": ",".join(tickers), "windows": windows_str, "format": "json"},
+            params=params,
         )
         if resp.status_code == 200:
             _TIER_FETCH_LAST_ERROR["reason"] = None
@@ -582,12 +630,17 @@ async def fetch_tier_data(
     dte_list: list[int] | None = None,
     fallback_url: str | None = None,
     on_swap_to_fallback: "Callable[[str], None] | None" = None,
+    percentiles: list[int] | None = None,
 ) -> dict | None:
     """Fetch percentile/tier data from the percentile server.
 
     Returns the hourly data structure with recommended tiers per ticker.
     Requests windows matching the DTE list so close-to-close data is
-    available.
+    available. When `percentiles` is supplied, the server is asked to
+    compute exactly those percentile values (in addition to its
+    defaults) — important when `--min-tier pN` uses a non-default N
+    like p93 / p87 / p82, otherwise the resulting boundary lookup
+    silently returns None and the gate disengages.
 
     Failover: when `fallback_url` is provided and differs from
     `percentile_url`, a failure on the primary triggers a one-shot
@@ -612,6 +665,7 @@ async def fetch_tier_data(
     # First attempt — the configured (or already-swapped) URL.
     result = await _try_fetch_tier_data_one_url(
         client, percentile_url, tickers, dte_list,
+        percentiles=percentiles,
     )
     if result is not None:
         return result
@@ -633,6 +687,7 @@ async def fetch_tier_data(
 
     result = await _try_fetch_tier_data_one_url(
         client, fallback_url, tickers, dte_list,
+        percentiles=percentiles,
     )
     if result is not None:
         # Success on backup. Tell the caller so they can swap their
@@ -1992,31 +2047,49 @@ def _collect_filtered_candidates(scan_data: dict, args) -> list[dict]:
                 # boundary FURTHER OTM — puts subtract, calls add — so
                 # the strike must clear the model's verdict by an extra
                 # `min_buf` percentage points.
+                #
+                # FAIL-SAFE: if a tier filter is configured but the
+                # boundary lookup returns None for this (sym, side) —
+                # e.g. the user asked for `pN` that the server didn't
+                # compute, or the model has no recommendation here —
+                # DROP the candidate instead of silently letting it
+                # through. The user explicitly asked for a tier-gated
+                # list; showing picks that bypass the gate is worse
+                # than showing none.
                 if min_tier:
                     sym_bounds = min_tier_boundaries_by_dte.get(dte, {}).get(sym, {})
                     tier_sides = sym_bounds.get(min_tier, {})
                     if s["option_type"] == "PUT":
                         boundary = tier_sides.get("put")
-                        if boundary is not None and s["short_strike"] > (boundary - buf_dollars):
+                        if boundary is None:
+                            continue
+                        if s["short_strike"] > (boundary - buf_dollars):
                             continue
                     elif s["option_type"] == "CALL":
                         boundary = tier_sides.get("call")
-                        if boundary is not None and s["short_strike"] < (boundary + buf_dollars):
+                        if boundary is None:
+                            continue
+                        if s["short_strike"] < (boundary + buf_dollars):
                             continue
 
-                # Tier filter (close-to-close) — same buffer treatment.
+                # Tier filter (close-to-close) — same buffer treatment +
+                # same fail-safe (drop on missing boundary).
                 if min_tier_close:
                     dte_bounds = tier_boundaries_c2c.get(dte, {})
-                    if sym in dte_bounds:
-                        tier_sides = dte_bounds[sym].get(min_tier_close, {})
-                        if s["option_type"] == "PUT":
-                            boundary = tier_sides.get("put")
-                            if boundary is not None and s["short_strike"] > (boundary - buf_dollars):
-                                continue
-                        elif s["option_type"] == "CALL":
-                            boundary = tier_sides.get("call")
-                            if boundary is not None and s["short_strike"] < (boundary + buf_dollars):
-                                continue
+                    sym_bounds_c2c = dte_bounds.get(sym, {})
+                    tier_sides = sym_bounds_c2c.get(min_tier_close, {})
+                    if s["option_type"] == "PUT":
+                        boundary = tier_sides.get("put")
+                        if boundary is None:
+                            continue
+                        if s["short_strike"] > (boundary - buf_dollars):
+                            continue
+                    elif s["option_type"] == "CALL":
+                        boundary = tier_sides.get("call")
+                        if boundary is None:
+                            continue
+                        if s["short_strike"] < (boundary + buf_dollars):
+                            continue
 
                 all_candidates.append({
                     **s,
@@ -2088,6 +2161,25 @@ def _render_top_picks(scan_data: dict, args) -> list[str]:
             continue
         seen.add(key)
         deduped.append(c)
+
+    # Per-(symbol, option_type) cap. `top_per_combo` defaults to 1 — only
+    # the highest-ROI pick per ticker × side surfaces, so the Top-N is a
+    # diverse list rather than 5 nearly-identical SPX puts crowding out
+    # everything else. When `top_per_combo` is None (YAML field
+    # commented out / left unset), the cap is disabled and `top_n`
+    # alone gates the count. all_candidates is sorted by ROI descending
+    # so taking the FIRST occurrence preserves "best per combo".
+    top_per_combo = getattr(args, "top_per_combo", None)
+    if top_per_combo is not None and top_per_combo > 0:
+        per_combo_count: dict[tuple[str, str], int] = {}
+        capped: list[dict] = []
+        for c in deduped:
+            combo = (c["symbol"], c["option_type"])
+            if per_combo_count.get(combo, 0) >= top_per_combo:
+                continue
+            per_combo_count[combo] = per_combo_count.get(combo, 0) + 1
+            capped.append(c)
+        deduped = capped
 
     picks = deduped[:top_n]
 
@@ -3864,11 +3956,20 @@ async def scan_all_tickers(
             pass
 
     tier_fallback = getattr(args, "percentile_url_backup", None)
+    # Tell the percentile server which percentile values we'll actually
+    # need — extracted from any `pN`-form `min_tier` / `min_tier_close`
+    # so the response includes them. Without this, a config like
+    # `min_tier: p93` would silently disengage because the default
+    # percentile set (~p1/5/10/25/50/75/90/95/98/99) doesn't include
+    # p93, the boundary lookup returns None, and the filter falls
+    # through.
+    requested_percentiles = _extract_pn_percentiles_from_args(args)
     tier_coro = (
         fetch_tier_data(
             client, args.percentile_url, args.tickers, args.dte,
             fallback_url=tier_fallback,
             on_swap_to_fallback=_swap_percentile_url_to_backup,
+            percentiles=requested_percentiles or None,
         )
         if should_fetch_tier else asyncio.sleep(0)
     )
@@ -4838,6 +4939,14 @@ Examples:
              "of the dynamic tier boundary (--min-tier / --min-tier-close). "
              "E.g. --min-buf 0.15 makes a conservative-tier 1.25%% OTM "
              "boundary effectively 1.40%% OTM. Default 0 = no buffer.",
+    )
+    parser.add_argument(
+        "--top-per-combo", type=int, default=None,
+        help="Max picks per (ticker, option_type) combo in Top-N. "
+             "Pass 1 to show only the highest-ROI put and call per "
+             "ticker (keeps the list diverse). Pass 0 or omit (and "
+             "leave YAML's `top_per_combo` commented out) to disable "
+             "the per-combo cap entirely; only `--top` then governs.",
     )
     parser.add_argument(
         "--widths", default=None, dest="widths_str",

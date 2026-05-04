@@ -36,7 +36,7 @@ percentile_url:
 
 # ── Scanner screening ─────────────────────────────────────────────────────────
 tickers: [SPX, NDX, RUT]
-dte: [2]
+dte: [4]
 types: [put, call]
 widths:
   SPX: 30
@@ -54,7 +54,7 @@ top: 3
 # rejected at this gate (require_provider_source=True is enforced internally).
 # 1DTE: tolerates slightly older quotes than 0DTE — overnight gap risk is the
 # primary driver, intraday tick-by-tick price action matters less.
-verify_max_age_sec: 45
+verify_max_age_sec: 90
 verify_require_provider_source: false
 
 # ── Risk-tier filter (applies to top-picks + all handlers) ───────────────────
@@ -89,13 +89,13 @@ verify_require_provider_source: false
 #                    is more honest about what's happening.
 # Leaving them null = no tier filter.
 tiers: true
-min_tier: p92 #aggr         # or a percentile e.g. p95, p75, p40
+min_tier: p90         # or a percentile e.g. p95, p75, p40
 #min_tier_close: p90          # close-to-close variant
 
 # ── Tier-boundary buffer (additive cushion) ──────────────────────────────────
 # Layered ON TOP of the dynamic tier boundaries above. Units are
-# ABSOLUTE percentage points. min_buf: 0.15 means the effective gate
-# is 0.15 percentage points MORE OTM than the model's verdict. Applies
+# ABSOLUTE percentage points. min_buf: 0.07 means the effective gate
+# is 0.07 percentage points MORE OTM than the model's verdict. Applies
 # symmetrically on put / call sides and to BOTH min_tier and
 # min_tier_close. Default 0 = no buffer.
 min_buf: 0.07
@@ -158,7 +158,7 @@ handlers:
     # behavior, or populate `min_norm_roi_per_ticker` to tune per ticker
     # (RUT routinely maxes around 1.65 p75 at DTE=1 so you'll likely
     # want RUT: 1.0-1.25 there to include it).
-    min_norm_roi: 1.75
+    min_norm_roi: 3.5
     # Per-ticker overrides — feature plumbed in but OFF.
     # When ready, e.g.:
     #   min_norm_roi_per_ticker:

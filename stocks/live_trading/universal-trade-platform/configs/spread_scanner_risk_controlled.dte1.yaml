@@ -90,7 +90,7 @@ verify_require_provider_source: false
 #                    c2c gate).
 # Leaving them null = no tier filter.
 tiers: true
-min_tier: agg         # or a percentile e.g. p95, p75, p40
+min_tier: p93 #aggr         # or a percentile e.g. p95, p75, p40
 #min_tier_close: p92         # close-to-close variant
 
 # ── Tier-boundary buffer (additive cushion) ──────────────────────────────────
@@ -99,7 +99,15 @@ min_tier: agg         # or a percentile e.g. p95, p75, p40
 # is 0.15 percentage points MORE OTM than the model's verdict. Applies
 # symmetrically on put / call sides and to BOTH min_tier and
 # min_tier_close. Default 0 = no buffer.
-min_buf: 0.15
+min_buf: 0.07
+
+# ── Top-N per-combo cap ──────────────────────────────────────────────────────
+# Maximum number of Top-N picks per (ticker, option_type) combo. 1 means
+# only the highest-ROI put and the highest-ROI call per ticker survive,
+# keeping the Top-N list diverse instead of having multiple near-identical
+# picks crowd out everything else. Comment this out (or set to 0) to
+# disable the per-combo cap entirely; only `top` then governs.
+top_per_combo: 1
 
 # ── Absolute OTM floor (scanner-level) ───────────────────────────────────────
 # 1DTE gives more time for mean reversion than 0DTE, but an intraday breach is
