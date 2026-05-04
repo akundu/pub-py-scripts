@@ -90,6 +90,19 @@ tiers: true
 min_tier: conservative         # or a percentile e.g. p95, p75, p40
 # min_tier_close: p95          # close-to-close variant
 
+# ── Tier-boundary buffer (additive cushion) ──────────────────────────────────
+# Layered ON TOP of the dynamic tier boundaries above. Units are
+# ABSOLUTE percentage points (NOT relative). With `min_tier: conservative`
+# resolving to (say) 1.25% OTM on a calm day and `min_buf: 0.15`, the
+# effective gate becomes 1.40% OTM — i.e. the strike must be at least
+# 0.15 percentage points MORE OTM than the model's verdict. Applies
+# symmetrically on put / call sides and to BOTH `min_tier` and
+# `min_tier_close`. Default 0 = no buffer (legacy behavior). Useful
+# when "conservative" alone collapses too close to spot on a calm day.
+# Doesn't replace `min_otm` (which is a flat absolute floor); the two
+# stack independently.
+min_buf: 0.15
+
 # ── Absolute OTM floor/ceiling (scanner-level) ──────────────────────────────
 # Tier filter above is DYNAMIC to today's IV (on a calm day "conservative" can
 # be barely 1% OTM). These fields add a HARD absolute guardrail on top so

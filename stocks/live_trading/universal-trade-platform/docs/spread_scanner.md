@@ -356,6 +356,7 @@ argparse with YAML values as defaults so CLI flags still win).
 | `tiers` | bool | True = fetch `/range_percentiles` (required by tier filters) |
 | `min_tier` | `aggressive\|moderate\|conservative\|pN` | DTE-routed live-intraday gate (see matrix above) |
 | `min_tier_close` | same | Always close-to-close window=DTE; independent of `min_tier` |
+| `min_buf` | float (% points, default 0) | Additive cushion in ABSOLUTE percentage points layered on top of the dynamic tier boundary. `min_buf: 0.15` shifts a "cons → 1.25% OTM" boundary to "1.40% OTM" — strike must clear the model's verdict by 0.15pp. Symmetric on put / call. Applies to BOTH `min_tier` and `min_tier_close`. Doesn't replace `min_otm`; they stack. |
 | `min_otm` | float | Absolute OTM% floor across all tickers |
 | `min_otm_per_ticker` | `{symbol: float}` | Per-symbol overrides; effective floor = `max(scalar, per_ticker)` |
 | `max_otm` / `max_otm_per_ticker` | float / dict | OTM ceiling (rare) |
@@ -441,6 +442,11 @@ Key pinned behaviors (regression guards):
 | `test_fetch_tier_data_records_combined_failure_when_both_fail` | both URLs failing surfaces both reasons in the offline banner |
 | `test_fetch_tier_data_skips_fallback_when_same_as_primary` | no double-latency when YAML omits a backup |
 | `test_scan_all_tickers_swaps_args_percentile_url_to_backup_on_primary_fail` | end-to-end: swap persists onto args + resolved_endpoints |
+| `test_min_buf_shifts_tier_boundary_more_otm_for_puts` | min_buf shifts put boundary further OTM (lower strike) |
+| `test_min_buf_shifts_tier_boundary_more_otm_for_calls` | min_buf shifts call boundary further OTM (higher strike) |
+| `test_min_buf_default_zero_is_legacy_behavior` | default 0 leaves old behavior intact |
+| `test_min_buf_applies_to_min_tier_close_too` | min_buf gates BOTH min_tier and min_tier_close |
+| `test_min_buf_chip_appears_in_filter_label` | `+bufN.NN%` chip in Top-N header when buffer + tier filter both active |
 
 ---
 

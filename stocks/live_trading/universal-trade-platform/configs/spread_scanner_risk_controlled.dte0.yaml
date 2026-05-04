@@ -39,12 +39,12 @@ tickers: [SPX, NDX, RUT]
 dte: [0]
 types: [put, call]
 widths:
-  SPX: 25
+  SPX: 30
   NDX: 60
   RUT: 25
 #otm_pcts: [0.75, 1.0, 1.5, 2.0]
 interval: 20
-top: 5
+top: 4
 
 # ── Provider re-verify freshness ─────────────────────────────────────────────
 # Each Top-N candidate (and every spread fed to a trade/simulate handler) is
@@ -95,8 +95,22 @@ verify_max_age_sec: 30
 #                    gives layered safety.
 # Leaving them null = no tier filter.
 tiers: true
-min_tier: moderate         # or a percentile e.g. p95, p75, p40
+min_tier: cons         # or a percentile e.g. p95, p75, p40
 # min_tier_close: p95          # close-to-close variant
+
+# ── Tier-boundary buffer (additive cushion) ──────────────────────────────────
+# Layered ON TOP of the dynamic tier boundary above. Units are ABSOLUTE
+# percentage points (NOT relative). With min_tier: cons resolving to (say)
+# 1.25% OTM on a calm day and min_buf: 0.15, the effective gate becomes
+# 1.40% OTM — i.e. the strike must be at least 0.15 percentage points
+# MORE OTM than the model's verdict. Symmetric on both put and call sides,
+# applies to BOTH min_tier and min_tier_close gates. Default 0 = no buffer.
+#
+# Useful when "conservative" alone collapses too close to spot on a calm
+# day — the buffer keeps a minimum cushion regardless of how compressed
+# the IV distribution is. Doesn't replace `min_otm` (which is a flat
+# absolute floor); the two stack independently.
+min_buf: 0.15
 
 # ── Absolute OTM floor (scanner-level) ───────────────────────────────────────
 # 0DTE has no time to recover from a breach — if the market touches the short

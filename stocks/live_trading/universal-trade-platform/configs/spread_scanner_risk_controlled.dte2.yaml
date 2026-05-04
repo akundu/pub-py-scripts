@@ -44,7 +44,7 @@ widths:
   RUT: 30
 #otm_pcts: [0.75, 1.0, 1.5, 2.0]
 interval: 60
-top: 5
+top: 3
 
 # ── Provider re-verify freshness ─────────────────────────────────────────────
 # Each Top-N candidate (and every spread fed to a trade/simulate handler) is
@@ -91,6 +91,14 @@ verify_require_provider_source: false
 tiers: true
 min_tier: p90         # or a percentile e.g. p95, p75, p40
 min_tier_close: p90          # close-to-close variant
+
+# ── Tier-boundary buffer (additive cushion) ──────────────────────────────────
+# Layered ON TOP of the dynamic tier boundaries above. Units are
+# ABSOLUTE percentage points. min_buf: 0.15 means the effective gate
+# is 0.15 percentage points MORE OTM than the model's verdict. Applies
+# symmetrically on put / call sides and to BOTH min_tier and
+# min_tier_close. Default 0 = no buffer.
+min_buf: 0.15
 
 # ── Absolute OTM floor (scanner-level) ───────────────────────────────────────
 # 1DTE gives more time for mean reversion than 0DTE, but an intraday breach is
@@ -142,7 +150,7 @@ handlers:
     # behavior, or populate `min_norm_roi_per_ticker` to tune per ticker
     # (RUT routinely maxes around 1.65 p75 at DTE=1 so you'll likely
     # want RUT: 1.0-1.25 there to include it).
-    min_norm_roi: 2.25
+    min_norm_roi: 1.75
     # Per-ticker overrides — feature plumbed in but OFF.
     # When ready, e.g.:
     #   min_norm_roi_per_ticker:
@@ -174,9 +182,9 @@ handlers:
       # LIMIT:  submit at the observed credit; may not fill.
       order_type: MARKET
       stop_loss_multiplier: 2.0
-      trading_window_pt:
-        start: "06:31"
-        end:   "11:30"
+      #trading_window_pt:
+      #  start: "06:31"
+      #  end:   "11:30"
 
   # Live trading — uncomment to activate. Uses the SAME policy as simulate_trade
   # via the YAML anchor above.

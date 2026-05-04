@@ -16577,6 +16577,257 @@ class TestSpreadScanner:
             }],
         }
 
+    def test_min_buf_shifts_tier_boundary_more_otm_for_puts(self, monkeypatch):
+        """min_buf adds an absolute %-point cushion on top of the
+        dynamic tier boundary. For puts, that pushes the boundary
+        DOWN (more OTM) — so a strike that just barely passes without
+        the buffer must FAIL with the buffer applied.
+
+        Fixture: spot=7000, intraday p90 puts at -1.0% → boundary 6930.
+        With min_buf=0.50%, the boundary shifts to 6930 - 7000*0.005
+        = 6895. A strike at 6920 passes the bare boundary (6920 ≤ 6930)
+        but fails with buffer (6920 > 6895)."""
+        import spread_scanner as ss
+        from spread_scanner import _collect_filtered_candidates, parse_args
+
+        monkeypatch.setattr(
+            ss, "_find_current_slot",
+            lambda slots: "10:00" if slots else None,
+        )
+
+        # No buffer — strike 6920 passes.
+        args = parse_args(["--tickers", "SPX", "--min-tier", "p90"])
+        scan_data = {
+            "quotes":      {"SPX": {"last": 7000.0}},
+            "prev_closes": {"SPX": 7000.0},
+            "tier_filter_state": "active",
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-05-04",
+                    "tier_data": self._tier_data_for_dte_routing("SPX"),
+                    "spreads": {
+                        "SPX": [{
+                            "option_type": "PUT", "short_strike": 6920,
+                            "long_strike": 6900, "credit": 0.50,
+                            "roi_pct": 2.5, "otm_pct": 1.14, "width": 20,
+                        }],
+                    },
+                }
+            },
+        }
+        cands = _collect_filtered_candidates(scan_data, args)
+        assert {c["short_strike"] for c in cands} == {6920}, (
+            "without buffer, 6920 must pass (≤ 6930 boundary)"
+        )
+
+        # With min_buf=0.50, the boundary shifts to 6895 → 6920 fails.
+        args2 = parse_args([
+            "--tickers", "SPX", "--min-tier", "p90", "--min-buf", "0.50",
+        ])
+        cands2 = _collect_filtered_candidates(scan_data, args2)
+        assert cands2 == [], (
+            "with min_buf=0.50, boundary shifts from 6930 to 6895; "
+            "strike 6920 must FAIL (6920 > 6895)"
+        )
+
+    def test_min_buf_shifts_tier_boundary_more_otm_for_calls(self, monkeypatch):
+        """Symmetric for calls: min_buf pushes the boundary UP (more
+        OTM = larger strike). Fixture: spot=7000, intraday p90 calls at
+        +1.0% → boundary 7070. With min_buf=0.50%, boundary becomes
+        7070 + 35 = 7105. A call short at 7080 passes bare but fails
+        with buffer."""
+        import spread_scanner as ss
+        from spread_scanner import _collect_filtered_candidates, parse_args
+
+        monkeypatch.setattr(
+            ss, "_find_current_slot",
+            lambda slots: "10:00" if slots else None,
+        )
+
+        td = self._tier_data_for_dte_routing("SPX")
+        # The fixture's intraday "when_up" pct.p90 = +1.0% (boundary 7070
+        # for spot=7000); add a strike scenario.
+        scan_data = {
+            "quotes":      {"SPX": {"last": 7000.0}},
+            "prev_closes": {"SPX": 7000.0},
+            "tier_filter_state": "active",
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-05-04",
+                    "tier_data": td,
+                    "spreads": {
+                        "SPX": [{
+                            "option_type": "CALL", "short_strike": 7080,
+                            "long_strike": 7100, "credit": 0.50,
+                            "roi_pct": 2.5, "otm_pct": 1.14, "width": 20,
+                        }],
+                    },
+                }
+            },
+        }
+        # No buffer: 7080 ≥ 7070 → PASSES.
+        args = parse_args(["--tickers", "SPX", "--min-tier", "p90"])
+        cands = _collect_filtered_candidates(scan_data, args)
+        assert {c["short_strike"] for c in cands} == {7080}
+
+        # min_buf=0.50: boundary → 7105; 7080 < 7105 → FAILS.
+        args2 = parse_args([
+            "--tickers", "SPX", "--min-tier", "p90", "--min-buf", "0.50",
+        ])
+        cands2 = _collect_filtered_candidates(scan_data, args2)
+        assert cands2 == []
+
+    def test_min_buf_default_zero_is_legacy_behavior(self, monkeypatch):
+        """min_buf defaults to 0 — no behavior change vs the pre-buffer
+        code path. Pinned so future refactors don't accidentally turn
+        on a non-zero buffer."""
+        import spread_scanner as ss
+        from spread_scanner import _collect_filtered_candidates, parse_args
+
+        monkeypatch.setattr(
+            ss, "_find_current_slot",
+            lambda slots: "10:00" if slots else None,
+        )
+
+        args = parse_args(["--tickers", "SPX", "--min-tier", "p90"])
+        assert args.min_buf == 0.0
+        # Strike at 6920 passes the bare boundary 6930 — same outcome
+        # as before adding min_buf support.
+        scan_data = {
+            "quotes":      {"SPX": {"last": 7000.0}},
+            "prev_closes": {"SPX": 7000.0},
+            "tier_filter_state": "active",
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-05-04",
+                    "tier_data": self._tier_data_for_dte_routing("SPX"),
+                    "spreads": {
+                        "SPX": [{
+                            "option_type": "PUT", "short_strike": 6920,
+                            "long_strike": 6900, "credit": 0.50,
+                            "roi_pct": 2.5, "otm_pct": 1.14, "width": 20,
+                        }],
+                    },
+                }
+            },
+        }
+        cands = _collect_filtered_candidates(scan_data, args)
+        assert {c["short_strike"] for c in cands} == {6920}
+
+    def test_min_buf_applies_to_min_tier_close_too(self, monkeypatch):
+        """min_buf isn't a min_tier-only concept — it must layer on top
+        of `min_tier_close` (the c2c gate) too. Same fixture: c2c-1 puts
+        at p90 = -2.0% → boundary 6860. min_buf=0.50 shifts to 6825.
+        Strike 6850 passes bare but fails buffered."""
+        import spread_scanner as ss
+        from spread_scanner import _collect_filtered_candidates, parse_args
+
+        monkeypatch.setattr(
+            ss, "_find_current_slot",
+            lambda slots: "10:00" if slots else None,
+        )
+
+        scan_data = {
+            "quotes":      {"SPX": {"last": 7000.0}},
+            "prev_closes": {"SPX": 7000.0},
+            "tier_filter_state": "active",
+            "dte_sections": {
+                # Use DTE 1 to exercise the c2c-window=1 path (and, with
+                # the latest routing, hourly_1dte fallback).
+                1: {
+                    "expiration": "2026-05-05",
+                    "tier_data": self._tier_data_for_dte_routing("SPX"),
+                    "spreads": {
+                        "SPX": [{
+                            "option_type": "PUT", "short_strike": 6850,
+                            "long_strike": 6830, "credit": 0.50,
+                            "roi_pct": 2.5, "otm_pct": 2.14, "width": 20,
+                        }],
+                    },
+                }
+            },
+        }
+        # No buffer: 6850 ≤ 6860 c2c-1 → passes.
+        args = parse_args([
+            "--tickers", "SPX", "--min-tier-close", "p90",
+        ])
+        cands = _collect_filtered_candidates(scan_data, args)
+        assert {c["short_strike"] for c in cands} == {6850}
+
+        # min_buf=0.50 shifts c2c-1 boundary to 6825 → 6850 fails.
+        args2 = parse_args([
+            "--tickers", "SPX", "--min-tier-close", "p90", "--min-buf", "0.50",
+        ])
+        cands2 = _collect_filtered_candidates(scan_data, args2)
+        assert cands2 == []
+
+    def test_min_buf_chip_appears_in_filter_label(self, monkeypatch):
+        """When min_buf > 0 AND a tier filter is configured, the Top-N
+        filter chip must include the `+bufN.NN%` suffix so the operator
+        sees the buffer is active. Without a tier filter (just min_buf
+        alone is meaningless), the chip should NOT appear."""
+        import spread_scanner as ss
+        from spread_scanner import _render_top_picks, parse_args
+
+        monkeypatch.setattr(
+            ss, "_find_current_slot",
+            lambda slots: "10:00" if slots else None,
+        )
+
+        args = parse_args([
+            "--tickers", "SPX", "--top", "1",
+            "--min-tier", "p90", "--min-buf", "0.15",
+        ])
+        # Strike 6800 is well inside the buffered boundary (6919.5
+        # with min_buf=0.15), so the row survives and the header
+        # (with the chip) is rendered.
+        scan_data = {
+            "quotes":      {"SPX": {"last": 7000.0}},
+            "prev_closes": {"SPX": 7000.0},
+            "tier_filter_state": "active",
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-05-04",
+                    "tier_data": self._tier_data_for_dte_routing("SPX"),
+                    "spreads": {
+                        "SPX": [{
+                            "option_type": "PUT", "short_strike": 6800,
+                            "long_strike": 6780, "credit": 0.50,
+                            "roi_pct": 2.5, "otm_pct": 2.86, "width": 20,
+                        }],
+                    },
+                }
+            },
+        }
+        text = "\n".join(_render_top_picks(scan_data, args))
+        assert "+buf0.15%" in text, (
+            f"expected '+buf0.15%' chip, got: {text!r}"
+        )
+        # Chip should NOT appear when no tier filter is configured (the
+        # buffer is meaningless alone — without a dynamic boundary to
+        # buffer above, the value can't be applied).
+        args_no_tier = parse_args([
+            "--tickers", "SPX", "--top", "1", "--min-buf", "0.15",
+        ])
+        text2 = "\n".join(_render_top_picks(scan_data, args_no_tier))
+        assert "+buf" not in text2
+
+    def test_min_buf_via_yaml_config(self, tmp_path):
+        """min_buf round-trips through YAML config loading."""
+        from spread_scanner import _load_config
+
+        cfg = tmp_path / "scanner.yaml"
+        cfg.write_text(
+            "tickers: [SPX]\n"
+            "dte: [0]\n"
+            "tiers: true\n"
+            "min_tier: conservative\n"
+            "min_buf: 0.15\n"
+        )
+        args, _ = _load_config(["--config", str(cfg)])
+        assert args.min_buf == 0.15
+        assert args.min_tier == "conservative"
+
     def test_min_tier_pn_routes_to_intraday_for_dte0_spreads(self, monkeypatch):
         """min_tier=p90 with a DTE-0 spread must apply the INTRADAY
         boundary (in this fixture: spot * (1 - 1.0%) = 6930 for SPX puts)."""

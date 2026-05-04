@@ -788,6 +788,11 @@ argparse with YAML values as defaults so CLI flags still win).</p>
 <td>Always close-to-close window=DTE; independent of <code>min_tier</code></td>
 </tr>
 <tr>
+<td><code>min_buf</code></td>
+<td>float (% points, default 0)</td>
+<td>Additive cushion in ABSOLUTE percentage points layered on top of the dynamic tier boundary. <code>min_buf: 0.15</code> shifts a "cons → 1.25% OTM" boundary to "1.40% OTM" — strike must clear the model's verdict by 0.15pp. Symmetric on put / call. Applies to BOTH <code>min_tier</code> and <code>min_tier_close</code>. Doesn't replace <code>min_otm</code>; they stack.</td>
+</tr>
+<tr>
 <td><code>min_otm</code></td>
 <td>float</td>
 <td>Absolute OTM% floor across all tickers</td>
@@ -925,6 +930,26 @@ python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> <
 <tr>
 <td><code>test_scan_all_tickers_swaps_args_percentile_url_to_backup_on_primary_fail</code></td>
 <td>end-to-end: swap persists onto args + resolved_endpoints</td>
+</tr>
+<tr>
+<td><code>test_min_buf_shifts_tier_boundary_more_otm_for_puts</code></td>
+<td>min_buf shifts put boundary further OTM (lower strike)</td>
+</tr>
+<tr>
+<td><code>test_min_buf_shifts_tier_boundary_more_otm_for_calls</code></td>
+<td>min_buf shifts call boundary further OTM (higher strike)</td>
+</tr>
+<tr>
+<td><code>test_min_buf_default_zero_is_legacy_behavior</code></td>
+<td>default 0 leaves old behavior intact</td>
+</tr>
+<tr>
+<td><code>test_min_buf_applies_to_min_tier_close_too</code></td>
+<td>min_buf gates BOTH min_tier and min_tier_close</td>
+</tr>
+<tr>
+<td><code>test_min_buf_chip_appears_in_filter_label</code></td>
+<td><code>+bufN.NN%</code> chip in Top-N header when buffer + tier filter both active</td>
 </tr>
 </tbody>
 </table>

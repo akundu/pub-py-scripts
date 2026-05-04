@@ -210,6 +210,23 @@ class ScannerConfig:
     max_otm_per_ticker: dict[str, float] = field(default_factory=dict)
     min_tier: str | None = None
     min_tier_close: str | None = None
+    # Additive buffer (in absolute percentage points) layered on top of
+    # the dynamic tier boundary. The tier filter resolves a strike from
+    # the modeled percentile move; `min_buf` shifts that boundary
+    # FURTHER OTM by this many percentage points so the strike has a
+    # cushion on top of what the model says is "safe".
+    #
+    # Example: min_tier=conservative might resolve to 1.25% OTM on a
+    # calm day. With min_buf=0.15, the effective OTM gate becomes
+    # 1.40% — the candidate must be at least 0.15% MORE OTM than the
+    # model's verdict. Symmetric: applies to both put (lower strike)
+    # and call (higher strike) sides, and to both `min_tier` (live
+    # intraday) and `min_tier_close` (close-to-close) gates.
+    #
+    # Units: absolute percentage points (NOT relative). 0.15 means add
+    # 0.15 percentage points; it is NOT scaled against the boundary.
+    # Default 0 = no buffer (legacy behavior).
+    min_buf: float = 0.0
     # Number of most-recent action rows shown at the bottom of the dashboard
     # (from trade/simulate-trade handlers). 0 = hide the panel entirely.
     recent_actions_count: int = 3
@@ -323,6 +340,7 @@ class ScannerConfig:
         d["max_otm_per_ticker"] = dict(self.max_otm_per_ticker or {})
         d["min_tier"] = self.min_tier
         d["min_tier_close"] = self.min_tier_close
+        d["min_buf"] = self.min_buf
         d["recent_actions_count"] = self.recent_actions_count
         d["verify_max_age_sec"] = self.verify_max_age_sec
         d["verify_require_provider_source"] = self.verify_require_provider_source
@@ -1871,11 +1889,17 @@ def _collect_filtered_candidates(scan_data: dict, args) -> list[dict]:
         return []
 
     prev_closes = scan_data.get("prev_closes", {})
+    quotes = scan_data.get("quotes", {})
     min_credit = args.min_credit
     min_roi = args.min_roi
     min_norm_roi = args.min_norm_roi
     min_tier = args.min_tier
     min_tier_close = args.min_tier_close
+    # Additive cushion (in absolute %-points) layered on top of the
+    # tier-derived boundary. Translated to a dollar offset per ticker
+    # below so the comparison against `short_strike` stays in price
+    # units. Default 0.0 = no buffer.
+    min_buf = float(getattr(args, "min_buf", 0.0) or 0.0)
 
     # Boundaries for the `min_tier` filter, keyed by DTE.
     #   - DTE 0 → intraday model (hourly slots → today's close)
@@ -1929,6 +1953,11 @@ def _collect_filtered_candidates(scan_data: dict, args) -> list[dict]:
             # Per-symbol OTM floors/ceilings (override the scalar min/max_otm).
             sym_min_otm = _resolve_min_otm(args, sym)
             sym_max_otm = _resolve_max_otm(args, sym)
+            # Tier-buffer in $ for THIS ticker's spot price. Computed
+            # once per (sym, dte) so the per-spread inner loop just
+            # subtracts (puts) / adds (calls) it from the boundary.
+            spot = (quotes.get(sym) or {}).get("last", 0) or 0
+            buf_dollars = (spot * min_buf / 100.0) if spot > 0 else 0.0
             for s in spreads:
                 # Verify outcome gate. The verify step now annotates rather
                 # than deletes, so failed candidates remain in the spreads
@@ -1958,31 +1987,35 @@ def _collect_filtered_candidates(scan_data: dict, args) -> list[dict]:
                 # Tier filter — DTE-routed: DTE 0 hits intraday model,
                 # DTE N>0 hits close-to-close model with window=N. The
                 # boundaries for both were pre-computed above and keyed
-                # by the spread's actual DTE.
+                # by the spread's actual DTE. `min_buf` (translated to
+                # `buf_dollars` for this ticker's spot) shifts the
+                # boundary FURTHER OTM — puts subtract, calls add — so
+                # the strike must clear the model's verdict by an extra
+                # `min_buf` percentage points.
                 if min_tier:
                     sym_bounds = min_tier_boundaries_by_dte.get(dte, {}).get(sym, {})
                     tier_sides = sym_bounds.get(min_tier, {})
                     if s["option_type"] == "PUT":
                         boundary = tier_sides.get("put")
-                        if boundary is not None and s["short_strike"] > boundary:
+                        if boundary is not None and s["short_strike"] > (boundary - buf_dollars):
                             continue
                     elif s["option_type"] == "CALL":
                         boundary = tier_sides.get("call")
-                        if boundary is not None and s["short_strike"] < boundary:
+                        if boundary is not None and s["short_strike"] < (boundary + buf_dollars):
                             continue
 
-                # Tier filter (close-to-close)
+                # Tier filter (close-to-close) — same buffer treatment.
                 if min_tier_close:
                     dte_bounds = tier_boundaries_c2c.get(dte, {})
                     if sym in dte_bounds:
                         tier_sides = dte_bounds[sym].get(min_tier_close, {})
                         if s["option_type"] == "PUT":
                             boundary = tier_sides.get("put")
-                            if boundary is not None and s["short_strike"] > boundary:
+                            if boundary is not None and s["short_strike"] > (boundary - buf_dollars):
                                 continue
                         elif s["option_type"] == "CALL":
                             boundary = tier_sides.get("call")
-                            if boundary is not None and s["short_strike"] < boundary:
+                            if boundary is not None and s["short_strike"] < (boundary + buf_dollars):
                                 continue
 
                 all_candidates.append({
@@ -2123,6 +2156,11 @@ def _render_top_picks(scan_data: dict, args) -> list[str]:
         filters.append(f"tier≥{args.min_tier[:4]}")
     if args.min_tier_close:
         filters.append(f"c2c≥{args.min_tier_close[:4]}")
+    # Show the tier-buffer when configured — operator should see that
+    # the dynamic boundary is being shifted further OTM.
+    min_buf = float(getattr(args, "min_buf", 0.0) or 0.0)
+    if min_buf > 0 and (args.min_tier or args.min_tier_close):
+        filters.append(f"+buf{min_buf:.2f}%")
     filter_str = f"  {DIM}[{', '.join(filters)}]{RESET}" if filters else ""
 
     # Column widths. Every cell — header, separator, and data row — uses the
@@ -4793,6 +4831,13 @@ Examples:
     parser.add_argument(
         "--min-tier-close", default=None,
         help="Minimum close-to-close risk tier for top picks: aggr (a), mod (m), or cons (c)",
+    )
+    parser.add_argument(
+        "--min-buf", type=float, default=0.0,
+        help="Additive buffer in ABSOLUTE percentage points layered on top "
+             "of the dynamic tier boundary (--min-tier / --min-tier-close). "
+             "E.g. --min-buf 0.15 makes a conservative-tier 1.25%% OTM "
+             "boundary effectively 1.40%% OTM. Default 0 = no buffer.",
     )
     parser.add_argument(
         "--widths", default=None, dest="widths_str",
