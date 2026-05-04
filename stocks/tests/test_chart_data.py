@@ -739,3 +739,53 @@ def test_realtime_resampler_handles_no_price_column(tmp_path: Path):
     bad = pd.DataFrame({"foo": [1, 2, 3]},
                         index=pd.date_range("2026-05-04", periods=3, freq="1min", tz="UTC"))
     assert _resample_ticks_to_ohlc(bad, "5m").empty
+
+
+def test_realtime_resampler_drops_stuck_feed():
+    """Indices broadcast a static `price` field through realtime_data —
+    every tick has the same value (e.g. SPX showed 7199.46 across 889
+    rows of a single trading day). The helper detects this 'stuck'
+    pattern (every resampled bar has the same close, more than 3 bars)
+    and returns empty so the loader falls back to hourly_prices, which
+    has the actual moving values."""
+    from common.chart_data import _resample_ticks_to_ohlc
+    # 60 minutes of "ticks" that all carry the same price — typical of
+    # an index quote stream's static reference broadcast.
+    n = 60
+    ticks = pd.DataFrame(
+        {"price": [7199.46] * n},
+        index=pd.date_range("2026-05-04 13:30:00", periods=n, freq="1min", tz="UTC"),
+    )
+    out = _resample_ticks_to_ohlc(ticks, "5m")
+    assert out.empty, (
+        "Stuck-feed (single unique price across many bars) must return "
+        "empty so the loader can fall back to hourly_prices"
+    )
+
+
+def test_realtime_resampler_keeps_moving_feed():
+    """Sanity counter to the stuck-feed test: when prices actually move
+    the resampler still produces useful bars."""
+    from common.chart_data import _resample_ticks_to_ohlc
+    n = 60
+    ticks = pd.DataFrame(
+        {"price": [100.0 + i * 0.05 for i in range(n)]},  # climbing
+        index=pd.date_range("2026-05-04 13:30:00", periods=n, freq="1min", tz="UTC"),
+    )
+    out = _resample_ticks_to_ohlc(ticks, "5m")
+    assert not out.empty
+    assert out["close"].nunique() > 1
+
+
+def test_realtime_resampler_keeps_short_flat_runs():
+    """An honestly-flat 1-2 bar window (legitimate quiet period at
+    market open / close) shouldn't trigger the stuck-feed guard."""
+    from common.chart_data import _resample_ticks_to_ohlc
+    # 10 minutes of identical price → 2 bars at 5m. Below the 3-bar
+    # threshold so it should pass through.
+    ticks = pd.DataFrame(
+        {"price": [100.0] * 10},
+        index=pd.date_range("2026-05-04 13:30:00", periods=10, freq="1min", tz="UTC"),
+    )
+    out = _resample_ticks_to_ohlc(ticks, "5m")
+    assert not out.empty

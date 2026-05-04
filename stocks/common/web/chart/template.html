@@ -546,6 +546,20 @@
     borderUpColor: "#26a69a", borderDownColor: "#ef5350",
     wickUpColor: "#26a69a", wickDownColor: "#ef5350",
   });
+  // Always-on line series tracing the close prices. Sits on top of the
+  // candles so the price path stays visible even when bars degenerate
+  // (e.g., index quote streams that broadcast a static value would
+  // otherwise render as flat-line dashes that look like nothing). The
+  // crosshair tooltip already pulls open/high/low/close from
+  // candleSeries; the line just gives a clear visual trace.
+  const lineSeries = priceChart.addLineSeries({
+    color: "#58a6ff",
+    lineWidth: 2,
+    priceLineVisible: false,   // candleSeries already shows the last-price line
+    crosshairMarkerVisible: true,
+    crosshairMarkerRadius: 3,
+    lastValueVisible: false,
+  });
   const volumeSeries = priceChart.addHistogramSeries({
     priceFormat: { type: "volume" },
     priceScaleId: "vol",
@@ -849,7 +863,7 @@
         const txt = await resp.text();
         $("status").textContent = `Error ${resp.status}: ${txt.slice(0, 200)}`;
         $("status").style.display = "block";
-        candleSeries.setData([]); volumeSeries.setData([]); rsiSeries.setData([]);
+        candleSeries.setData([]); lineSeries.setData([]); volumeSeries.setData([]); rsiSeries.setData([]);
         renderStats(null);
         return;
       }
@@ -882,6 +896,9 @@
       setPickerDates(data.start, data.end);
 
       candleSeries.setData(lastBars);
+      // Line series traces the closes — always visible, regardless of
+      // whether the candles render with usable bodies.
+      lineSeries.setData(lastBars.map(b => ({ time: b.time, value: b.close })));
       volumeSeries.setData(lastBars.map(b => ({
         time: b.time, value: b.volume || 0,
         color: (b.close >= b.open ? "rgba(38, 166, 154, 0.45)"
@@ -1310,6 +1327,7 @@
       // dates to the left/right edge.
       rebuildDayRefs();
       candleSeries.setData(lastBars);
+      lineSeries.setData(lastBars.map(b => ({ time: b.time, value: b.close })));
       volumeSeries.setData(lastBars.map(b => ({
         time: b.time, value: b.volume || 0,
         color: b.close >= b.open ? "rgba(38, 166, 154, 0.45)"

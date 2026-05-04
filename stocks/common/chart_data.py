@@ -674,6 +674,14 @@ def _resample_ticks_to_ohlc(ticks: pd.DataFrame | None, interval: str) -> pd.Dat
     rs.columns = ["open", "high", "low", "close", "volume"]
     rs = rs.dropna(subset=["open", "high", "low", "close"], how="all")
     rs.index.name = "timestamp"
+    # Stuck-feed guard: index symbols (SPX/NDX/RUT/etc.) broadcast a
+    # static reference value through realtime_data — the chart would
+    # show a flat line at a stale price even though the actual index
+    # is moving. If every resampled bar's close is the same value over
+    # a multi-bar span, the data isn't useful — drop it so the loader
+    # falls back to hourly_prices, which carries the real values.
+    if not rs.empty and len(rs) > 3 and rs["close"].nunique() <= 1:
+        return pd.DataFrame()
     return rs
 
 
