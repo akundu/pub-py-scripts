@@ -14758,8 +14758,162 @@ async def handle_ai_query(request: web.Request) -> web.Response:
         }, status=500)
 
 def _range_percentiles_methodology_html(exclude_outliers: bool = True) -> str:
-    """Generate methodology documentation HTML for range_percentiles page."""
+    """Generate methodology documentation HTML for range_percentiles page.
+
+    Tier table, strike-selection table, and the "X-day backtest" line
+    are all interpolated from the latest calibration JSON
+    (`results/calibration/recommended_percentiles.json`) so the
+    explainer can never drift from the actual numbers in use. If the
+    JSON is missing or unreadable we fall back to a generic message
+    and the static SPX/NDX/RUT placeholders.
+    """
     outlier_status = "Enabled (default)" if exclude_outliers else "Disabled (?outliers=1)"
+
+    # ── Load calibration so the explainer reflects reality ─────────────
+    import json as _json
+    cal_path = Path(__file__).parent / "results" / "calibration" / "recommended_percentiles.json"
+    cal: dict = {}
+    try:
+        if cal_path.exists():
+            cal = _json.loads(cal_path.read_text())
+    except Exception:
+        cal = {}
+
+    backtest_days = int(cal.get("backtest_days", 250))
+    target_hit_rate = float(cal.get("target_hit_rate", 95.0))
+    cal_tickers = cal.get("tickers", {})
+    cal_generated_at = (cal.get("generated_at") or "")[:10] or "unknown"
+
+    # Resolve aggressive/moderate/conservative per ticker by reusing the
+    # same step-down/step-up logic the percentiles page uses for tier
+    # row highlighting (`common.range_percentiles._load_recommended`).
+    try:
+        from common.range_percentiles import _load_recommended
+    except Exception:
+        _load_recommended = None  # type: ignore
+
+    def _tier_pcts_for(ticker: str, ctx: str) -> dict:
+        """Return {aggressive: {put,call}, moderate: ..., conservative: ...}
+        for a single ticker + context, or empty if calibration unavailable."""
+        if _load_recommended is None:
+            return {}
+        try:
+            rec = _load_recommended(ticker)
+            return rec.get(ctx, {})
+        except Exception:
+            return {}
+
+    def _hit_rate_for(ticker: str, pct: int) -> float | None:
+        """Look up actual backtest hit rate at percentile `pct` for ticker.
+        The calibration JSON stores `hit_rates: {p95: 90.4, p96: 91.6, …}`.
+        Same percentile is used for both put and call sides in calibration,
+        so a single hit rate per percentile is correct."""
+        info = cal_tickers.get(ticker, {}) or {}
+        hr = info.get("hit_rates", {}) or {}
+        v = hr.get(f"p{pct}")
+        return float(v) if isinstance(v, (int, float)) else None
+
+    def _avg_width_for(ticker: str, pct: int) -> float | None:
+        info = cal_tickers.get(ticker, {}) or {}
+        w = info.get("avg_widths", {}) or {}
+        v = w.get(f"p{pct}")
+        return float(v) if isinstance(v, (int, float)) else None
+
+    # ── Build the "Three Risk Tiers" table — one row per tier with
+    #    averaged actual-hit-rate across SPX/NDX/RUT (since the page
+    #    legend applies generically to all three tickers). Each tier's
+    #    target uses the *put* percentile as canonical (calibration
+    #    keeps put and call equal in this layout).
+    TIER_NAMES = ("aggressive", "moderate", "conservative")
+    TIER_INDICATORS = {"aggressive": "&#128308;", "moderate": "&#128993;", "conservative": "&#128994;"}
+    TIER_BG = {"aggressive": "rgba(218,54,51,0.08)",
+                "moderate":   "rgba(210,153,34,0.08)",
+                "conservative":"rgba(35,134,54,0.08)"}
+    TIER_DESC = {
+        "aggressive":   "High-conviction, small size, stop-loss in place",
+        "moderate":     "Default choice, balanced risk/reward",
+        "conservative": "Larger positions, no stop-loss, capital preservation",
+    }
+    TIER_STRIKES = {"aggressive": "Tightest", "moderate": "Balanced", "conservative": "Widest"}
+    TIER_PREMIUM = {"aggressive": "Most",     "moderate": "Good",     "conservative": "Least"}
+
+    tier_rows = []
+    for tier in TIER_NAMES:
+        # Average actual hit rate across the canonical 3 tickers when the
+        # calibration knows them. Fall back to a "—" if nothing is loaded.
+        rates: list[float] = []
+        for tk in ("SPX", "NDX", "RUT"):
+            pcts = _tier_pcts_for(tk, "close_to_close").get(tier, {})
+            p = pcts.get("put") if isinstance(pcts, dict) else None
+            if isinstance(p, int):
+                hr = _hit_rate_for(tk, p)
+                if hr is not None:
+                    rates.append(hr)
+        if rates:
+            avg = sum(rates) / len(rates)
+            hit_rate_str = f"~{avg:.0f}%"
+        else:
+            hit_rate_str = "—"
+        tier_rows.append(
+            f'<tr style="background:{TIER_BG[tier]};">'
+            f'<td style="padding:2px 10px 2px 0;">{tier.capitalize()}</td>'
+            f'<td style="padding:2px 10px;">{TIER_INDICATORS[tier]}</td>'
+            f'<td style="padding:2px 10px;">{hit_rate_str}</td>'
+            f'<td style="padding:2px 10px;">{TIER_STRIKES[tier]}</td>'
+            f'<td style="padding:2px 10px;">{TIER_PREMIUM[tier]}</td>'
+            f'<td style="padding:2px 10px;">{TIER_DESC[tier]}</td></tr>'
+        )
+    tier_table_rows = "\n    ".join(tier_rows)
+
+    # ── Build the "Credit Spread Strike Selection" table — one row per
+    #    ticker showing the moderate-tier put/call percentile and its
+    #    average width (% OTM) from the calibration backtest.
+    def _strike_row(ticker: str) -> str:
+        rec = _tier_pcts_for(ticker, "close_to_close").get("moderate", {})
+        if not isinstance(rec, dict):
+            return f"<tr><td>{ticker}</td><td colspan=\"5\" style=\"color:#8b949e;\">no calibration</td></tr>"
+        put_p, call_p = rec.get("put"), rec.get("call")
+        put_w = _avg_width_for(ticker, put_p) if isinstance(put_p, int) else None
+        call_w = _avg_width_for(ticker, call_p) if isinstance(call_p, int) else None
+        put_w_str  = f"~{put_w:.1f}% OTM"  if put_w  is not None else "—"
+        call_w_str = f"~{call_w:.1f}% OTM" if call_w is not None else "—"
+        # Calibration keeps put and call symmetric, so we don't claim
+        # a numeric asymmetry % here — just describe the moderate band.
+        return (
+            f'<tr><td style="padding:3px 12px 3px 0;">{ticker}</td>'
+            f'<td style="padding:3px 10px;color:#3fb950;">P{put_p}</td>'
+            f'<td style="padding:3px 10px;">{put_w_str}</td>'
+            f'<td style="padding:3px 10px;color:#d29922;">P{call_p}</td>'
+            f'<td style="padding:3px 10px;">{call_w_str}</td>'
+            f'<td style="padding:3px 10px;font-size:11px;">moderate tier (calibrated)</td></tr>'
+        )
+    strike_rows = "\n    ".join(_strike_row(t) for t in ("SPX", "NDX", "RUT"))
+
+    # ── Intraday strike table (point-to-close), same idea ──────────────
+    def _intraday_row(ticker: str) -> str:
+        rec = _tier_pcts_for(ticker, "intraday").get("moderate", {})
+        if not isinstance(rec, dict):
+            return f"<tr><td>{ticker}</td><td colspan=\"3\" style=\"color:#8b949e;\">no calibration</td></tr>"
+        put_p, call_p = rec.get("put"), rec.get("call")
+        put_str  = f"P{put_p}"  if isinstance(put_p,  int) else "—"
+        call_str = f"P{call_p}" if isinstance(call_p, int) else "—"
+        return (
+            f'<tr><td style="padding:3px 12px 3px 0;">{ticker}</td>'
+            f'<td style="padding:3px 10px;">{put_str}</td>'
+            f'<td style="padding:3px 10px;">{call_str}</td>'
+            f'<td style="padding:3px 10px;font-size:11px;">moderate tier (calibrated)</td></tr>'
+        )
+    intraday_rows = "\n    ".join(_intraday_row(t) for t in ("SPX", "NDX", "RUT"))
+
+    # Footer line acknowledging where the numbers came from.
+    cal_footer = (
+        f"<p style=\"font-size:10px;opacity:0.7;margin-top:6px;\">"
+        f"Tier and strike values above are loaded from the most recent "
+        f"calibration ({cal_generated_at}) — re-runs nightly via the "
+        f"weekly cron. Target hit-rate: {target_hit_rate:.0f}%, "
+        f"backtest window: {backtest_days} trading days.</p>"
+    )
+
     return f"""
 <div style="max-width:1200px;margin:40px auto 20px;padding:25px 30px;font-size:12px;color:var(--text-secondary,#8b949e);
     line-height:1.7;border-top:1px solid var(--border-color,#30363d);">
@@ -14880,8 +15034,9 @@ A &minus;3.5% day becomes &minus;2.55%. The day still counts in sample size.</pr
   <h4 style="font-size:13px;color:var(--text-primary,#c9d1d9);margin:18px 0 6px;">Credit Spread Strike Selection</h4>
 
   <p><strong>Close-to-Close (0DTE):</strong> Place short strikes outside the band boundary for your ticker.
-  Empirical analysis (120-day and 250-day windows) consistently shows UP days have wider tails than
-  DOWN days — so CALL credit spreads need wider bands than PUT credit spreads.</p>
+  Numbers below are pulled from the latest calibration backtest — they reflect the
+  <em>moderate</em> tier (the calibrated band that empirically meets the {target_hit_rate:.0f}% target hit rate).
+  Width is the average % OTM at that percentile across the {backtest_days}-day backtest.</p>
   <table style="font-size:12px;border-collapse:collapse;margin:8px 0;">
     <tr style="border-bottom:1px solid var(--border-color,#30363d);">
       <th style="text-align:left;padding:4px 12px 4px 0;">Ticker</th>
@@ -14889,41 +15044,23 @@ A &minus;3.5% day becomes &minus;2.55%. The day still counts in sample size.</pr
       <th style="padding:4px 10px;">Typical Range</th>
       <th style="padding:4px 10px;">Call (Short)</th>
       <th style="padding:4px 10px;">Typical Range</th>
-      <th style="padding:4px 10px;">Why Asymmetric</th>
+      <th style="padding:4px 10px;">Source</th>
     </tr>
-    <tr><td style="padding:3px 12px 3px 0;">SPX</td>
-        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~2.0% OTM</td>
-        <td style="padding:3px 10px;color:#d29922;">P97</td><td style="padding:3px 10px;">~2.5% OTM</td>
-        <td style="padding:3px 10px;font-size:11px;">Up tails 20% wider than down</td></tr>
-    <tr><td style="padding:3px 12px 3px 0;">NDX</td>
-        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~2.8% OTM</td>
-        <td style="padding:3px 10px;color:#d29922;">P97</td><td style="padding:3px 10px;">~3.2% OTM</td>
-        <td style="padding:3px 10px;font-size:11px;">Up tails 15% wider than down</td></tr>
-    <tr><td style="padding:3px 12px 3px 0;">RUT</td>
-        <td style="padding:3px 10px;color:#3fb950;">P95</td><td style="padding:3px 10px;">~3.1% OTM</td>
-        <td style="padding:3px 10px;color:#d29922;">P98</td><td style="padding:3px 10px;">~4.3% OTM</td>
-        <td style="padding:3px 10px;font-size:11px;">Up tails 30% wider than down</td></tr>
+    {strike_rows}
   </table>
 
   <p style="margin-top:12px;"><strong>Intraday (Point-to-Close):</strong> The intraday section shows how
   much price can move from a given time to the 4 PM close. Because the remaining time is shorter and
-  you have more information (today's open, current momentum), you can be more aggressive:</p>
+  you have more information (today's open, current momentum), the calibration tends to land on
+  somewhat tighter percentiles — but those are still derived from the same backtest:</p>
   <table style="font-size:12px;border-collapse:collapse;margin:8px 0;">
     <tr style="border-bottom:1px solid var(--border-color,#30363d);">
       <th style="text-align:left;padding:4px 12px 4px 0;">Ticker</th>
       <th style="padding:4px 10px;">Put Strike</th>
       <th style="padding:4px 10px;">Call Strike</th>
-      <th style="padding:4px 10px;">Note</th>
+      <th style="padding:4px 10px;">Source</th>
     </tr>
-    <tr><td style="padding:3px 12px 3px 0;">SPX</td>
-        <td style="padding:3px 10px;">P90</td><td style="padding:3px 10px;">P90</td>
-        <td style="padding:3px 10px;font-size:11px;">Most predictable intraday</td></tr>
-    <tr><td style="padding:3px 12px 3px 0;">NDX</td>
-        <td style="padding:3px 10px;">P95</td><td style="padding:3px 10px;">P90</td>
-        <td style="padding:3px 10px;font-size:11px;">Down protection wider; rallies orderly</td></tr>
-    <tr><td style="padding:3px 12px 3px 0;">RUT</td>
-        <td style="padding:3px 10px;">P95</td><td style="padding:3px 10px;">P90</td>
-        <td style="padding:3px 10px;font-size:11px;">Spikiest intraday; needs wider puts</td></tr>
+    {intraday_rows}
   </table>
 
   <p style="margin-top:12px;"><strong>Multi-Day (1&ndash;5 DTE):</strong> For longer-dated spreads,
@@ -14941,33 +15078,25 @@ A &minus;3.5% day becomes &minus;2.55%. The day still counts in sample size.</pr
   </table>
 
   <h4 style="font-size:13px;color:var(--text-primary,#c9d1d9);margin:18px 0 6px;">Three Risk Tiers</h4>
-  <p>Each table highlights three rows with colored indicators. Choose based on your risk appetite:</p>
+  <p>Each table highlights three rows with colored indicators. Hit rates below are the
+  <em>actual</em> backtest hit rates from the most recent calibration, averaged across SPX/NDX/RUT
+  on the close-to-close path — not aspirational targets. Choose based on your risk appetite:</p>
   <table style="font-size:11px;border-collapse:collapse;margin:8px 0;">
     <tr style="border-bottom:1px solid var(--border-color,#30363d);">
       <th style="text-align:left;padding:3px 10px 3px 0;">Tier</th>
       <th style="padding:3px 10px;">Indicator</th>
-      <th style="padding:3px 10px;">Target Hit Rate</th>
+      <th style="padding:3px 10px;">Backtest Hit Rate</th>
       <th style="padding:3px 10px;">Strikes</th>
       <th style="padding:3px 10px;">Premium</th>
       <th style="padding:3px 10px;">Best For</th>
     </tr>
-    <tr style="background:rgba(218,54,51,0.08);"><td style="padding:2px 10px 2px 0;">Aggressive</td>
-        <td style="padding:2px 10px;">&#128308;</td><td style="padding:2px 10px;">~90%</td>
-        <td style="padding:2px 10px;">Tightest</td><td style="padding:2px 10px;">Most</td>
-        <td style="padding:2px 10px;">High-conviction, small size, stop-loss in place</td></tr>
-    <tr style="background:rgba(210,153,34,0.08);"><td style="padding:2px 10px 2px 0;">Moderate</td>
-        <td style="padding:2px 10px;">&#128993;</td><td style="padding:2px 10px;">~93%</td>
-        <td style="padding:2px 10px;">Balanced</td><td style="padding:2px 10px;">Good</td>
-        <td style="padding:2px 10px;">Default choice, balanced risk/reward</td></tr>
-    <tr style="background:rgba(35,134,54,0.08);"><td style="padding:2px 10px 2px 0;">Conservative</td>
-        <td style="padding:2px 10px;">&#128994;</td><td style="padding:2px 10px;">~95%</td>
-        <td style="padding:2px 10px;">Widest</td><td style="padding:2px 10px;">Least</td>
-        <td style="padding:2px 10px;">Larger positions, no stop-loss, capital preservation</td></tr>
+    {tier_table_rows}
   </table>
+  {cal_footer}
   <ul style="margin:4px 0 8px 20px;font-size:11px;">
-    <li>Tiers are auto-calibrated nightly from a 90-day rolling backtest (target hit rates above are approximate).</li>
-    <li><strong>Asymmetry:</strong> Call (up) side uses wider bands than put (down) side because empirical
-    data shows UP days have 15&ndash;30% wider tails than DOWN days.</li>
+    <li>Tiers are auto-calibrated weekly from a {backtest_days}-day rolling backtest. Aggressive is
+    one percentile-step tighter than the moderate (calibrated) band; conservative is one step wider.
+    Hit rates therefore reflect what the backtest actually measured, not a fixed target.</li>
     <li><strong>European settlement:</strong> SPX/NDX/RUT are European-style &mdash; settle at expiration
     only. Intraday breach does not cause assignment. Close-to-close tables determine P&amp;L.</li>
     <li><strong>Intraday is tighter:</strong> Less time remaining = less room to move. Bands narrow as
