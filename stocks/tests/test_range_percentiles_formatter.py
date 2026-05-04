@@ -257,6 +257,117 @@ def test_format_hourly_moves_as_html_without_buffer():
     assert "buffer-addendum" not in html
 
 
+# ── Collapsible (<details>) wrappers for noisier sections ────────────
+
+
+def _hourly_data_with_max_move() -> dict:
+    """Fixture variant that includes max_move data so the Max Intraday
+    Excursion section renders. Otherwise identical to _make_hourly_data."""
+    d = _make_hourly_data()
+    d["slots_primary"] = {
+        "10:00": {
+            "label_et": "10:00 AM ET",
+            "when_down_day_count": 25,
+            "when_up_day_count": 25,
+            "when_down": {"day_count": 25, "pct": {"p75": -0.5, "p90": -1.0},
+                           "price": {"p75": 19900.0, "p90": 19800.0}},
+            "when_up":   {"day_count": 25, "pct": {"p75": 0.5, "p90": 1.0},
+                           "price": {"p75": 20100.0, "p90": 20200.0}},
+            "max_move": {
+                "day_count": 25,
+                "max_down_pct": {"p75": -0.7, "p90": -1.4},
+                "max_down_price": {"p75": 19860.0, "p90": 19720.0},
+                "max_up_pct": {"p75": 0.7, "p90": 1.4},
+                "max_up_price": {"p75": 20140.0, "p90": 20280.0},
+            },
+        },
+    }
+    return d
+
+
+def test_max_intraday_excursion_section_is_collapsed_by_default():
+    """Max Intraday Excursion sits behind a closed <details> caret —
+    most users want move-to-close as the primary view; the worst-case
+    excursion is secondary. Collapsed by default, click to expand."""
+    html = format_hourly_moves_as_html(_hourly_data_with_max_move())
+    # Section is wrapped in <details>, NOT <details open>
+    assert "Max Intraday Excursion" in html
+    # The summary must contain the title
+    assert "<summary" in html
+    # The details element wrapping the excursion must be closed by default
+    # (no `open` attribute on the <details> tag preceding the title).
+    import re
+    m = re.search(r'<details([^>]*)>\s*<summary[^>]*>[^<]*<h3[^>]*>\s*Max Intraday Excursion',
+                   html)
+    assert m, "Max Intraday Excursion not wrapped in <details>/<summary>"
+    assert "open" not in m.group(1), \
+        f"Max Intraday Excursion <details> should be closed by default; got attrs: {m.group(1)!r}"
+
+
+def _multi_window_with_momentum() -> dict:
+    """Fixture variant that includes momentum_conditional data so the
+    Momentum-Conditional Analysis section renders."""
+    d = _make_multi_window_result()
+    d["windows"]["1"]["momentum_conditional"] = {
+        "filter": {"direction": "up", "consecutive_days_min": 1, "auto_detected": False},
+        "continuation_rate": 0.55,
+        "matching_days": 50,
+        "when_continued_day_count": 25,
+        "when_reversed_day_count": 25,
+        "when_continued": {"pct": {"p75": 0.4, "p90": 0.8},
+                            "price": {"p75": 20080.0, "p90": 20160.0}},
+        "when_reversed": {"pct": {"p75": -0.4, "p90": -0.8},
+                           "price": {"p75": 19920.0, "p90": 19840.0}},
+    }
+    d["metadata"]["current_streak"] = 1
+    return d
+
+
+def test_momentum_conditional_section_is_collapsed_by_default():
+    """Momentum-Conditional Analysis is closed by default — it's an
+    advanced section most users don't need on first paint. The
+    Continued/Reversed subsections inside are open by default once
+    the user expands the parent."""
+    html = format_multi_window_as_html(_multi_window_with_momentum())
+    assert "Momentum-Conditional Analysis" in html
+    import re
+    # Outer details (the Momentum section) must be closed.
+    m = re.search(
+        r'<details([^>]*)>\s*<summary[^>]*>\s*<h2[^>]*>\s*🧭 Momentum-Conditional Analysis',
+        html,
+    )
+    assert m, "Momentum-Conditional section not wrapped in <details>/<summary>"
+    assert "open" not in m.group(1), \
+        f"Momentum <details> should be closed by default; got attrs: {m.group(1)!r}"
+
+    # Inner CONTINUED and REVERSED details should default to open so the
+    # parent section feels populated when first expanded.
+    m_c = re.search(r'<details([^>]*)>\s*<summary[^>]*>\s*<span[^>]*>\s*▶ CONTINUED', html)
+    assert m_c, "CONTINUED subsection not wrapped in nested <details>"
+    assert "open" in m_c.group(1), \
+        f"CONTINUED subsection should be open by default; got attrs: {m_c.group(1)!r}"
+
+    m_r = re.search(r'<details([^>]*)>\s*<summary[^>]*>\s*<span[^>]*>\s*◀ REVERSED', html)
+    assert m_r, "REVERSED subsection not wrapped in nested <details>"
+    assert "open" in m_r.group(1), \
+        f"REVERSED subsection should be open by default; got attrs: {m_r.group(1)!r}"
+
+
+def test_collapsible_details_tags_are_balanced():
+    """Open / close counts must match — a stray unclosed <details> would
+    break every later section's rendering."""
+    html_mw = format_multi_window_as_html(_multi_window_with_momentum())
+    html_hd = format_hourly_moves_as_html(_hourly_data_with_max_move())
+    for name, html in (("multi_window", html_mw), ("hourly", html_hd)):
+        opens = html.count("<details")
+        closes = html.count("</details>")
+        assert opens == closes, (
+            f"{name}: <details> opens ({opens}) != closes ({closes})"
+        )
+        # Each fixture exercises >=1 collapsible.
+        assert opens >= 1, f"{name}: expected at least one <details>"
+
+
 def test_db_server_js_handles_buffered_pct_attribute():
     """The injected live-price JS must reapply the buffer addendum after replacing
     the price cell — otherwise live-price updates would wipe the addendum."""

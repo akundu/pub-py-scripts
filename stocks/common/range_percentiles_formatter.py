@@ -1083,8 +1083,15 @@ def _generate_ticker_content_html(result: dict, ticker_id: str, buffer: float = 
 
         auto_note = " (auto-detected from current streak)" if auto_detected else ""
 
+        # Wrap the whole momentum block in a <details> so it's collapsed
+        # by default — most users only want the unconditional tables on
+        # first paint. Click the summary to expand.
         html_parts.append(f"""
-            <h2>🧭 Momentum-Conditional Analysis</h2>
+            <details class="rp-collapsible" style="margin-top:25px;">
+              <summary class="rp-collapsible-summary" style="cursor:pointer;list-style:revert;padding:6px 0;">
+                <h2 style="display:inline;margin:0;">🧭 Momentum-Conditional Analysis</h2>
+              </summary>
+              <div style="margin-top:10px;">
             <div style="display: flex; align-items: center; gap: 15px; margin-bottom: 15px; flex-wrap: wrap;">
                 <div style="background: var(--card-bg, #f8f9fa); border: 1px solid var(--border-color, #dee2e6); border-radius: 8px; padding: 10px 18px; display: flex; align-items: center; gap: 10px;">
                     <span style="font-size: 13px; opacity: 0.7;">Current Streak:</span>
@@ -1125,11 +1132,16 @@ def _generate_ticker_content_html(result: dict, ticker_id: str, buffer: float = 
 """)
         html_parts.append("            </div>\n")
 
-        # CONTINUED moves table
+        # CONTINUED moves table — wrapped in its own <details> so the
+        # user can collapse it independently. Default open within the
+        # parent so the section feels populated when first expanded.
         html_parts.append(f"""
-            <div class="direction-header" style="background: linear-gradient(135deg, #238636, #2ea043); color: white; padding: 8px 16px; border-radius: 6px 6px 0 0; font-weight: bold;">
-                ▶ CONTINUED (streak continued in same direction)
-            </div>
+            <details class="rp-collapsible" open style="margin-top:8px;">
+              <summary class="rp-collapsible-summary" style="cursor:pointer;list-style:revert;">
+                <span class="direction-header" style="display:inline-block;background: linear-gradient(135deg, #238636, #2ea043); color: white; padding: 6px 14px; border-radius: 6px; font-weight: bold;">
+                  ▶ CONTINUED (streak continued in same direction)
+                </span>
+              </summary>
             <div class="table-section">
                 <table>
                     <thead>
@@ -1185,13 +1197,17 @@ def _generate_ticker_content_html(result: dict, ticker_id: str, buffer: float = 
         html_parts.append("""                    </tbody>
                 </table>
             </div>
+            </details>
 """)
 
-        # REVERSED moves table
+        # REVERSED moves table — also wrapped in its own <details>.
         html_parts.append(f"""
-            <div class="direction-header" style="background: linear-gradient(135deg, #da3633, #f85149); color: white; padding: 8px 16px; border-radius: 6px 6px 0 0; font-weight: bold;">
-                ◀ REVERSED (streak broke — moved opposite direction)
-            </div>
+            <details class="rp-collapsible" open style="margin-top:8px;">
+              <summary class="rp-collapsible-summary" style="cursor:pointer;list-style:revert;">
+                <span class="direction-header" style="display:inline-block;background: linear-gradient(135deg, #da3633, #f85149); color: white; padding: 6px 14px; border-radius: 6px; font-weight: bold;">
+                  ◀ REVERSED (streak broke — moved opposite direction)
+                </span>
+              </summary>
             <div class="table-section">
                 <table>
                     <thead>
@@ -1247,6 +1263,9 @@ def _generate_ticker_content_html(result: dict, ticker_id: str, buffer: float = 
         html_parts.append("""                    </tbody>
                 </table>
             </div>
+            </details>
+              </div>
+            </details>
 """)
 
     html_parts.append("""        </div>
@@ -2366,10 +2385,15 @@ def format_hourly_moves_as_html(hourly_data: dict, buffer: float = 0.0) -> str:
                                               highlight_tiers=intra_call_tiers,
                                               buffer=buffer, prev_close=prev_close))
 
-    # --- Max-Move (Intraday Excursion) tables ---
+    # --- Max-Move (Intraday Excursion) tables — collapsed by default;
+    # the worst-case intraday spike data is useful but secondary to the
+    # primary move-to-close tables, so it sits behind a click. ---
     if sorted_primary and any(slots_primary[s].get("max_move") for s in sorted_primary):
-        html_parts.append('\n        <h3 style="margin-top:35px;">Max Intraday Excursion (High/Low After This Time)</h3>\n')
-        html_parts.append('        <div class="hourly-info" style="margin-bottom:12px;font-size:12px;">'
+        html_parts.append('\n        <details class="rp-collapsible" style="margin-top:35px;">\n')
+        html_parts.append('          <summary class="rp-collapsible-summary" style="cursor:pointer;list-style:revert;padding:6px 0;">'
+                          '<h3 style="display:inline;margin:0;">Max Intraday Excursion (High/Low After This Time)</h3>'
+                          '</summary>\n')
+        html_parts.append('        <div class="hourly-info" style="margin-bottom:12px;font-size:12px;margin-top:10px;">'
                           'Maximum high and minimum low reached <em>after</em> each time slot through close. '
                           'Unlike move-to-close (which only measures where the day <em>closed</em>), this shows '
                           'the worst-case intraday spike — the price your short strike could be tested at.</div>\n')
@@ -2382,6 +2406,7 @@ def format_hourly_moves_as_html(hourly_data: dict, buffer: float = 0.0) -> str:
                                                   "MAX UP EXCURSION (highest intraday high)", ticker=ticker,
                                                   highlight_tiers=mm_call_tiers,
                                                   buffer=buffer, prev_close=prev_close))
+        html_parts.append('        </details>\n')
 
     # --- Tier 2: 10-min tables (last 30 min) ---
     sorted_10 = sorted(slots_10min.keys(), key=_time_sort_key)
