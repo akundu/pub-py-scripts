@@ -16609,7 +16609,7 @@ async def handle_catch_all(request: web.Request) -> web.Response:
     }, status=404)
 
 # Allowed script names for /run_script (must exist in run_scripts/ and be in this list)
-RUN_SCRIPT_ALLOWLIST = frozenset({"ms1_cron.sh", "ms1_run.sh", "prediction_setup.sh", "lin1_cron.sh"})
+RUN_SCRIPT_ALLOWLIST = frozenset({"ms1_cron.sh", "ms1_run.sh", "prediction_setup.sh", "lin1_cron.sh", "dte_research_refresh.sh"})
 
 
 async def handle_run_script(request: web.Request) -> web.Response:
@@ -16647,6 +16647,7 @@ async def handle_run_script(request: web.Request) -> web.Response:
     start_date = request.query.get("start_date", "").strip()
     end_date = request.query.get("end_date", "").strip()
     days_back = request.query.get("days_back", "").strip()
+    research_refresh = request.query.get("research_refresh", "").strip()
     env = os.environ.copy()
     if start_date:
         env["START_DATE"] = start_date
@@ -16654,6 +16655,8 @@ async def handle_run_script(request: web.Request) -> web.Response:
         env["END_DATE"] = end_date
     if days_back:
         env["DAYS_BACK"] = days_back
+    if research_refresh:
+        env["RESEARCH_REFRESH"] = research_refresh
 
     try:
         # Use exec (list args) so script path with spaces is not split by shell
