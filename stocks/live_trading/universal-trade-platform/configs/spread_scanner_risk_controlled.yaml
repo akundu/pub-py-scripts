@@ -153,7 +153,12 @@ handlers:
     # before the simulated submit; failed verifications are dropped before
     # any risk reservation. Useful when you want the simulate log to be
     # faithful to what a live handler would have seen post-validation.
-    #validate_prices: true
+    # NOTE: defaults to TRUE for simulate_trade and trade handlers since
+    # the operator required IBKR validation on every transaction
+    # regardless of mode. Setting this to false explicitly opts out
+    # (e.g. offline-replay scenarios). Leaving the line uncommented
+    # makes the safer behavior explicit for future readers.
+    validate_prices: true
     policy: &trade_policy
       roi_pct: [1.5, 5.0]
       min_otm_pct:  {SPX: 1.0, NDX: 1.0, RUT: 1.0}

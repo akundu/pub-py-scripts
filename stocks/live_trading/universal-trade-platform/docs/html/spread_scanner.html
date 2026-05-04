@@ -808,6 +808,11 @@ argparse with YAML values as defaults so CLI flags still win).</p>
 <td>Global cooldown in MINUTES between successive trade submits across all tickers/sides. After a successful submit, all candidates within this window get <code>global_cooldown</code> skip entries. Stacks with <code>cooldown_per_ticker_side_sec</code>. <code>0</code> disables.</td>
 </tr>
 <tr>
+<td>handler <code>validate_prices</code> (simulate_trade / trade)</td>
+<td>bool (default <strong>True</strong>)</td>
+<td>Pre-fire price re-verify against IBKR via <code>verify_spread_pricing</code>. Operator-required on every transaction regardless of mode (simulate or live) — a screener candidate's quote may be seconds out of date by the time fire() runs, and a stale credit can flip a trade from "good" to "no edge". Failed verifications drop the candidate before risk reservation. Set to <code>false</code> ONLY for offline-replay scenarios where the daemon isn't reachable. Notify and log handlers retain a separate <code>validate_prices: false</code> default — informational sends don't need a fresh round-trip.</td>
+</tr>
+<tr>
 <td><code>min_otm</code></td>
 <td>float</td>
 <td>Absolute OTM% floor across all tickers</td>

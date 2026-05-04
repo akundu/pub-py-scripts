@@ -3288,8 +3288,15 @@ class TradeHandlerBase(ActionHandler):
         *,
         min_norm_roi_schedule: list[dict] | None = None,
         min_norm_roi_per_ticker: dict | None = None,
-        validate_prices: bool = False,
+        validate_prices: bool = True,
     ):
+        # validate_prices defaults to True for BOTH simulate and live
+        # trade handlers. The previous False default let a stale-but-
+        # not-quite-rejected quote slip through to a (simulated or live)
+        # submission; the operator explicitly required a fresh IBKR
+        # round-trip on every transaction regardless of mode. Tests
+        # that don't want to mock the verify call can pass
+        # `validate_prices=False` explicitly.
         self.min_norm_roi = float(min_norm_roi)
         self.min_norm_roi_schedule = min_norm_roi_schedule
         self.min_norm_roi_per_ticker = min_norm_roi_per_ticker
@@ -3957,12 +3964,17 @@ def build_handler(cfg: dict) -> ActionHandler:
         daemon_url = cfg.get("daemon_url") or DEFAULT_DAEMON_URL
         cls = SimulateTradeHandler if htype == "simulate_trade" else TradeHandler
         scalar = nroi_kwargs.pop("min_norm_roi")
+        # validate_prices defaults to TRUE for both simulate and trade
+        # handlers — the operator explicitly required a fresh IBKR
+        # round-trip on every transaction regardless of mode. The YAML
+        # can still set it to False for special cases (e.g. an offline
+        # backtest replay where the daemon isn't reachable).
         return cls(
             min_norm_roi=scalar,
             log_file=cfg["log_file"],
             policy=policy,
             daemon_url=daemon_url,
-            validate_prices=bool(cfg.get("validate_prices", False)),
+            validate_prices=bool(cfg.get("validate_prices", True)),
             **nroi_kwargs,
         )
     raise ValueError(f"Unknown handler type: {htype!r}")

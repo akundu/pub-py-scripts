@@ -147,7 +147,12 @@ handlers:
     # before the simulated submit; failed verifications are dropped before
     # any risk reservation. Useful when you want the simulate log to be
     # faithful to what a live handler would have seen post-validation.
-    #validate_prices: true
+    # NOTE: defaults to TRUE for simulate_trade and trade handlers since
+    # the operator required IBKR validation on every transaction
+    # regardless of mode. Setting this to false explicitly opts out
+    # (e.g. offline-replay scenarios). Leaving the line uncommented
+    # makes the safer behavior explicit for future readers.
+    validate_prices: true
     # Flat nROI floor tuned from 2026-04-22 session analysis. DTE=1 has
     # better inherent risk/reward (~7% credit/risk ratio vs DTE=0's ~4%),
     # so we can afford a slightly lower bar than DTE=0's 2.0. Data from
