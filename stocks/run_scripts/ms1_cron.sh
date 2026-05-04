@@ -163,7 +163,7 @@ if [ "$run_weekly" -eq 1 ]; then
         python3 scripts/fetch_options.py --symbols "$tk" \
             --date "$target_date" \
             --strike-range-percent 5 \
-            --max-days-to-expiry 5 \
+            --max-days-to-expiry 12 \
             --use-csv \
             --data-dir options_csv_output_full \
             --csv-layout per-trading-date \
@@ -207,4 +207,50 @@ a['tickers'].update(b.get('tickers', {}))
 json.dump(a, open('$REC_OUT', 'w'), indent=2)
 " >> /tmp/calibrate_recommendations.log 2>&1
     fi
+fi
+
+# ─── Step 7: monthly DTE research refresh ────────────────────────────────────
+# Runs on the first Sunday of each month (DOW=7, day-of-month 1-7), or when
+# RESEARCH_REFRESH=1 is set manually. Intentionally runs the day after
+# Saturday's weekly augment so the backtest sees the freshest data.
+#
+# What it does:
+#   a. Re-run the 2-year put-spread backtest → dte_trades_v2.tsv
+#   b. Hill-climb to find the new best aggressive + robust portfolio configs
+#   c. Rebuild the per-day deployment schedule
+#   d. Rebuild the HTML analysis report
+#
+# Output report (filesystem only — not served via HTTP):
+#   results/dte_comparison/report_autoresearch_dte_v2.html
+#   Open locally:  open results/dte_comparison/report_autoresearch_dte_v2.html
+#   Fetch remotely: scp ms1:$(pwd)/results/dte_comparison/report_autoresearch_dte_v2.html .
+#
+# Manual trigger:
+#   curl 'http://localhost:9102/run_script?script=ms1_cron.sh&research_refresh=1'
+#   or standalone: curl 'http://localhost:9102/run_script?script=dte_research_refresh.sh'
+#   or direct:     RESEARCH_REFRESH=1 sh run_scripts/ms1_cron.sh
+RESEARCH_REFRESH=${RESEARCH_REFRESH:-0}
+DOM=$(date +%d)  # day of month (01-31)
+if [ "$RESEARCH_REFRESH" = "1" ] || { [ "$DOW" -eq 7 ] && [ "$DOM" -le 7 ]; }; then
+    echo "=== monthly DTE research refresh ==="
+    rm -f /tmp/dte_research_refresh.log
+
+    echo "[1/4] 2-year backtest..." >> /tmp/dte_research_refresh.log
+    python3 run_dte_comparison_v2.py >> /tmp/dte_research_refresh.log 2>&1
+
+    echo "[2/4] autoresearch hill-climb..." >> /tmp/dte_research_refresh.log
+    # loop_v2.py uses bare 'from experiment_v2 import', so run from its directory.
+    (cd autoresearch_dte && \
+        python3 loop_v2.py --trials 600 --seeds 80 --seed 42 \
+            --out-prefix v3_2yr >> /tmp/dte_research_refresh.log 2>&1 && \
+        python3 loop_v2.py --robust --trials 600 --seeds 80 --seed 42 \
+            --out-prefix v3_2yr_robust >> /tmp/dte_research_refresh.log 2>&1)
+
+    echo "[3/4] per-day schedule..." >> /tmp/dte_research_refresh.log
+    python3 autoresearch_dte/per_day_schedule.py >> /tmp/dte_research_refresh.log 2>&1
+
+    echo "[4/4] HTML report..." >> /tmp/dte_research_refresh.log
+    python3 autoresearch_dte/build_v2_report.py >> /tmp/dte_research_refresh.log 2>&1
+
+    echo "=== DTE research refresh complete ===" >> /tmp/dte_research_refresh.log
 fi
