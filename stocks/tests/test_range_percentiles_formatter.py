@@ -260,6 +260,56 @@ def test_format_hourly_moves_as_html_without_buffer():
 # ── Collapsible (<details>) wrappers for noisier sections ────────────
 
 
+def _hourly_data_with_fine_slots() -> dict:
+    """Fixture variant that populates slots_10min and slots_5min so the
+    Last 30 Minutes and Last 10 Minutes sections render."""
+    d = _make_hourly_data()
+    fine_slot = {
+        "label_et": "3:50 PM ET",
+        "when_down_day_count": 25, "when_up_day_count": 25,
+        "when_down": {"day_count": 25, "pct": {"p75": -0.2, "p90": -0.4},
+                       "price": {"p75": 19960.0, "p90": 19920.0}},
+        "when_up":   {"day_count": 25, "pct": {"p75": 0.2, "p90": 0.4},
+                       "price": {"p75": 20040.0, "p90": 20080.0}},
+    }
+    d["slots_10min"] = {"15:30": dict(fine_slot, label_et="3:30 PM ET"),
+                         "15:40": dict(fine_slot, label_et="3:40 PM ET")}
+    d["slots_5min"]  = {"15:50": dict(fine_slot, label_et="3:50 PM ET"),
+                         "15:55": dict(fine_slot, label_et="3:55 PM ET")}
+    d["has_fine_data"] = True
+    return d
+
+
+def test_last_30_min_section_is_collapsed_by_default():
+    """The 'Last 30 Minutes (10-min detail)' section is closed by
+    default. It's high-resolution detail that adds vertical space; the
+    primary half-hour tables above stay visible."""
+    html = format_hourly_moves_as_html(_hourly_data_with_fine_slots())
+    assert "Last 30 Minutes (10-min detail)" in html
+    import re
+    m = re.search(
+        r'<details([^>]*)>\s*<summary[^>]*>\s*<h3[^>]*>\s*Last 30 Minutes',
+        html,
+    )
+    assert m, "Last 30 Minutes not wrapped in <details>/<summary>"
+    assert "open" not in m.group(1), \
+        f"Last 30 Minutes <details> should be closed by default; got: {m.group(1)!r}"
+
+
+def test_last_10_min_section_is_collapsed_by_default():
+    """Same rule for the 5-min detail at the very tail of the session."""
+    html = format_hourly_moves_as_html(_hourly_data_with_fine_slots())
+    assert "Last 10 Minutes (5-min detail)" in html
+    import re
+    m = re.search(
+        r'<details([^>]*)>\s*<summary[^>]*>\s*<h3[^>]*>\s*Last 10 Minutes',
+        html,
+    )
+    assert m, "Last 10 Minutes not wrapped in <details>/<summary>"
+    assert "open" not in m.group(1), \
+        f"Last 10 Minutes <details> should be closed by default; got: {m.group(1)!r}"
+
+
 def _hourly_data_with_max_move() -> dict:
     """Fixture variant that includes max_move data so the Max Intraday
     Excursion section renders. Otherwise identical to _make_hourly_data."""

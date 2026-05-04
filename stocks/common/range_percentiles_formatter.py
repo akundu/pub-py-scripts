@@ -2408,10 +2408,12 @@ def format_hourly_moves_as_html(hourly_data: dict, buffer: float = 0.0) -> str:
                                                   buffer=buffer, prev_close=prev_close))
         html_parts.append('        </details>\n')
 
-    # --- Tier 2: 10-min tables (last 30 min) ---
+    # --- Tier 2: 10-min tables (last 30 min) — collapsed by default ---
     sorted_10 = sorted(slots_10min.keys(), key=_time_sort_key)
     if sorted_10:
-        html_parts.append('\n        <h3>Last 30 Minutes (10-min detail)</h3>\n')
+        html_parts.append('\n        <details class="rp-collapsible" style="margin-top:25px;">\n')
+        html_parts.append('          <summary class="rp-collapsible-summary" style="cursor:pointer;list-style:revert;padding:6px 0;">'
+                          '<h3 style="display:inline;margin:0;">Last 30 Minutes (10-min detail)</h3></summary>\n')
         html_parts.append(_render_slot_table(slots_10min, sorted_10, percentiles, "down",
                                               "DOWN MOVES TO CLOSE (per 10-min)", ticker=ticker,
                                               buffer=buffer, prev_close=prev_close))
@@ -2419,11 +2421,14 @@ def format_hourly_moves_as_html(hourly_data: dict, buffer: float = 0.0) -> str:
         html_parts.append(_render_slot_table(slots_10min, sorted_10, percentiles, "up",
                                               "UP MOVES TO CLOSE (per 10-min)", ticker=ticker,
                                               buffer=buffer, prev_close=prev_close))
+        html_parts.append('        </details>\n')
 
-    # --- Tier 3: 5-min tables (last 10 min) ---
+    # --- Tier 3: 5-min tables (last 10 min) — collapsed by default ---
     sorted_5 = sorted(slots_5min.keys(), key=_time_sort_key)
     if sorted_5:
-        html_parts.append('\n        <h3>Last 10 Minutes (5-min detail)</h3>\n')
+        html_parts.append('\n        <details class="rp-collapsible" style="margin-top:25px;">\n')
+        html_parts.append('          <summary class="rp-collapsible-summary" style="cursor:pointer;list-style:revert;padding:6px 0;">'
+                          '<h3 style="display:inline;margin:0;">Last 10 Minutes (5-min detail)</h3></summary>\n')
         html_parts.append(_render_slot_table(slots_5min, sorted_5, percentiles, "down",
                                               "DOWN MOVES TO CLOSE (per 5-min)", ticker=ticker,
                                               buffer=buffer, prev_close=prev_close))
@@ -2431,6 +2436,7 @@ def format_hourly_moves_as_html(hourly_data: dict, buffer: float = 0.0) -> str:
         html_parts.append(_render_slot_table(slots_5min, sorted_5, percentiles, "up",
                                               "UP MOVES TO CLOSE (per 5-min)", ticker=ticker,
                                               buffer=buffer, prev_close=prev_close))
+        html_parts.append('        </details>\n')
 
     if not has_fine:
         html_parts.append("""
@@ -2600,7 +2606,9 @@ def format_hourly_moves_to_next_close_as_html(hourly_data: dict, buffer: float =
 
     sorted_10 = sorted(slots_10min.keys(), key=_time_sort_key)
     if sorted_10:
-        html_parts.append('\n        <h3>Last 30 Minutes (10-min detail)</h3>\n')
+        html_parts.append('\n        <details class="rp-collapsible" style="margin-top:25px;">\n')
+        html_parts.append('          <summary class="rp-collapsible-summary" style="cursor:pointer;list-style:revert;padding:6px 0;">'
+                          '<h3 style="display:inline;margin:0;">Last 30 Minutes (10-min detail)</h3></summary>\n')
         html_parts.append(_render_slot_table(slots_10min, sorted_10, percentiles, "down",
                                               "DOWN MOVES TO NEXT CLOSE (per 10-min)", ticker=ticker,
                                               buffer=buffer, prev_close=prev_close))
@@ -2608,10 +2616,13 @@ def format_hourly_moves_to_next_close_as_html(hourly_data: dict, buffer: float =
         html_parts.append(_render_slot_table(slots_10min, sorted_10, percentiles, "up",
                                               "UP MOVES TO NEXT CLOSE (per 10-min)", ticker=ticker,
                                               buffer=buffer, prev_close=prev_close))
+        html_parts.append('        </details>\n')
 
     sorted_5 = sorted(slots_5min.keys(), key=_time_sort_key)
     if sorted_5:
-        html_parts.append('\n        <h3>Last 10 Minutes (5-min detail)</h3>\n')
+        html_parts.append('\n        <details class="rp-collapsible" style="margin-top:25px;">\n')
+        html_parts.append('          <summary class="rp-collapsible-summary" style="cursor:pointer;list-style:revert;padding:6px 0;">'
+                          '<h3 style="display:inline;margin:0;">Last 10 Minutes (5-min detail)</h3></summary>\n')
         html_parts.append(_render_slot_table(slots_5min, sorted_5, percentiles, "down",
                                               "DOWN MOVES TO NEXT CLOSE (per 5-min)", ticker=ticker,
                                               buffer=buffer, prev_close=prev_close))
@@ -2619,6 +2630,7 @@ def format_hourly_moves_to_next_close_as_html(hourly_data: dict, buffer: float =
         html_parts.append(_render_slot_table(slots_5min, sorted_5, percentiles, "up",
                                               "UP MOVES TO NEXT CLOSE (per 5-min)", ticker=ticker,
                                               buffer=buffer, prev_close=prev_close))
+        html_parts.append('        </details>\n')
 
     if not has_fine:
         html_parts.append("""
