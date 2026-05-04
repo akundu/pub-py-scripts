@@ -580,12 +580,29 @@ async def load_bars_with_db_fallback(
     from zoneinfo import ZoneInfo as _ZI
     today_str = datetime.now(_ZI("America/New_York")).strftime("%Y-%m-%d")
     if db_instance is not None and start_date <= today_str <= end_date:
+        # `data_type='trade'` carries the actual moving prices for both
+        # tradable instruments (SPY/QQQ → real transaction prints) and
+        # indices (SPX/NDX → computed values that update with the
+        # underlying basket). The default `quote` rows broadcast a
+        # stuck bid for indices (e.g. SPX showed 7199.46 across 900+
+        # rows of a single trading day), so we'd silently render a
+        # flat line at a stale level. If trades come back empty, fall
+        # back to quote — covers any ticker the streamer happens to
+        # save only as quote.
         try:
             ticks = await db_instance.get_realtime_data(
                 symbol,
                 start_datetime=f"{today_str} 00:00:00",
                 end_datetime=f"{today_str} 23:59:59",
+                data_type="trade",
             )
+            if ticks is None or ticks.empty:
+                ticks = await db_instance.get_realtime_data(
+                    symbol,
+                    start_datetime=f"{today_str} 00:00:00",
+                    end_datetime=f"{today_str} 23:59:59",
+                    data_type="quote",
+                )
             realtime_df = _resample_ticks_to_ohlc(ticks, interval)
         except Exception:
             realtime_df = pd.DataFrame()
