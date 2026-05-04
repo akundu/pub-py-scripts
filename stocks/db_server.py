@@ -14757,15 +14757,125 @@ async def handle_ai_query(request: web.Request) -> web.Response:
             "error": f"Failed to execute AI query: {str(e)}"
         }, status=500)
 
-def _range_percentiles_methodology_html(exclude_outliers: bool = True) -> str:
+# ── Methodology data-stats cache ────────────────────────────────────────
+# Per-ticker IQR / tail asymmetry / multi-day P95 numbers used to populate
+# the /range_percentiles methodology section. Computed on-demand from the
+# daily_prices DB rows, then cached for an hour because the explainer is
+# read on every page hit and these stats only meaningfully change when a
+# new trading day closes.
+_METHODOLOGY_STATS_CACHE: dict[str, tuple[float, dict]] = {}
+_METHODOLOGY_STATS_TTL = 3600.0  # seconds
+
+
+async def _compute_methodology_stats(db_instance) -> dict:
+    """Compute IQR, Tukey fences, up/down tail asymmetry, and 5-day P95
+    return widths for SPX/NDX/RUT off the last ~250 trading days of
+    daily closes in `daily_prices`. Cached for `_METHODOLOGY_STATS_TTL`
+    seconds — recomputation is idempotent and only matters once a day
+    when a new bar lands.
+
+    Returns a dict shaped like:
+      {"NDX": {"iqr": 1.31, "lower_fence": -2.55, "upper_fence": 2.77,
+                "up_p95": 1.78, "down_p95": -1.61,
+                "asymmetry_pct": 11,         # 100*(up - |down|)/|down|
+                "five_day_down_p95": -3.42,
+                "five_day_up_p95":   4.18},
+       "SPX": {…}, "RUT": {…},
+       "_generated_at": "2026-05-03T…"}
+    Falls back to {} if DB is unavailable or returns no rows.
+    """
+    import time
+    cache_key = "stats"
+    now = time.time()
+    cached = _METHODOLOGY_STATS_CACHE.get(cache_key)
+    if cached and (now - cached[0]) < _METHODOLOGY_STATS_TTL:
+        return cached[1]
+
+    if db_instance is None:
+        return {}
+
+    from datetime import datetime as _dt, timedelta as _td
+    import numpy as _np
+    end = _dt.now().date()
+    start = end - _td(days=400)  # ~250 trading days
+    out: dict = {}
+    for ticker in ("SPX", "NDX", "RUT"):
+        try:
+            df = await db_instance.get_stock_data(
+                ticker,
+                start_date=start.strftime("%Y-%m-%d"),
+                end_date=end.strftime("%Y-%m-%d"),
+                interval="daily",
+            )
+        except Exception:
+            continue
+        if df is None or df.empty or "close" not in df.columns:
+            continue
+        # Daily close-to-close returns in %.
+        closes = df["close"].dropna().astype(float).values
+        if len(closes) < 30:
+            continue
+        rets = (closes[1:] / closes[:-1] - 1.0) * 100.0
+        if len(rets) < 30:
+            continue
+        q1, q3 = _np.percentile(rets, [25, 75])
+        iqr = q3 - q1
+        lower = q1 - 1.5 * iqr
+        upper = q3 + 1.5 * iqr
+        up = rets[rets > 0]
+        down = rets[rets < 0]
+        up_p95 = float(_np.percentile(up, 95)) if len(up) >= 5 else None
+        down_p95 = float(_np.percentile(down, 5)) if len(down) >= 5 else None
+        asymmetry = None
+        if up_p95 is not None and down_p95 is not None and down_p95 != 0:
+            asymmetry = (up_p95 - abs(down_p95)) / abs(down_p95) * 100.0
+        # 5-day cumulative returns (rolling product of 1+daily).
+        if len(rets) >= 30:
+            r1 = rets / 100.0
+            five_day = []
+            for i in range(len(r1) - 5 + 1):
+                cum = 1.0
+                for j in range(5):
+                    cum *= (1.0 + r1[i + j])
+                five_day.append((cum - 1.0) * 100.0)
+            five_day_arr = _np.array(five_day)
+            down_5 = five_day_arr[five_day_arr < 0]
+            up_5 = five_day_arr[five_day_arr > 0]
+            five_day_down_p95 = float(_np.percentile(down_5, 5)) if len(down_5) >= 5 else None
+            five_day_up_p95 = float(_np.percentile(up_5, 95)) if len(up_5) >= 5 else None
+        else:
+            five_day_down_p95 = five_day_up_p95 = None
+
+        out[ticker] = {
+            "iqr": float(iqr),
+            "lower_fence": float(lower),
+            "upper_fence": float(upper),
+            "up_p95": up_p95,
+            "down_p95": down_p95,
+            "asymmetry_pct": asymmetry,
+            "five_day_down_p95": five_day_down_p95,
+            "five_day_up_p95": five_day_up_p95,
+        }
+
+    if out:
+        out["_generated_at"] = _dt.now(timezone.utc).isoformat()
+        _METHODOLOGY_STATS_CACHE[cache_key] = (now, out)
+    return out
+
+
+async def _range_percentiles_methodology_html(
+    exclude_outliers: bool = True,
+    db_instance: Any | None = None,
+) -> str:
     """Generate methodology documentation HTML for range_percentiles page.
 
     Tier table, strike-selection table, and the "X-day backtest" line
     are all interpolated from the latest calibration JSON
-    (`results/calibration/recommended_percentiles.json`) so the
-    explainer can never drift from the actual numbers in use. If the
-    JSON is missing or unreadable we fall back to a generic message
-    and the static SPX/NDX/RUT placeholders.
+    (`results/calibration/recommended_percentiles.json`). Per-ticker
+    IQR / Tukey fences / 5-day P95 / tail-asymmetry numbers are
+    computed live from `daily_prices` (with a 1-hour cache). Either
+    falls back gracefully to "—" placeholders when the data isn't
+    available so the rest of the page still renders.
     """
     outlier_status = "Enabled (default)" if exclude_outliers else "Disabled (?outliers=1)"
 
@@ -14778,6 +14888,87 @@ def _range_percentiles_methodology_html(exclude_outliers: bool = True) -> str:
             cal = _json.loads(cal_path.read_text())
     except Exception:
         cal = {}
+
+    # ── Live-computed per-ticker stats (IQR, fences, 5-day, asymmetry) ─
+    stats = await _compute_methodology_stats(db_instance)
+
+    def _fmt_signed_pct(v: float | None, *, decimals: int = 1) -> str:
+        """Sign-prefixed percentage formatting — keeps the "−1.8%" style of
+        the static rows so the table renders consistently."""
+        if v is None:
+            return "—"
+        sign = "−" if v < 0 else "+"
+        return f"~{sign}{abs(v):.{decimals}f}%"
+
+    def _fence_row(ticker: str) -> str:
+        s = stats.get(ticker, {}) if isinstance(stats, dict) else {}
+        if not s:
+            return (
+                f"<tr><td style=\"padding:2px 10px 2px 0;\">{ticker}</td>"
+                f"<td colspan=\"4\" style=\"padding:2px 10px;color:#8b949e;\">"
+                f"no data — DB call returned empty</td></tr>"
+            )
+        iqr  = s.get("iqr")
+        lo   = s.get("lower_fence")
+        up   = s.get("upper_fence")
+        return (
+            f'<tr><td style="padding:2px 10px 2px 0;">{ticker}</td>'
+            f'<td style="padding:2px 10px;">{f"~{iqr:.2f}%" if iqr is not None else "—"}</td>'
+            f'<td style="padding:2px 10px;">{_fmt_signed_pct(lo, decimals=2)}</td>'
+            f'<td style="padding:2px 10px;">{_fmt_signed_pct(up, decimals=2)}</td>'
+            f'<td style="padding:2px 10px;font-size:10px;opacity:0.7;">'
+            f'computed from last ~250 trading days</td></tr>'
+        )
+    fence_rows = "\n    ".join(_fence_row(t) for t in ("SPX", "NDX", "RUT"))
+
+    def _five_day_row(ticker: str) -> str:
+        s = stats.get(ticker, {}) if isinstance(stats, dict) else {}
+        down = s.get("five_day_down_p95")
+        up_v = s.get("five_day_up_p95")
+        return (
+            f'<tr><td style="padding:3px 12px 3px 0;">{ticker}</td>'
+            f'<td style="padding:3px 10px;">'
+            f'{f"~{abs(down):.1f}%" if down is not None else "—"}</td>'
+            f'<td style="padding:3px 10px;">'
+            f'{f"~{up_v:.1f}%" if up_v is not None else "—"}</td></tr>'
+        )
+    multi_day_rows = "\n    ".join(_five_day_row(t) for t in ("SPX", "NDX", "RUT"))
+
+    # Asymmetry text — pull the actual range across SPX/NDX/RUT instead
+    # of saying "15-30%" forever. If we can't compute, fall back to a
+    # generic statement.
+    asymm_vals: list[float] = []
+    for t in ("SPX", "NDX", "RUT"):
+        a = stats.get(t, {}).get("asymmetry_pct") if isinstance(stats, dict) else None
+        if isinstance(a, (int, float)):
+            asymm_vals.append(float(a))
+    if asymm_vals:
+        # Up-tail wider when asymmetry > 0; down-tail wider if negative.
+        # Report the actual signed range so the page can't drift.
+        lo, hi = min(asymm_vals), max(asymm_vals)
+        if lo >= 0:
+            asymmetry_text = (
+                f"Empirically across SPX/NDX/RUT, UP-day P95 tails run "
+                f"{lo:.0f}&ndash;{hi:.0f}% wider than DOWN-day P95 tails "
+                f"(measured against the latest ~250 daily closes)."
+            )
+        elif hi <= 0:
+            asymmetry_text = (
+                f"Empirically across SPX/NDX/RUT, DOWN-day P95 tails run "
+                f"{abs(hi):.0f}&ndash;{abs(lo):.0f}% wider than UP-day P95 "
+                f"tails (measured against the latest ~250 daily closes)."
+            )
+        else:
+            asymmetry_text = (
+                f"Up/down asymmetry currently ranges from {lo:+.0f}% to "
+                f"{hi:+.0f}% across SPX/NDX/RUT (positive = UP tail wider; "
+                f"measured against the latest ~250 daily closes)."
+            )
+    else:
+        asymmetry_text = (
+            "Empirically UP-day tails tend to run wider than DOWN-day "
+            "tails — figure varies; live computation unavailable."
+        )
 
     backtest_days = int(cal.get("backtest_days", 250))
     target_hit_rate = float(cal.get("target_hit_rate", 95.0))
@@ -14976,24 +15167,18 @@ A &minus;3.5% day becomes &minus;2.55%. The day still counts in sample size.</pr
         <td style="padding:2px 10px;color:#d29922;">Almost nothing clipped</td></tr>
   </table>
 
-  <p><strong>Per-ticker fences</strong> (computed dynamically from each ticker's own distribution):</p>
+  <p><strong>Per-ticker fences</strong> (computed live from each ticker's own
+  distribution — values below are derived from the most recent ~250 daily closes
+  and refresh hourly):</p>
   <table style="font-size:11px;border-collapse:collapse;margin:8px 0;">
     <tr style="border-bottom:1px solid var(--border-color,#30363d);">
       <th style="text-align:left;padding:3px 10px 3px 0;">Ticker</th>
       <th style="padding:3px 10px;">IQR</th>
       <th style="padding:3px 10px;">Lower Fence</th>
       <th style="padding:3px 10px;">Upper Fence</th>
-      <th style="padding:3px 10px;">Typical Days Clipped</th>
+      <th style="padding:3px 10px;">Source</th>
     </tr>
-    <tr><td style="padding:2px 10px 2px 0;">SPX</td><td style="padding:2px 10px;">~1.0%</td>
-        <td style="padding:2px 10px;">~&minus;1.8%</td><td style="padding:2px 10px;">~+2.0%</td>
-        <td style="padding:2px 10px;">4-5 / 120 days</td></tr>
-    <tr><td style="padding:2px 10px 2px 0;">NDX</td><td style="padding:2px 10px;">~1.3%</td>
-        <td style="padding:2px 10px;">~&minus;2.6%</td><td style="padding:2px 10px;">~+2.8%</td>
-        <td style="padding:2px 10px;">2-3 / 120 days</td></tr>
-    <tr><td style="padding:2px 10px 2px 0;">RUT</td><td style="padding:2px 10px;">~1.7%</td>
-        <td style="padding:2px 10px;">~&minus;3.2%</td><td style="padding:2px 10px;">~+3.4%</td>
-        <td style="padding:2px 10px;">1-2 / 120 days</td></tr>
+    {fence_rows}
   </table>
   <p style="font-size:11px;opacity:0.8;">More volatile tickers (RUT) have wider fences because their
   IQR is larger. Fences adapt automatically as market conditions change — they're recomputed on every request.</p>
@@ -15037,6 +15222,8 @@ A &minus;3.5% day becomes &minus;2.55%. The day still counts in sample size.</pr
   Numbers below are pulled from the latest calibration backtest — they reflect the
   <em>moderate</em> tier (the calibrated band that empirically meets the {target_hit_rate:.0f}% target hit rate).
   Width is the average % OTM at that percentile across the {backtest_days}-day backtest.</p>
+
+  <p style="font-size:11px;opacity:0.85;"><strong>Up vs down tail asymmetry:</strong> {asymmetry_text}</p>
   <table style="font-size:12px;border-collapse:collapse;margin:8px 0;">
     <tr style="border-bottom:1px solid var(--border-color,#30363d);">
       <th style="text-align:left;padding:4px 12px 4px 0;">Ticker</th>
@@ -15065,16 +15252,15 @@ A &minus;3.5% day becomes &minus;2.55%. The day still counts in sample size.</pr
 
   <p style="margin-top:12px;"><strong>Multi-Day (1&ndash;5 DTE):</strong> For longer-dated spreads,
   use P95 across the board for both puts and calls. The multi-day distribution is wider and more
-  symmetric, so put/call asymmetry matters less. At 5 DTE, typical ranges (P95):</p>
+  symmetric, so put/call asymmetry matters less. The 5-day P95 ranges below are computed live from
+  rolling 5-day cumulative returns over the last ~250 trading days:</p>
   <table style="font-size:12px;border-collapse:collapse;margin:8px 0;">
     <tr style="border-bottom:1px solid var(--border-color,#30363d);">
       <th style="text-align:left;padding:4px 12px 4px 0;">Ticker</th>
       <th style="padding:4px 10px;">5-Day DOWN P95</th>
       <th style="padding:4px 10px;">5-Day UP P95</th>
     </tr>
-    <tr><td style="padding:3px 12px 3px 0;">SPX</td><td style="padding:3px 10px;">~3.4%</td><td style="padding:3px 10px;">~4.4%</td></tr>
-    <tr><td style="padding:3px 12px 3px 0;">NDX</td><td style="padding:3px 10px;">~4.5%</td><td style="padding:3px 10px;">~6.5%</td></tr>
-    <tr><td style="padding:3px 12px 3px 0;">RUT</td><td style="padding:3px 10px;">~4.9%</td><td style="padding:3px 10px;">~6.5%</td></tr>
+    {multi_day_rows}
   </table>
 
   <h4 style="font-size:13px;color:var(--text-primary,#c9d1d9);margin:18px 0 6px;">Three Risk Tiers</h4>
@@ -16312,7 +16498,12 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
             html = html.replace("<body>", "<body>\n" + _outlier_toggle_html(exclude_outliers), 1)
 
             # Inject methodology documentation
-            html = html.replace("</body>", _range_percentiles_methodology_html(exclude_outliers) + "\n</body>", 1)
+            html = html.replace(
+                "</body>",
+                (await _range_percentiles_methodology_html(
+                    exclude_outliers, request.app.get('db_instance'))) + "\n</body>",
+                1,
+            )
 
             return web.Response(text=html, content_type="text/html")
 
@@ -16527,7 +16718,12 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
         html = html.replace("<body>", "<body>\n" + _outlier_toggle_html(exclude_outliers), 1)
 
         # Inject methodology documentation
-        html = html.replace("</body>", _range_percentiles_methodology_html(exclude_outliers) + "\n</body>", 1)
+        html = html.replace(
+                "</body>",
+                (await _range_percentiles_methodology_html(
+                    exclude_outliers, request.app.get('db_instance'))) + "\n</body>",
+                1,
+            )
 
         return web.Response(text=html, content_type="text/html")
 
