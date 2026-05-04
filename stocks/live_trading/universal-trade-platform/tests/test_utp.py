@@ -8756,6 +8756,686 @@ option_quotes_greeks_interval: 30.0
         cfg = StreamingConfig()
         assert cfg.option_quotes_greeks_interval == 25.0
 
+    # ── Long-DTE percentile-based fetching tests ─────────────────────────────
+
+    def test_long_dte_config_defaults(self):
+        """StreamingConfig long-DTE fields have correct defaults."""
+        from app.services.streaming_config import StreamingConfig
+        cfg = StreamingConfig()
+        assert cfg.option_quotes_long_dte_enabled is False
+        assert cfg.option_quotes_long_dte_list == [5, 10, 15, 20]
+        assert cfg.option_quotes_long_dte_tier == "aggressive"
+        assert cfg.option_quotes_long_dte_strike_band_pct == 1.0
+        assert cfg.option_quotes_long_dte_cooldown_sec == 600.0
+        assert cfg.option_quotes_percentile_url == "http://lin1.kundu.dev:9100"
+        assert cfg.option_quotes_percentile_url_backup == "http://ms1.kundu.dev:9100"
+
+    def test_long_dte_config_loads_from_yaml(self, tmp_path):
+        """load_streaming_config parses long-DTE fields from YAML."""
+        from app.services.streaming_config import load_streaming_config
+        yaml_content = """\
+symbols:
+  - SPX
+option_quotes_long_dte_enabled: true
+option_quotes_long_dte_list: [5, 10, 20]
+option_quotes_long_dte_tier: moderate
+option_quotes_long_dte_strike_band_pct: 2.0
+option_quotes_long_dte_cooldown_sec: 300.0
+option_quotes_percentile_url: "http://lin1.kundu.dev:9100"
+option_quotes_percentile_url_backup: "http://ms1.kundu.dev:9100"
+"""
+        cfg_file = tmp_path / "streaming.yaml"
+        cfg_file.write_text(yaml_content)
+        cfg = load_streaming_config(cfg_file)
+        assert cfg.option_quotes_long_dte_enabled is True
+        assert cfg.option_quotes_long_dte_list == [5, 10, 20]
+        assert cfg.option_quotes_long_dte_tier == "moderate"
+        assert cfg.option_quotes_long_dte_strike_band_pct == 2.0
+        assert cfg.option_quotes_long_dte_cooldown_sec == 300.0
+        assert cfg.option_quotes_percentile_url == "http://lin1.kundu.dev:9100"
+        assert cfg.option_quotes_percentile_url_backup == "http://ms1.kundu.dev:9100"
+
+    def test_tier_to_pct_key(self):
+        """_tier_to_pct_key maps semantic names and passes literals through."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService as OQS
+        assert OQS._tier_to_pct_key("aggressive") == "p90"
+        assert OQS._tier_to_pct_key("moderate") == "p95"
+        assert OQS._tier_to_pct_key("conservative") == "p98"
+        assert OQS._tier_to_pct_key("p92") == "p92"
+        assert OQS._tier_to_pct_key("p75") == "p75"
+
+    def test_next_friday_on_friday(self):
+        """_next_friday returns today when today is Friday."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService as OQS
+        from datetime import date
+        friday = date(2026, 5, 1)  # Friday
+        assert OQS._next_friday(friday) == friday
+
+    def test_next_friday_from_monday(self):
+        """_next_friday returns the coming Friday from a Monday."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService as OQS
+        from datetime import date
+        monday = date(2026, 4, 27)  # Monday
+        assert OQS._next_friday(monday) == date(2026, 5, 1)
+
+    def test_next_friday_from_saturday(self):
+        """_next_friday skips Saturday and returns next Friday."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService as OQS
+        from datetime import date
+        saturday = date(2026, 5, 2)  # Saturday
+        assert OQS._next_friday(saturday) == date(2026, 5, 8)
+
+    def test_find_exp_for_dte_exact_match(self):
+        """_find_exp_for_dte returns the exact expiration when DTE matches."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService as OQS
+        from datetime import date
+        today = date(2026, 4, 27)  # Monday
+        # 5 trading days later = 2026-05-04 (Mon next week)
+        exps = ["2026-04-28", "2026-05-01", "2026-05-04", "2026-05-15"]
+        result = OQS._find_exp_for_dte(exps, 5, today)
+        assert result == "2026-05-04"
+
+    def test_find_exp_for_dte_nearest_within_tolerance(self):
+        """_find_exp_for_dte picks nearest expiration within ±3 days of target DTE."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService as OQS
+        from datetime import date
+        today = date(2026, 4, 27)
+        # No exact DTE-10 available but 2026-05-08 is 8 trading days (within 3 of 10)
+        exps = ["2026-05-08", "2026-05-15"]
+        result = OQS._find_exp_for_dte(exps, 10, today)
+        assert result == "2026-05-08"
+
+    def test_find_exp_for_dte_none_when_too_far(self):
+        """_find_exp_for_dte returns None when no expiration is within ±3 days."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService as OQS
+        from datetime import date
+        today = date(2026, 4, 27)
+        # Only 2026-05-15 available (≈14 DTE) — far from target DTE 5
+        exps = ["2026-05-15"]
+        result = OQS._find_exp_for_dte(exps, 5, today)
+        assert result is None
+
+    def test_build_long_dte_csv_jobs_basic(self):
+        """_build_long_dte_csv_jobs builds one PUT and one CALL job per expiration."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+        from datetime import date
+
+        cfg = StreamingConfig(
+            option_quotes_long_dte_enabled=True,
+            option_quotes_long_dte_list=[5],
+            option_quotes_long_dte_tier="aggressive",
+            option_quotes_long_dte_strike_band_pct=1.0,
+            option_quotes_long_dte_cooldown_sec=0.0,  # always due
+        )
+        svc = OptionQuoteStreamingService(cfg, provider=MagicMock())
+
+        today = date(2026, 4, 27)  # Monday
+        # DTE 5 = 2026-05-04 (5 trading days away)
+        available_exps = ["2026-05-04", "2026-05-15"]
+        # put_pct=-2.0, call_pct=+2.5 → PUT center=9800, CALL center=10250 (at price=10000)
+        pct_data = {"5": {"put_pct": -2.0, "call_pct": 2.5}}
+        price = 10000.0
+
+        jobs = svc._build_long_dte_csv_jobs(
+            "NDX", price, available_exps, pct_data, "streaming", today,
+        )
+        # Expect 2 jobs: PUT and CALL for exp 2026-05-04
+        assert len(jobs) == 2
+        put_job = next(j for j in jobs if j[2] == "PUT")
+        call_job = next(j for j in jobs if j[2] == "CALL")
+        # PUT center = 10000 × 0.98 = 9800; band ±1% → [9702, 9898]
+        assert put_job[0] == "NDX"
+        assert put_job[1] == "2026-05-04"
+        assert abs(put_job[3] - 9702.0) < 1.0   # strike_min
+        assert abs(put_job[4] - 9898.0) < 1.0   # strike_max
+        # CALL center = 10000 × 1.025 = 10250; band ±1% → [10147.5, 10352.5]
+        assert call_job[1] == "2026-05-04"
+        assert abs(call_job[3] - 10147.5) < 1.0
+        assert abs(call_job[4] - 10352.5) < 1.0
+
+    def test_build_long_dte_csv_jobs_respects_cooldown(self):
+        """_build_long_dte_csv_jobs skips jobs that haven't cooled down."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+        from datetime import date
+        import time
+
+        cfg = StreamingConfig(
+            option_quotes_long_dte_enabled=True,
+            option_quotes_long_dte_list=[5],
+            option_quotes_long_dte_tier="aggressive",
+            option_quotes_long_dte_strike_band_pct=1.0,
+            option_quotes_long_dte_cooldown_sec=3600.0,  # 1 hour
+        )
+        svc = OptionQuoteStreamingService(cfg, provider=MagicMock())
+        # Pre-mark both (symbol, exp, type) keys as just-read
+        now = time.monotonic()
+        svc._csv_last_read_mono[("SPX", "2026-05-04", "PUT")] = now
+        svc._csv_last_read_mono[("SPX", "2026-05-04", "CALL")] = now
+
+        today = date(2026, 4, 27)
+        pct_data = {"5": {"put_pct": -2.0, "call_pct": 2.5}}
+        jobs = svc._build_long_dte_csv_jobs(
+            "SPX", 5000.0, ["2026-05-04"], pct_data, "streaming", today,
+        )
+        assert jobs == []  # Both skipped due to cooldown
+
+    def test_build_long_dte_csv_jobs_adds_friday(self):
+        """_build_long_dte_csv_jobs always adds closest Friday even if not in dte_list."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+        from datetime import date
+
+        cfg = StreamingConfig(
+            option_quotes_long_dte_enabled=True,
+            option_quotes_long_dte_list=[10],  # Friday DTE not included
+            option_quotes_long_dte_tier="aggressive",
+            option_quotes_long_dte_strike_band_pct=1.0,
+            option_quotes_long_dte_cooldown_sec=0.0,
+        )
+        svc = OptionQuoteStreamingService(cfg, provider=MagicMock())
+
+        today = date(2026, 4, 27)  # Monday; next Friday = 2026-05-01 (DTE 4)
+        # Provide both DTE-4 and DTE-10 expirations, and percentile data for both
+        available_exps = ["2026-05-01", "2026-05-08"]
+        pct_data = {
+            "4": {"put_pct": -1.5, "call_pct": 1.5},
+            "10": {"put_pct": -2.5, "call_pct": 2.5},
+        }
+        jobs = svc._build_long_dte_csv_jobs(
+            "RUT", 2200.0, available_exps, pct_data, "streaming", today,
+        )
+        exps_fetched = {j[1] for j in jobs}
+        # Should fetch Friday (2026-05-01) and the DTE-10 expiration (2026-05-08)
+        assert "2026-05-01" in exps_fetched
+        assert "2026-05-08" in exps_fetched
+
+    def test_build_long_dte_csv_jobs_empty_when_no_pct_data(self):
+        """_build_long_dte_csv_jobs returns empty list when pct_data is empty."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+        from datetime import date
+
+        cfg = StreamingConfig(option_quotes_long_dte_enabled=True)
+        svc = OptionQuoteStreamingService(cfg, provider=MagicMock())
+        jobs = svc._build_long_dte_csv_jobs(
+            "SPX", 5000.0, ["2026-05-04"], {}, "streaming", date(2026, 4, 27),
+        )
+        assert jobs == []
+
+    async def test_fetch_long_dte_percentile_data_parses_response(self):
+        """_fetch_long_dte_percentile_data correctly parses the /range_percentiles response."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        cfg = StreamingConfig(
+            option_quotes_long_dte_tier="aggressive",
+            option_quotes_percentile_url="http://test-pct:9100",
+            option_quotes_percentile_url_backup="http://test-pct-bak:9100",
+        )
+        svc = OptionQuoteStreamingService(cfg, provider=MagicMock())
+        svc._percentile_url_resolved = "http://test-pct:9100"
+        svc._percentile_url_resolved_at = time.monotonic()
+
+        fake_response = {
+            "tickers": [
+                {
+                    "ticker": "SPX",
+                    "windows": {
+                        "5": {
+                            "when_down": {"pct": {"p90": -1.8, "p95": -2.5, "p98": -3.2}},
+                            "when_up":   {"pct": {"p90":  2.1, "p95":  2.8, "p98":  3.5}},
+                        },
+                        "10": {
+                            "when_down": {"pct": {"p90": -2.5}},
+                            "when_up":   {"pct": {"p90":  3.0}},
+                        },
+                    },
+                }
+            ]
+        }
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = fake_response
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            result = await svc._fetch_long_dte_percentile_data(["SPX"], [5, 10])
+
+        assert "SPX" in result
+        assert result["SPX"]["5"]["put_pct"] == -1.8   # p90 when_down
+        assert result["SPX"]["5"]["call_pct"] == 2.1   # p90 when_up
+        assert result["SPX"]["10"]["put_pct"] == -2.5
+        assert result["SPX"]["10"]["call_pct"] == 3.0
+
+    async def test_fetch_long_dte_percentile_data_handles_server_error(self):
+        """_fetch_long_dte_percentile_data returns empty dict on HTTP error."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        cfg = StreamingConfig(
+            option_quotes_percentile_url="http://test-pct:9100",
+            option_quotes_percentile_url_backup="http://test-pct-bak:9100",
+        )
+        svc = OptionQuoteStreamingService(cfg, provider=MagicMock())
+        svc._percentile_url_resolved = "http://test-pct:9100"
+        svc._percentile_url_resolved_at = time.monotonic()
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            result = await svc._fetch_long_dte_percentile_data(["SPX"], [5])
+
+        assert result == {}
+
+    async def test_fetch_long_dte_percentile_data_handles_connect_error(self):
+        """_fetch_long_dte_percentile_data returns {} on connection failure and invalidates URL cache."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+        import httpx
+
+        cfg = StreamingConfig(
+            option_quotes_percentile_url="http://test-pct:9100",
+            option_quotes_percentile_url_backup="http://test-pct-bak:9100",
+        )
+        svc = OptionQuoteStreamingService(cfg, provider=MagicMock())
+        svc._percentile_url_resolved = "http://test-pct:9100"
+        svc._percentile_url_resolved_at = time.monotonic()
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=httpx.ConnectError("Connection refused"))
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            result = await svc._fetch_long_dte_percentile_data(["SPX"], [5])
+
+        assert result == {}
+        # URL cache should be invalidated so the next cycle re-probes
+        assert svc._percentile_url_resolved is None
+
+    async def test_resolve_long_dte_percentile_url_uses_cache(self):
+        """_resolve_long_dte_percentile_url returns cached URL without probing."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        cfg = StreamingConfig(
+            option_quotes_percentile_url="http://lin1.kundu.dev:9100",
+            option_quotes_percentile_url_backup="http://ms1.kundu.dev:9100",
+        )
+        svc = OptionQuoteStreamingService(cfg, provider=MagicMock())
+        svc._percentile_url_resolved = "http://lin1.kundu.dev:9100"
+        svc._percentile_url_resolved_at = time.monotonic()
+
+        probe_called = []
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client_cls.return_value.__aenter__ = AsyncMock(side_effect=lambda: probe_called.append(1))
+            result = await svc._resolve_long_dte_percentile_url()
+
+        assert result == "http://lin1.kundu.dev:9100"
+        assert not probe_called  # Cache hit — no probe
+
+    async def test_resolve_long_dte_percentile_url_custom_bypasses_probe(self):
+        """Non-default primary URL is used as-is with no probe."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        cfg = StreamingConfig(
+            option_quotes_percentile_url="http://my.custom.host:9100",
+            option_quotes_percentile_url_backup="http://ms1.kundu.dev:9100",
+        )
+        svc = OptionQuoteStreamingService(cfg, provider=MagicMock())
+
+        probe_called = []
+        with patch("httpx.AsyncClient") as mock_client_cls:
+            mock_client_cls.return_value.__aenter__ = AsyncMock(side_effect=lambda: probe_called.append(1))
+            result = await svc._resolve_long_dte_percentile_url()
+
+        assert result == "http://my.custom.host:9100"
+        assert not probe_called
+
+    async def test_resolve_long_dte_percentile_url_falls_back_to_ms1(self):
+        """When lin1 is unreachable, falls back to ms1.kundu.dev:9100."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+        import httpx
+
+        cfg = StreamingConfig(
+            option_quotes_percentile_url="http://lin1.kundu.dev:9100",
+            option_quotes_percentile_url_backup="http://ms1.kundu.dev:9100",
+        )
+        svc = OptionQuoteStreamingService(cfg, provider=MagicMock())
+
+        probed_urls = []
+
+        async def fake_get(url, *args, **kwargs):
+            probed_urls.append(url)
+            if "lin1" in url:
+                raise httpx.ConnectError("lin1 offline")
+            mock_r = MagicMock()
+            mock_r.status_code = 200
+            return mock_r
+
+        mock_client = AsyncMock()
+        mock_client.get = fake_get
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            result = await svc._resolve_long_dte_percentile_url()
+
+        assert result == "http://ms1.kundu.dev:9100"
+        assert any("lin1" in u for u in probed_urls)
+        assert any("ms1" in u for u in probed_urls)
+
+    async def test_run_one_cycle_triggers_long_dte_jobs_when_enabled(self):
+        """_run_one_cycle appends long-DTE CSV jobs when long_dte_enabled=True."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig, StreamingSymbolConfig
+        from datetime import date
+
+        cfg = StreamingConfig(
+            symbols=[StreamingSymbolConfig(symbol="SPX", sec_type="IND")],
+            option_quotes_csv_primary=True,
+            option_quotes_long_dte_enabled=True,
+            option_quotes_long_dte_list=[5],
+            option_quotes_long_dte_cooldown_sec=0.0,
+        )
+        svc = OptionQuoteStreamingService(cfg, provider=AsyncMock())
+        # Pre-seed price and expirations so the cycle doesn't need to fetch them
+        svc._symbol_last_price["SPX"] = 5000.0
+        svc._symbol_last_price_source["SPX"] = "streaming"
+        # 5-DTE expiration: 5 trading days from 2026-04-27 = 2026-05-04
+        svc._symbol_expirations["SPX"] = ["2026-05-04"]
+        svc._long_dte_pct_data = {"SPX": {"5": {"put_pct": -2.0, "call_pct": 2.0}}}
+        svc._long_dte_pct_fetched_at = time.monotonic()  # Fresh — no re-fetch needed
+
+        captured_jobs: list = []
+
+        async def fake_csv_cycle(csv_jobs, ibkr_jobs=None):
+            captured_jobs.extend(csv_jobs)
+
+        with (
+            patch("app.services.market_data._is_market_active", return_value=True),
+            patch.object(svc, "_get_price", new=AsyncMock(return_value=(5000.0, "streaming"))),
+            patch.object(svc, "_get_expirations", new=AsyncMock(return_value=["2026-05-04"])),
+            patch.object(svc, "_run_csv_primary_cycle", side_effect=fake_csv_cycle),
+        ):
+            svc._csv_dir = "/some/dir"  # Enable CSV primary path
+            await svc._run_one_cycle()
+
+        long_jobs = [j for j in captured_jobs if j[1] == "2026-05-04"]
+        assert len(long_jobs) == 2  # PUT and CALL
+        types = {j[2] for j in long_jobs}
+        assert types == {"PUT", "CALL"}
+
+    def test_long_dte_stats_in_service_stats(self):
+        """stats dict includes long_dte section with all config fields."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        cfg = StreamingConfig(
+            option_quotes_long_dte_enabled=True,
+            option_quotes_long_dte_tier="moderate",
+            option_quotes_long_dte_list=[5, 10],
+            option_quotes_percentile_url="http://lin1.kundu.dev:9100",
+            option_quotes_percentile_url_backup="http://ms1.kundu.dev:9100",
+        )
+        svc = OptionQuoteStreamingService(cfg, provider=MagicMock())
+        stats = svc.stats
+        ld = stats["config"]["long_dte"]
+        assert ld["enabled"] is True
+        assert ld["tier"] == "moderate"
+        assert ld["pct_key"] == "p95"
+        assert ld["dte_list"] == [5, 10]
+        assert ld["percentile_url"] == "http://lin1.kundu.dev:9100"
+        assert ld["percentile_url_backup"] == "http://ms1.kundu.dev:9100"
+
+    def test_long_dte_ibkr_enabled_defaults_false(self):
+        """option_quotes_long_dte_ibkr_enabled defaults to False."""
+        from app.services.streaming_config import StreamingConfig
+        cfg = StreamingConfig()
+        assert cfg.option_quotes_long_dte_ibkr_enabled is False
+
+    def test_long_dte_ibkr_enabled_loads_from_yaml(self, tmp_path):
+        """load_streaming_config parses option_quotes_long_dte_ibkr_enabled."""
+        from app.services.streaming_config import load_streaming_config
+        yaml_content = """\
+symbols:
+  - SPX
+option_quotes_long_dte_enabled: true
+option_quotes_long_dte_ibkr_enabled: true
+"""
+        cfg_file = tmp_path / "streaming.yaml"
+        cfg_file.write_text(yaml_content)
+        cfg = load_streaming_config(cfg_file)
+        assert cfg.option_quotes_long_dte_enabled is True
+        assert cfg.option_quotes_long_dte_ibkr_enabled is True
+
+    def test_build_long_dte_ibkr_jobs_basic(self):
+        """_build_long_dte_ibkr_jobs builds PUT and CALL jobs without cooldown."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+        from datetime import date
+
+        cfg = StreamingConfig(
+            option_quotes_long_dte_ibkr_enabled=True,
+            option_quotes_long_dte_list=[5],
+            option_quotes_long_dte_strike_band_pct=1.0,
+            option_quotes_long_dte_cooldown_sec=9999.0,  # high cooldown — IBKR ignores it
+        )
+        svc = OptionQuoteStreamingService(cfg, provider=MagicMock())
+        today = date(2026, 4, 27)
+        pct_data = {"5": {"put_pct": -2.0, "call_pct": 2.0}}
+        jobs = svc._build_long_dte_ibkr_jobs(
+            "SPX", 5000.0, ["2026-05-04"], pct_data, "streaming", today,
+        )
+        assert len(jobs) == 2
+        types = {j[2] for j in jobs}
+        assert types == {"PUT", "CALL"}
+        put_job = next(j for j in jobs if j[2] == "PUT")
+        # PUT center = 5000 × 0.98 = 4900; band ±1% → [4851, 4949]
+        assert abs(put_job[3] - 4851.0) < 1.0
+        assert abs(put_job[4] - 4949.0) < 1.0
+
+    def test_build_long_dte_ibkr_jobs_no_cooldown_enforcement(self):
+        """_build_long_dte_ibkr_jobs always emits jobs regardless of csv_last_read_mono."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+        from datetime import date
+        import time
+
+        cfg = StreamingConfig(
+            option_quotes_long_dte_ibkr_enabled=True,
+            option_quotes_long_dte_list=[5],
+            option_quotes_long_dte_strike_band_pct=1.0,
+            option_quotes_long_dte_cooldown_sec=9999.0,
+        )
+        svc = OptionQuoteStreamingService(cfg, provider=MagicMock())
+        # Pre-mark as recently read (would block CSV jobs but not IBKR jobs)
+        svc._csv_last_read_mono[("SPX", "2026-05-04", "PUT")] = time.monotonic()
+        svc._csv_last_read_mono[("SPX", "2026-05-04", "CALL")] = time.monotonic()
+
+        today = date(2026, 4, 27)
+        pct_data = {"5": {"put_pct": -2.0, "call_pct": 2.0}}
+        jobs = svc._build_long_dte_ibkr_jobs(
+            "SPX", 5000.0, ["2026-05-04"], pct_data, "streaming", today,
+        )
+        assert len(jobs) == 2  # No cooldown — both emitted despite recent CSV reads
+
+    async def test_run_one_cycle_adds_long_dte_ibkr_jobs_when_enabled(self):
+        """_run_one_cycle appends long-DTE jobs to ibkr_jobs when ibkr_enabled=True."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig, StreamingSymbolConfig
+
+        cfg = StreamingConfig(
+            symbols=[StreamingSymbolConfig(symbol="SPX", sec_type="IND")],
+            option_quotes_csv_primary=True,
+            option_quotes_long_dte_enabled=True,
+            option_quotes_long_dte_ibkr_enabled=True,
+            option_quotes_long_dte_list=[5],
+            option_quotes_long_dte_cooldown_sec=0.0,
+        )
+        svc = OptionQuoteStreamingService(cfg, provider=AsyncMock())
+        svc._symbol_last_price["SPX"] = 5000.0
+        svc._symbol_last_price_source["SPX"] = "streaming"
+        svc._symbol_expirations["SPX"] = ["2026-05-04"]
+        svc._long_dte_pct_data = {"SPX": {"5": {"put_pct": -2.0, "call_pct": 2.0}}}
+        svc._long_dte_pct_fetched_at = time.monotonic()
+
+        captured_ibkr_jobs: list = []
+
+        async def fake_csv_cycle(csv_jobs, ibkr_jobs=None):
+            if ibkr_jobs:
+                captured_ibkr_jobs.extend(ibkr_jobs)
+
+        with (
+            patch("app.services.market_data._is_market_active", return_value=True),
+            patch.object(svc, "_get_price", new=AsyncMock(return_value=(5000.0, "streaming"))),
+            patch.object(svc, "_get_expirations", new=AsyncMock(return_value=["2026-05-04"])),
+            patch.object(svc, "_run_csv_primary_cycle", side_effect=fake_csv_cycle),
+        ):
+            svc._csv_dir = "/some/dir"
+            await svc._run_one_cycle()
+
+        long_ibkr = [j for j in captured_ibkr_jobs if j[1] == "2026-05-04"]
+        assert len(long_ibkr) == 2
+        assert {j[2] for j in long_ibkr} == {"PUT", "CALL"}
+
+    def test_long_dte_stats_includes_ibkr_enabled(self):
+        """stats long_dte section includes ibkr_enabled flag."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        cfg = StreamingConfig(
+            option_quotes_long_dte_enabled=True,
+            option_quotes_long_dte_ibkr_enabled=True,
+        )
+        svc = OptionQuoteStreamingService(cfg, provider=MagicMock())
+        ld = svc.stats["config"]["long_dte"]
+        assert ld["enabled"] is True
+        assert ld["ibkr_enabled"] is True
+
+    def test_long_dte_ibkr_interval_default_is_300(self):
+        """option_quotes_long_dte_ibkr_interval defaults to 300s."""
+        from app.services.streaming_config import StreamingConfig
+        assert StreamingConfig().option_quotes_long_dte_ibkr_interval == 300.0
+
+    def test_long_dte_ibkr_interval_loads_from_yaml(self, tmp_path):
+        """load_streaming_config parses option_quotes_long_dte_ibkr_interval."""
+        from app.services.streaming_config import load_streaming_config
+        cfg_file = tmp_path / "s.yaml"
+        cfg_file.write_text("symbols:\n  - SPX\noption_quotes_long_dte_ibkr_interval: 600\n")
+        cfg = load_streaming_config(cfg_file)
+        assert cfg.option_quotes_long_dte_ibkr_interval == 600.0
+
+    async def test_long_dte_ibkr_jobs_only_emit_when_interval_elapsed(self):
+        """_build_long_dte_ibkr_jobs is NOT called when the interval has not elapsed."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig, StreamingSymbolConfig
+
+        pct_payload = {"SPX": {"5": {"put_pct": -2.0, "call_pct": 2.0}}}
+        cfg = StreamingConfig(
+            symbols=[StreamingSymbolConfig(symbol="SPX", sec_type="IND")],
+            option_quotes_csv_primary=True,
+            option_quotes_long_dte_enabled=True,
+            option_quotes_long_dte_ibkr_enabled=True,
+            option_quotes_long_dte_ibkr_interval=300.0,
+            option_quotes_long_dte_list=[5],
+            option_quotes_long_dte_cooldown_sec=0.0,
+        )
+        svc = OptionQuoteStreamingService(cfg, provider=AsyncMock())
+        svc._symbol_last_price["SPX"] = 5000.0
+        svc._symbol_last_price_source["SPX"] = "streaming"
+        svc._symbol_expirations["SPX"] = ["2026-05-08"]
+        # Mark the long-DTE IBKR overlay as having just fired — interval not elapsed
+        svc._long_dte_ibkr_last_fetch = time.monotonic()
+
+        with (
+            patch("app.services.market_data._is_market_active", return_value=True),
+            patch.object(svc, "_get_price", new=AsyncMock(return_value=(5000.0, "streaming"))),
+            patch.object(svc, "_get_expirations", new=AsyncMock(return_value=["2026-05-08"])),
+            patch.object(svc, "_fetch_long_dte_percentile_data", new=AsyncMock(return_value=pct_payload)),
+            patch.object(svc, "_build_long_dte_ibkr_jobs") as mock_ibkr_build,
+            patch.object(svc, "_run_csv_primary_cycle", new=AsyncMock()),
+        ):
+            svc._csv_dir = "/some/dir"
+            await svc._run_one_cycle()
+
+        # _build_long_dte_ibkr_jobs should NOT have been called — interval not elapsed
+        mock_ibkr_build.assert_not_called()
+
+    async def test_long_dte_ibkr_jobs_emit_when_interval_elapsed(self):
+        """_build_long_dte_ibkr_jobs IS called when the ibkr_interval has fully elapsed."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig, StreamingSymbolConfig
+
+        pct_payload = {"SPX": {"5": {"put_pct": -2.0, "call_pct": 2.0}}}
+        fake_ibkr_jobs = [
+            ("SPX", "2026-05-08", "PUT", 4850.0, 5150.0, "streaming"),
+            ("SPX", "2026-05-08", "CALL", 4850.0, 5150.0, "streaming"),
+        ]
+        cfg = StreamingConfig(
+            symbols=[StreamingSymbolConfig(symbol="SPX", sec_type="IND")],
+            option_quotes_csv_primary=True,
+            option_quotes_long_dte_enabled=True,
+            option_quotes_long_dte_ibkr_enabled=True,
+            option_quotes_long_dte_ibkr_interval=300.0,
+            option_quotes_long_dte_list=[5],
+            option_quotes_long_dte_cooldown_sec=0.0,
+        )
+        svc = OptionQuoteStreamingService(cfg, provider=AsyncMock())
+        svc._symbol_last_price["SPX"] = 5000.0
+        svc._symbol_last_price_source["SPX"] = "streaming"
+        svc._symbol_expirations["SPX"] = ["2026-05-08"]
+        # Last IBKR fetch was 400s ago — interval (300s) has elapsed
+        svc._long_dte_ibkr_last_fetch = time.monotonic() - 400.0
+
+        ibkr_jobs_seen: list = []
+
+        async def capture_cycle(csv_jobs, ibkr_jobs=None):
+            if ibkr_jobs:
+                ibkr_jobs_seen.extend(ibkr_jobs)
+
+        with (
+            patch("app.services.market_data._is_market_active", return_value=True),
+            patch.object(svc, "_get_price", new=AsyncMock(return_value=(5000.0, "streaming"))),
+            patch.object(svc, "_get_expirations", new=AsyncMock(return_value=["2026-05-08"])),
+            patch.object(svc, "_fetch_long_dte_percentile_data", new=AsyncMock(return_value=pct_payload)),
+            patch.object(svc, "_build_long_dte_ibkr_jobs", return_value=fake_ibkr_jobs) as mock_ibkr_build,
+            patch.object(svc, "_run_csv_primary_cycle", side_effect=capture_cycle),
+        ):
+            svc._csv_dir = "/some/dir"
+            await svc._run_one_cycle()
+
+        # _build_long_dte_ibkr_jobs must have been called and its jobs forwarded
+        mock_ibkr_build.assert_called_once()
+        assert any(j in ibkr_jobs_seen for j in fake_ibkr_jobs)
+
+    def test_long_dte_stats_includes_ibkr_interval(self):
+        """stats long_dte section includes ibkr_interval_sec."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        cfg = StreamingConfig(
+            option_quotes_long_dte_ibkr_enabled=True,
+            option_quotes_long_dte_ibkr_interval=180.0,
+        )
+        svc = OptionQuoteStreamingService(cfg, provider=MagicMock())
+        ld = svc.stats["config"]["long_dte"]
+        assert ld["ibkr_interval_sec"] == 180.0
+        assert ld["ibkr_last_fetch_age_sec"] is None  # never fired
+
 
 class TestEtradeProvider:
     """Tests for E*TRADE provider — stub, live provider, config, token management."""
@@ -16455,7 +17135,7 @@ class TestSpreadScanner:
             return ["2026-04-30"]
         async def fake_chain(client, daemon_url, sym, exp, strike_range_pct=5.0):
             return {"calls": [], "puts": []}
-        async def fake_tier_data(client, percentile_url, tickers, dte_list=None):
+        async def fake_tier_data(client, percentile_url, tickers, dte_list=None, **kwargs):
             return None  # simulate percentile server unreachable
         async def fake_prev_closes(client, db_url, tickers):
             return {sym: 7100.0 for sym in tickers}
@@ -16649,6 +17329,213 @@ class TestSpreadScanner:
         finally:
             ss._resolve_percentile_url = orig_resolve
 
+    # ── fetch_tier_data data-layer failover ─────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_fetch_tier_data_falls_over_to_backup_on_primary_failure(self):
+        """When the primary URL times out (or returns an error) but a
+        fallback URL is configured AND differs, fetch_tier_data must
+        retry against the fallback once and return its data on success.
+        The on_swap_to_fallback callback must fire so the caller can
+        permanently swap to backup."""
+        import spread_scanner as ss
+        import httpx
+
+        # Bypass _resolve_percentile_url — keep both URLs verbatim.
+        async def fake_resolve(client, configured):
+            return configured
+        orig_resolve = ss._resolve_percentile_url
+        ss._resolve_percentile_url = fake_resolve
+
+        try:
+            primary = "http://primary:9100"
+            backup  = "http://backup:9100"
+
+            class FakeOK:
+                status_code = 200
+                def json(self):
+                    return {"hourly": {"SPX": {}}, "hourly_1dte": {}, "tickers": []}
+            class FakeClient:
+                def __init__(self):
+                    self.calls = []
+                async def get(self, url, *a, **kw):
+                    self.calls.append(url)
+                    if url.startswith(primary):
+                        raise httpx.ReadTimeout("simulated primary timeout")
+                    return FakeOK()
+
+            client = FakeClient()
+            swapped_to: list[str] = []
+            data = await ss.fetch_tier_data(
+                client, primary, ["SPX"], dte_list=[0, 1],
+                fallback_url=backup,
+                on_swap_to_fallback=lambda u: swapped_to.append(u),
+            )
+            assert data is not None
+            assert "hourly" in data
+            # Both URLs probed exactly once; primary first, then backup.
+            assert any(u.startswith(primary) for u in client.calls)
+            assert any(u.startswith(backup) for u in client.calls)
+            # Caller was told to swap.
+            assert swapped_to == [backup]
+            # Error reason cleared (we have data).
+            assert ss._TIER_FETCH_LAST_ERROR.get("reason") is None
+        finally:
+            ss._resolve_percentile_url = orig_resolve
+
+    @pytest.mark.asyncio
+    async def test_fetch_tier_data_records_combined_failure_when_both_fail(self):
+        """Both primary and backup failing is the unrecoverable case.
+        fetch_tier_data must return None and capture BOTH failure
+        reasons in `_TIER_FETCH_LAST_ERROR.reason` so the offline
+        banner can show the operator what's actually wrong on each
+        URL — half-info ('primary timed out') is misleading when
+        backup is also broken."""
+        import spread_scanner as ss
+        import httpx
+
+        async def fake_resolve(client, configured):
+            return configured
+        orig_resolve = ss._resolve_percentile_url
+        ss._resolve_percentile_url = fake_resolve
+        try:
+            class FakeClient:
+                async def get(self, url, *a, **kw):
+                    if "primary" in url:
+                        raise httpx.ReadTimeout("primary timeout")
+                    raise httpx.ConnectError("backup unreachable")
+            data = await ss.fetch_tier_data(
+                FakeClient(), "http://primary:9100", ["SPX"],
+                fallback_url="http://backup:9100",
+            )
+            assert data is None
+            reason = ss._TIER_FETCH_LAST_ERROR.get("reason") or ""
+            assert "primary failed" in reason
+            assert "backup also failed" in reason
+            # Both underlying error types should appear so the operator
+            # can tell timeout from connection refused.
+            assert "ReadTimeout" in reason or "primary timeout" in reason
+            assert "ConnectError" in reason or "backup unreachable" in reason
+        finally:
+            ss._resolve_percentile_url = orig_resolve
+
+    @pytest.mark.asyncio
+    async def test_fetch_tier_data_skips_fallback_when_same_as_primary(self):
+        """Avoid pointless double-latency when the resolver cached the
+        same URL on both primary and backup (no real backup configured).
+        fetch_tier_data must NOT retry against an identical URL."""
+        import spread_scanner as ss
+        import httpx
+
+        async def fake_resolve(client, configured):
+            return configured
+        orig_resolve = ss._resolve_percentile_url
+        ss._resolve_percentile_url = fake_resolve
+        try:
+            class FakeClient:
+                def __init__(self):
+                    self.calls = 0
+                async def get(self, *a, **kw):
+                    self.calls += 1
+                    raise httpx.ReadTimeout("oops")
+            client = FakeClient()
+            data = await ss.fetch_tier_data(
+                client, "http://localhost:9100", ["SPX"],
+                fallback_url="http://localhost:9100",  # same as primary
+            )
+            assert data is None
+            assert client.calls == 1, (
+                f"expected exactly 1 call (no fallback retry when URLs "
+                f"match), got {client.calls}"
+            )
+        finally:
+            ss._resolve_percentile_url = orig_resolve
+
+    @pytest.mark.asyncio
+    async def test_fetch_tier_data_no_fallback_no_retry(self):
+        """When `fallback_url=None`, fetch_tier_data must not invent a
+        retry — preserves the legacy single-URL contract."""
+        import spread_scanner as ss
+        import httpx
+
+        async def fake_resolve(client, configured):
+            return configured
+        orig_resolve = ss._resolve_percentile_url
+        ss._resolve_percentile_url = fake_resolve
+        try:
+            class FakeClient:
+                def __init__(self):
+                    self.calls = 0
+                async def get(self, *a, **kw):
+                    self.calls += 1
+                    raise httpx.ConnectError("down")
+            client = FakeClient()
+            data = await ss.fetch_tier_data(
+                client, "http://localhost:9100", ["SPX"],
+                fallback_url=None,
+            )
+            assert data is None
+            assert client.calls == 1
+        finally:
+            ss._resolve_percentile_url = orig_resolve
+
+    @pytest.mark.asyncio
+    async def test_scan_all_tickers_swaps_args_percentile_url_to_backup_on_primary_fail(
+        self, monkeypatch,
+    ):
+        """End-to-end wiring: when scan_all_tickers' tier fetch falls
+        over from primary → backup, `args.percentile_url` AND
+        `args.resolved_endpoints["percentile_url"]` must be updated to
+        the backup URL so future scan cycles bypass the dead primary
+        AND the dashboard's dim-grey endpoints line reflects the swap."""
+        import asyncio
+        import spread_scanner as ss
+        from spread_scanner import parse_args
+
+        # The fake fetch_tier_data simulates the failover internally:
+        # it sees fallback_url, calls on_swap_to_fallback, returns data.
+        async def fake_failover_fetch(
+            client, percentile_url, tickers, dte_list=None,
+            fallback_url=None, on_swap_to_fallback=None,
+        ):
+            assert fallback_url is not None, (
+                "scan_all_tickers must pass fallback_url to fetch_tier_data"
+            )
+            assert fallback_url != percentile_url
+            # Simulate primary failure → backup success.
+            if on_swap_to_fallback is not None:
+                on_swap_to_fallback(fallback_url)
+            return {"hourly": {sym: {"recommended": {}, "slots": {}}}
+                    for sym in tickers}
+
+        async def fake_quote(c, url, sym):  return {"last": 7100.0}
+        async def fake_exp(c, url, sym):    return ["2026-05-04"]
+        async def fake_chain(c, url, sym, exp, strike_range_pct=5.0):
+            return {"calls": [], "puts": []}
+        async def fake_prev(c, url, syms):  return {s: 7100.0 for s in syms}
+
+        monkeypatch.setattr(ss, "fetch_tier_data", fake_failover_fetch)
+        monkeypatch.setattr(ss, "fetch_quote", fake_quote)
+        monkeypatch.setattr(ss, "fetch_expirations", fake_exp)
+        monkeypatch.setattr(ss, "fetch_option_chain", fake_chain)
+        monkeypatch.setattr(ss, "fetch_prev_closes", fake_prev)
+        monkeypatch.setattr(ss, "extract_prev_closes_from_tier_data", lambda td: {})
+
+        args = parse_args(["--tickers", "SPX", "--min-tier", "p90"])
+        args.percentile_url = "http://localhost:9100"
+        args.percentile_url_backup = "http://lin1.kundu.dev:9100"
+        args.resolved_endpoints = {
+            "daemon_url": args.daemon_url,
+            "db_url": args.db_url,
+            "percentile_url": args.percentile_url,
+        }
+
+        await ss.scan_all_tickers(object(), args)
+
+        # The swap callback fired → both args fields now point at backup.
+        assert args.percentile_url == "http://lin1.kundu.dev:9100"
+        assert args.resolved_endpoints["percentile_url"] == "http://lin1.kundu.dev:9100"
+
     # ── TierDataCache (TTL-bounded refresh of slow percentile payload) ──
 
     def test_tier_data_cache_refreshes_when_empty(self):
@@ -16738,7 +17625,7 @@ class TestSpreadScanner:
         from spread_scanner import parse_args, TierDataCache
 
         fetch_calls: list[tuple] = []
-        async def counting_fetch_tier_data(client, percentile_url, tickers, dte_list=None):
+        async def counting_fetch_tier_data(client, percentile_url, tickers, dte_list=None, **kwargs):
             fetch_calls.append((percentile_url, tuple(tickers)))
             return {"hourly": {sym: {"recommended": {}, "slots": {}}
                                for sym in tickers}}
@@ -16791,7 +17678,7 @@ class TestSpreadScanner:
 
         cached_payload = {"hourly": {"SPX": {"recommended": {}, "slots": {}}}}
 
-        async def stub_fetch(client, percentile_url, tickers, dte_list=None):
+        async def stub_fetch(client, percentile_url, tickers, dte_list=None, **kwargs):
             raise AssertionError("fetch must not run when cache is fresh")
         async def fake_quote(client, daemon_url, sym):
             return {"last": 7100.0}

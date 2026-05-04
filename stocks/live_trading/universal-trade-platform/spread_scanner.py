@@ -518,25 +518,14 @@ async def _resolve_percentile_url(
 _TIER_FETCH_LAST_ERROR: dict[str, str | None] = {"reason": None}
 
 
-async def fetch_tier_data(
+async def _try_fetch_tier_data_one_url(
     client: httpx.AsyncClient, percentile_url: str, tickers: list[str],
     dte_list: list[int] | None = None,
 ) -> dict | None:
-    """Fetch percentile/tier data from the percentile server.
-
-    Returns the hourly data structure with recommended tiers per ticker.
-    Requests windows matching the DTE list so close-to-close data is available.
-
-    Side effect: captures the last failure reason in
-    `_TIER_FETCH_LAST_ERROR["reason"]` so callers can distinguish "couldn't
-    reach the server" from "server returned an error" (e.g. HTTP 500
-    because the percentile server's upstream QuestDB is down). Cleared on
-    success.
-    """
-    # Resolve primary/fallback the first time through; subsequent calls hit
-    # the cache immediately (no extra round-trip).
-    percentile_url = await _resolve_percentile_url(client, percentile_url)
-    # Request all windows needed for the DTEs being scanned
+    """Single-URL fetch attempt. Returns the JSON dict on HTTP 200 or
+    None on any failure. On failure, writes a diagnostic into
+    `_TIER_FETCH_LAST_ERROR["reason"]`. Caller is responsible for any
+    URL resolution / cache / failover."""
     windows = sorted(set([0] + (dte_list or [0])))
     windows_str = ",".join(str(w) for w in windows)
     target = (
@@ -556,7 +545,6 @@ async def fetch_tier_data(
         # errors include the upstream cause (e.g. "Connect call failed
         # ('192.168.7.120', 8812)" when QuestDB is down).
         body = (resp.text or "").strip()
-        # Strip HTML tags if the server returned an error page.
         import re
         body_text = re.sub(r"<[^>]+>", " ", body)
         body_text = re.sub(r"\s+", " ", body_text).strip()[:160]
@@ -568,6 +556,91 @@ async def fetch_tier_data(
         _TIER_FETCH_LAST_ERROR["reason"] = (
             f"{type(e).__name__} reaching {target}: {str(e)[:120]}"
         )
+    return None
+
+
+async def fetch_tier_data(
+    client: httpx.AsyncClient, percentile_url: str, tickers: list[str],
+    dte_list: list[int] | None = None,
+    fallback_url: str | None = None,
+    on_swap_to_fallback: "Callable[[str], None] | None" = None,
+) -> dict | None:
+    """Fetch percentile/tier data from the percentile server.
+
+    Returns the hourly data structure with recommended tiers per ticker.
+    Requests windows matching the DTE list so close-to-close data is
+    available.
+
+    Failover: when `fallback_url` is provided and differs from
+    `percentile_url`, a failure on the primary triggers a one-shot
+    retry against the fallback. If the fallback succeeds, it's
+    considered the new "current" URL — `on_swap_to_fallback(fallback_url)`
+    is invoked so the caller can persist the swap (e.g. update
+    `args.percentile_url` and the resolved-endpoints dashboard line).
+    The 2h TierDataCache then keeps using the fallback for the next
+    refresh window. Only the startup `/health` probe gets a primary
+    revisit — once we've witnessed a real data-layer failure on the
+    primary, we don't ping-pong back to it for the rest of the session.
+
+    Side effect: captures the last failure reason in
+    `_TIER_FETCH_LAST_ERROR["reason"]` so the offline banner can show
+    HTTP code + body excerpt or exception type. On a successful
+    fallback, the reason text records which URL succeeded.
+    """
+    # Resolve primary/fallback the first time through; subsequent calls hit
+    # the cache immediately (no extra round-trip).
+    percentile_url = await _resolve_percentile_url(client, percentile_url)
+
+    # First attempt — the configured (or already-swapped) URL.
+    result = await _try_fetch_tier_data_one_url(
+        client, percentile_url, tickers, dte_list,
+    )
+    if result is not None:
+        return result
+
+    # Primary failed. If we have a fallback that's actually different,
+    # try it once. Avoids needless double-latency when there's no
+    # backup configured or when both fields point to the same URL
+    # (which happens when the YAML omits a backup and the resolver
+    # cached the lone URL on both sides).
+    if not fallback_url or fallback_url == percentile_url:
+        return None
+
+    primary_reason = _TIER_FETCH_LAST_ERROR.get("reason")
+    print(
+        f"[tier_fetch] primary {percentile_url} failed: {primary_reason}; "
+        f"trying backup {fallback_url}",
+        file=sys.stderr,
+    )
+
+    result = await _try_fetch_tier_data_one_url(
+        client, fallback_url, tickers, dte_list,
+    )
+    if result is not None:
+        # Success on backup. Tell the caller so they can swap their
+        # cached URL — future refreshes go directly to backup, no
+        # second-guess re-probe of a URL we know is broken.
+        if on_swap_to_fallback is not None:
+            try:
+                on_swap_to_fallback(fallback_url)
+            except Exception as e:
+                print(f"[tier_fetch] on_swap_to_fallback raised: {e}", file=sys.stderr)
+        # Annotate so the operator sees we're on backup, while still
+        # clearing the "fetch failed" state (since we DO have data).
+        _TIER_FETCH_LAST_ERROR["reason"] = None
+        print(
+            f"[tier_fetch] backup {fallback_url} succeeded; swapping for the rest of the session",
+            file=sys.stderr,
+        )
+        return result
+
+    # Both failed. Record the joint failure so the offline banner is
+    # honest about it.
+    backup_reason = _TIER_FETCH_LAST_ERROR.get("reason")
+    _TIER_FETCH_LAST_ERROR["reason"] = (
+        f"primary failed ({primary_reason}); "
+        f"backup also failed ({backup_reason})"
+    )
     return None
 
 
@@ -3731,11 +3804,34 @@ async def scan_all_tickers(
     else:
         should_fetch_tier = bool(needs_tiers)
 
-    # Phase 1: Fetch quotes + expirations + tier data in parallel
+    # Phase 1: Fetch quotes + expirations + tier data in parallel.
+    # The tier fetch gets data-layer failover: if the configured
+    # primary times out (e.g. localhost:9100 /range_percentiles is slow
+    # but localhost:9100 /health was fast at startup), one retry against
+    # the configured backup. On backup success we permanently swap
+    # `args.percentile_url` so future cycles go directly to backup.
     quote_coros = [fetch_quote(client, args.daemon_url, sym) for sym in args.tickers]
     exp_coro = fetch_expirations(client, args.daemon_url, args.tickers[0])
+
+    def _swap_percentile_url_to_backup(new_url: str) -> None:
+        """Persist a backup-URL win onto args so future refreshes go
+        directly to the backup. Updates the resolved-endpoints map too
+        so the dashboard's dim-grey footer reflects the swap."""
+        args.percentile_url = new_url
+        try:
+            resolved = getattr(args, "resolved_endpoints", None)
+            if isinstance(resolved, dict):
+                resolved["percentile_url"] = new_url
+        except Exception:
+            pass
+
+    tier_fallback = getattr(args, "percentile_url_backup", None)
     tier_coro = (
-        fetch_tier_data(client, args.percentile_url, args.tickers, args.dte)
+        fetch_tier_data(
+            client, args.percentile_url, args.tickers, args.dte,
+            fallback_url=tier_fallback,
+            on_swap_to_fallback=_swap_percentile_url_to_backup,
+        )
         if should_fetch_tier else asyncio.sleep(0)
     )
 

@@ -241,6 +241,42 @@ endpoints line tells you which URL was picked, so you can spot it.)
   so it survives multiple calls to `resolve_endpoint_urls` within one
   process — the probe runs once.
 
+### Data-layer failover (percentile only)
+
+The startup `/health` probe checks reachability, not function. A
+percentile server can answer `/health` in 1ms but time out on
+`/range_percentiles` (the 7-8s data path). To handle that case,
+`fetch_tier_data` accepts a `fallback_url` and falls over to it on a
+failed primary attempt.
+
+Flow:
+
+1. `fetch_tier_data(client, primary, …, fallback_url=backup,
+   on_swap_to_fallback=cb)` is called from `scan_all_tickers`.
+2. Try primary once. If 200 → return data, done.
+3. If primary failed AND `fallback_url` differs AND is non-None →
+   try `fallback_url` once.
+4. If fallback succeeds → call `on_swap_to_fallback(fallback_url)` so
+   the caller persists the swap. `scan_all_tickers` updates
+   `args.percentile_url` AND
+   `args.resolved_endpoints["percentile_url"]`, so future cycles go
+   directly to backup AND the dashboard footer reflects the swap.
+5. If both failed → return None, with `_TIER_FETCH_LAST_ERROR.reason`
+   recording BOTH failure reasons (so the offline banner is honest
+   about the joint failure).
+
+The swap is sticky for the rest of the process — once we've witnessed a
+real data-layer failure on the primary, we don't ping-pong back. The
+TierDataCache's 2h TTL keeps using the backup until restart. Adaptive
+failback (re-trying primary later) is intentionally not implemented;
+restart the scanner if the primary recovers.
+
+This is also why the data-layer failover is on the percentile fetch
+specifically and NOT generalized: it's the only endpoint where a
+healthy `/health` doesn't imply a healthy data path. Daemon and
+db_server data endpoints are fast enough that `/health` reachability
+is a sufficient predictor.
+
 ---
 
 ## Refresh cadence (anticipatory kickoff)
@@ -401,6 +437,10 @@ Key pinned behaviors (regression guards):
 | `test_top_picks_pred_column_uses_intraday_1dte_for_dte1` | Pred column DTE routing |
 | `test_scan_all_tickers_skips_tier_fetch_when_cache_is_fresh` | TierDataCache TTL semantics |
 | `test_fetch_tier_data_captures_*` | error-reason capture for offline banner |
+| `test_fetch_tier_data_falls_over_to_backup_on_primary_failure` | data-layer failover (primary fails → backup tried → swap callback fires) |
+| `test_fetch_tier_data_records_combined_failure_when_both_fail` | both URLs failing surfaces both reasons in the offline banner |
+| `test_fetch_tier_data_skips_fallback_when_same_as_primary` | no double-latency when YAML omits a backup |
+| `test_scan_all_tickers_swaps_args_percentile_url_to_backup_on_primary_fail` | end-to-end: swap persists onto args + resolved_endpoints |
 
 ---
 

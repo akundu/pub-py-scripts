@@ -624,6 +624,38 @@ endpoints line tells you which URL was picked, so you can spot it.)</p>
   so it survives multiple calls to <code>resolve_endpoint_urls</code> within one
   process — the probe runs once.</li>
 </ul>
+<h3 id="data-layer-failover-percentile-only">Data-layer failover (percentile only)</h3>
+<p>The startup <code>/health</code> probe checks reachability, not function. A
+percentile server can answer <code>/health</code> in 1ms but time out on
+<code>/range_percentiles</code> (the 7-8s data path). To handle that case,
+<code>fetch_tier_data</code> accepts a <code>fallback_url</code> and falls over to it on a
+failed primary attempt.</p>
+<p>Flow:</p>
+<ol>
+<li><code>fetch_tier_data(client, primary, …, fallback_url=backup,
+   on_swap_to_fallback=cb)</code> is called from <code>scan_all_tickers</code>.</li>
+<li>Try primary once. If 200 → return data, done.</li>
+<li>If primary failed AND <code>fallback_url</code> differs AND is non-None →
+   try <code>fallback_url</code> once.</li>
+<li>If fallback succeeds → call <code>on_swap_to_fallback(fallback_url)</code> so
+   the caller persists the swap. <code>scan_all_tickers</code> updates
+   <code>args.percentile_url</code> AND
+   <code>args.resolved_endpoints["percentile_url"]</code>, so future cycles go
+   directly to backup AND the dashboard footer reflects the swap.</li>
+<li>If both failed → return None, with <code>_TIER_FETCH_LAST_ERROR.reason</code>
+   recording BOTH failure reasons (so the offline banner is honest
+   about the joint failure).</li>
+</ol>
+<p>The swap is sticky for the rest of the process — once we've witnessed a
+real data-layer failure on the primary, we don't ping-pong back. The
+TierDataCache's 2h TTL keeps using the backup until restart. Adaptive
+failback (re-trying primary later) is intentionally not implemented;
+restart the scanner if the primary recovers.</p>
+<p>This is also why the data-layer failover is on the percentile fetch
+specifically and NOT generalized: it's the only endpoint where a
+healthy <code>/health</code> doesn't imply a healthy data path. Daemon and
+db_server data endpoints are fast enough that <code>/health</code> reachability
+is a sufficient predictor.</p>
 <hr />
 <h2 id="refresh-cadence-anticipatory-kickoff">Refresh cadence (anticipatory kickoff)</h2>
 <p>Naïve loops do <code>[scan → render → sleep(interval)]</code> and the dashboard
@@ -877,6 +909,22 @@ python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> <
 <tr>
 <td><code>test_fetch_tier_data_captures_*</code></td>
 <td>error-reason capture for offline banner</td>
+</tr>
+<tr>
+<td><code>test_fetch_tier_data_falls_over_to_backup_on_primary_failure</code></td>
+<td>data-layer failover (primary fails → backup tried → swap callback fires)</td>
+</tr>
+<tr>
+<td><code>test_fetch_tier_data_records_combined_failure_when_both_fail</code></td>
+<td>both URLs failing surfaces both reasons in the offline banner</td>
+</tr>
+<tr>
+<td><code>test_fetch_tier_data_skips_fallback_when_same_as_primary</code></td>
+<td>no double-latency when YAML omits a backup</td>
+</tr>
+<tr>
+<td><code>test_scan_all_tickers_swaps_args_percentile_url_to_backup_on_primary_fail</code></td>
+<td>end-to-end: swap persists onto args + resolved_endpoints</td>
 </tr>
 </tbody>
 </table>
