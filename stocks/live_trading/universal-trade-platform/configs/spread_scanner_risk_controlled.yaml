@@ -189,17 +189,17 @@ handlers:
       trading_window_pt:
         start: "06:31"
         end:   "10:00"
+      # ── Per-cycle pacing — see dte0.yaml for full notes ──
+      max_trades_per_cycle: 1
+      min_minutes_between_trades: 3.0
 
   # Live trading — uncomment to activate. Uses the SAME policy as simulate_trade
   # via the YAML anchor above.
   # - type: trade
-  #   min_norm_roi: 1.5
+  #   min_norm_roi: 2.5      # higher bar for live than simulate
   #   log_file: trades_live.jsonl
   #   daemon_url: http://localhost:8000
   #   policy: *trade_policy
-  #   # Per-handler pre-fire price validation (default false). For LIVE trading,
-  #   # turning this on adds a final sanity check right before order submission:
-  #   # if the verify call fails (csv_source_rejected, non_monotonic, no_edge),
-  #   # the trade is silently skipped instead of submitted on stale data.
-  #   # Strongly recommended for live mode.
+  #   # Strongly RECOMMENDED for live: pre-fire price re-verify drops
+  #   # trades whose quotes went stale between screening and submission.
   #   validate_prices: true

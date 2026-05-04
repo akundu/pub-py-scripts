@@ -358,6 +358,8 @@ argparse with YAML values as defaults so CLI flags still win).
 | `min_tier_close` | same | Always close-to-close window=DTE; independent of `min_tier` |
 | `min_buf` | float (% points, default 0) | Additive cushion in ABSOLUTE percentage points layered on top of the dynamic tier boundary. `min_buf: 0.07` shifts a "cons → 1.25% OTM" boundary to "1.32% OTM" — strike must clear the model's verdict by 0.07pp. Symmetric on put / call. Applies to BOTH `min_tier` and `min_tier_close`. Doesn't replace `min_otm`; they stack. |
 | `top_per_combo` | int \| null (default null) | Max picks per (ticker, option_type) combo in Top-N. `1` = only the best put + best call per ticker (diverse list). `null` / commented-out / `0` disables the cap entirely. |
+| `policy.max_trades_per_cycle` | int (default 1) | Cap on trade submissions per scan cycle, sorted by ROI desc. `1` = only the highest-ROI eligible spread fires per cycle (others get `per_cycle_cap` skip log entries). `0` = kill switch (no trades fire). Higher values let multiple trades go in one cycle. |
+| `policy.min_minutes_between_trades` | float (default 3.0) | Global cooldown in MINUTES between successive trade submits across all tickers/sides. After a successful submit, all candidates within this window get `global_cooldown` skip entries. Stacks with `cooldown_per_ticker_side_sec`. `0` disables. |
 | `min_otm` | float | Absolute OTM% floor across all tickers |
 | `min_otm_per_ticker` | `{symbol: float}` | Per-symbol overrides; effective floor = `max(scalar, per_ticker)` |
 | `max_otm` / `max_otm_per_ticker` | float / dict | OTM ceiling (rare) |
@@ -453,6 +455,10 @@ Key pinned behaviors (regression guards):
 | `test_min_tier_pn_drops_candidate_when_boundary_unavailable` | FAIL-SAFE: missing tier boundary → drop candidate (no silent fall-through) |
 | `test_top_per_combo_caps_one_per_combo_by_default` | per-(ticker, option_type) Top-N cap |
 | `test_top_per_combo_none_disables_cap` | omit-config = no cap (legacy behavior) |
+| `test_max_trades_per_cycle_one_keeps_only_top_roi` | per-cycle cap (default 1) keeps only the highest-ROI submission |
+| `test_max_trades_per_cycle_zero_kill_switch` | `0` is a kill switch — no trades fire |
+| `test_min_minutes_between_trades_blocks_second_cycle` | global cooldown blocks the next cycle's trades when within window |
+| `test_min_minutes_between_trades_zero_disables` | `0` disables the cooldown entirely |
 
 ---
 

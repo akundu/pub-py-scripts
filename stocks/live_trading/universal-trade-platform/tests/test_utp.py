@@ -20840,7 +20840,15 @@ class TestTradeHandlers:
         self._bind_utp_pricing(FakeTClient)
         monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
 
-        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0]})
+        # Disable the global per-cycle cap and global cooldown for this
+        # test — it's specifically validating cross-ticker concurrency
+        # and within-ticker serialization, NOT the per-cycle/cooldown
+        # gates which would otherwise trim the 9 candidates down to 1.
+        pol = TradePolicy.from_dict({
+            "roi_pct": [1.0, 10.0],
+            "max_trades_per_cycle": 100,
+            "min_minutes_between_trades": 0,
+        })
         h = TradeHandler(min_norm_roi=0, log_file=str(tmp_path / "t.jsonl"),
                         policy=pol, daemon_url="http://d")
 
@@ -20907,7 +20915,15 @@ class TestTradeHandlers:
         monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
 
         # width=20, credit=1.0 → max_loss = $1900 per trade. Cap = $2500 → 1 trade fits, 2 don't.
-        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "max_total_risk": 2500})
+        # The new per-cycle cap (default 1) would also block the 2nd trade
+        # but for the WRONG reason. Bypass it so we genuinely exercise
+        # the within-lock cap recheck path.
+        pol = TradePolicy.from_dict({
+            "roi_pct": [1.0, 10.0],
+            "max_total_risk": 2500,
+            "max_trades_per_cycle": 100,
+            "min_minutes_between_trades": 0,
+        })
         log_file = tmp_path / "t.jsonl"
         h = TradeHandler(min_norm_roi=0, log_file=str(log_file), policy=pol,
                         daemon_url="http://d")
@@ -20941,9 +20957,12 @@ class TestTradeHandlers:
         monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
 
         # NDX width=50 credit=1.0 → max_loss=$4900. per-ticker cap for NDX = $5000 → 1 fits, 2nd blocked.
+        # Bypass the global per-cycle cap so we exercise the per-ticker cap.
         pol = TradePolicy.from_dict({
             "roi_pct": [1.0, 10.0],
             "max_per_ticker_risk": {"NDX": 5000, "SPX": 100000},
+            "max_trades_per_cycle": 100,
+            "min_minutes_between_trades": 0,
         })
         log_file = tmp_path / "t.jsonl"
         h = TradeHandler(min_norm_roi=0, log_file=str(log_file), policy=pol,
@@ -20964,6 +20983,178 @@ class TestTradeHandlers:
         assert len(skipped) == 1
         assert skipped[0]["spread"]["symbol"] == "NDX"
         assert skipped[0]["reason"] == "per_ticker_risk_cap"
+
+    # --- per-cycle cap + global cooldown ----------------------------------
+
+    def test_max_trades_per_cycle_one_keeps_only_top_roi(self, monkeypatch, tmp_path):
+        """Default `max_trades_per_cycle=1`: even with 5 valid candidates,
+        only the highest-ROI one fires. The other 4 get logged with
+        `per_cycle_cap` so the operator sees what was held back."""
+        import asyncio
+        from spread_scanner import TradeHandler, TradePolicy
+
+        submit_log: list[dict] = []
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def trade_credit_spread(self, **kw):
+                submit_log.append(kw)
+                return {"order_id": "ok", "status": "FILLED"}
+
+        import spread_scanner as ss
+        self._bind_utp_pricing(FakeTClient)
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+
+        # No max_trades_per_cycle override → default 1.
+        pol = TradePolicy.from_dict({"roi_pct": [1.0, 50.0]})
+        log_file = tmp_path / "t.jsonl"
+        h = TradeHandler(min_norm_roi=0, log_file=str(log_file), policy=pol,
+                        daemon_url="http://d")
+
+        sp = self._spread
+        # Five candidates with strictly increasing ROI.
+        spreads = [
+            sp("SPX", credit=1.0, short=5700, long_=5680, roi=5.0),
+            sp("NDX", credit=1.5, prev_close=26000, short=26200, long_=26150, roi=10.0),
+            sp("SPX", credit=2.0, short=5710, long_=5690, roi=15.0),
+            sp("RUT", credit=2.5, prev_close=2800, short=2810, long_=2785, roi=20.0),
+            sp("NDX", credit=3.0, prev_close=26000, short=26210, long_=26160, roi=25.0),
+        ]
+        asyncio.run(h.fire(spreads, self._ctx()))
+        # Exactly one trade fired — the one with roi_pct=25 (NDX 26210).
+        assert len(submit_log) == 1, (
+            f"per-cycle cap (default 1) should have allowed exactly 1 "
+            f"submission; got {len(submit_log)}"
+        )
+        # Log shows 4 per_cycle_cap skips.
+        events = [json.loads(ln) for ln in log_file.read_text().splitlines()]
+        skips = [e for e in events if e.get("event") == "skipped"
+                 and e.get("reason") == "per_cycle_cap"]
+        assert len(skips) == 4
+
+    def test_max_trades_per_cycle_zero_kill_switch(self, monkeypatch, tmp_path):
+        """`max_trades_per_cycle=0` is a kill switch — no trades fire,
+        every candidate is skipped with `per_cycle_cap_zero` so the
+        operator can see why nothing happened."""
+        import asyncio
+        from spread_scanner import TradeHandler, TradePolicy
+
+        submitted = []
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def trade_credit_spread(self, **kw):
+                submitted.append(kw)
+                return {"order_id": "x", "status": "FILLED"}
+
+        import spread_scanner as ss
+        self._bind_utp_pricing(FakeTClient)
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+
+        pol = TradePolicy.from_dict({
+            "roi_pct": [1.0, 50.0],
+            "max_trades_per_cycle": 0,
+        })
+        log_file = tmp_path / "t.jsonl"
+        h = TradeHandler(min_norm_roi=0, log_file=str(log_file), policy=pol,
+                        daemon_url="http://d")
+        sp = self._spread
+        asyncio.run(h.fire([sp("SPX", credit=1.0, short=5700, long_=5680)], self._ctx()))
+        assert submitted == []
+        events = [json.loads(ln) for ln in log_file.read_text().splitlines()]
+        kills = [e for e in events if e.get("reason") == "per_cycle_cap_zero"]
+        assert len(kills) == 1
+
+    def test_min_minutes_between_trades_blocks_second_cycle(self, monkeypatch, tmp_path):
+        """First fire() submits a trade; a second fire() within the
+        cooldown window must skip ALL spreads with `global_cooldown`
+        and submit nothing. The cooldown is anchored at the previous
+        cycle's submit time, not at fill time."""
+        import asyncio
+        from datetime import datetime, timedelta
+        from spread_scanner import TradeHandler, TradePolicy
+
+        submitted = []
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def trade_credit_spread(self, **kw):
+                submitted.append(kw)
+                return {"order_id": str(len(submitted)), "status": "FILLED"}
+
+        import spread_scanner as ss
+        self._bind_utp_pricing(FakeTClient)
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+
+        pol = TradePolicy.from_dict({
+            "roi_pct": [1.0, 50.0],
+            "max_trades_per_cycle": 1,
+            "min_minutes_between_trades": 3.0,
+        })
+        log_file = tmp_path / "t.jsonl"
+        h = TradeHandler(min_norm_roi=0, log_file=str(log_file), policy=pol,
+                        daemon_url="http://d")
+
+        sp = self._spread
+        spread = sp("SPX", credit=1.0, short=5700, long_=5680)
+        # Cycle 1 — fires.
+        asyncio.run(h.fire([spread], self._ctx()))
+        assert len(submitted) == 1
+
+        # Cycle 2 — well within the 3-minute cooldown. Must NOT submit.
+        asyncio.run(h.fire([spread], self._ctx()))
+        assert len(submitted) == 1, (
+            f"second fire() within 3-minute cooldown must skip; got "
+            f"{len(submitted)} total submits"
+        )
+        events = [json.loads(ln) for ln in log_file.read_text().splitlines()]
+        cooldown_skips = [e for e in events
+                          if e.get("reason") == "global_cooldown"]
+        assert cooldown_skips, (
+            "expected at least one global_cooldown skip in the JSONL log"
+        )
+
+        # After we artificially backdate the global anchor, the cooldown
+        # should release and a fresh fire() submits again.
+        h._last_global_trade_at = datetime.now() - timedelta(minutes=4)
+        asyncio.run(h.fire([spread], self._ctx()))
+        assert len(submitted) == 2
+
+    def test_min_minutes_between_trades_zero_disables(self, monkeypatch, tmp_path):
+        """`min_minutes_between_trades=0` disables the global cooldown
+        entirely — back-to-back cycles can each submit (subject to other
+        gates)."""
+        import asyncio
+        from spread_scanner import TradeHandler, TradePolicy
+
+        submitted = []
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def trade_credit_spread(self, **kw):
+                submitted.append(kw)
+                return {"order_id": "x", "status": "FILLED"}
+
+        import spread_scanner as ss
+        self._bind_utp_pricing(FakeTClient)
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+
+        pol = TradePolicy.from_dict({
+            "roi_pct": [1.0, 50.0],
+            "max_trades_per_cycle": 1,
+            "min_minutes_between_trades": 0,
+        })
+        h = TradeHandler(min_norm_roi=0, log_file=str(tmp_path / "t.jsonl"),
+                        policy=pol, daemon_url="http://d")
+        sp = self._spread
+        spread = sp("SPX", credit=1.0, short=5700, long_=5680)
+        asyncio.run(h.fire([spread], self._ctx()))
+        asyncio.run(h.fire([spread.copy()], self._ctx()))
+        assert len(submitted) == 2
 
     # --- logging + submission ---------------------------------------------
 

@@ -203,17 +203,35 @@ handlers:
       trading_window_pt:
         start: "06:31"
         end:   "10:00"
+      # ── Per-cycle pacing (applies to BOTH simulate and live trade) ──
+      # max_trades_per_cycle: at most this many spreads submit per scan
+      # cycle, sorted by ROI desc — the rest get logged with reason
+      # `per_cycle_cap`. Default 1 keeps the firing pace conservative
+      # (one trade per cycle, the highest-ROI candidate). Set to 0 for
+      # a kill switch.
+      max_trades_per_cycle: 1
+      # min_minutes_between_trades: after a successful submit, no further
+      # trade fires for this many minutes (across all tickers/sides);
+      # candidates in cycles within that window are logged with reason
+      # `global_cooldown`. Stacked on top of `cooldown_per_ticker_side_sec`
+      # which is the per-(ticker, side) version. Default 3.0 — comfortable
+      # cushion that prevents the scanner from spamming the broker on a
+      # rapidly-moving spread.
+      min_minutes_between_trades: 3.0
 
   # Live trading — uncomment to activate. Uses the SAME policy as simulate_trade
   # via the YAML anchor above.
   # - type: trade
-  #   min_norm_roi: 1.5
+  #   # Recommend a HIGHER nROI bar for the live handler than for simulate,
+  #   # so live only fires on the strongest signals while simulate captures
+  #   # the wider funnel for analysis.
+  #   min_norm_roi: 2.5
   #   log_file: trades_live.jsonl
   #   daemon_url: http://localhost:8000
   #   policy: *trade_policy
-  #   # Per-handler pre-fire price validation (default false). For LIVE trading,
-  #   # turning this on adds a final sanity check right before order submission:
-  #   # if the verify call fails (csv_source_rejected, non_monotonic, no_edge),
-  #   # the trade is silently skipped instead of submitted on stale data.
-  #   # Strongly recommended for live mode.
+  #   # Per-handler pre-fire price validation. Strongly RECOMMENDED for
+  #   # live: re-fetches a fresh quote right before each order submission
+  #   # and drops the trade if the verify fails (csv_source_rejected,
+  #   # non_monotonic, no_edge). Adds latency but prevents firing on
+  #   # quotes that went stale between screening and submission.
   #   validate_prices: true

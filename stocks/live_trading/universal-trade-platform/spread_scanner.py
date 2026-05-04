@@ -3164,6 +3164,22 @@ class TradePolicy:
     # how many contracts that trade carries.
     max_risk_per_trade: dict[str, float] = field(default_factory=dict)
     cooldown_per_ticker_side_sec: int = 0
+    # Global per-scan-cycle cap on the number of trades this handler
+    # will submit. Default 1 — only the highest-ROI eligible spread
+    # fires per cycle (others get logged as `per_cycle_cap` skips).
+    # Applies across all tickers and sides. 0 = kill switch (no
+    # trades fire). Higher values let multiple trades go in one cycle
+    # (typically only useful when tickers move independently and you
+    # want concurrent SPX + NDX exposure).
+    max_trades_per_cycle: int = 1
+    # Global cooldown in MINUTES between successive trade submissions.
+    # If a trade was submitted by THIS handler `min_minutes_between_trades`
+    # minutes ago or less, every spread in this cycle is skipped with
+    # the `global_cooldown` reason. Independent of, and stacked on top
+    # of, `cooldown_per_ticker_side_sec`. Default 3 minutes — generous
+    # enough that the per-strike re-entry doesn't spam a single ticker.
+    # 0 disables the global cooldown.
+    min_minutes_between_trades: float = 3.0
     require_prev_close: bool = True
     # None = use the daemon's configured `default_order_type` (from
     # app/config.py → GET /trade/defaults). Explicit "MARKET" or "LIMIT"
@@ -3205,6 +3221,7 @@ class TradePolicy:
         kwargs: dict = {}
         known_scalars = {
             "max_total_risk", "cooldown_per_ticker_side_sec",
+            "max_trades_per_cycle", "min_minutes_between_trades",
             "require_prev_close", "order_type", "stop_loss_multiplier",
             "limit_slippage_pct", "notify", "notify_channel",
         }
@@ -3283,6 +3300,12 @@ class TradeHandlerBase(ActionHandler):
         self._ticker_locks: dict[str, asyncio.Lock] = {}
         self._last_trade_time_by_ticker: dict[str, datetime] = {}
         self._last_trade_time_by_ticker_side: dict[tuple[str, str], datetime] = {}
+        # Last successful trade SUBMIT timestamp across ALL tickers/sides —
+        # the gate behind `policy.min_minutes_between_trades`. Set right
+        # before the order goes out (in the lock, after risk-cap recheck)
+        # so that a still-pending fill doesn't gate further trades, but
+        # a committed submit does.
+        self._last_global_trade_at: datetime | None = None
         self.cum_risk: float = 0.0
         self.per_ticker_risk: dict[str, float] = {}
         self.count_submitted: int = 0
@@ -3331,6 +3354,8 @@ class TradeHandlerBase(ActionHandler):
             "max_per_ticker_risk": self.policy.max_per_ticker_risk,
             "max_risk_per_trade": self.policy.max_risk_per_trade,
             "cooldown_per_ticker_side_sec": self.policy.cooldown_per_ticker_side_sec,
+            "max_trades_per_cycle": self.policy.max_trades_per_cycle,
+            "min_minutes_between_trades": self.policy.min_minutes_between_trades,
             "require_prev_close": self.policy.require_prev_close,
             "order_type": self.policy.order_type,
             "limit_slippage_pct": self.policy.limit_slippage_pct,
@@ -3491,6 +3516,42 @@ class TradeHandlerBase(ActionHandler):
         if not spreads:
             return
 
+        # Global cooldown gate — blocks ALL trades this cycle when the
+        # last successful submit was less than `min_minutes_between_trades`
+        # ago. Acts across all tickers/sides; layered on top of the
+        # per-ticker-side cooldown which still runs inside the ticker
+        # lock below.
+        if (
+            self.policy.min_minutes_between_trades > 0
+            and self._last_global_trade_at is not None
+        ):
+            elapsed_sec = (datetime.now() - self._last_global_trade_at).total_seconds()
+            cooldown_sec = float(self.policy.min_minutes_between_trades) * 60.0
+            if elapsed_sec < cooldown_sec:
+                for s in spreads:
+                    self._write_skip(ctx, s, "global_cooldown")
+                return
+
+        # Per-cycle cap — keep only the top-N highest-ROI candidates
+        # this cycle. Default cap is 1 (only the single best spread
+        # fires); 0 is a kill switch (all skipped). The remaining
+        # candidates are logged with `per_cycle_cap` so the activity
+        # panel reflects what we held back.
+        cap = max(0, int(self.policy.max_trades_per_cycle))
+        if cap == 0:
+            for s in spreads:
+                self._write_skip(ctx, s, "per_cycle_cap_zero")
+            return
+        spreads_sorted = sorted(
+            spreads,
+            key=lambda s: float(s.get("roi_pct") or 0),
+            reverse=True,
+        )
+        spreads_to_fire = spreads_sorted[:cap]
+        for s in spreads_sorted[cap:]:
+            self._write_skip(ctx, s, "per_cycle_cap")
+        spreads = spreads_to_fire
+
         by_ticker: dict[str, list[dict]] = {}
         for s in spreads:
             by_ticker.setdefault(s["symbol"], []).append(s)
@@ -3568,6 +3629,11 @@ class TradeHandlerBase(ActionHandler):
                 self.per_ticker_risk[ticker] = self.per_ticker_risk.get(ticker, 0.0) + ml
                 self._last_trade_time_by_ticker[ticker] = datetime.now()
                 self._last_trade_time_by_ticker_side[(ticker, spread["option_type"])] = datetime.now()
+                # Set the global cooldown anchor at COMMIT time, not fill
+                # time — concurrent tickers all see the latest commit, and
+                # a slow fill doesn't permit a second trade to slip through
+                # the cooldown gate on the next cycle.
+                self._last_global_trade_at = datetime.now()
 
                 await self._submit_and_log(spread, ctx, tclient, ml, contracts)
 

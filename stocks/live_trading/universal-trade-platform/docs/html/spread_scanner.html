@@ -798,6 +798,16 @@ argparse with YAML values as defaults so CLI flags still win).</p>
 <td>Max picks per (ticker, option_type) combo in Top-N. <code>1</code> = only the best put + best call per ticker (diverse list). <code>null</code> / commented-out / <code>0</code> disables the cap entirely.</td>
 </tr>
 <tr>
+<td><code>policy.max_trades_per_cycle</code></td>
+<td>int (default 1)</td>
+<td>Cap on trade submissions per scan cycle, sorted by ROI desc. <code>1</code> = only the highest-ROI eligible spread fires per cycle (others get <code>per_cycle_cap</code> skip log entries). <code>0</code> = kill switch (no trades fire). Higher values let multiple trades go in one cycle.</td>
+</tr>
+<tr>
+<td><code>policy.min_minutes_between_trades</code></td>
+<td>float (default 3.0)</td>
+<td>Global cooldown in MINUTES between successive trade submits across all tickers/sides. After a successful submit, all candidates within this window get <code>global_cooldown</code> skip entries. Stacks with <code>cooldown_per_ticker_side_sec</code>. <code>0</code> disables.</td>
+</tr>
+<tr>
 <td><code>min_otm</code></td>
 <td>float</td>
 <td>Absolute OTM% floor across all tickers</td>
@@ -975,6 +985,22 @@ python<span class="w"> </span>-m<span class="w"> </span>pytest<span class="w"> <
 <tr>
 <td><code>test_top_per_combo_none_disables_cap</code></td>
 <td>omit-config = no cap (legacy behavior)</td>
+</tr>
+<tr>
+<td><code>test_max_trades_per_cycle_one_keeps_only_top_roi</code></td>
+<td>per-cycle cap (default 1) keeps only the highest-ROI submission</td>
+</tr>
+<tr>
+<td><code>test_max_trades_per_cycle_zero_kill_switch</code></td>
+<td><code>0</code> is a kill switch — no trades fire</td>
+</tr>
+<tr>
+<td><code>test_min_minutes_between_trades_blocks_second_cycle</code></td>
+<td>global cooldown blocks the next cycle's trades when within window</td>
+</tr>
+<tr>
+<td><code>test_min_minutes_between_trades_zero_disables</code></td>
+<td><code>0</code> disables the cooldown entirely</td>
 </tr>
 </tbody>
 </table>

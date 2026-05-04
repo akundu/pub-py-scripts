@@ -190,6 +190,9 @@ handlers:
       # LIMIT:  submit at the observed credit; may not fill.
       order_type: MARKET
       stop_loss_multiplier: 2.0
+      # ── Per-cycle pacing — see dte0.yaml for full notes ──
+      max_trades_per_cycle: 1
+      min_minutes_between_trades: 3.0
       #trading_window_pt:
       #  start: "06:31"
       #  end:   "11:30"
