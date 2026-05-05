@@ -466,11 +466,12 @@ class PolygonStreamManager:
                  redis_publisher: Optional[RedisPublisher], feed_types: List[str],
                  market: str = "stocks", symbols_per_connection: int = 10, max_retries: int = 3, 
                  retry_delay: float = 5.0, batch_interval: float = 5.0,
-                 fetch_interval: float = 600.0, db_server_host: str = "localhost", 
+                 fetch_interval: float = 600.0, db_server_host: str = "localhost",
                  db_server_port: int = 9100, poll_interval: float = 15.0,
                  poll_fallback_enabled: bool = True, poll_only: bool = False,
                  print_data: bool = False, use_market_hours: bool = False,
-                 timezone: str = "America/New_York"):
+                 timezone: str = "America/New_York",
+                 poll_data_source: str = "auto"):
         self.api_key = api_key
         self.db_client = db_client
         self.redis_publisher = redis_publisher
@@ -489,6 +490,11 @@ class PolygonStreamManager:
         self.print_data = print_data  # If True, print raw Polygon data and built records to stdout
         self.use_market_hours = use_market_hours  # If True, use market hours awareness for polling
         self.timezone = timezone  # Timezone for market hours calculations
+        # Override for the poll-fallback `data_source` arg passed to
+        # fetch_symbol_data.get_current_price. "auto" keeps the existing
+        # rule (yfinance for indices, polygon for everything else);
+        # "yfinance" / "polygon" force that source for every symbol.
+        self.poll_data_source = poll_data_source
         
         # Determine which method to use (Redis preferred if available)
         self.use_redis = redis_publisher is not None and redis_publisher.available
@@ -1285,8 +1291,16 @@ class PolygonStreamManager:
             if shutdown_flag:
                 return
             try:
-                # Default: index symbols (I:NDX, I:SPX) -> yfinance (real-time); others -> polygon
-                data_source = "yfinance" if is_index_symbol(symbol) else "polygon"
+                # Default ("auto"): index symbols → yfinance (real-time
+                # spot via ^VIX/^GSPC/etc.), everything else → polygon.
+                # Override via --poll-data-source forces the same source
+                # for every symbol regardless of its is_index_symbol bit.
+                if self.poll_data_source == "yfinance":
+                    data_source = "yfinance"
+                elif self.poll_data_source == "polygon":
+                    data_source = "polygon"
+                else:  # "auto"
+                    data_source = "yfinance" if is_index_symbol(symbol) else "polygon"
                 price_info = await get_current_price(
                     symbol,
                     data_source=data_source,
@@ -1679,6 +1693,18 @@ def parse_args():
         action='store_true',
         help='No WebSocket connections: only run periodic poll fallback (fetch live price every --poll-interval and publish to Redis). Requires Redis, --market stocks, and poll fallback enabled. Use to test poll path or avoid connection limits.'
     )
+    parser.add_argument(
+        '--poll-data-source',
+        choices=['auto', 'yfinance', 'polygon'],
+        default='auto',
+        help='Override the data source used by the poll-fallback path '
+             '(get_current_price). "auto" (default) routes index symbols '
+             '(I:SPX, I:NDX, I:VIX, …) to yfinance and everything else '
+             'to polygon — same rule fetch_symbol_data uses. "yfinance" '
+             'or "polygon" forces that source for every symbol regardless '
+             'of type. Only affects --poll-only / poll-fallback path; '
+             'the WebSocket streaming path always uses polygon.'
+    )
     
     # Market hours awareness
     parser.add_argument(
@@ -1752,6 +1778,7 @@ async def _run_streaming(api_key: str, redis_publisher: Optional[RedisPublisher]
         print_data=args.print_data,
         use_market_hours=args.use_market_hours,
         timezone=args.timezone,
+        poll_data_source=args.poll_data_source,
     )
     
     # Start statistics task
