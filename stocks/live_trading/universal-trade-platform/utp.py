@@ -5137,52 +5137,71 @@ async def _cmd_trade_http(args, server: str) -> int:
         enforce_freshness = mode != "dry-run"
         block_max = _trade_price_block_max_age()
 
-        # Fetch daemon-configured VIX circuit-breaker thresholds.
-        # Fall back to hardcoded defaults when no daemon or old daemon version.
+        # ── Parallel pre-fetch: daemon defaults + VIX quotes ──────────────
+        # All three are independent HTTP GETs — gather for one round-trip.
+        async def _pfetch_defaults() -> dict:
+            try:
+                r = await client.get("/trade/defaults")
+                if r.status_code == 200:
+                    return r.json()
+            except Exception:
+                pass
+            return {}
+
+        async def _pfetch_viq(vsym: str) -> "float | None":
+            try:
+                r = await client.get(f"/market/quote/{vsym}", params={"max_age": 120})
+                if r.status_code == 200:
+                    d = r.json()
+                    v = d.get("last") or d.get("bid") or d.get("ask")
+                    if v and float(v) > 0:
+                        return float(v)
+            except Exception:
+                pass
+            return None
+
+        _td_data, vix_val, vix1d_val = await asyncio.gather(
+            _pfetch_defaults(),
+            _pfetch_viq("VIX"),
+            _pfetch_viq("VIX1D"),
+        )
+
         _vix_limit    = 25.0
         _vix_spike_v5 = 2.0
         _vix_spike_v15 = 3.0
         _vix_accel_limit = 1.0
-        try:
-            _td_resp = await client.get("/trade/defaults")
-            if _td_resp.status_code == 200:
-                _td = _td_resp.json()
-                _vix_limit       = float(_td.get("vix_limit",       _vix_limit))
-                _vix_spike_v5    = float(_td.get("vix_spike_v5",    _vix_spike_v5))
-                _vix_spike_v15   = float(_td.get("vix_spike_v15",   _vix_spike_v15))
-                _vix_accel_limit = float(_td.get("vix_accel_limit", _vix_accel_limit))
-        except Exception:
-            pass
+        if _td_data:
+            _vix_limit       = float(_td_data.get("vix_limit",       _vix_limit))
+            _vix_spike_v5    = float(_td_data.get("vix_spike_v5",    _vix_spike_v5))
+            _vix_spike_v15   = float(_td_data.get("vix_spike_v15",   _vix_spike_v15))
+            _vix_accel_limit = float(_td_data.get("vix_accel_limit", _vix_accel_limit))
 
-        # Fetch VIX / VIX1D once up front for display + circuit-breaker.
-        # Use a relaxed max_age (120s) — these are informational gauges,
-        # not execution prices, so occasional staleness is acceptable.
-        vix_val: float | None = None
-        vix1d_val: float | None = None
-        for _vsym in ("VIX", "VIX1D"):
-            try:
-                _vr = await client.get(f"/market/quote/{_vsym}", params={"max_age": 120})
-                if _vr.status_code == 200:
-                    _vd = _vr.json()
-                    _v = _vd.get("last") or _vd.get("bid") or _vd.get("ask")
-                    if _v and float(_v) > 0:
-                        if _vsym == "VIX":
-                            vix_val = float(_v)
-                        else:
-                            vix1d_val = float(_v)
-            except Exception:
-                pass
-
-        # Pre-fetch VIX/VIX1D tick history for derivative display + circuit-breaker.
-        # Soft dependency — empty dict if QuestDB is unavailable.
+        # ── Parallel VIX tick history — gated on freshness & non-None ─────
         _vix_derivs: dict[str, dict] = {}
         if enforce_freshness:
             _db_url_pre = os.environ.get("DB_SERVER_URL", "http://localhost:9102")
-            for _vsym, _vcur in (("VIX", vix_val), ("VIX1D", vix1d_val)):
-                if _vcur is not None:
-                    _t = await _fetch_vix_ticks(_vsym, lookback_minutes=20, db_url=_db_url_pre)
-                    if _t:
-                        _vix_derivs[_vsym] = _compute_vix_derivatives(_t, _vcur)
+            _tick_items = [(s, v) for s, v in (("VIX", vix_val), ("VIX1D", vix1d_val)) if v is not None]
+            if _tick_items:
+                _tick_res = await asyncio.gather(
+                    *[_fetch_vix_ticks(s, lookback_minutes=20, db_url=_db_url_pre) for s, _ in _tick_items]
+                )
+                for (s, cur), ticks in zip(_tick_items, _tick_res):
+                    if ticks:
+                        _vix_derivs[s] = _compute_vix_derivatives(ticks, cur)
+
+        # ── Fire margin check as a background task ────────────────────────
+        # The IBKR margin round-trip takes 5-10 s.  Launch it now so it runs
+        # concurrently with display-building below; await just before use.
+        skip_margin = getattr(args, "skip_margin", False)
+        _margin_task = None
+        if (not confirm and mode != "dry-run"
+                and mode in ("live", "paper")
+                and trade_request.multi_leg_order
+                and not nocheck and not skip_margin):
+            _marg_payload = {"order": trade_request.multi_leg_order.model_dump(), "timeout": 5.0}
+            _margin_task = asyncio.create_task(
+                client.post("/market/margin", json=_marg_payload, timeout=6.0)
+            )
 
         _print_header("Trade Order Summary")
         if not enforce_freshness:
@@ -5359,6 +5378,8 @@ async def _cmd_trade_http(args, server: str) -> int:
                                 print(f"\n  {_color('⛔ Trade BLOCKED: estimated MARKET net is a DEBIT at current quotes.', '91')}")
                                 print(f"     A {subcommand} should receive credit, not pay debit.")
                                 print(f"     Pass --override-spend-credit to bypass this safety check.")
+                                if _margin_task is not None:
+                                    _margin_task.cancel()
                                 return 1
                             print(f"  {_color('⚠ Net debit estimate allowed by --override-spend-credit', '93')}")
                     if crossed:
@@ -5451,6 +5472,8 @@ async def _cmd_trade_http(args, server: str) -> int:
             if reason:
                 print(f"     Details: {reason}")
             print(f"     Retry when fresh market data is available.")
+            if _margin_task is not None:
+                _margin_task.cancel()
             return 1
 
         # ── VIX / VIX1D circuit-breakers (independent) ───────────────────────
@@ -5466,6 +5489,8 @@ async def _cmd_trade_http(args, server: str) -> int:
                     print(f"\n  {_color(f'⛔ Trade BLOCKED: VIX {vix_val:.2f} > {_VIX_LIMIT:.0f}.', '91')}")
                     print(f"     High VIX increases gap risk against spread and directional positions.")
                     print(f"     Pass --override-vix to trade during elevated VIX.")
+                    if _margin_task is not None:
+                        _margin_task.cancel()
                     return 1
                 print(f"  {_color(f'⚠ VIX {vix_val:.2f} > {_VIX_LIMIT:.0f} — proceeding with --override-vix', '93')}")
             if vix1d_val is not None and vix1d_val > _VIX_LIMIT:
@@ -5473,6 +5498,8 @@ async def _cmd_trade_http(args, server: str) -> int:
                     print(f"\n  {_color(f'⛔ Trade BLOCKED: VIX1D {vix1d_val:.2f} > {_VIX_LIMIT:.0f}.', '91')}")
                     print(f"     High VIX1D indicates elevated same-day implied volatility.")
                     print(f"     Pass --override-vix1d to trade during elevated VIX1D.")
+                    if _margin_task is not None:
+                        _margin_task.cancel()
                     return 1
                 print(f"  {_color(f'⚠ VIX1D {vix1d_val:.2f} > {_VIX_LIMIT:.0f} — proceeding with --override-vix1d', '93')}")
 
@@ -5520,17 +5547,17 @@ async def _cmd_trade_http(args, server: str) -> int:
                         print(f"\n  {_color(f'⛔ Trade BLOCKED: {_spike_reason}.', '91')}")
                         print(f"     Rapidly rising volatility increases gap risk on credit spreads.")
                         print(f"     Pass {_override_flag} to trade during a volatility spike.")
+                        if _margin_task is not None:
+                            _margin_task.cancel()
                         return 1
                     print(f"  {_color(f'⚠ {_spike_reason} — proceeding with {_override_flag}', '93')}")
 
-        skip_margin = getattr(args, "skip_margin", False)
         if not confirm and mode != "dry-run":
-            # Auto-validate with IBKR margin check when --live (catches rejections early)
-            if mode in ("live", "paper") and trade_request.multi_leg_order and not nocheck and not skip_margin:
-                order = trade_request.multi_leg_order
-                margin_payload = {"order": order.model_dump(), "timeout": 5.0}
+            # Await the margin check background task launched at the top of this block.
+            # Usually already complete by the time we reach here (ran concurrently with display).
+            if _margin_task is not None:
                 try:
-                    mr = await client.post("/market/margin", json=margin_payload, timeout=6.0)
+                    mr = await _margin_task
                     if mr.status_code == 200:
                         md = mr.json()
                         if md.get("error"):

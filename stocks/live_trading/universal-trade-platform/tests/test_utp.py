@@ -13840,6 +13840,143 @@ class TestPriceFreshnessEnforcement:
         assert received["calls"][0]["max_age"] == 15.0
 
 
+    # ── Parallel pre-fetch and background margin task ──────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_parallel_prefetch_hits_defaults_vix_vix1d(self, monkeypatch, capsys):
+        """The parallel gather at the top of _cmd_trade_http must hit all three
+        sources: /trade/defaults, /market/quote/VIX, and /market/quote/VIX1D."""
+        from utp import _cmd_trade_http
+
+        fetched = []
+
+        class FakeResp:
+            def __init__(self, status_code, data):
+                self.status_code = status_code
+                self._data = data
+            def json(self): return self._data
+            @property
+            def headers(self): return {"content-type": "application/json"}
+            @property
+            def text(self): return str(self._data)
+
+        class FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+            async def get(self, path, params=None):
+                fetched.append(path)
+                if path == "/trade/defaults":
+                    return FakeResp(200, {"vix_limit": 25.0, "vix_spike_v5": 2.0,
+                                          "vix_spike_v15": 3.0, "vix_accel_limit": 1.0})
+                if "VIX1D" in path:
+                    return FakeResp(200, {"symbol": "VIX1D", "last": 14.0,
+                                          "bid": 13.9, "ask": 14.1, "volume": 0,
+                                          "quote_age_seconds": 5.0, "quote_source": "fresh_cache"})
+                if "VIX" in path:
+                    return FakeResp(200, {"symbol": "VIX", "last": 15.0,
+                                          "bid": 14.9, "ask": 15.1, "volume": 0,
+                                          "quote_age_seconds": 5.0, "quote_source": "fresh_cache"})
+                if path.startswith("/market/quote"):
+                    return FakeResp(200, {"symbol": "SPX", "bid": 5499, "ask": 5501,
+                                          "last": 5500, "volume": 0,
+                                          "quote_age_seconds": 5.0, "quote_source": "fresh_cache"})
+                if path.startswith("/market/options"):
+                    ot = (params or {}).get("option_type", "PUT").lower()
+                    return FakeResp(200, {"symbol": "SPX",
+                                          "quotes": {ot: [
+                                              {"strike": 5500, "bid": 1.0, "ask": 1.2, "last": 1.1, "volume": 5,
+                                               "source": "ibkr_fresh", "age_seconds": 5.0},
+                                              {"strike": 5475, "bid": 0.4, "ask": 0.6, "last": 0.5, "volume": 3,
+                                               "source": "ibkr_fresh", "age_seconds": 5.0},
+                                          ]},
+                                          "meta": {"age_seconds": 5.0, "source": "fresh_cache",
+                                                    "per_type": {ot: {"age_seconds": 5.0, "source": "fresh_cache",
+                                                                       "n_ibkr_fresh": 2, "n_csv": 0, "n_ibkr_stale": 0}}},
+                                          "quote_age_seconds": 5.0, "quote_source": "fresh_cache"})
+                return FakeResp(200, {})
+            async def post(self, path, json=None, headers=None, **kwargs):
+                return FakeResp(200, {})
+
+        import httpx
+        monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+        args = self._trade_args(net_price=1.20, confirm=False, nocheck=True)
+        rc = await _cmd_trade_http(args, "http://localhost:8000")
+        capsys.readouterr()
+
+        assert rc == 0
+        assert "/trade/defaults" in fetched, "/trade/defaults must be fetched in parallel gather"
+        assert any("VIX1D" in p for p in fetched), "VIX1D quote must be fetched"
+        assert any("VIX" in p and "VIX1D" not in p for p in fetched), "VIX quote must be fetched"
+
+    @pytest.mark.asyncio
+    async def test_margin_result_not_displayed_when_vix_blocks_trade(self, monkeypatch, capsys):
+        """When VIX > 25 blocks the trade early, the margin check result must not
+        appear in the output — even though the background task may have run during
+        the display section's await points."""
+        from utp import _cmd_trade_http
+
+        class FakeResp:
+            def __init__(self, status_code, data):
+                self.status_code = status_code
+                self._data = data
+            def json(self): return self._data
+            @property
+            def headers(self): return {"content-type": "application/json"}
+            @property
+            def text(self): return str(self._data)
+
+        class FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+            async def get(self, path, params=None):
+                if path == "/trade/defaults":
+                    return FakeResp(200, {"vix_limit": 25.0, "vix_spike_v5": 2.0,
+                                          "vix_spike_v15": 3.0, "vix_accel_limit": 1.0})
+                if "VIX1D" in path:
+                    return FakeResp(200, {"symbol": "VIX1D", "last": 14.0,
+                                          "bid": 13.9, "ask": 14.1, "volume": 0,
+                                          "quote_age_seconds": 5.0, "quote_source": "fresh_cache"})
+                if "VIX" in path:
+                    # Elevated — will trigger the circuit breaker
+                    return FakeResp(200, {"symbol": "VIX", "last": 30.0,
+                                          "bid": 29.9, "ask": 30.1, "volume": 0,
+                                          "quote_age_seconds": 5.0, "quote_source": "fresh_cache"})
+                if path.startswith("/market/quote"):
+                    return FakeResp(200, {"symbol": "SPX", "bid": 5499, "ask": 5501,
+                                          "last": 5500, "volume": 0,
+                                          "quote_age_seconds": 5.0, "quote_source": "fresh_cache"})
+                if path.startswith("/market/options"):
+                    ot = (params or {}).get("option_type", "PUT").lower()
+                    return FakeResp(200, {"symbol": "SPX",
+                                          "quotes": {ot: [
+                                              {"strike": 5500, "bid": 1.0, "ask": 1.2, "last": 1.1, "volume": 5,
+                                               "source": "ibkr_fresh", "age_seconds": 5.0},
+                                              {"strike": 5475, "bid": 0.4, "ask": 0.6, "last": 0.5, "volume": 3,
+                                               "source": "ibkr_fresh", "age_seconds": 5.0},
+                                          ]},
+                                          "meta": {"age_seconds": 5.0, "source": "fresh_cache",
+                                                    "per_type": {ot: {"age_seconds": 5.0, "source": "fresh_cache",
+                                                                       "n_ibkr_fresh": 2, "n_csv": 0, "n_ibkr_stale": 0}}},
+                                          "quote_age_seconds": 5.0, "quote_source": "fresh_cache"})
+                return FakeResp(200, {})
+            async def post(self, path, json=None, headers=None, **kwargs):
+                return FakeResp(200, {"init_margin": 2500.0, "maint_margin": 2000.0, "commission": 1.30})
+
+        import httpx
+        monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+        args = self._trade_args(net_price=1.20, confirm=False, nocheck=False, skip_margin=False)
+        rc = await _cmd_trade_http(args, "http://localhost:8000")
+        out = capsys.readouterr().out
+
+        assert rc == 1, "elevated VIX must block the trade"
+        assert "IBKR margin check:" not in out, "margin result must not be displayed when blocked by VIX"
+        assert "NOT EXECUTED" not in out, "NOT EXECUTED message must not appear when blocked early"
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # VIX Rate-of-Change Circuit Breaker Tests
 # ══════════════════════════════════════════════════════════════════════════════
@@ -22434,7 +22571,7 @@ class TestTradePolicy:
         from spread_scanner import TradePolicy
         from datetime import time as dtime
         p = TradePolicy()
-        assert p.roi_pct == (1.5, 5.0)
+        assert p.norm_roi == (0.3, 8.0)
         assert p.max_total_risk == 400_000.0
         assert p.max_risk_per_trade == {}         # empty → per-candidate default (width*100)
         assert p.require_prev_close is True
@@ -22451,7 +22588,7 @@ class TestTradePolicy:
         from spread_scanner import TradePolicy
         from datetime import time as dtime
         p = TradePolicy.from_dict({
-            "roi_pct": [1.0, 6.0],
+            "norm_roi": [1.0, 6.0],
             "min_otm_pct": {"spx": 1.0, "ndx": 1.5},
             "min_credit": {"RUT": 0.40},
             "max_total_risk": 250000,
@@ -22463,7 +22600,7 @@ class TestTradePolicy:
             "stop_loss_multiplier": 1.5,
             "trading_window_pt": {"start": "07:00", "end": "09:30:30"},
         })
-        assert p.roi_pct == (1.0, 6.0)
+        assert p.norm_roi == (1.0, 6.0)
         assert p.min_otm_pct == {"SPX": 1.0, "NDX": 1.5}     # upper-cased keys
         assert p.min_credit == {"RUT": 0.40}
         assert p.max_total_risk == 250000
@@ -22477,8 +22614,8 @@ class TestTradePolicy:
 
     def test_from_dict_empty(self):
         from spread_scanner import TradePolicy
-        assert TradePolicy.from_dict(None).roi_pct == (1.5, 5.0)
-        assert TradePolicy.from_dict({}).roi_pct == (1.5, 5.0)
+        assert TradePolicy.from_dict(None).norm_roi == (0.3, 8.0)
+        assert TradePolicy.from_dict({}).norm_roi == (0.3, 8.0)
 
     def test_from_dict_unknown_field(self):
         import pytest
@@ -22486,13 +22623,13 @@ class TestTradePolicy:
         with pytest.raises(ValueError, match="Unknown TradePolicy field"):
             TradePolicy.from_dict({"warp_drive": True})
 
-    def test_from_dict_bad_roi(self):
+    def test_from_dict_bad_norm_roi(self):
         import pytest
         from spread_scanner import TradePolicy
-        with pytest.raises(ValueError, match="roi_pct must be"):
-            TradePolicy.from_dict({"roi_pct": [5.0, 1.0]})
-        with pytest.raises(ValueError, match="roi_pct must be"):
-            TradePolicy.from_dict({"roi_pct": [1.0]})
+        with pytest.raises(ValueError, match="norm_roi must be"):
+            TradePolicy.from_dict({"norm_roi": [5.0, 1.0]})
+        with pytest.raises(ValueError, match="norm_roi must be"):
+            TradePolicy.from_dict({"norm_roi": [1.0]})
 
     def test_from_dict_bad_window(self):
         import pytest
@@ -22586,7 +22723,7 @@ class TestTradeHandlers:
         from spread_scanner import SimulateTradeHandler, TradePolicy
         h = SimulateTradeHandler(
             min_norm_roi=1.0, log_file="/tmp/u.jsonl",
-            policy=TradePolicy(roi_pct=(1.0, 10.0)), daemon_url="http://d",
+            policy=TradePolicy(norm_roi=(1.0, 10.0)), daemon_url="http://d",
         )
         cands = [self._spread("SPX", prev_close=0), self._spread("NDX", prev_close=26000)]
         out = h.filter(cands)
@@ -22595,7 +22732,7 @@ class TestTradeHandlers:
     def test_filter_blocks_below_credit_floor(self, monkeypatch, tmp_path):
         self._always_in_window(monkeypatch)
         from spread_scanner import SimulateTradeHandler, TradePolicy
-        pol = TradePolicy.from_dict({"min_credit": {"SPX": 0.50}, "roi_pct": [1.0, 10.0]})
+        pol = TradePolicy.from_dict({"min_credit": {"SPX": 0.50}, "norm_roi": [1.0, 10.0]})
         h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
                                  policy=pol, daemon_url="http://d",                        validate_prices=False,
                        )
@@ -22608,7 +22745,7 @@ class TestTradeHandlers:
     def test_filter_blocks_below_otm_floor(self, monkeypatch, tmp_path):
         self._always_in_window(monkeypatch)
         from spread_scanner import SimulateTradeHandler, TradePolicy
-        pol = TradePolicy.from_dict({"min_otm_pct": {"SPX": 1.0}, "roi_pct": [1.0, 10.0]})
+        pol = TradePolicy.from_dict({"min_otm_pct": {"SPX": 1.0}, "norm_roi": [1.0, 10.0]})
         h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
                                  policy=pol, daemon_url="http://d",                        validate_prices=False,
                        )
@@ -22621,7 +22758,7 @@ class TestTradeHandlers:
     def test_filter_roi_band(self, monkeypatch, tmp_path):
         self._always_in_window(monkeypatch)
         from spread_scanner import SimulateTradeHandler, TradePolicy
-        pol = TradePolicy.from_dict({"roi_pct": [1.5, 5.0]})
+        pol = TradePolicy.from_dict({"norm_roi": [1.5, 5.0]})
         h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
                                  policy=pol, daemon_url="http://d",                        validate_prices=False,
                        )
@@ -22637,7 +22774,7 @@ class TestTradeHandlers:
         self._always_in_window(monkeypatch)
         from spread_scanner import SimulateTradeHandler, TradePolicy
 
-        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0]})   # default cap=1
+        pol = TradePolicy.from_dict({"norm_roi": [1.0, 10.0]})   # default cap=1
         h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
                                  policy=pol, daemon_url="http://d",                        validate_prices=False,
                        )
@@ -22662,7 +22799,7 @@ class TestTradeHandlers:
         self._always_in_window(monkeypatch)
         from spread_scanner import SimulateTradeHandler, TradePolicy
 
-        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0]})
+        pol = TradePolicy.from_dict({"norm_roi": [1.0, 10.0]})
         h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
                                  policy=pol, daemon_url="http://d",                        validate_prices=False,
                        )
@@ -22725,7 +22862,7 @@ class TestTradeHandlers:
 
         # cap 5000, SPX width 20, credit 1.0 → 2 contracts
         pol = TradePolicy.from_dict({
-            "roi_pct": [1.0, 10.0], "max_risk_per_trade": {"SPX": 5000},
+            "norm_roi": [1.0, 10.0], "max_risk_per_trade": {"SPX": 5000},
         })
         log_file = tmp_path / "t.jsonl"
         h = TradeHandler(min_norm_roi=0, log_file=str(log_file),
@@ -22768,7 +22905,7 @@ class TestTradeHandlers:
         # and within-ticker serialization, NOT the per-cycle/cooldown
         # gates which would otherwise trim the 9 candidates down to 1.
         pol = TradePolicy.from_dict({
-            "roi_pct": [1.0, 10.0],
+            "norm_roi": [1.0, 10.0],
             "max_trades_per_cycle": 100,
             "min_minutes_between_trades": 0,
         })
@@ -22843,7 +22980,7 @@ class TestTradeHandlers:
         # but for the WRONG reason. Bypass it so we genuinely exercise
         # the within-lock cap recheck path.
         pol = TradePolicy.from_dict({
-            "roi_pct": [1.0, 10.0],
+            "norm_roi": [1.0, 10.0],
             "max_total_risk": 2500,
             "max_trades_per_cycle": 100,
             "min_minutes_between_trades": 0,
@@ -22884,7 +23021,7 @@ class TestTradeHandlers:
         # NDX width=50 credit=1.0 → max_loss=$4900. per-ticker cap for NDX = $5000 → 1 fits, 2nd blocked.
         # Bypass the global per-cycle cap so we exercise the per-ticker cap.
         pol = TradePolicy.from_dict({
-            "roi_pct": [1.0, 10.0],
+            "norm_roi": [1.0, 10.0],
             "max_per_ticker_risk": {"NDX": 5000, "SPX": 100000},
             "max_trades_per_cycle": 100,
             "min_minutes_between_trades": 0,
@@ -22933,7 +23070,7 @@ class TestTradeHandlers:
         monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
 
         # No max_trades_per_cycle override → default 1.
-        pol = TradePolicy.from_dict({"roi_pct": [1.0, 50.0]})
+        pol = TradePolicy.from_dict({"norm_roi": [1.0, 50.0]})
         log_file = tmp_path / "t.jsonl"
         h = TradeHandler(min_norm_roi=0, log_file=str(log_file), policy=pol,
                         daemon_url="http://d",                        validate_prices=False,
@@ -22981,7 +23118,7 @@ class TestTradeHandlers:
         monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
 
         pol = TradePolicy.from_dict({
-            "roi_pct": [1.0, 50.0],
+            "norm_roi": [1.0, 50.0],
             "max_trades_per_cycle": 0,
         })
         log_file = tmp_path / "t.jsonl"
@@ -23018,7 +23155,7 @@ class TestTradeHandlers:
         monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
 
         pol = TradePolicy.from_dict({
-            "roi_pct": [1.0, 50.0],
+            "norm_roi": [1.0, 50.0],
             "max_trades_per_cycle": 1,
             "min_minutes_between_trades": 3.0,
         })
@@ -23073,7 +23210,7 @@ class TestTradeHandlers:
         monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
 
         pol = TradePolicy.from_dict({
-            "roi_pct": [1.0, 50.0],
+            "norm_roi": [1.0, 50.0],
             "max_trades_per_cycle": 1,
             "min_minutes_between_trades": 0,
         })
@@ -23113,7 +23250,7 @@ class TestTradeHandlers:
         log_file = tmp_path / "sim.jsonl"
         h = SimulateTradeHandler(
             min_norm_roi=0, log_file=str(log_file),
-            policy=TradePolicy.from_dict({"roi_pct": [1.0, 10.0]}),
+            policy=TradePolicy.from_dict({"norm_roi": [1.0, 10.0]}),
             daemon_url="http://d",                        validate_prices=False,
                        )
         asyncio.run(h.fire([self._spread("SPX", credit=1.0)], self._ctx()))
@@ -23145,7 +23282,7 @@ class TestTradeHandlers:
         log_file = tmp_path / "live.jsonl"
         # Default policy now uses MARKET orders — no net_price sent.
         h = TradeHandler(min_norm_roi=0, log_file=str(log_file),
-                        policy=TradePolicy.from_dict({"roi_pct": [1.0, 10.0]}),
+                        policy=TradePolicy.from_dict({"norm_roi": [1.0, 10.0]}),
                         daemon_url="http://d",                        validate_prices=False,
                        )
         asyncio.run(h.fire([self._spread("SPX", credit=1.0)], self._ctx()))
@@ -23191,7 +23328,7 @@ class TestTradeHandlers:
         self._bind_utp_pricing(FakeTClient)
         monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
 
-        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "order_type": "LIMIT"})
+        pol = TradePolicy.from_dict({"norm_roi": [1.0, 10.0], "order_type": "LIMIT"})
         log = tmp_path / "l.jsonl"
         h = TradeHandler(min_norm_roi=0, log_file=str(log), policy=pol, daemon_url="http://d", validate_prices=False)
         # Scan-time credit = 0.85 (stale). Refreshed legs give 1.20 - 0.50 = 0.70.
@@ -23244,7 +23381,7 @@ class TestTradeHandlers:
 
         # refreshed credit = 1.00 - 0.20 = 0.80; slippage 10% → net_price = 0.72
         pol = TradePolicy.from_dict({
-            "roi_pct": [1.0, 10.0], "order_type": "LIMIT", "limit_slippage_pct": 10.0,
+            "norm_roi": [1.0, 10.0], "order_type": "LIMIT", "limit_slippage_pct": 10.0,
         })
         h = TradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
                         policy=pol, daemon_url="http://d",                        validate_prices=False,
@@ -23273,7 +23410,7 @@ class TestTradeHandlers:
         self._bind_utp_pricing(FakeTClient)
         monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
 
-        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "order_type": "LIMIT"})
+        pol = TradePolicy.from_dict({"norm_roi": [1.0, 10.0], "order_type": "LIMIT"})
         log = tmp_path / "l.jsonl"
         h = TradeHandler(min_norm_roi=0, log_file=str(log),
                         policy=pol, daemon_url="http://d",                        validate_prices=False,
@@ -23316,7 +23453,7 @@ class TestTradeHandlers:
         self._bind_utp_pricing(FakeTClient)
         monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
 
-        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "order_type": "LIMIT"})
+        pol = TradePolicy.from_dict({"norm_roi": [1.0, 10.0], "order_type": "LIMIT"})
         log = tmp_path / "l.jsonl"
         h = TradeHandler(min_norm_roi=0, log_file=str(log),
                         policy=pol, daemon_url="http://d",                        validate_prices=False,
@@ -23350,7 +23487,7 @@ class TestTradeHandlers:
         self._bind_utp_pricing(FakeTClient)
         monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
 
-        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "order_type": "MARKET"})
+        pol = TradePolicy.from_dict({"norm_roi": [1.0, 10.0], "order_type": "MARKET"})
         h = TradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
                         policy=pol, daemon_url="http://d",                        validate_prices=False,
                        )
@@ -23382,7 +23519,7 @@ class TestTradeHandlers:
 
         log_file = tmp_path / "err.jsonl"
         h = TradeHandler(min_norm_roi=0, log_file=str(log_file),
-                        policy=TradePolicy.from_dict({"roi_pct": [1.0, 10.0]}),
+                        policy=TradePolicy.from_dict({"norm_roi": [1.0, 10.0]}),
                         daemon_url="http://d",                        validate_prices=False,
                        )
         asyncio.run(h.fire([self._spread("SPX", credit=1.0)], self._ctx()))
@@ -23411,7 +23548,7 @@ class TestTradeHandlers:
 
         sim_file = tmp_path / "sim.jsonl"
         live_file = tmp_path / "live.jsonl"
-        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0]})
+        pol = TradePolicy.from_dict({"norm_roi": [1.0, 10.0]})
         sim = SimulateTradeHandler(min_norm_roi=0, log_file=str(sim_file),
                                    policy=pol, daemon_url="http://d",                        validate_prices=False,
                        )
@@ -23460,13 +23597,13 @@ handlers:
     min_norm_roi: 1.5
     log_file: /tmp/sim.jsonl
     policy:
-      roi_pct: [1.5, 5.0]
+      norm_roi: [1.5, 5.0]
       min_credit: {SPX: 0.50}
   - type: trade
     min_norm_roi: 1.5
     log_file: /tmp/live.jsonl
     policy:
-      roi_pct: [1.5, 5.0]
+      norm_roi: [1.5, 5.0]
       min_credit: {SPX: 0.50}
 """)
         monkeypatch.setattr("sys.argv", ["spread_scanner.py", "--config", str(cfg)])
@@ -23632,7 +23769,7 @@ handlers:
                 {"until": "07:30", "value": 2.5},
                 {"value": 1.5},
             ],
-            "policy": {"roi_pct": [1.0, 10.0]},
+            "policy": {"norm_roi": [1.0, 10.0]},
         })
         # Candidate: nROI = 2.0 (between the two thresholds)
         cand = [{"symbol": "SPX", "option_type": "PUT", "short_strike": 7050,
@@ -23677,7 +23814,7 @@ handlers:
             min_norm_roi=0,
             log_file=str(log),
             policy=TradePolicy.from_dict({
-                "roi_pct": [1.0, 10.0], "min_credit": {"SPX": 0.50},
+                "norm_roi": [1.0, 10.0], "min_credit": {"SPX": 0.50},
             }),
             daemon_url="http://d",                        validate_prices=False,
                        )
@@ -23695,7 +23832,7 @@ handlers:
         h = SimulateTradeHandler(
             min_norm_roi=0, log_file=str(log),
             policy=TradePolicy.from_dict({
-                "roi_pct": [1.0, 10.0], "min_otm_pct": {"SPX": 1.0},
+                "norm_roi": [1.0, 10.0], "min_otm_pct": {"SPX": 1.0},
             }),
             daemon_url="http://d",                        validate_prices=False,
                        )
@@ -23705,23 +23842,23 @@ handlers:
         assert len(r) == 1
         assert r[0]["otm_pct"] == 0.5 and r[0]["otm_floor"] == 1.0
 
-    def test_filter_logs_roi_outside_band(self, monkeypatch, tmp_path):
+    def test_filter_logs_norm_roi_outside_band(self, monkeypatch, tmp_path):
         self._always_in_window(monkeypatch)
         from spread_scanner import SimulateTradeHandler, TradePolicy
         log = tmp_path / "l.jsonl"
         h = SimulateTradeHandler(
             min_norm_roi=0, log_file=str(log),
-            policy=TradePolicy.from_dict({"roi_pct": [1.5, 5.0]}),
+            policy=TradePolicy.from_dict({"norm_roi": [1.5, 5.0]}),
             daemon_url="http://d",                        validate_prices=False,
                        )
         h.filter([
-            self._spread("SPX", roi=1.0),   # below
-            self._spread("SPX", roi=7.0),   # above
+            self._spread("SPX", roi=1.0),   # below band (nROI 1.0 < 1.5)
+            self._spread("SPX", roi=7.0),   # above band (nROI 7.0 > 5.0)
         ])
         evs = self._read_log(log)
-        r = [e for e in evs if e.get("reason") == "roi_outside_band"]
+        r = [e for e in evs if e.get("reason") == "norm_roi_outside_band"]
         assert len(r) == 2
-        assert {e["roi_pct"] for e in r} == {1.0, 7.0}
+        assert {e["norm_roi"] for e in r} == {1.0, 7.0}
 
     def test_filter_logs_missing_prev_close(self, monkeypatch, tmp_path):
         self._always_in_window(monkeypatch)
@@ -23729,7 +23866,7 @@ handlers:
         log = tmp_path / "l.jsonl"
         h = SimulateTradeHandler(
             min_norm_roi=0, log_file=str(log),
-            policy=TradePolicy.from_dict({"roi_pct": [1.0, 10.0]}),
+            policy=TradePolicy.from_dict({"norm_roi": [1.0, 10.0]}),
             daemon_url="http://d",                        validate_prices=False,
                        )
         h.filter([self._spread("SPX", prev_close=0)])
@@ -23743,7 +23880,7 @@ handlers:
         log = tmp_path / "l.jsonl"
         h = SimulateTradeHandler(
             min_norm_roi=3.0, log_file=str(log),
-            policy=TradePolicy.from_dict({"roi_pct": [1.0, 10.0]}),
+            policy=TradePolicy.from_dict({"norm_roi": [1.0, 10.0]}),
             daemon_url="http://d",                        validate_prices=False,
                        )
         h.filter([self._spread("SPX", roi=2.0)])   # nROI = 2.0 < 3.0
@@ -23759,7 +23896,7 @@ handlers:
         log = tmp_path / "l.jsonl"
         h = SimulateTradeHandler(
             min_norm_roi=0, log_file=str(log),
-            policy=TradePolicy.from_dict({"roi_pct": [1.0, 10.0]}),
+            policy=TradePolicy.from_dict({"norm_roi": [1.0, 10.0]}),
             daemon_url="http://d",                        validate_prices=False,
                        )
         out = h.filter([
@@ -23799,14 +23936,14 @@ handlers:
         h = SimulateTradeHandler(
             min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
             policy=TradePolicy.from_dict({
-                "roi_pct": [1.5, 5.0], "min_credit": {"SPX": 0.50},
+                "norm_roi": [1.5, 5.0], "min_credit": {"SPX": 0.50},
             }),
             daemon_url="http://d",                        validate_prices=False,
                        )
         assert h.count_rejected == 0
         h.filter([
             self._spread("SPX", credit=0.20),   # below_credit_floor
-            self._spread("SPX", roi=7.0),       # roi_outside_band
+            self._spread("SPX", roi=7.0),       # norm_roi_outside_band
         ])
         assert h.count_rejected == 2
 
@@ -23833,7 +23970,7 @@ class TestRecentActionsAndNotifications:
 
     def test_record_action_appends_to_buffer(self, tmp_path):
         from spread_scanner import SimulateTradeHandler, TradePolicy
-        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "notify": False})
+        pol = TradePolicy.from_dict({"norm_roi": [1.0, 10.0], "notify": False})
         h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
                                  policy=pol, daemon_url="http://d",                        validate_prices=False,
                        )
@@ -23854,7 +23991,7 @@ class TestRecentActionsAndNotifications:
 
     def test_recent_actions_is_bounded(self, tmp_path):
         from spread_scanner import SimulateTradeHandler, TradePolicy
-        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "notify": False})
+        pol = TradePolicy.from_dict({"norm_roi": [1.0, 10.0], "notify": False})
         h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
                                  policy=pol, daemon_url="http://d",                        validate_prices=False,
                        )
@@ -23870,7 +24007,7 @@ class TestRecentActionsAndNotifications:
     def test_render_recent_actions_orders_newest_at_bottom(self, tmp_path):
         import time
         from spread_scanner import SimulateTradeHandler, TradePolicy, render_recent_actions
-        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "notify": False})
+        pol = TradePolicy.from_dict({"norm_roi": [1.0, 10.0], "notify": False})
         h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
                                  policy=pol, daemon_url="http://d",                        validate_prices=False,
                        )
@@ -23894,7 +24031,7 @@ class TestRecentActionsAndNotifications:
 
     def test_render_recent_actions_hidden_when_n_zero(self, tmp_path):
         from spread_scanner import SimulateTradeHandler, TradePolicy, render_recent_actions
-        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "notify": False})
+        pol = TradePolicy.from_dict({"norm_roi": [1.0, 10.0], "notify": False})
         h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
                                  policy=pol, daemon_url="http://d",                        validate_prices=False,
                        )
@@ -23904,7 +24041,7 @@ class TestRecentActionsAndNotifications:
     def test_render_recent_actions_merges_across_handlers(self, tmp_path):
         import time
         from spread_scanner import SimulateTradeHandler, TradeHandler, TradePolicy, render_recent_actions
-        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "notify": False})
+        pol = TradePolicy.from_dict({"norm_roi": [1.0, 10.0], "notify": False})
         h_sim = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "sim.jsonl"),
                                      policy=pol, daemon_url="http://d",                        validate_prices=False,
                        )
@@ -23947,7 +24084,7 @@ class TestRecentActionsAndNotifications:
         monkeypatch.setattr(ss.TradePolicy, "within_trading_window",
                             lambda self, now_pt=None: True)
 
-        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0]})   # notify default True
+        pol = TradePolicy.from_dict({"norm_roi": [1.0, 10.0]})   # notify default True
         h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
                                  policy=pol, daemon_url="http://d",                        validate_prices=False,
                        )
@@ -23988,7 +24125,7 @@ class TestRecentActionsAndNotifications:
         monkeypatch.setattr(ss.TradePolicy, "within_trading_window",
                             lambda self, now_pt=None: True)
 
-        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "notify": False})
+        pol = TradePolicy.from_dict({"norm_roi": [1.0, 10.0], "notify": False})
         h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
                                  policy=pol, daemon_url="http://d",                        validate_prices=False,
                        )
@@ -24018,7 +24155,7 @@ class TestRecentActionsAndNotifications:
         monkeypatch.setattr(ss.TradePolicy, "within_trading_window",
                             lambda self, now_pt=None: True)
 
-        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0]})
+        pol = TradePolicy.from_dict({"norm_roi": [1.0, 10.0]})
         log_path = tmp_path / "l.jsonl"
         h = SimulateTradeHandler(min_norm_roi=0, log_file=str(log_path),
                                  policy=pol, daemon_url="http://d",                        validate_prices=False,
@@ -24059,7 +24196,7 @@ class TestRecentActionsAndNotifications:
         monkeypatch.setattr(ss.TradePolicy, "within_trading_window",
                             lambda self, now_pt=None: True)
 
-        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "order_type": "MARKET"})
+        pol = TradePolicy.from_dict({"norm_roi": [1.0, 10.0], "order_type": "MARKET"})
         h = TradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
                         policy=pol, daemon_url="http://d",                        validate_prices=False,
                        )
@@ -24092,7 +24229,7 @@ class TestRecentActionsAndNotifications:
     def test_diagnose_quiet_names_gates_with_counts(self, tmp_path):
         """Diagnoser reports which gates fired with their per-scan counts."""
         from spread_scanner import _diagnose_quiet_reason, SimulateTradeHandler, TradePolicy
-        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "notify": False})
+        pol = TradePolicy.from_dict({"norm_roi": [1.0, 10.0], "notify": False})
         h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
                                  policy=pol, daemon_url="http://d",                        validate_prices=False,
                        )
@@ -24112,7 +24249,7 @@ class TestRecentActionsAndNotifications:
     def test_diagnose_quiet_single_gate_omits_count(self, tmp_path):
         """When only one gate fires, the count is implicit (all of them)."""
         from spread_scanner import _diagnose_quiet_reason, SimulateTradeHandler, TradePolicy
-        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "notify": False})
+        pol = TradePolicy.from_dict({"norm_roi": [1.0, 10.0], "notify": False})
         h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
                                  policy=pol, daemon_url="http://d",                        validate_prices=False,
                        )
@@ -24124,13 +24261,13 @@ class TestRecentActionsAndNotifications:
     def test_diagnose_quiet_more_than_three_gates_truncates(self, tmp_path):
         """When >3 gates fire, show top 3 and +N more."""
         from spread_scanner import _diagnose_quiet_reason, SimulateTradeHandler, TradePolicy
-        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "notify": False})
+        pol = TradePolicy.from_dict({"norm_roi": [1.0, 10.0], "notify": False})
         h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
                                  policy=pol, daemon_url="http://d",                        validate_prices=False,
                        )
         h.last_scan_rejection_counts = {
             "below_otm_floor": 3, "below_credit_floor": 2,
-            "roi_outside_band": 1, "missing_prev_close": 1, "total_risk_cap": 1,
+            "norm_roi_outside_band": 1, "missing_prev_close": 1, "total_risk_cap": 1,
         }
         data = {"dte_sections": {0: {"spreads": {"SPX": [{"credit": 0.1}]}}}}
         reason = _diagnose_quiet_reason([h], data, [{"symbol": "SPX"}])
@@ -24146,7 +24283,7 @@ class TestRecentActionsAndNotifications:
                             lambda self, now_pt=None: True)
         from spread_scanner import SimulateTradeHandler, TradePolicy
         pol = TradePolicy.from_dict({
-            "roi_pct": [1.0, 10.0], "min_otm_pct": {"SPX": 1.5},
+            "norm_roi": [1.0, 10.0], "min_otm_pct": {"SPX": 1.5},
         })
         h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
                                  policy=pol, daemon_url="http://d",                        validate_prices=False,
@@ -24162,7 +24299,7 @@ class TestRecentActionsAndNotifications:
         from collections import deque
         from spread_scanner import _maybe_log_quiet_heartbeat, SimulateTradeHandler, TradePolicy
         import types
-        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "notify": False})
+        pol = TradePolicy.from_dict({"norm_roi": [1.0, 10.0], "notify": False})
         h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
                                  policy=pol, daemon_url="http://d",                        validate_prices=False,
                        )
@@ -24186,7 +24323,7 @@ class TestRecentActionsAndNotifications:
         from spread_scanner import (
             SimulateTradeHandler, TradePolicy, render_activity_panel,
         )
-        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "notify": False})
+        pol = TradePolicy.from_dict({"norm_roi": [1.0, 10.0], "notify": False})
         h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
                                  policy=pol, daemon_url="http://d",                        validate_prices=False,
                        )
@@ -24217,7 +24354,7 @@ class TestRecentActionsAndNotifications:
 
     def test_activity_panel_renders_nothing_when_empty(self, tmp_path):
         from spread_scanner import render_activity_panel, SimulateTradeHandler, TradePolicy
-        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0], "notify": False})
+        pol = TradePolicy.from_dict({"norm_roi": [1.0, 10.0], "notify": False})
         h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
                                  policy=pol, daemon_url="http://d",                        validate_prices=False,
                        )
@@ -24249,7 +24386,7 @@ class TestRecentActionsAndNotifications:
 
         # Total risk cap = 100 → first trade's $1,905 max-loss already breaches it.
         pol = TradePolicy.from_dict({
-            "roi_pct": [1.0, 10.0], "max_total_risk": 100,
+            "norm_roi": [1.0, 10.0], "max_total_risk": 100,
             "order_type": "MARKET",
         })
         h = TradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
@@ -24443,7 +24580,7 @@ class TestDaemonTradeDefaults:
         monkeypatch.setattr(ss.TradePolicy, "within_trading_window", lambda self, now_pt=None: True)
 
         # Policy does NOT set order_type — daemon default should be used.
-        pol = TradePolicy.from_dict({"roi_pct": [1.0, 10.0]})
+        pol = TradePolicy.from_dict({"norm_roi": [1.0, 10.0]})
         assert pol.order_type is None
         h = TradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
                         policy=pol, daemon_url="http://d",                        validate_prices=False,
