@@ -10880,6 +10880,224 @@ class TestPctStrikeResolution:
         from utp import _snap_to_chain
         assert _snap_to_chain(7160, [], "otm_call") == 7160
 
+    # ── pN numeric percentile form ──────────────────────────────────────────
+
+    def test_risk_tier_type_accepts_named_tiers(self):
+        """_risk_tier_type accepts all three named tiers (case-normalised)."""
+        from utp import _risk_tier_type
+        assert _risk_tier_type("conservative") == "conservative"
+        assert _risk_tier_type("moderate") == "moderate"
+        assert _risk_tier_type("aggressive") == "aggressive"
+        assert _risk_tier_type("Conservative") == "conservative"
+        assert _risk_tier_type("AGGRESSIVE") == "aggressive"
+
+    def test_risk_tier_type_accepts_pN_form(self):
+        """_risk_tier_type accepts pN numeric form (p50–p99)."""
+        from utp import _risk_tier_type
+        assert _risk_tier_type("p90") == "p90"
+        assert _risk_tier_type("p95") == "p95"
+        assert _risk_tier_type("p99") == "p99"
+        assert _risk_tier_type("P95") == "p95"   # case-normalised
+        assert _risk_tier_type(" p75 ") == "p75"  # stripped
+
+    def test_risk_tier_type_rejects_invalid(self):
+        """_risk_tier_type raises ArgumentTypeError for unrecognised values."""
+        import argparse
+        from utp import _risk_tier_type
+        for bad in ("p0", "p100", "p200", "weirdo", "q95", ""):
+            with pytest.raises(argparse.ArgumentTypeError):
+                _risk_tier_type(bad)
+
+    def test_validate_risk_tier_pN_alone_passes(self):
+        """pN form of --risk-tier passes _validate_strike_args the same as named tier."""
+        from utp import _validate_strike_args
+        args = argparse.Namespace(
+            otm_pct=None, close_pct=None,
+            short_strike=None, long_strike=None, width=None,
+            risk_tier="p95", risk_tier_intraday=None, risk_tier_pred=None,
+        )
+        assert _validate_strike_args("credit-spread", args) is None
+
+    def test_validate_risk_tier_pN_intraday_passes(self):
+        """pN form of --risk-tier-intraday is valid."""
+        from utp import _validate_strike_args
+        args = argparse.Namespace(
+            otm_pct=None, close_pct=None,
+            short_strike=None, long_strike=None, width=None,
+            risk_tier=None, risk_tier_intraday="p90", risk_tier_pred=None,
+        )
+        assert _validate_strike_args("credit-spread", args) is None
+
+    @pytest.mark.asyncio
+    async def test_resolve_one_tier_side_pN_historical(self, monkeypatch):
+        """pN form uses the numeric level directly for close-to-close lookup."""
+        import utp, httpx as _httpx_mod
+        db_url = "http://fakedb:9102"
+        fake_pdata = {
+            "tickers": [
+                {
+                    "ticker": "SPX",
+                    "windows": {
+                        "1": {
+                            "when_down": {"price": {"p90": 5350.0, "p95": 5300.0}},
+                            "when_up":   {"price": {"p90": 5650.0, "p95": 5700.0}},
+                        }
+                    },
+                    "recommended": {"close_to_close": {"conservative": {"put": 95, "call": 95}}},
+                }
+            ],
+            "hourly": {
+                "SPX": {"recommended": {"close_to_close": {"conservative": {"put": 95, "call": 95}}}}
+            },
+        }
+
+        class _FakeResp:
+            status_code = 200
+            def json(self): return fake_pdata
+
+        class _FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+            async def get(self, url, params=None): return _FakeResp()
+
+        monkeypatch.setattr(_httpx_mod, "AsyncClient", _FakeClient)
+        price, level, label = await utp._resolve_one_tier_side(
+            sym="SPX", side="put", active_tier="p90",
+            tier_pred=None, tier_intra=None, db_url=db_url,
+        )
+        assert level == 90
+        assert price == 5350.0
+        assert label == "historical"
+
+    @pytest.mark.asyncio
+    async def test_resolve_one_tier_side_pN_intraday(self, monkeypatch):
+        """pN form resolves intraday slot data using the numeric percentile directly."""
+        import utp, httpx as _httpx_mod
+        db_url = "http://fakedb:9102"
+        fake_pdata = {
+            "tickers": [],
+            "hourly": {
+                "SPX": {
+                    "previous_close": 5500.0,
+                    "recommended": {"intraday": {"conservative": {"put": 98, "call": 98}}},
+                    "slots": {
+                        "09:30": {
+                            "when_down": {"pct": {"p90": -1.5, "p95": -2.0}},
+                            "when_up":   {"pct": {"p90":  1.5, "p95":  2.0}},
+                        }
+                    },
+                }
+            },
+        }
+
+        class _FakeResp:
+            status_code = 200
+            def json(self): return fake_pdata
+
+        class _FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+            async def get(self, url, params=None): return _FakeResp()
+
+        monkeypatch.setattr(_httpx_mod, "AsyncClient", _FakeClient)
+        price, level, label = await utp._resolve_one_tier_side(
+            sym="SPX", side="put", active_tier="p90",
+            tier_pred=None, tier_intra="p90", db_url=db_url,
+        )
+        assert level == 90
+        # 5500 * (1 - 1.5/100) = 5417.5
+        assert abs(price - 5417.5) < 0.01
+        assert label == "intraday"
+
+    @pytest.mark.asyncio
+    async def test_resolve_one_tier_side_pN_pred_skips_percentile_server(self, monkeypatch):
+        """pN with tier_pred set skips the /range_percentiles fetch entirely and
+        reads the numeric band directly from /predictions/{sym}."""
+        import utp, httpx as _httpx_mod
+        db_url = "http://fakedb:9102"
+        pct_called = []
+        pred_data = {"combined_bands": {"P90": {"lo_price": 5350.0, "hi_price": 5650.0}}}
+
+        class _FakeResp:
+            def __init__(self, data): self._data = data
+            status_code = 200
+            def json(self): return self._data
+
+        class _FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+            async def get(self, url, params=None):
+                if "range_percentiles" in url:
+                    pct_called.append(url)
+                    return _FakeResp({})
+                if "/predictions/" in url:
+                    return _FakeResp(pred_data)
+                return _FakeResp({})
+
+        monkeypatch.setattr(_httpx_mod, "AsyncClient", _FakeClient)
+        price, level, label = await utp._resolve_one_tier_side(
+            sym="SPX", side="put", active_tier="p90",
+            tier_pred="p90", tier_intra=None, db_url=db_url,
+        )
+        assert pct_called == [], "percentile server should NOT be hit for pN pred"
+        assert level == 90
+        assert price == 5350.0
+        assert label == "prediction"
+
+    @pytest.mark.asyncio
+    async def test_resolve_risk_tier_strikes_pN_passes_through(self, monkeypatch):
+        """_resolve_risk_tier_strikes with pN form passes the tier string through
+        to _resolve_one_tier_side unchanged."""
+        import utp
+        received = {}
+        async def fake_resolve_side(*, sym, side, active_tier, tier_pred, tier_intra, db_url):
+            received[side] = active_tier
+            return 7000.0 if side == "put" else 7200.0, 95, "historical"
+        monkeypatch.setattr(utp, "_resolve_one_tier_side", fake_resolve_side)
+        async def no_snap(c, s, e, st, ot, ic):
+            return st
+        monkeypatch.setattr(utp, "_snap_strikes_to_chain_http", no_snap)
+
+        args = argparse.Namespace(
+            symbol="SPX", expiration="2026-04-30",
+            option_type="PUT",
+            risk_tier="p95", risk_tier_intraday=None, risk_tier_pred=None,
+            width=20.0, short_strike=None, long_strike=None,
+        )
+        rc = await utp._resolve_risk_tier_strikes(args, "credit-spread", client=None)
+        assert rc is None
+        assert received.get("put") == "p95"
+        assert args.short_strike == 7000.0
+        assert args.long_strike == 6980.0  # 7000 - 20
+
+    @pytest.mark.asyncio
+    async def test_resolve_risk_tier_strikes_pN_iron_condor(self, monkeypatch):
+        """Iron-condor with pN tier resolves both put and call sides."""
+        import utp
+        async def fake_resolve_side(*, sym, side, active_tier, tier_pred, tier_intra, db_url):
+            assert active_tier == "p90"
+            return (6950.0, 90, "intraday") if side == "put" else (7050.0, 90, "intraday")
+        monkeypatch.setattr(utp, "_resolve_one_tier_side", fake_resolve_side)
+        async def no_snap(c, s, e, st, ot, ic):
+            return st
+        monkeypatch.setattr(utp, "_snap_strikes_to_chain_http", no_snap)
+
+        args = argparse.Namespace(
+            symbol="SPX", expiration="2026-04-30",
+            risk_tier=None, risk_tier_intraday="p90", risk_tier_pred=None,
+            width=25.0,
+            put_short=None, put_long=None, call_short=None, call_long=None,
+        )
+        rc = await utp._resolve_risk_tier_strikes(args, "iron-condor", client=None)
+        assert rc is None
+        assert args.put_short == 6950.0
+        assert args.put_long == 6925.0   # 6950 - 25
+        assert args.call_short == 7050.0
+        assert args.call_long == 7075.0  # 7050 + 25
+
 
 class TestClosePctResolution:
     """Tests for --close-pct (anchored to previous trading day's close)."""

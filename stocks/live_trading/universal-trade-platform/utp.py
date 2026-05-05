@@ -2101,11 +2101,29 @@ async def _resolve_otm_strikes_http(args, subcommand: str, client) -> int | None
     return None
 
 
+def _risk_tier_type(value: str) -> str:
+    """Argparse type for --risk-tier* flags.
+
+    Accepts named tiers (conservative/moderate/aggressive) and pN numeric
+    percentile form (e.g. p90, p95, p99).  Case-insensitive; normalised to
+    lower-case on return.
+    """
+    v = value.strip().lower()
+    if v in ("conservative", "moderate", "aggressive"):
+        return v
+    if v.startswith("p") and v[1:].isdigit() and 1 <= int(v[1:]) <= 99:
+        return v
+    raise argparse.ArgumentTypeError(
+        f"invalid risk tier {value!r}: use conservative/moderate/aggressive "
+        "or pN percentile (e.g. p90, p95, p99)"
+    )
+
+
 async def _resolve_one_tier_side(
     *,
     sym: str,
     side: str,                    # "put" or "call"
-    active_tier: str,             # "aggressive" | "moderate" | "conservative"
+    active_tier: str,             # "aggressive" | "moderate" | "conservative" | "p95" etc.
     tier_pred: str | None,
     tier_intra: str | None,
     db_url: str,
@@ -2117,34 +2135,47 @@ async def _resolve_one_tier_side(
 
     Used by both the credit-spread (one call) and iron-condor (two calls,
     one per side) paths.
+
+    ``active_tier`` may be a named tier (conservative/moderate/aggressive) or
+    a numeric pN form (e.g. ``p90``, ``p95``, ``p99``).  For pN form the
+    percentile level is used directly and the server is asked to compute that
+    exact percentile via the ``?percentiles=N`` query parameter.
     """
     import httpx as _hx
     option_type = "PUT" if side == "put" else "CALL"
 
+    # Detect pN numeric percentile form (e.g. p90, p95, p99)
+    _is_pN = active_tier.startswith("p") and active_tier[1:].isdigit()
+    _pN_level = int(active_tier[1:]) if _is_pN else None
+
     if tier_pred:
         context_label = "prediction"
-        async with _hx.AsyncClient(timeout=10.0) as hc:
-            pr = await hc.get(
-                f"{db_url}/range_percentiles",
-                params={"ticker": sym, "windows": "0,1", "format": "json"},
-            )
-            if pr.status_code != 200:
-                print(f"  Error: percentiles server returned {pr.status_code}")
-                return None, None, context_label
-            pdata = pr.json()
-            tickers = pdata.get("tickers", [pdata] if "ticker" in pdata else [])
-            hourly = pdata.get("hourly", {})
-            rec = hourly.get(sym, {}).get("recommended", {}).get("close_to_close", {})
-            if not rec:
-                for t in tickers:
-                    if t.get("ticker") == sym:
-                        rec = t.get("recommended", {}).get("close_to_close", {})
-                        break
-            pctl_level = rec.get(active_tier, {}).get(side)
-            if not pctl_level:
-                print(f"  Error: no {active_tier} tier for {sym} {side}")
-                return None, None, context_label
+        if _is_pN:
+            pctl_level = _pN_level
+        else:
+            async with _hx.AsyncClient(timeout=10.0) as hc:
+                pr = await hc.get(
+                    f"{db_url}/range_percentiles",
+                    params={"ticker": sym, "windows": "0,1", "format": "json"},
+                )
+                if pr.status_code != 200:
+                    print(f"  Error: percentiles server returned {pr.status_code}")
+                    return None, None, context_label
+                pdata = pr.json()
+                tickers = pdata.get("tickers", [pdata] if "ticker" in pdata else [])
+                hourly = pdata.get("hourly", {})
+                rec = hourly.get(sym, {}).get("recommended", {}).get("close_to_close", {})
+                if not rec:
+                    for t in tickers:
+                        if t.get("ticker") == sym:
+                            rec = t.get("recommended", {}).get("close_to_close", {})
+                            break
+                pctl_level = rec.get(active_tier, {}).get(side)
+                if not pctl_level:
+                    print(f"  Error: no {active_tier} tier for {sym} {side}")
+                    return None, None, context_label
 
+        async with _hx.AsyncClient(timeout=10.0) as hc:
             pred_r = await hc.get(f"{db_url}/predictions/{sym}")
             if pred_r.status_code != 200:
                 print(f"  Error: predictions unavailable for {sym}")
@@ -2162,10 +2193,14 @@ async def _resolve_one_tier_side(
     # Historical or intraday percentiles
     context = "intraday" if tier_intra else "close_to_close"
     context_label = "intraday" if tier_intra else "historical"
+    # Ask the server to compute the exact percentile when using pN form.
+    _fetch_params: dict = {"ticker": sym, "windows": "0,1", "format": "json"}
+    if _is_pN:
+        _fetch_params["percentiles"] = str(_pN_level)
     async with _hx.AsyncClient(timeout=10.0) as hc:
         pr = await hc.get(
             f"{db_url}/range_percentiles",
-            params={"ticker": sym, "windows": "0,1", "format": "json"},
+            params=_fetch_params,
         )
         if pr.status_code != 200:
             print(f"  Error: percentiles server returned {pr.status_code}")
@@ -2179,10 +2214,13 @@ async def _resolve_one_tier_side(
                 if t.get("ticker") == sym:
                     rec = t.get("recommended", {}).get(context, {})
                     break
-        pctl_level = rec.get(active_tier, {}).get(side)
-        if not pctl_level:
-            print(f"  Error: no {active_tier} {context} tier for {sym} {side}")
-            return None, None, context_label
+        if _is_pN:
+            pctl_level = _pN_level
+        else:
+            pctl_level = rec.get(active_tier, {}).get(side)
+            if not pctl_level:
+                print(f"  Error: no {active_tier} {context} tier for {sym} {side}")
+                return None, None, context_label
 
         if tier_intra:
             hdata = hourly.get(sym, {})
@@ -10008,7 +10046,7 @@ Examples:
   %(prog)s --symbol SPX --close-pct 2 --option-type PUT \\
     --expiration 2026-03-20 --quantity 25 --live
 
-  Risk-tier based (uses calibrated percentile boundaries):
+  Risk-tier based (named tier or numeric pN):
   %(prog)s --symbol SPX --risk-tier conservative --option-type PUT \\
     --expiration 2026-04-21 --quantity 5 --live
   %(prog)s --symbol NDX --risk-tier aggressive --option-type CALL \\
@@ -10016,6 +10054,10 @@ Examples:
   %(prog)s --symbol RUT --risk-tier-intraday moderate --option-type PUT \\
     --expiration 2026-04-21 --quantity 5 --live
   %(prog)s --symbol SPX --risk-tier-pred conservative --option-type PUT \\
+    --expiration 2026-04-21 --quantity 5 --live
+  %(prog)s --symbol SPX --risk-tier p95 --option-type PUT \\
+    --expiration 2026-04-21 --quantity 5 --live
+  %(prog)s --symbol NDX --risk-tier-intraday p90 --option-type PUT \\
     --expiration 2026-04-21 --quantity 5 --live
 
 P&L: credit_received - cost_to_close (max profit = full credit, max loss = width - credit)
@@ -10030,16 +10072,17 @@ P&L: credit_received - cost_to_close (max profit = full credit, max loss = width
     t_cs.add_argument("--otm-pct", type=str, default=None,
                       help="Place short strike this %% OTM from current spot price "
                            "(single-sided spread — pick side via --option-type)")
-    t_cs.add_argument("--risk-tier", type=str, default=None,
-                      choices=["aggressive", "moderate", "conservative"],
-                      help="Place short strike at the historical percentile boundary for this risk tier "
-                           "(fetched from db_server /api/range_percentiles recommended field)")
-    t_cs.add_argument("--risk-tier-intraday", type=str, default=None,
-                      choices=["aggressive", "moderate", "conservative"],
-                      help="Like --risk-tier but uses intraday move-to-close percentile (better for 0DTE)")
-    t_cs.add_argument("--risk-tier-pred", type=str, default=None,
-                      choices=["aggressive", "moderate", "conservative"],
-                      help="Like --risk-tier but uses ML prediction percentile boundary")
+    t_cs.add_argument("--risk-tier", type=_risk_tier_type, default=None,
+                      help="Place short strike at the historical percentile boundary. "
+                           "Named tiers: conservative/moderate/aggressive. "
+                           "Numeric pN form: p90, p95, p99, etc. "
+                           "(fetched from db_server /range_percentiles recommended field)")
+    t_cs.add_argument("--risk-tier-intraday", type=_risk_tier_type, default=None,
+                      help="Like --risk-tier but uses intraday move-to-close percentile "
+                           "(named tiers or pN form, e.g. p95). Better for 0DTE.")
+    t_cs.add_argument("--risk-tier-pred", type=_risk_tier_type, default=None,
+                      help="Like --risk-tier but uses ML prediction percentile boundary "
+                           "(named tiers or pN form, e.g. p95).")
     t_cs.add_argument("--close-pct", type=str, default=None,
                       help="Place short strike this %% from PREVIOUS trading day's close "
                            "(fetched from db_server /api/range_percentiles). "
@@ -10142,6 +10185,14 @@ Examples:
   %(prog)s --symbol SPX --close-pct 1.5:2.5 --width 20 \\
     --expiration 2026-03-20 --quantity 25 --live
 
+  Risk-tier based (named tier or numeric pN):
+  %(prog)s --symbol SPX --risk-tier conservative --width 20 \\
+    --expiration 2026-04-21 --quantity 5 --live
+  %(prog)s --symbol NDX --risk-tier p95 --width 50 \\
+    --expiration 2026-04-21 --quantity 5 --live
+  %(prog)s --symbol RUT --risk-tier-intraday p90 --width 20 \\
+    --expiration 2026-04-21 --quantity 5 --live
+
 P&L: combined credit - cost_to_close (max profit = total credit, max loss = wider wing width - credit)
                                 ''',
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -10163,18 +10214,17 @@ P&L: combined credit - cost_to_close (max profit = total credit, max loss = wide
                       help="Same as --otm-pct but anchored to PREVIOUS trading day's close "
                            "(fetched from db_server /api/range_percentiles). "
                            "Single value or split 'put:call'.")
-    t_ic.add_argument("--risk-tier", type=str, default=None,
-                      choices=["aggressive", "moderate", "conservative"],
+    t_ic.add_argument("--risk-tier", type=_risk_tier_type, default=None,
                       help="Place short strikes (both put and call) at the historical "
-                           "percentile boundary for this risk tier "
-                           "(fetched from db_server /api/range_percentiles recommended field).")
-    t_ic.add_argument("--risk-tier-intraday", type=str, default=None,
-                      choices=["aggressive", "moderate", "conservative"],
+                           "percentile boundary. Named tiers: conservative/moderate/aggressive. "
+                           "Numeric pN form: p90, p95, p99, etc. "
+                           "(fetched from db_server /range_percentiles recommended field).")
+    t_ic.add_argument("--risk-tier-intraday", type=_risk_tier_type, default=None,
                       help="Like --risk-tier but uses intraday move-to-close percentile "
-                           "(better for 0DTE).")
-    t_ic.add_argument("--risk-tier-pred", type=str, default=None,
-                      choices=["aggressive", "moderate", "conservative"],
-                      help="Like --risk-tier but uses ML prediction percentile boundary.")
+                           "(named tiers or pN form, e.g. p95). Better for 0DTE.")
+    t_ic.add_argument("--risk-tier-pred", type=_risk_tier_type, default=None,
+                      help="Like --risk-tier but uses ML prediction percentile boundary "
+                           "(named tiers or pN form, e.g. p95).")
     t_ic.add_argument("--width", type=float, default=None,
                       help="Wing width in points (default: SPX=20, NDX=50, RUT=20, equities=5)")
     t_ic.add_argument("--quantity", type=int, default=1)
