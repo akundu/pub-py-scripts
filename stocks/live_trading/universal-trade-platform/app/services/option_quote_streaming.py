@@ -31,6 +31,17 @@ from app.services.streaming_config import StreamingConfig
 
 logger = logging.getLogger(__name__)
 
+# ── Long-DTE percentile server defaults ──────────────────────────────────────
+_DEFAULT_LONG_DTE_PERCENTILE_URL = "http://lin1.kundu.dev:9100"
+_FALLBACK_LONG_DTE_PERCENTILE_URL = "http://ms1.kundu.dev:9100"
+
+# Tier name → percentile key mapping for the /range_percentiles response.
+_TIER_TO_PCT_KEY: dict[str, str] = {
+    "aggressive": "p90",
+    "moderate": "p95",
+    "conservative": "p98",
+}
+
 # Redis key prefix for option quote prices.  Two cache instances live in this
 # service (CSV-only, IBKR-only) and need non-colliding namespaces so a daemon
 # restart can warm-load each without crosstalk.  Default keeps the historical
@@ -374,6 +385,17 @@ class OptionQuoteStreamingService:
         self._conid_cache_loaded = False
         self._conid_cache_snapshot: int = 0  # size at last save
 
+        # Long-DTE percentile-based fetching
+        # Resolved percentile URL cached with a TTL so probes don't fire every cycle.
+        self._percentile_url_resolved: str | None = None
+        self._percentile_url_resolved_at: float = 0.0
+        # Percentile data cache: {symbol: {dte_str: {"put_pct": float, "call_pct": float}}}
+        self._long_dte_pct_data: dict[str, dict[str, dict]] = {}
+        self._long_dte_pct_fetched_at: float = 0.0
+        # Tracks the last time the long-DTE IBKR overlay fired (separate from the
+        # short-DTE greeks overlay so the two cadences are fully independent).
+        self._long_dte_ibkr_last_fetch: float = 0.0
+
     @staticmethod
     def _resolve_csv_dir(configured: str) -> str:
         """Resolve CSV exports directory. Empty = auto-resolve relative to this file."""
@@ -470,6 +492,24 @@ class OptionQuoteStreamingService:
                 "ibkr_max_parallel_effective": self._effective_max_parallel(),
                 "ibkr_provider_kind": type(self._provider).__name__,
                 "ibkr_overlay_interval": self._config.option_quotes_greeks_interval,
+                "long_dte": {
+                    "enabled": self._config.option_quotes_long_dte_enabled,
+                    "ibkr_enabled": self._config.option_quotes_long_dte_ibkr_enabled,
+                    "ibkr_interval_sec": self._config.option_quotes_long_dte_ibkr_interval,
+                    "ibkr_last_fetch_age_sec": round(time.monotonic() - self._long_dte_ibkr_last_fetch, 1)
+                        if self._long_dte_ibkr_last_fetch else None,
+                    "dte_list": self._config.option_quotes_long_dte_list,
+                    "tier": self._config.option_quotes_long_dte_tier,
+                    "pct_key": self._tier_to_pct_key(self._config.option_quotes_long_dte_tier),
+                    "strike_band_pct": self._config.option_quotes_long_dte_strike_band_pct,
+                    "cooldown_sec": self._config.option_quotes_long_dte_cooldown_sec,
+                    "percentile_url": self._config.option_quotes_percentile_url,
+                    "percentile_url_backup": self._config.option_quotes_percentile_url_backup,
+                    "resolved_url": self._percentile_url_resolved,
+                    "pct_data_symbols": list(self._long_dte_pct_data.keys()),
+                    "pct_data_age_sec": round(time.monotonic() - self._long_dte_pct_fetched_at, 1)
+                        if self._long_dte_pct_fetched_at else None,
+                },
             },
             "ibkr_overlay": {
                 "in_flight": self._ibkr_overlay_in_flight,
@@ -1101,6 +1141,267 @@ class OptionQuoteStreamingService:
                 count += 1
         return count
 
+    # ── Long-DTE percentile-based fetching ──────────────────────────────────
+
+    @staticmethod
+    def _tier_to_pct_key(tier: str) -> str:
+        """Map semantic tier name to percentile key (e.g. 'aggressive' → 'p90')."""
+        return _TIER_TO_PCT_KEY.get(tier, tier)
+
+    @staticmethod
+    def _next_friday(today: date | None = None) -> date:
+        """Return the next Friday on or after today (inclusive)."""
+        if today is None:
+            today = date.today()
+        days_until = (4 - today.weekday()) % 7  # Friday=4; 0 when today is Friday
+        return today + timedelta(days=days_until)
+
+    async def _resolve_long_dte_percentile_url(self) -> str:
+        """Probe primary (lin1) then fallback (ms1) percentile URLs.
+
+        Result is cached for 5 minutes to avoid a probe round-trip every cycle.
+        """
+        # Cache for 5 minutes — probes only fire on cold start and after eviction.
+        if (self._percentile_url_resolved is not None
+                and time.monotonic() - self._percentile_url_resolved_at < 300):
+            return self._percentile_url_resolved
+
+        primary = self._config.option_quotes_percentile_url
+        backup = self._config.option_quotes_percentile_url_backup
+
+        # If the operator set a custom URL (not our baked-in default), use it verbatim.
+        if primary != _DEFAULT_LONG_DTE_PERCENTILE_URL:
+            self._percentile_url_resolved = primary
+            self._percentile_url_resolved_at = time.monotonic()
+            return primary
+
+        try:
+            import httpx
+            async with httpx.AsyncClient() as client:
+                for candidate in (primary, backup):
+                    try:
+                        r = await client.get(
+                            f"{candidate}/range_percentiles",
+                            params={"ticker": "SPX", "windows": "0", "format": "json"},
+                            timeout=3.0,
+                        )
+                        if r.status_code < 500:
+                            self._percentile_url_resolved = candidate
+                            self._percentile_url_resolved_at = time.monotonic()
+                            logger.info("Long-DTE percentile URL resolved: %s", candidate)
+                            return candidate
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+        # Neither answered — cache the fallback to stop hammering lin1.
+        self._percentile_url_resolved = backup
+        self._percentile_url_resolved_at = time.monotonic()
+        logger.warning(
+            "Long-DTE percentile server unreachable at both %s and %s; "
+            "long-DTE jobs will be skipped until next probe",
+            primary, backup,
+        )
+        return backup
+
+    async def _fetch_long_dte_percentile_data(
+        self, symbols: list[str], dte_list: list[int],
+    ) -> dict[str, dict[str, dict]]:
+        """Fetch close-to-close percentile data for long-DTE windows.
+
+        Returns {symbol: {dte_str: {"put_pct": float, "call_pct": float}}}
+        where put_pct is negative (downside) and call_pct is positive (upside).
+        Missing windows in the server response are silently omitted.
+        """
+        if not dte_list:
+            return {}
+
+        tier = self._config.option_quotes_long_dte_tier
+        pct_key = self._tier_to_pct_key(tier)
+        url = await self._resolve_long_dte_percentile_url()
+        windows_str = ",".join(str(d) for d in sorted(set(dte_list)))
+
+        try:
+            import httpx
+            async with httpx.AsyncClient() as client:
+                resp = await client.get(
+                    f"{url}/range_percentiles",
+                    params={
+                        "ticker": ",".join(symbols),
+                        "windows": windows_str,
+                        "format": "json",
+                    },
+                    timeout=10.0,
+                )
+        except Exception as e:
+            logger.warning("Long-DTE percentile fetch failed (%s): %s", url, e)
+            # Invalidate URL cache so the next cycle re-probes.
+            self._percentile_url_resolved = None
+            return {}
+
+        if resp.status_code != 200:
+            logger.warning(
+                "Long-DTE percentile server returned %d (url=%s/range_percentiles)",
+                resp.status_code, url,
+            )
+            return {}
+
+        try:
+            data = resp.json()
+        except Exception as e:
+            logger.warning("Long-DTE percentile response parse failed: %s", e)
+            return {}
+
+        result: dict[str, dict[str, dict]] = {}
+        for ticker_entry in data.get("tickers", []):
+            sym = ticker_entry.get("ticker", "")
+            windows = ticker_entry.get("windows", {})
+            sym_dtemap: dict[str, dict] = {}
+            for dte_str, window_data in windows.items():
+                when_down = window_data.get("when_down", {}) if window_data else {}
+                when_up = window_data.get("when_up", {}) if window_data else {}
+                put_pct = when_down.get("pct", {}).get(pct_key)
+                call_pct = when_up.get("pct", {}).get(pct_key)
+                if put_pct is not None and call_pct is not None:
+                    sym_dtemap[dte_str] = {"put_pct": float(put_pct), "call_pct": float(call_pct)}
+            if sym_dtemap:
+                result[sym] = sym_dtemap
+
+        logger.info(
+            "Long-DTE percentile data fetched: tier=%s pct_key=%s windows=%s symbols=%s → %s",
+            tier, pct_key, windows_str, symbols,
+            {s: list(r.keys()) for s, r in result.items()},
+        )
+        return result
+
+    @staticmethod
+    def _find_exp_for_dte(
+        available_exps: list[str], target_dte: int, today: date,
+    ) -> str | None:
+        """Find the available expiration closest to target DTE trading days away.
+
+        Matches within ±3 trading days; returns None if nothing is close enough.
+        """
+        best_exp: str | None = None
+        best_diff = float("inf")
+        for exp in available_exps:
+            dte = OptionQuoteStreamingService._dte_for_exp(exp, today)
+            if dte is None or dte < 0:
+                continue
+            diff = abs(dte - target_dte)
+            if diff < best_diff and diff <= 3:
+                best_diff = diff
+                best_exp = exp
+        return best_exp
+
+    def _build_long_dte_csv_jobs(
+        self,
+        symbol: str,
+        price: float,
+        available_exps: list[str],
+        pct_data: dict[str, dict],
+        price_source: str,
+        today: date,
+    ) -> list[tuple]:
+        """Build narrow-band CSV fetch jobs for long-DTE expirations.
+
+        One PUT job and one CALL job per matching expiration, centered on the
+        percentile-implied strike (put_pct% down, call_pct% up from current price)
+        and ±long_dte_strike_band_pct% wide.
+
+        Returns list of (symbol, exp, opt_type, strike_min, strike_max, price_source).
+        """
+        if not pct_data:
+            return []
+
+        band_pct = self._config.option_quotes_long_dte_strike_band_pct / 100.0
+        cooldown = self._config.option_quotes_long_dte_cooldown_sec
+        now_mono = time.monotonic()
+
+        # Effective DTE list = configured + closest Friday (if not already in list)
+        dte_list = list(self._config.option_quotes_long_dte_list)
+        friday = self._next_friday(today)
+        friday_dte = self._dte_for_exp(friday.isoformat(), today)
+        if friday_dte is not None and friday_dte not in dte_list:
+            dte_list = sorted(set(dte_list + [friday_dte]))
+
+        jobs: list[tuple] = []
+        for target_dte in dte_list:
+            dte_str = str(target_dte)
+            pct_info = pct_data.get(dte_str)
+            if not pct_info:
+                continue
+
+            target_exp = self._find_exp_for_dte(available_exps, target_dte, today)
+            if not target_exp:
+                continue
+
+            put_pct = pct_info["put_pct"]    # negative (downside)
+            call_pct = pct_info["call_pct"]  # positive (upside)
+            put_center = price * (1 + put_pct / 100)
+            call_center = price * (1 + call_pct / 100)
+
+            for opt_type, center in (("PUT", put_center), ("CALL", call_center)):
+                key = (symbol, target_exp, opt_type)
+                last = self._csv_last_read_mono.get(key, 0.0)
+                if now_mono - last < cooldown:
+                    continue
+                smin = round(center * (1 - band_pct), 2)
+                smax = round(center * (1 + band_pct), 2)
+                jobs.append((symbol, target_exp, opt_type, smin, smax, price_source))
+                self._csv_last_read_mono[key] = now_mono
+
+        return jobs
+
+    def _build_long_dte_ibkr_jobs(
+        self,
+        symbol: str,
+        price: float,
+        available_exps: list[str],
+        pct_data: dict[str, dict],
+        price_source: str,
+        today: date,
+    ) -> list[tuple]:
+        """Build narrow-band IBKR overlay jobs for long-DTE percentile strikes.
+
+        Same logic as _build_long_dte_csv_jobs but uses the IBKR strike range
+        and does NOT apply cooldown (the IBKR overlay interval controls cadence
+        for these jobs, just as it does for short-DTE ibkr_jobs). The IBKR
+        fetch delivers live prices + greeks for the percentile-implied strikes,
+        which is what a downstream screener needs when CSV snapshot data isn't
+        fresh enough.
+
+        Returns list of (symbol, exp, opt_type, strike_min, strike_max, price_source).
+        """
+        if not pct_data:
+            return []
+
+        band_pct = self._config.option_quotes_long_dte_strike_band_pct / 100.0
+        dte_list = list(self._config.option_quotes_long_dte_list)
+        friday = self._next_friday(today)
+        friday_dte = self._dte_for_exp(friday.isoformat(), today)
+        if friday_dte is not None and friday_dte not in dte_list:
+            dte_list = sorted(set(dte_list + [friday_dte]))
+
+        jobs: list[tuple] = []
+        for target_dte in dte_list:
+            dte_str = str(target_dte)
+            pct_info = pct_data.get(dte_str)
+            if not pct_info:
+                continue
+            target_exp = self._find_exp_for_dte(available_exps, target_dte, today)
+            if not target_exp:
+                continue
+            put_center = price * (1 + pct_info["put_pct"] / 100)
+            call_center = price * (1 + pct_info["call_pct"] / 100)
+            for opt_type, center in (("PUT", put_center), ("CALL", call_center)):
+                smin = round(center * (1 - band_pct), 2)
+                smax = round(center * (1 + band_pct), 2)
+                jobs.append((symbol, target_exp, opt_type, smin, smax, price_source))
+
+        return jobs
+
     def _build_fetch_jobs(
         self,
         symbol: str,
@@ -1227,6 +1528,64 @@ class OptionQuoteStreamingService:
             )
             csv_jobs.extend(sym_csv)
             ibkr_jobs.extend(sym_ibkr)
+
+        # Phase 1b: long-DTE percentile-based jobs (CSV-only, narrow band).
+        # Percentile data is fetched once per cooldown period for all symbols;
+        # per-job cooldown reuses _csv_last_read_mono (same key space).
+        if self._config.option_quotes_long_dte_enabled:
+            today = date.today()
+            long_dte_list = list(self._config.option_quotes_long_dte_list or [])
+            # Always include closest Friday's DTE if not already in list
+            friday_dte = self._dte_for_exp(self._next_friday(today).isoformat(), today)
+            if friday_dte is not None and friday_dte not in long_dte_list:
+                long_dte_list = sorted(set(long_dte_list + [friday_dte]))
+
+            # Refresh percentile data when cooldown has elapsed
+            cooldown = self._config.option_quotes_long_dte_cooldown_sec
+            if time.monotonic() - self._long_dte_pct_fetched_at >= cooldown:
+                active_symbols = [
+                    s.symbol for s in self._config.symbols
+                    if s.sec_type in ("IND", "STK")
+                    and self._symbol_last_price.get(s.symbol, 0) > 0
+                ]
+                if active_symbols:
+                    self._long_dte_pct_data = await self._fetch_long_dte_percentile_data(
+                        active_symbols, long_dte_list,
+                    )
+                    self._long_dte_pct_fetched_at = time.monotonic()
+
+            # Build per-symbol long-DTE jobs using cached percentile data.
+            # CSV jobs are throttled by per-job cooldown; IBKR jobs are gated
+            # on their own separate interval (long_dte_ibkr_interval, default 300s)
+            # so long-DTE greeks don't crowd out the short-DTE 25s overlay.
+            long_dte_ibkr_enabled = self._config.option_quotes_long_dte_ibkr_enabled
+            now_mono = time.monotonic()
+            long_dte_ibkr_due = (
+                long_dte_ibkr_enabled
+                and now_mono - self._long_dte_ibkr_last_fetch
+                    >= self._config.option_quotes_long_dte_ibkr_interval
+            )
+            for sym_cfg in self._config.symbols:
+                if sym_cfg.sec_type not in ("IND", "STK"):
+                    continue
+                symbol = sym_cfg.symbol
+                price = self._symbol_last_price.get(symbol, 0)
+                if not price or price <= 0:
+                    continue
+                expirations = self._symbol_expirations.get(symbol, [])
+                pct_data = self._long_dte_pct_data.get(symbol, {})
+                price_source = self._symbol_last_price_source.get(symbol, "quote")
+                long_csv = self._build_long_dte_csv_jobs(
+                    symbol, price, expirations, pct_data, price_source, today,
+                )
+                csv_jobs.extend(long_csv)
+                if long_dte_ibkr_due:
+                    long_ibkr = self._build_long_dte_ibkr_jobs(
+                        symbol, price, expirations, pct_data, price_source, today,
+                    )
+                    ibkr_jobs.extend(long_ibkr)
+            if long_dte_ibkr_due:
+                self._long_dte_ibkr_last_fetch = now_mono
 
         if not csv_jobs and not ibkr_jobs:
             self._cycle_phase = "idle"
@@ -1543,6 +1902,46 @@ class OptionQuoteStreamingService:
             return None
         self._cache_hits += 1
         return merged
+
+    def get_delta_for_strike(
+        self,
+        symbol: str,
+        expiration: str,
+        option_type: str,
+        strike: float,
+    ) -> float | None:
+        """Return the most recent cached delta for a specific strike, or None.
+
+        Priority: greeks overlay (IBKR model) → IBKR quote cache → CSV cache.
+        All caches are read with no age gate — stale data is fine for display.
+        """
+        sym = symbol.upper()
+        exp = _normalize_exp(expiration)
+        otype = option_type.upper()
+        strike_f = float(strike)
+
+        # 1. IBKR model greeks overlay (highest accuracy)
+        greeks_map = self._greeks_cache.get((sym, exp, otype))
+        if greeks_map:
+            g = greeks_map.get(strike_f)
+            if g and g.get("delta") is not None:
+                return float(g["delta"])
+
+        # 2. IBKR quote cache (quotes may include modelGreeks)
+        for q in (self._ibkr_cache.get(sym, exp, otype, max_age_seconds=86400.0) or []):
+            if abs(float(q.get("strike", -9999)) - strike_f) < 0.01:
+                g = q.get("greeks", {})
+                if g.get("delta") is not None:
+                    return float(g["delta"])
+
+        # 3. CSV cache (greeks merged in via _merge_greeks)
+        for q in (self._cache.get(sym, exp, otype, max_age_seconds=86400.0) or []):
+            if abs(float(q.get("strike", -9999)) - strike_f) < 0.01:
+                g = q.get("greeks", {})
+                if g.get("delta") is not None:
+                    return float(g["delta"])
+
+        return None
 
 
 # ── Module-level singleton ───────────────────────────────────────────────────

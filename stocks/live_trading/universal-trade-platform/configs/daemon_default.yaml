@@ -1,16 +1,18 @@
 # UTP Daemon Configuration
 #
 # Used with: python utp.py daemon --live --config configs/daemon_default.yaml
+#         or python utp.py daemon --live --streaming-config configs/daemon_default.yaml
+#         (both flags accept this file — it covers all daemon configuration)
 #
 # Single YAML that covers everything the daemon reads on startup:
 #   - Market-data streaming (IBKR ticks → Redis / QuestDB / WebSocket)
 #   - Option-quote background cache (see lower sections)
-#   - Trade defaults (default order type, LIMIT slippage, quote freshness)
+#   - Trade defaults (order type, LIMIT slippage, quote freshness, VIX thresholds)
 #
 # Trade defaults flow to the global `app.config.settings` object and surface
-# via GET /trade/defaults. Every LIMIT-pricing caller (CLI `utp trade`,
-# playbook, spread_scanner `trade` handler) that doesn't pin its own values
-# inherits these — change once here, everyone sees it.
+# via GET /trade/defaults. Every caller (CLI `utp trade`, playbook, spread_scanner
+# `trade` handler) that doesn't pin its own values inherits these — change once
+# here, everyone sees it.
 #
 # IBKR streaming limits (with 50% safety buffer):
 #   - Max 50 subscriptions (IBKR standard ~100 market data lines)
@@ -24,6 +26,14 @@ trade_defaults:
   default_order_type: MARKET          # MARKET or LIMIT
   limit_slippage_pct: 0.0             # fresh_credit * (1 - N/100) when LIMIT
   limit_quote_max_age_sec: 10.0       # force provider refresh if cache older
+
+  # VIX / VIX1D circuit-breaker thresholds.
+  # Surfaced via GET /trade/defaults so the CLI reads these from the daemon
+  # rather than having hardcoded values. Tune here; all trade commands pick it up.
+  vix_limit: 25.0          # block if VIX or VIX1D absolute level exceeds this
+  vix_spike_v5: 2.0        # block if VIX/VIX1D rose > N pts in the last 5 min
+  vix_spike_v15: 3.0       # block if VIX/VIX1D rose > N pts in the last 15 min
+  vix_accel_limit: 1.0     # block if velocity increased > N pts/5-min interval (acceleration)
 
 # ── Symbols to stream ───────────────────────────────────────────────────────
 # Simple string form: auto-detects index vs stock
@@ -54,8 +64,8 @@ redis_channel_prefix: "realtime"
 
 # QuestDB direct write — inserts into realtime_data table
 # Set questdb_url to enable (same connection string as QUEST_DB_STRING)
-questdb_enabled: false
-questdb_url: ""
+questdb_enabled: true
+questdb_url: ""    # Uses $QUEST_DB_STRING env var when empty
 # Example: questdb_url: "questdb://stock_user:stock_password@lin1.kundu.dev:8812/stock_data"
 
 # ── Timing ────────────────────────────────────────────────────────────────────
@@ -104,13 +114,13 @@ cpg_poll_interval: 2.0
 # symbols and caches them for instant serving via CLI and REST endpoints.
 #
 # Two-tier fetch:
-#   IBKR tier — narrow strike range (±2.5%), only DTE 0-2, frequent.  This is
+#   IBKR tier — narrow strike range (±3%), only DTE 0-2, frequent.  This is
 #               the freshness-critical hot zone where most trading attention
 #               focuses.  Realistic floor cycle is ~60s given measured IBKR
 #               latency of ~5s p50 / ~10s p95 per call (use `utp.py
 #               latency-probe` to verify).
-#   CSV tier  — wide strike range (±10%), all DTEs available in CSV exports,
-#               every option_quotes_poll_interval seconds.  File I/O — cheap.
+#   CSV tier  — wide strike range (±15%), all DTEs up to csv_dte_max, every
+#               option_quotes_poll_interval seconds.  File I/O — cheap.
 #
 # Read merge (in app/services/market_data.py): IBKR data wins when fresher than
 # the CSV warm cache; CSV fills in everything outside IBKR's hot zone.
@@ -143,7 +153,7 @@ option_quotes_greeks_interval: 25
 #   CPG  (IBKRRestProvider): capped at 12  — rate-limited (9 msg/sec, 2 msg/call
 #                                            warm), tolerates higher parallelism.
 #
-# Per-call payload at default ±2.5% range:
+# Per-call payload at default ±3% range:
 #   SPX → ~50–70 strikes per call
 #   NDX → ~50–55
 #   RUT → ~25–28
@@ -165,24 +175,25 @@ option_quotes_ibkr_max_parallel: 6
 # .skipped_overlapping in /market/streaming/option-quotes/status — non-zero
 # means your broker latency is exceeding the overlay interval.
 
-# ── Tiered strike ranges ──────────────────────────────────────────────────
-# IBKR tier: narrow band around ATM where freshness matters most
-option_quotes_ibkr_strike_range_pct: 2.5
+# ── Strike ranges (split by tier) ────────────────────────────────────────
+# IBKR tier: ±3% of spot (fresh quotes for near-ATM strikes)
+option_quotes_ibkr_strike_range_pct: 3.0
 
-# CSV tier: wide band — file reads are cheap so we cover more strikes
-option_quotes_csv_strike_range_pct: 10.0
+# CSV tier: ±15% of spot (wide coverage from file reads)
+option_quotes_csv_strike_range_pct: 15.0
 
-# Which DTEs to fetch from IBKR.  Omit (or set to ~) to fetch every resolved
-# expiration (legacy behavior).  Default focuses IBKR budget on DTE 0–2.
+# Legacy: fallback if the ibkr_/csv_-specific ranges above aren't set.
+option_quotes_strike_range_pct: 15.0
+
+# ── DTE depth (split by tier) ────────────────────────────────────────────
+# IBKR: only fetch DTE 0–2 (near-term where freshness matters most)
 option_quotes_ibkr_dte_list: [0, 1, 2]
 
-# Legacy: fallback if the ibkr_/csv_-specific ranges above aren't set.  Kept
-# for backwards compat with older configs.
-option_quotes_strike_range_pct: 10.0
+# CSV: load expirations up to 10 DTE (or whatever is available)
+option_quotes_csv_dte_max: 10
 
-# Number of upcoming expirations to fetch per symbol (CSV scope).  IBKR scope
-# is further filtered by option_quotes_ibkr_dte_list.
-option_quotes_num_expirations: 6  # Cover DTE 0 through 5
+# Resolve enough expirations to cover up to 10 DTE (some days have multiple)
+option_quotes_num_expirations: 12
 
 # CSV exports as primary fast source for option bid/ask/volume (~10ms per read)
 # IBKR data overlaid every greeks_interval seconds

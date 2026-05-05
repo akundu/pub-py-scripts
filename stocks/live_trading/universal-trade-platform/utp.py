@@ -3404,7 +3404,15 @@ async def _cmd_portfolio_http(args, server: str) -> int:
 
         # Positions
         positions = data.get("positions", [])
-        _print_section("Active Positions")
+        # Total underlying legs = sum of positions_by_source counts
+        total_legs = sum(by_source.values()) if by_source else len(positions)
+        # Count multi-leg groups (each represents 2+ underlying positions)
+        multi_leg_count = sum(1 for p in positions if p.get("order_type") == "multi_leg")
+        if multi_leg_count > 0 and total_legs != len(positions):
+            section_label = f"Active Positions  ({len(positions)} groups / {total_legs} individual legs)"
+        else:
+            section_label = "Active Positions"
+        _print_section(section_label)
         if not positions:
             print("    (no open positions)")
         else:
@@ -3412,8 +3420,8 @@ async def _cmd_portfolio_http(args, server: str) -> int:
             has_marks = any(p.get("avg_cost") is not None for p in positions)
 
             if has_marks:
-                print(f"  {'ID':<6} {'Symbol':>6} {'Price':>10} {'Strikes':>16} {'Qty':>5} {'Cost':>12} {'Value':>12} {'P&L':>12} {'Cr/ROI/MaxLoss':>22} {'Exp':>12} {'Risk':>14}")
-                print(f"  {'─'*6} {'─'*6} {'─'*10} {'─'*16} {'─'*5} {'─'*12} {'─'*12} {'─'*12} {'─'*22} {'─'*12} {'─'*14}")
+                print(f"  {'ID':<6} {'Symbol':>6} {'Price':>10} {'Strikes':>16} {'Qty':>5} {'Cost':>12} {'Value':>12} {'P&L':>12} {'Cr/ROI/MaxLoss':>22} {'Exp':>12} {'Risk':>14} {'Δ':>7}")
+                print(f"  {'─'*6} {'─'*6} {'─'*10} {'─'*16} {'─'*5} {'─'*12} {'─'*12} {'─'*12} {'─'*22} {'─'*12} {'─'*14} {'─'*7}")
                 total_upnl = 0.0
                 total_daily = 0.0
                 total_max_loss = 0.0
@@ -3448,6 +3456,15 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                         if not strikes_s:
                             strikes_s = "/".join(parts)
 
+                    # Delta (cached, best-effort) — pre-pad to 7 chars before coloring so
+                    # ANSI escape codes don't confuse Python's format-spec width calculation.
+                    net_delta = p.get("net_delta")
+                    if net_delta is not None:
+                        delta_c = "92" if net_delta >= 0 else "91"
+                        delta_s = _color(f"{net_delta:>+7.3f}", delta_c)
+                    else:
+                        delta_s = f"{'---':>7}"
+
                     risk_info = ""  # Combined Credit/ROI/MaxLoss column
                     if p.get("avg_cost") is not None:
                         avg_cost = p["avg_cost"]
@@ -3457,7 +3474,7 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                         total_upnl += upnl
                         total_daily += dpnl
                         pnl_c = "92" if upnl >= 0 else "91"
-                        upnl_s = _color(f"${upnl:>+10,.2f}", pnl_c) if upnl else f"{'---':>12}"
+                        upnl_s = _color(f"${upnl:>+11,.2f}", pnl_c) if upnl else f"{'---':>12}"
 
                         # Cost basis = market_value - unrealized_pnl (what you paid/received)
                         cost_basis = mv - upnl if mv and upnl else 0
@@ -3475,6 +3492,12 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                             total_max_loss += max_loss
                             total_credit += derived_credit
                             risk_info = f"{derived_credit:,.0f}/{roi_pct:.1f}%/{max_loss:,.0f}"
+                        elif sm.get("gross_risk"):
+                            # Position entered at net debit or credit can't be derived —
+                            # show max risk so the exposure is still visible.
+                            gross_risk = sm["gross_risk"]
+                            total_max_loss += gross_risk
+                            risk_info = f"---/--/{gross_risk:,.0f}"
                         elif otype == "multi_leg" and len(leg_strikes) >= 2:
                             # Fallback: compute locally (direct IBKR path without daemon)
                             spread_width = abs(leg_strikes[0] - leg_strikes[1])
@@ -3486,6 +3509,9 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                                 total_credit += derived_credit
                                 roi_pct = (derived_credit / max_loss) * 100
                                 risk_info = f"{derived_credit:,.0f}/{roi_pct:.1f}%/{max_loss:,.0f}"
+                            else:
+                                total_max_loss += gross_risk
+                                risk_info = f"---/--/{gross_risk:,.0f}"
 
                         cur_price = p.get("current_price", 0)
                         price_s = f"${cur_price:>9,.2f}" if cur_price else f"{'---':>10}"
@@ -3495,17 +3521,17 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                             sev = bs["severity"]
                             dist = bs.get("distance_pct", 0)
                             sev_colors = {"breached": "91", "critical": "91", "warning": "93", "watch": "93", "safe": "92"}
-                            risk_s = _color(f"{sev} {dist:.1f}%", sev_colors.get(sev, "0"))
+                            risk_s = _color(f"{sev} {dist:.1f}%".rjust(14), sev_colors.get(sev, "0"))
                         else:
-                            risk_s = ""
-                        print(f"  {pid:<6} {sym:>6} {price_s:>10} {strikes_s:>16} {qty:>5.0f} "
-                              f"{cost_s:>12} {value_s:>12} {upnl_s:>20} {risk_info:>22} {exp:>12} {risk_s:>14}")
+                            risk_s = " " * 14
+                        print(f"  {pid:<6} {sym:>6} {price_s} {strikes_s:>16} {qty:>5.0f} "
+                              f"{cost_s} {value_s} {upnl_s} {risk_info:>22} {exp:>12} {risk_s} {delta_s}")
                     else:
                         cur_price = p.get("current_price", 0)
                         price_s = f"${cur_price:>9,.2f}" if cur_price else f"{'---':>10}"
                         entry = p.get("entry_price", 0)
-                        print(f"  {pid:<6} {sym:>6} {price_s:>10} {strikes_s:>16} {qty:>5.0f} "
-                              f"{'---':>12} {'---':>12} {'---':>12} {'':>22} {exp:>12}")
+                        print(f"  {pid:<6} {sym:>6} {price_s} {strikes_s:>16} {qty:>5.0f} "
+                              f"{'---':>12} {'---':>12} {'---':>12} {'':>22} {exp:>12} {' ' * 14} {delta_s}")
 
                 upnl_c = "92" if total_upnl >= 0 else "91"
                 total_risk_info = ""
@@ -3514,7 +3540,7 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                     total_risk_info = f"{total_credit:,.0f}/{total_roi_pct:+.1f}%/{total_max_loss:,.0f}"
                 print(f"  {'':>6} {'':>6} {'':>10} {'':>16} {'':>5} "
                       f"${total_cost:>11,.2f} ${total_value:>11,.2f} "
-                      f"{_color(f'${total_upnl:>+10,.2f}', upnl_c):>20} {total_risk_info:>22}")
+                      f"{_color(f'${total_upnl:>+11,.2f}', upnl_c)} {total_risk_info:>22}")
             else:
                 print(f"  {'Symbol':<10} {'Type':<10} {'Qty':>6} {'Entry':>10} {'P&L':>10} {'Status':<8}")
                 print(f"  {'---':<10} {'---':<10} {'---':>6} {'---':>10} {'---':>10} {'---':<8}")
@@ -4831,6 +4857,78 @@ async def _estimate_spread_market_price(client, order) -> dict | None:
     return result
 
 
+async def _fetch_vix_ticks(symbol: str, lookback_minutes: int = 20, db_url: str | None = None) -> list[dict]:
+    """Fetch recent VIX/VIX1D ticks from QuestDB realtime_data. Returns [] on any failure."""
+    import httpx as _hx
+    import os as _os
+    _db = db_url or _os.environ.get("DB_SERVER_URL", "http://localhost:9102")
+    sql = (
+        f"SELECT price, timestamp FROM realtime_data "
+        f"WHERE ticker = '{symbol}' "
+        f"AND timestamp >= dateadd('m', -{lookback_minutes}, now()) "
+        f"ORDER BY timestamp ASC"
+    )
+    try:
+        async with _hx.AsyncClient(timeout=3.0) as _c:
+            r = await _c.get(f"{_db}/api/execute_sql", params={"sql": sql})
+            if r.status_code == 200:
+                return r.json().get("data", [])
+    except Exception:
+        pass
+    return []
+
+
+def _compute_vix_derivatives(ticks: list[dict], current_price: float) -> dict:
+    """Compute 1st and 2nd discrete derivatives from recent VIX ticks.
+
+    Returns dict with keys v5, v15, accel (any may be None if ticks are insufficient).
+    - v5:   current_price - price 5 min ago  (5-min velocity)
+    - v15:  current_price - price 15 min ago (15-min velocity)
+    - accel: v5 - (price_5min_ago - price_10min_ago) (change in velocity = acceleration)
+    """
+    from datetime import datetime, timezone, timedelta
+
+    def _parse_ts(raw):
+        if isinstance(raw, (int, float)):
+            return datetime.fromtimestamp(raw / 1e6, tz=timezone.utc)
+        if isinstance(raw, str):
+            try:
+                return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        return None
+
+    now = datetime.now(tz=timezone.utc)
+    parsed: list[tuple] = []
+    for row in ticks:
+        ts = _parse_ts(row.get("timestamp"))
+        try:
+            price = float(row["price"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if ts:
+            parsed.append((ts, price))
+
+    def price_at(minutes_ago: int) -> float | None:
+        if not parsed:
+            return None
+        target = now - timedelta(minutes=minutes_ago)
+        best = min(parsed, key=lambda x: abs((x[0] - target).total_seconds()))
+        if abs((best[0] - target).total_seconds()) <= 90:
+            return best[1]
+        return None
+
+    p5  = price_at(5)
+    p10 = price_at(10)
+    p15 = price_at(15)
+
+    v5  = (current_price - p5)  if p5  is not None else None
+    v15 = (current_price - p15) if p15 is not None else None
+    accel = (v5 - (p5 - p10)) if (v5 is not None and p10 is not None) else None
+
+    return {"v5": v5, "v15": v15, "accel": accel}
+
+
 async def _cmd_trade_http(args, server: str) -> int:
     """Execute trade via HTTP."""
     import httpx
@@ -4941,6 +5039,53 @@ async def _cmd_trade_http(args, server: str) -> int:
         enforce_freshness = mode != "dry-run"
         block_max = _trade_price_block_max_age()
 
+        # Fetch daemon-configured VIX circuit-breaker thresholds.
+        # Fall back to hardcoded defaults when no daemon or old daemon version.
+        _vix_limit    = 25.0
+        _vix_spike_v5 = 2.0
+        _vix_spike_v15 = 3.0
+        _vix_accel_limit = 1.0
+        try:
+            _td_resp = await client.get("/trade/defaults")
+            if _td_resp.status_code == 200:
+                _td = _td_resp.json()
+                _vix_limit       = float(_td.get("vix_limit",       _vix_limit))
+                _vix_spike_v5    = float(_td.get("vix_spike_v5",    _vix_spike_v5))
+                _vix_spike_v15   = float(_td.get("vix_spike_v15",   _vix_spike_v15))
+                _vix_accel_limit = float(_td.get("vix_accel_limit", _vix_accel_limit))
+        except Exception:
+            pass
+
+        # Fetch VIX / VIX1D once up front for display + circuit-breaker.
+        # Use a relaxed max_age (120s) — these are informational gauges,
+        # not execution prices, so occasional staleness is acceptable.
+        vix_val: float | None = None
+        vix1d_val: float | None = None
+        for _vsym in ("VIX", "VIX1D"):
+            try:
+                _vr = await client.get(f"/market/quote/{_vsym}", params={"max_age": 120})
+                if _vr.status_code == 200:
+                    _vd = _vr.json()
+                    _v = _vd.get("last") or _vd.get("bid") or _vd.get("ask")
+                    if _v and float(_v) > 0:
+                        if _vsym == "VIX":
+                            vix_val = float(_v)
+                        else:
+                            vix1d_val = float(_v)
+            except Exception:
+                pass
+
+        # Pre-fetch VIX/VIX1D tick history for derivative display + circuit-breaker.
+        # Soft dependency — empty dict if QuestDB is unavailable.
+        _vix_derivs: dict[str, dict] = {}
+        if enforce_freshness:
+            _db_url_pre = os.environ.get("DB_SERVER_URL", "http://localhost:9102")
+            for _vsym, _vcur in (("VIX", vix_val), ("VIX1D", vix1d_val)):
+                if _vcur is not None:
+                    _t = await _fetch_vix_ticks(_vsym, lookback_minutes=20, db_url=_db_url_pre)
+                    if _t:
+                        _vix_derivs[_vsym] = _compute_vix_derivatives(_t, _vcur)
+
         _print_header("Trade Order Summary")
         if not enforce_freshness:
             print(f"  {_color('ℹ', '96')}  Dry-run: price freshness enforcement disabled.")
@@ -4980,6 +5125,21 @@ async def _cmd_trade_http(args, server: str) -> int:
                     print(f"  Est. total: ~${total:,.2f} ({action})")
                 else:
                     print(f"  Price:      MARKET {annotation}")
+            _eq_vix_parts = []
+            if vix_val is not None:
+                _vc = "91" if vix_val > 25 else ("93" if vix_val > 20 else "92")
+                _vd5 = (_vix_derivs.get("VIX") or {}).get("v5")
+                _roc_a = (f" {_color(f'({_vd5:+.1f} in 5m ⚠)', '91')}" if _vd5 is not None and _vd5 > 2.0
+                          else f" ({_vd5:+.1f} in 5m)" if _vd5 is not None else "")
+                _eq_vix_parts.append(f"VIX {_color(f'{vix_val:.2f}', _vc)}{_roc_a}")
+            if vix1d_val is not None:
+                _v1c = "91" if vix1d_val > 25 else ("93" if vix1d_val > 20 else "92")
+                _v1d5 = (_vix_derivs.get("VIX1D") or {}).get("v5")
+                _roc_b = (f" {_color(f'({_v1d5:+.1f} in 5m ⚠)', '91')}" if _v1d5 is not None and _v1d5 > 2.0
+                          else f" ({_v1d5:+.1f} in 5m)" if _v1d5 is not None else "")
+                _eq_vix_parts.append(f"VIX1D {_color(f'{vix1d_val:.2f}', _v1c)}{_roc_b}")
+            if _eq_vix_parts:
+                print(f"  Volatility: {' / '.join(_eq_vix_parts)}")
         elif trade_request.multi_leg_order:
             order = trade_request.multi_leg_order
             sym = order.legs[0].symbol if order.legs else "?"
@@ -5042,6 +5202,22 @@ async def _cmd_trade_http(args, server: str) -> int:
                             print(f"  Underlying: ${ul_price:,.2f} {ul_annotation}")
             except Exception:
                 pass
+            # Show VIX / VIX1D as volatility context
+            _vix_parts = []
+            if vix_val is not None:
+                _vc = "91" if vix_val > 25 else ("93" if vix_val > 20 else "92")
+                _vd5 = (_vix_derivs.get("VIX") or {}).get("v5")
+                _roc_a = (f" {_color(f'({_vd5:+.1f} in 5m ⚠)', '91')}" if _vd5 is not None and _vd5 > 2.0
+                          else f" ({_vd5:+.1f} in 5m)" if _vd5 is not None else "")
+                _vix_parts.append(f"VIX {_color(f'{vix_val:.2f}', _vc)}{_roc_a}")
+            if vix1d_val is not None:
+                _v1c = "91" if vix1d_val > 25 else ("93" if vix1d_val > 20 else "92")
+                _v1d5 = (_vix_derivs.get("VIX1D") or {}).get("v5")
+                _roc_b = (f" {_color(f'({_v1d5:+.1f} in 5m ⚠)', '91')}" if _v1d5 is not None and _v1d5 > 2.0
+                          else f" ({_v1d5:+.1f} in 5m)" if _v1d5 is not None else "")
+                _vix_parts.append(f"VIX1D {_color(f'{vix1d_val:.2f}', _v1c)}{_roc_b}")
+            if _vix_parts:
+                print(f"  Volatility: {' / '.join(_vix_parts)}")
             is_credit = order.legs[0].action.value in ("SELL_TO_OPEN", "SELL_TO_CLOSE") if order.legs else False
             credit_per_spread = None  # set below for ROI calc
             est_legs = None  # set by MARKET path if quotes available
@@ -5061,7 +5237,7 @@ async def _cmd_trade_http(args, server: str) -> int:
                 else:
                     print(f"  Net debit:  ${order.net_price:.2f} per spread (LIMIT)")
                     total = order.net_price * order.quantity * 100
-                    print(f"  You spend:  ~${total:,.2f}")
+                    print(f"  {_color('You spend:', '91')}  ~${total:,.2f}")
             else:
                 est_result = await _estimate_spread_market_price(client, order)
                 if est_result is not None:
@@ -5077,9 +5253,16 @@ async def _cmd_trade_http(args, server: str) -> int:
                         print(f"  You receive: {approx}${total:,.2f}")
                     else:
                         print(f"  Price:      MARKET ({approx}${abs(est_net):.2f} debit)")
-                        print(f"  You spend:  {approx}${total:,.2f}")
+                        print(f"  {_color('You spend:', '91')}  {approx}${total:,.2f}")
                         if is_credit:
                             print(f"  {_color('Note:', '93')} wide bid/ask makes this a net debit at current quotes")
+                            _override_spend_early = getattr(args, "override_spend_credit", False)
+                            if not _override_spend_early:
+                                print(f"\n  {_color('⛔ Trade BLOCKED: estimated MARKET net is a DEBIT at current quotes.', '91')}")
+                                print(f"     A {subcommand} should receive credit, not pay debit.")
+                                print(f"     Pass --override-spend-credit to bypass this safety check.")
+                                return 1
+                            print(f"  {_color('⚠ Net debit estimate allowed by --override-spend-credit', '93')}")
                     if crossed:
                         print(f"  {_color('Warning:', '93')} bid/ask crossed on some legs — prices are approximate")
                 else:
@@ -5172,9 +5355,80 @@ async def _cmd_trade_http(args, server: str) -> int:
             print(f"     Retry when fresh market data is available.")
             return 1
 
+        # ── VIX / VIX1D circuit-breakers (independent) ───────────────────────
+        # Block all trades (paper + live) when VIX or VIX1D exceeds 25.
+        # Each index has its own override flag so you can bypass only the one
+        # that's elevated. Dry-run is exempt so paper walkthroughs always work.
+        _VIX_LIMIT = _vix_limit
+        _override_vix = getattr(args, "override_vix", False)
+        _override_vix1d = getattr(args, "override_vix1d", False)
+        if enforce_freshness:
+            if vix_val is not None and vix_val > _VIX_LIMIT:
+                if not _override_vix:
+                    print(f"\n  {_color(f'⛔ Trade BLOCKED: VIX {vix_val:.2f} > {_VIX_LIMIT:.0f}.', '91')}")
+                    print(f"     High VIX increases gap risk against spread and directional positions.")
+                    print(f"     Pass --override-vix to trade during elevated VIX.")
+                    return 1
+                print(f"  {_color(f'⚠ VIX {vix_val:.2f} > {_VIX_LIMIT:.0f} — proceeding with --override-vix', '93')}")
+            if vix1d_val is not None and vix1d_val > _VIX_LIMIT:
+                if not _override_vix1d:
+                    print(f"\n  {_color(f'⛔ Trade BLOCKED: VIX1D {vix1d_val:.2f} > {_VIX_LIMIT:.0f}.', '91')}")
+                    print(f"     High VIX1D indicates elevated same-day implied volatility.")
+                    print(f"     Pass --override-vix1d to trade during elevated VIX1D.")
+                    return 1
+                print(f"  {_color(f'⚠ VIX1D {vix1d_val:.2f} > {_VIX_LIMIT:.0f} — proceeding with --override-vix1d', '93')}")
+
+        # ── VIX / VIX1D rate-of-change circuit-breakers ──────────────────────
+        # Block if VIX or VIX1D is spiking (velocity) or accelerating, even
+        # before crossing the 25 absolute threshold.  Selling credit spreads
+        # into an accelerating vol spike is the highest-risk scenario.
+        # Soft dependency on QuestDB: silently skipped when DB is unreachable
+        # or too few ticks are available.
+        # Uses the SAME --override-vix / --override-vix1d flags so one flag
+        # per symbol covers all checks for that symbol.
+        _VIX_SPIKE_V5    = _vix_spike_v5    # pts: block if VIX rose > N pts in last 5 min
+        _VIX_SPIKE_V15   = _vix_spike_v15   # pts: block if VIX rose > N pts in last 15 min
+        _VIX_ACCEL_LIMIT = _vix_accel_limit  # pts: block if velocity increased > N pts/interval
+        if enforce_freshness:
+            for _vsym, _vcur, _override_this, _override_flag in (
+                ("VIX",   vix_val,   _override_vix,   "--override-vix"),
+                ("VIX1D", vix1d_val, _override_vix1d, "--override-vix1d"),
+            ):
+                if _vcur is None:
+                    continue
+                # Reuse derivatives pre-computed for the display section above.
+                _d = _vix_derivs.get(_vsym)
+                if not _d:
+                    continue
+                _spike_reason: str | None = None
+                if _d["v5"] is not None and _d["v5"] > _VIX_SPIKE_V5:
+                    _spike_reason = (
+                        f"{_vsym} spiked +{_d['v5']:.2f} pts in 5 min "
+                        f"(limit {_VIX_SPIKE_V5:.0f} pts)"
+                    )
+                elif _d["v15"] is not None and _d["v15"] > _VIX_SPIKE_V15:
+                    _spike_reason = (
+                        f"{_vsym} rose +{_d['v15']:.2f} pts in 15 min "
+                        f"(limit {_VIX_SPIKE_V15:.0f} pts)"
+                    )
+                elif _d["accel"] is not None and _d["accel"] > _VIX_ACCEL_LIMIT:
+                    _spike_reason = (
+                        f"{_vsym} accelerating: velocity increased "
+                        f"+{_d['accel']:.2f} pts/interval "
+                        f"(limit {_VIX_ACCEL_LIMIT:.0f} pts)"
+                    )
+                if _spike_reason:
+                    if not _override_this:
+                        print(f"\n  {_color(f'⛔ Trade BLOCKED: {_spike_reason}.', '91')}")
+                        print(f"     Rapidly rising volatility increases gap risk on credit spreads.")
+                        print(f"     Pass {_override_flag} to trade during a volatility spike.")
+                        return 1
+                    print(f"  {_color(f'⚠ {_spike_reason} — proceeding with {_override_flag}', '93')}")
+
+        skip_margin = getattr(args, "skip_margin", False)
         if not confirm and mode != "dry-run":
             # Auto-validate with IBKR margin check when --live (catches rejections early)
-            if mode in ("live", "paper") and trade_request.multi_leg_order and not nocheck:
+            if mode in ("live", "paper") and trade_request.multi_leg_order and not nocheck and not skip_margin:
                 order = trade_request.multi_leg_order
                 margin_payload = {"order": order.model_dump(), "timeout": 20.0}
                 try:
@@ -8171,6 +8425,18 @@ async def _cmd_daemon(args) -> int:
             if stream_cfg.limit_quote_max_age_sec is not None:
                 settings.limit_quote_max_age_sec = float(stream_cfg.limit_quote_max_age_sec)
                 print(f"  Trade default: limit_quote_max_age_sec = {settings.limit_quote_max_age_sec} (from YAML)")
+            if stream_cfg.vix_limit is not None:
+                settings.vix_limit = float(stream_cfg.vix_limit)
+                print(f"  Trade default: vix_limit = {settings.vix_limit} (from YAML)")
+            if stream_cfg.vix_spike_v5 is not None:
+                settings.vix_spike_v5 = float(stream_cfg.vix_spike_v5)
+                print(f"  Trade default: vix_spike_v5 = {settings.vix_spike_v5} (from YAML)")
+            if stream_cfg.vix_spike_v15 is not None:
+                settings.vix_spike_v15 = float(stream_cfg.vix_spike_v15)
+                print(f"  Trade default: vix_spike_v15 = {settings.vix_spike_v15} (from YAML)")
+            if stream_cfg.vix_accel_limit is not None:
+                settings.vix_accel_limit = float(stream_cfg.vix_accel_limit)
+                print(f"  Trade default: vix_accel_limit = {settings.vix_accel_limit} (from YAML)")
 
             # Export pre/post-market window into env vars so the gating helpers
             # in market_data and option_quote_streaming honor the YAML setting.
@@ -9626,6 +9892,12 @@ Required flags:
                       help="Limit price (required for LIMIT orders)")
     t_eq.add_argument("--nocheck", action="store_true",
                       help="Skip IBKR margin validation — show cached prices only")
+    t_eq.add_argument("--skip-margin", action="store_true",
+                      help="Skip the IBKR margin check (saves ~5-10s at the cost of no margin pre-validation)")
+    t_eq.add_argument("--override-vix", action="store_true",
+                      help="Bypass the VIX > 25 volatility circuit-breaker.")
+    t_eq.add_argument("--override-vix1d", action="store_true",
+                      help="Bypass the VIX1D > 25 volatility circuit-breaker.")
     t_eq.add_argument("--confirm", action="store_true",
                       help="Confirm and execute (without this, shows order summary only)")
     _add_connection_args(t_eq)
@@ -9741,6 +10013,8 @@ P&L: credit_received - cost_to_close (max profit = full credit, max loss = width
                       help="Close an existing position (BUY_TO_CLOSE / SELL_TO_CLOSE)")
     t_cs.add_argument("--nocheck", action="store_true",
                       help="Skip IBKR margin validation — show cached prices only")
+    t_cs.add_argument("--skip-margin", action="store_true",
+                      help="Skip the IBKR margin check (saves ~5-10s at the cost of no margin pre-validation)")
     t_cs.add_argument("--trading-class", default=None,
                       help="Override the default trading class (SPX→SPXW, RUT→RUTW, "
                            "NDX→NDXP). Pass 'SPX'/'RUT'/'NDX' for AM-settled monthly, "
@@ -9753,6 +10027,10 @@ P&L: credit_received - cost_to_close (max profit = full credit, max loss = width
                       help="Bypass the credit-direction safety check. Normally a "
                            "credit-spread that nets out as a debit (you spending) "
                            "is blocked because that's almost certainly a mistake.")
+    t_cs.add_argument("--override-vix", action="store_true",
+                      help="Bypass the VIX > 25 volatility circuit-breaker.")
+    t_cs.add_argument("--override-vix1d", action="store_true",
+                      help="Bypass the VIX1D > 25 volatility circuit-breaker.")
     t_cs.add_argument("--confirm", action="store_true",
                       help="Confirm and execute (without this, shows order summary only)")
     _add_connection_args(t_cs)
@@ -9784,10 +10062,16 @@ P&L: value_on_close - debit_paid (max profit = width - debit, max loss = debit p
                       help="Close an existing position (SELL_TO_CLOSE / BUY_TO_CLOSE)")
     t_ds.add_argument("--nocheck", action="store_true",
                       help="Skip IBKR margin validation — show cached prices only")
+    t_ds.add_argument("--skip-margin", action="store_true",
+                      help="Skip the IBKR margin check (saves ~5-10s at the cost of no margin pre-validation)")
     t_ds.add_argument("--trading-class", default=None,
                       help="Override the default trading class (SPX→SPXW, RUT→RUTW, "
                            "NDX→NDXP). Pass 'SPX'/'RUT'/'NDX' for AM-settled monthly, "
                            "or '' to disable forcing entirely.")
+    t_ds.add_argument("--override-vix", action="store_true",
+                      help="Bypass the VIX > 25 volatility circuit-breaker.")
+    t_ds.add_argument("--override-vix1d", action="store_true",
+                      help="Bypass the VIX1D > 25 volatility circuit-breaker.")
     t_ds.add_argument("--confirm", action="store_true",
                       help="Confirm and execute (without this, shows order summary only)")
     _add_connection_args(t_ds)
@@ -9859,6 +10143,8 @@ P&L: combined credit - cost_to_close (max profit = total credit, max loss = wide
                       help="Close an existing position (reverses all legs)")
     t_ic.add_argument("--nocheck", action="store_true",
                       help="Skip IBKR margin validation — show cached prices only")
+    t_ic.add_argument("--skip-margin", action="store_true",
+                      help="Skip the IBKR margin check (saves ~5-10s at the cost of no margin pre-validation)")
     t_ic.add_argument("--trading-class", default=None,
                       help="Override the default trading class (SPX→SPXW, RUT→RUTW, "
                            "NDX→NDXP). Pass 'SPX'/'RUT'/'NDX' for AM-settled monthly, "
@@ -9871,6 +10157,10 @@ P&L: combined credit - cost_to_close (max profit = total credit, max loss = wide
                       help="Bypass the credit-direction safety check. Normally an "
                            "iron-condor that nets out as a debit (you spending) "
                            "is blocked because that's almost certainly a mistake.")
+    t_ic.add_argument("--override-vix", action="store_true",
+                      help="Bypass the VIX > 25 volatility circuit-breaker.")
+    t_ic.add_argument("--override-vix1d", action="store_true",
+                      help="Bypass the VIX1D > 25 volatility circuit-breaker.")
     t_ic.add_argument("--confirm", action="store_true",
                       help="Confirm and execute (without this, shows order summary only)")
     _add_connection_args(t_ic)
@@ -9913,6 +10203,8 @@ Supported position types:
                       help="Use mid-point pricing")
     t_rp.add_argument("--nocheck", action="store_true",
                       help="Skip IBKR margin validation")
+    t_rp.add_argument("--skip-margin", action="store_true",
+                      help="Skip the IBKR margin check (saves ~5-10s at the cost of no margin pre-validation)")
     t_rp.add_argument("--trading-class", default=None,
                       help="Override the default trading class on the rebuilt "
                            "order. See `trade --help`.")
@@ -9922,6 +10214,10 @@ Supported position types:
     t_rp.add_argument("--override-spend-credit", action="store_true",
                       help="Bypass the credit-direction safety check on "
                            "credit-spread / iron-condor replays.")
+    t_rp.add_argument("--override-vix", action="store_true",
+                      help="Bypass the VIX > 25 volatility circuit-breaker.")
+    t_rp.add_argument("--override-vix1d", action="store_true",
+                      help="Bypass the VIX1D > 25 volatility circuit-breaker.")
     t_rp.add_argument("--confirm", action="store_true",
                       help="Confirm and execute (without this, shows order summary only)")
     _add_connection_args(t_rp)

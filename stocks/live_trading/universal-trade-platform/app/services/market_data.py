@@ -152,7 +152,7 @@ _OPTION_STALE_TTL = 300.0     # stale fallback (5 min)
 
 
 # Absolute floor prices per index — reject garbage from TWS/CPG
-_INDEX_FLOOR_PRICES = {"SPX": 3000, "NDX": 10000, "RUT": 1000, "DJX": 200, "VIX": 5}
+_INDEX_FLOOR_PRICES = {"SPX": 5000, "NDX": 18000, "RUT": 1700, "DJX": 320, "VIX": 5}
 
 
 def _is_valid_price(symbol: str, price: float) -> bool:

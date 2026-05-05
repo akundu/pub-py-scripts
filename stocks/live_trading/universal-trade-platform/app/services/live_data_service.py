@@ -16,6 +16,7 @@ from typing import Optional
 
 from app.models import DailyPnL, DashboardSummary, PerformanceMetrics, StatusReport, TrackedPosition
 from app.services.dashboard_service import DashboardService
+from app.services.market_data import get_option_quotes
 from app.services.position_store import PlatformPositionStore
 
 logger = logging.getLogger(__name__)
@@ -308,6 +309,156 @@ def _compute_spread_metrics(positions: list[dict]) -> None:
         }
 
 
+def _compute_net_delta_for_position(
+    p: dict,
+    delta_lookup: dict[tuple, float],
+) -> float | None:
+    """Compute net delta for a position using a pre-built {(sym,exp,ot,strike): delta} map."""
+    sym = p.get("symbol", "").upper()
+    exp = p.get("expiration") or ""
+    otype = p.get("order_type", "")
+    legs = p.get("legs") or []
+
+    if otype == "multi_leg" and legs:
+        net_delta = 0.0
+        valid_legs = [l for l in legs if l.get("strike") is not None]
+        found = 0
+        for leg in valid_legs:
+            action = leg.get("action", "")
+            opt_type = (leg.get("option_type") or "").upper()
+            strike = float(leg.get("strike"))
+            delta = delta_lookup.get((sym, exp, opt_type, strike))
+            if delta is not None:
+                sign = -1 if action == "SELL" else 1
+                net_delta += sign * delta
+                found += 1
+        if found == len(valid_legs) and found > 0:
+            return round(net_delta, 4)
+
+    elif otype == "option":
+        qty = p.get("quantity", 0) or 0
+        right = p.get("right", "")
+        opt_type = "PUT" if right == "P" else "CALL"
+        strike = p.get("strike")
+        if strike:
+            delta = delta_lookup.get((sym, exp, opt_type, float(strike)))
+            if delta is not None:
+                sign = -1 if qty < 0 else 1
+                return round(sign * delta, 4)
+
+    return None
+
+
+async def _enrich_with_greeks(positions: list[dict]) -> None:
+    """Add net_delta to each position.
+
+    Pass 1: check the option quote streaming cache (sync, instant).
+    Pass 2: for positions still missing delta, fire concurrent provider
+            fetches with a 5s timeout (uses the live IBKR connection).
+
+    Requires ALL legs of a spread to have delta data before setting net_delta,
+    so partial/incorrect values are never shown.
+    """
+    import asyncio
+    from app.services.option_quote_streaming import get_option_quote_streaming
+
+    # --- Pass 1: streaming cache lookup (sync, instant) --------------------
+    delta_lookup: dict[tuple, float] = {}
+    svc = get_option_quote_streaming()
+    if svc:
+        # Collect all unique (sym, exp, opt_type) combos across all legs
+        needed_strikes: dict[tuple, set] = {}
+        for p in positions:
+            sym = (p.get("symbol") or "").upper()
+            exp = p.get("expiration") or ""
+            for leg in (p.get("legs") or []):
+                ot = (leg.get("option_type") or "").upper()
+                sk = leg.get("strike")
+                if sym and exp and ot and sk is not None:
+                    needed_strikes.setdefault((sym, exp, ot), set()).add(float(sk))
+            # Single options
+            if p.get("order_type") == "option":
+                right = p.get("right", "")
+                ot = "PUT" if right == "P" else "CALL"
+                sk = p.get("strike")
+                if sym and exp and sk:
+                    needed_strikes.setdefault((sym, exp, ot), set()).add(float(sk))
+
+        for (sym, exp, ot), strikes in needed_strikes.items():
+            for sk in strikes:
+                d = svc.get_delta_for_strike(sym, exp, ot, sk)
+                if d is not None:
+                    delta_lookup[(sym, exp, ot, sk)] = d
+
+    # Apply pass-1 results
+    for p in positions:
+        nd = _compute_net_delta_for_position(p, delta_lookup)
+        if nd is not None:
+            p["net_delta"] = nd
+
+    # --- Pass 2: provider fetch for positions still lacking delta ----------
+    # Collect unique (sym, exp, opt_type) + strike ranges not yet resolved
+    missing: dict[tuple, tuple[float, float]] = {}
+    for p in positions:
+        if p.get("net_delta") is not None:
+            continue
+        sym = (p.get("symbol") or "").upper()
+        exp = p.get("expiration") or ""
+        for leg in (p.get("legs") or []):
+            ot = (leg.get("option_type") or "").upper()
+            sk = leg.get("strike")
+            if sym and exp and ot and sk is not None:
+                key = (sym, exp, ot)
+                sk_f = float(sk)
+                cur_min, cur_max = missing.get(key, (sk_f, sk_f))
+                missing[key] = (min(cur_min, sk_f), max(cur_max, sk_f))
+        if p.get("order_type") == "option":
+            right = p.get("right", "")
+            ot = "PUT" if right == "P" else "CALL"
+            sk = p.get("strike")
+            if sym and exp and sk:
+                key = (sym, exp, ot)
+                sk_f = float(sk)
+                cur_min, cur_max = missing.get(key, (sk_f, sk_f))
+                missing[key] = (min(cur_min, sk_f), max(cur_max, sk_f))
+
+    if not missing:
+        return
+
+    async def _fetch_one(sym, exp, ot, sk_min, sk_max):
+        try:
+            quotes = await asyncio.wait_for(
+                get_option_quotes(sym, exp, ot,
+                                  strike_min=sk_min, strike_max=sk_max,
+                                  max_age=120),
+                timeout=5.0,
+            )
+            return (sym, exp, ot), quotes
+        except Exception:
+            return (sym, exp, ot), []
+
+    fetched = await asyncio.gather(*[
+        _fetch_one(sym, exp, ot, sk_min, sk_max)
+        for (sym, exp, ot), (sk_min, sk_max) in missing.items()
+    ])
+
+    for (sym, exp, ot), quotes in fetched:
+        for q in quotes:
+            sk = q.get("strike")
+            g = q.get("greeks") or {}
+            d = g.get("delta")
+            if sk is not None and d is not None:
+                delta_lookup[(sym, exp, ot, float(sk))] = float(d)
+
+    # Apply pass-2 results
+    for p in positions:
+        if p.get("net_delta") is not None:
+            continue
+        nd = _compute_net_delta_for_position(p, delta_lookup)
+        if nd is not None:
+            p["net_delta"] = nd
+
+
 def _calc_breach_status(current_price: float, position: dict) -> dict | None:
     """Calculate how close a position is to being breached.
 
@@ -346,6 +497,12 @@ def _calc_breach_status(current_price: float, position: dict) -> dict | None:
         is_itm = current_price >= short_strike
 
     if is_itm:
+        # Sanity check: US index circuit breakers halt at -20%.  If the underlying
+        # appears to be more than 30% below the short strike it almost certainly
+        # reflects stale/garbage data rather than a genuine breach — return None so
+        # the display shows "---" instead of misleading "breached XX%".
+        if distance_pct > 30.0:
+            return None
         severity = "breached"
     elif distance_pct < 0.5:
         severity = "critical"
@@ -645,6 +802,9 @@ class LiveDataService:
 
         # Compute spread metrics (width, credit, ROI, max_loss) for each multi-leg position
         _compute_spread_metrics(grouped)
+
+        # Enrich with delta from streaming cache, falling back to live IBKR fetch
+        await _enrich_with_greeks(grouped)
 
         # Optionally fetch quotes and compute breach status
         if include_quotes:

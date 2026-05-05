@@ -38,6 +38,10 @@ async def get_trade_defaults() -> dict:
         "default_order_type": settings.default_order_type.upper(),
         "limit_slippage_pct": float(settings.limit_slippage_pct),
         "limit_quote_max_age_sec": float(settings.limit_quote_max_age_sec),
+        "vix_limit": float(settings.vix_limit),
+        "vix_spike_v5": float(settings.vix_spike_v5),
+        "vix_spike_v15": float(settings.vix_spike_v15),
+        "vix_accel_limit": float(settings.vix_accel_limit),
     }
 
 

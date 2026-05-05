@@ -80,6 +80,13 @@ class Settings(BaseSettings):
     limit_slippage_pct: float = 0.0             # credit * (1 - N/100) when LIMIT
     limit_quote_max_age_sec: float = 10.0       # force provider refresh if older
 
+    # VIX / VIX1D circuit-breaker thresholds — surfaced via GET /trade/defaults
+    # so the CLI reads them from the daemon's config rather than hardcoding.
+    vix_limit: float = 25.0          # absolute level: block if VIX or VIX1D > this
+    vix_spike_v5: float = 2.0        # 5-min velocity: block if rose > this many pts
+    vix_spike_v15: float = 3.0       # 15-min velocity: block if rose > this many pts
+    vix_accel_limit: float = 1.0     # acceleration: block if velocity increased > this
+
     # LAN trust
     trust_local_network: bool = True
 

@@ -187,6 +187,11 @@ def _calc_breach_status(current_price: float, position: dict) -> dict | None:
         is_itm = current_price >= short_strike
 
     if is_itm:
+        # Sanity guard: US index circuit breakers halt at -20%.  A breach depth
+        # > 30% almost certainly means the price data is stale or wrong rather
+        # than a genuine breach, so return None to avoid misleading alerts.
+        if distance_pct > 30.0:
+            return None
         severity = "breached"
     elif distance_pct < 0.5:
         severity = "critical"

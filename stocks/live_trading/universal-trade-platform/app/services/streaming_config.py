@@ -168,6 +168,38 @@ class StreamingConfig:
     option_quotes_premarket_minutes: int = 10
     option_quotes_postmarket_minutes: int = 10
 
+    # ── Long-DTE percentile-based option fetching (DTE 5-20) ────────────────
+    # For longer-dated options, fixed-percentage strike ranges are too broad
+    # and miss the tail risk. Instead, use the percentile server to get the
+    # expected move at the configured tier and fetch a narrow band of strikes
+    # centered on that move. The closest Friday is always added to the DTE
+    # list at runtime regardless of whether its DTE is in long_dte_list.
+    #
+    # Three-tier hierarchy (each level is independent):
+    #   1. option_quotes_long_dte_enabled=False → no long-DTE fetching (default)
+    #   2. option_quotes_long_dte_enabled=True  → CSV tier only (snapshot bid/ask)
+    #   3. option_quotes_long_dte_ibkr_enabled=True → also fetch from IBKR overlay
+    #      (live prices + greeks for percentile-implied strikes; useful when a
+    #       downstream screener needs live bid/ask/greeks rather than CSV snapshots)
+    option_quotes_long_dte_enabled: bool = False
+    # Enable IBKR overlay for long-DTE percentile strikes (requires long_dte_enabled).
+    option_quotes_long_dte_ibkr_enabled: bool = False
+    # How often to fire the IBKR overlay for long-DTE jobs (independent of
+    # option_quotes_greeks_interval which governs the short-DTE overlay).
+    # 300s default: DTE 5-20 greeks shift slowly; no need for a 25s cadence.
+    option_quotes_long_dte_ibkr_interval: float = 300.0
+    # DTE values to fetch (closest Friday always added dynamically at runtime)
+    option_quotes_long_dte_list: list = field(default_factory=lambda: [5, 10, 15, 20])
+    # Tier: "aggressive"=p90, "moderate"=p95, "conservative"=p98, or literal "p92"
+    option_quotes_long_dte_tier: str = "aggressive"
+    # ±% of spot around the percentile-implied strike to fetch
+    option_quotes_long_dte_strike_band_pct: float = 1.0
+    # Minimum seconds between re-fetches per (symbol, exp, type) for long DTEs
+    option_quotes_long_dte_cooldown_sec: float = 600.0
+    # Percentile server URLs. Primary is probed first; ms1 is the fallback.
+    option_quotes_percentile_url: str = "http://lin1.kundu.dev:9100"
+    option_quotes_percentile_url_backup: str = "http://ms1.kundu.dev:9100"
+
     # ── Trade defaults (daemon-wide) ─────────────────────────────────────────
     # When set, these are applied to the global `settings` at daemon startup
     # and surfaced via GET /trade/defaults. Every LIMIT caller (CLI trade,
@@ -176,6 +208,12 @@ class StreamingConfig:
     default_order_type: Optional[str] = None            # "MARKET" | "LIMIT"
     limit_slippage_pct: Optional[float] = None          # 0..100
     limit_quote_max_age_sec: Optional[float] = None     # seconds
+
+    # VIX / VIX1D circuit-breaker thresholds. None = leave settings default.
+    vix_limit: Optional[float] = None        # absolute level (default 25.0)
+    vix_spike_v5: Optional[float] = None     # 5-min velocity pts (default 2.0)
+    vix_spike_v15: Optional[float] = None    # 15-min velocity pts (default 3.0)
+    vix_accel_limit: Optional[float] = None  # acceleration pts/interval (default 1.0)
 
     def validate(self) -> list[str]:
         """Validate config. Returns list of errors (empty = valid)."""
@@ -356,12 +394,36 @@ def load_streaming_config(path: str | Path) -> StreamingConfig:
         option_quotes_postmarket_minutes=int(
             raw.get("option_quotes_postmarket_minutes", 10)
         ),
+        # Long-DTE percentile-based fetching
+        option_quotes_long_dte_enabled=raw.get("option_quotes_long_dte_enabled", False),
+        option_quotes_long_dte_ibkr_enabled=raw.get("option_quotes_long_dte_ibkr_enabled", False),
+        option_quotes_long_dte_ibkr_interval=float(
+            raw.get("option_quotes_long_dte_ibkr_interval", 300.0)
+        ),
+        option_quotes_long_dte_list=list(raw.get("option_quotes_long_dte_list", [5, 10, 15, 20])),
+        option_quotes_long_dte_tier=raw.get("option_quotes_long_dte_tier", "aggressive"),
+        option_quotes_long_dte_strike_band_pct=float(
+            raw.get("option_quotes_long_dte_strike_band_pct", 1.0)
+        ),
+        option_quotes_long_dte_cooldown_sec=float(
+            raw.get("option_quotes_long_dte_cooldown_sec", 600.0)
+        ),
+        option_quotes_percentile_url=raw.get(
+            "option_quotes_percentile_url", "http://lin1.kundu.dev:9100"
+        ),
+        option_quotes_percentile_url_backup=raw.get(
+            "option_quotes_percentile_url_backup", "http://ms1.kundu.dev:9100"
+        ),
         # Trade defaults: accept either a nested `trade_defaults:` block or
         # top-level keys. Nested form is preferred (clearer scoping); top-level
         # kept for simpler configs.
         default_order_type=_get_trade_default(raw, "default_order_type", str),
         limit_slippage_pct=_get_trade_default(raw, "limit_slippage_pct", float),
         limit_quote_max_age_sec=_get_trade_default(raw, "limit_quote_max_age_sec", float),
+        vix_limit=_get_trade_default(raw, "vix_limit", float),
+        vix_spike_v5=_get_trade_default(raw, "vix_spike_v5", float),
+        vix_spike_v15=_get_trade_default(raw, "vix_spike_v15", float),
+        vix_accel_limit=_get_trade_default(raw, "vix_accel_limit", float),
     )
 
     errors = config.validate()

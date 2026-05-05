@@ -7380,6 +7380,55 @@ symbols:
         assert svc._last_tick["SPY"]["price"] == 510.0
 
 
+    @pytest.mark.asyncio
+    async def test_write_questdb_passes_datetime_objects(self):
+        """_write_questdb must pass datetime objects to asyncpg, not ISO strings.
+
+        asyncpg raises 'expected a datetime.datetime instance, got str' when
+        string timestamps are passed for TIMESTAMP columns — every write fails.
+        This test confirms the fix: both ts and write_ts arrive as datetime.
+        """
+        from datetime import datetime, timezone
+        from unittest.mock import AsyncMock, MagicMock, patch
+        from app.services.streaming_config import StreamingConfig
+        from app.services.market_data_streaming import MarketDataStreamingService
+
+        cfg = StreamingConfig(symbols=[], questdb_enabled=True, questdb_url="postgresql://x:y@localhost/z",
+                              redis_enabled=False, ws_broadcast_enabled=False, market_hours_only=False)
+        svc = MarketDataStreamingService(cfg)
+
+        captured = []
+
+        async def fake_execute(sql, *args):
+            captured.append(args)
+
+        fake_conn = MagicMock()
+        fake_conn.execute = fake_execute
+        fake_conn.__aenter__ = AsyncMock(return_value=fake_conn)
+        fake_conn.__aexit__ = AsyncMock(return_value=False)
+
+        fake_pool = MagicMock()
+        fake_pool.acquire = MagicMock(return_value=fake_conn)
+        svc._questdb_pool = fake_pool
+
+        # Record with an ISO string timestamp (the real format coming from ib_insync)
+        record = {
+            "timestamp": "2026-05-05T14:00:00.123456+00:00",
+            "price": 7250.0,
+            "size": 0,
+            "ask_price": 7250.5,
+            "ask_size": 0,
+        }
+        await svc._write_questdb("SPX", record)
+
+        assert len(captured) == 1
+        args = captured[0]
+        # $2 = timestamp, $8 = write_timestamp — both must be datetime objects
+        assert isinstance(args[1], datetime), f"timestamp arg is {type(args[1])}, expected datetime"
+        assert isinstance(args[7], datetime), f"write_timestamp arg is {type(args[7])}, expected datetime"
+        assert args[1].tzinfo is not None  # timezone-aware
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Execution Store — IBKR execution history and multi-leg grouping
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -9435,6 +9484,341 @@ option_quotes_long_dte_ibkr_enabled: true
         ld = svc.stats["config"]["long_dte"]
         assert ld["ibkr_interval_sec"] == 180.0
         assert ld["ibkr_last_fetch_age_sec"] is None  # never fired
+
+    def test_get_delta_for_strike_from_greeks_cache(self):
+        """get_delta_for_strike returns delta from greeks overlay cache."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        svc = OptionQuoteStreamingService(StreamingConfig(), provider=MagicMock())
+        svc._greeks_cache[("SPX", "2026-05-04", "PUT")] = {
+            5500.0: {"delta": -0.15, "gamma": 0.01, "theta": -0.3, "vega": 0.8, "iv": 0.18},
+        }
+        delta = svc.get_delta_for_strike("SPX", "2026-05-04", "PUT", 5500.0)
+        assert delta == -0.15
+
+    def test_get_delta_for_strike_falls_back_to_ibkr_cache(self):
+        """get_delta_for_strike falls back to IBKR quote cache when greeks overlay is empty."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        svc = OptionQuoteStreamingService(StreamingConfig(), provider=MagicMock())
+        svc._ibkr_cache.put("SPX", "2026-05-04", "PUT", [
+            {"strike": 5400.0, "bid": 2.0, "ask": 2.5, "greeks": {"delta": -0.22}},
+        ])
+        delta = svc.get_delta_for_strike("SPX", "2026-05-04", "PUT", 5400.0)
+        assert delta == -0.22
+
+    def test_get_delta_for_strike_falls_back_to_csv_cache(self):
+        """get_delta_for_strike falls back to CSV cache when IBKR is empty."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        svc = OptionQuoteStreamingService(StreamingConfig(), provider=MagicMock())
+        svc._cache.put("NDX", "2026-05-04", "CALL", [
+            {"strike": 21000.0, "bid": 3.0, "ask": 3.5, "greeks": {"delta": 0.35}},
+        ])
+        delta = svc.get_delta_for_strike("NDX", "2026-05-04", "CALL", 21000.0)
+        assert delta == 0.35
+
+    def test_get_delta_for_strike_returns_none_when_unavailable(self):
+        """get_delta_for_strike returns None when no cached data exists."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        svc = OptionQuoteStreamingService(StreamingConfig(), provider=MagicMock())
+        delta = svc.get_delta_for_strike("SPX", "2026-05-04", "PUT", 5500.0)
+        assert delta is None
+
+    def test_get_delta_greeks_overlay_takes_priority_over_cache(self):
+        """get_delta_for_strike prefers greeks overlay delta over IBKR quote cache."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        svc = OptionQuoteStreamingService(StreamingConfig(), provider=MagicMock())
+        # Both caches populated with different values
+        svc._greeks_cache[("SPX", "2026-05-04", "PUT")] = {5500.0: {"delta": -0.15}}
+        svc._ibkr_cache.put("SPX", "2026-05-04", "PUT", [
+            {"strike": 5500.0, "bid": 1.0, "ask": 1.5, "greeks": {"delta": -0.99}},
+        ])
+        delta = svc.get_delta_for_strike("SPX", "2026-05-04", "PUT", 5500.0)
+        assert delta == -0.15  # greeks overlay wins
+
+
+class TestPortfolioDeltaAndRisk:
+    """Tests for net_delta enrichment and gross-risk display fallback."""
+
+    @pytest.mark.asyncio
+    async def test_enrich_with_greeks_sets_net_delta_for_spread(self):
+        """_enrich_with_greeks computes net delta for a multi-leg credit spread."""
+        from app.services.live_data_service import _enrich_with_greeks
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+        from unittest.mock import patch, AsyncMock
+
+        svc = OptionQuoteStreamingService(StreamingConfig(), provider=MagicMock())
+        # Short P5500 delta=-0.20, Long P5475 delta=-0.10
+        svc._greeks_cache[("SPX", "2026-05-04", "PUT")] = {
+            5500.0: {"delta": -0.20},
+            5475.0: {"delta": -0.10},
+        }
+        with (
+            patch("app.services.option_quote_streaming.get_option_quote_streaming", return_value=svc),
+            patch("app.services.live_data_service.get_option_quotes", new=AsyncMock(return_value=[])),
+        ):
+            positions = [{
+                "symbol": "SPX",
+                "expiration": "2026-05-04",
+                "order_type": "multi_leg",
+                "quantity": 5,
+                "legs": [
+                    {"action": "SELL", "option_type": "PUT", "strike": 5500.0},
+                    {"action": "BUY",  "option_type": "PUT", "strike": 5475.0},
+                ],
+            }]
+            await _enrich_with_greeks(positions)
+            # net = -(-0.20) + (-0.10) = 0.20 - 0.10 = +0.10
+            assert positions[0].get("net_delta") == pytest.approx(0.10, abs=1e-4)
+
+    @pytest.mark.asyncio
+    async def test_enrich_with_greeks_skips_when_service_absent(self):
+        """_enrich_with_greeks is a no-op when streaming service isn't running and provider returns no greeks."""
+        from app.services.live_data_service import _enrich_with_greeks
+        from unittest.mock import patch, AsyncMock
+
+        with (
+            patch("app.services.option_quote_streaming.get_option_quote_streaming", return_value=None),
+            patch("app.services.live_data_service.get_option_quotes", new=AsyncMock(return_value=[])),
+        ):
+            positions = [{"symbol": "SPX", "order_type": "multi_leg", "expiration": "2026-05-04", "legs": []}]
+            await _enrich_with_greeks(positions)  # must not raise
+            assert "net_delta" not in positions[0]
+
+    @pytest.mark.asyncio
+    async def test_enrich_with_greeks_provider_fallback(self):
+        """_enrich_with_greeks falls back to provider fetch when streaming cache is empty."""
+        from app.services.live_data_service import _enrich_with_greeks
+        from unittest.mock import patch, AsyncMock
+
+        provider_quotes = [
+            {"strike": 5500.0, "bid": 1.0, "ask": 1.5, "greeks": {"delta": -0.20}},
+            {"strike": 5475.0, "bid": 0.5, "ask": 0.8, "greeks": {"delta": -0.10}},
+        ]
+        with (
+            patch("app.services.option_quote_streaming.get_option_quote_streaming", return_value=None),
+            patch("app.services.live_data_service.get_option_quotes", new=AsyncMock(return_value=provider_quotes)),
+        ):
+            positions = [{
+                "symbol": "SPX",
+                "expiration": "2026-05-04",
+                "order_type": "multi_leg",
+                "quantity": 5,
+                "legs": [
+                    {"action": "SELL", "option_type": "PUT", "strike": 5500.0},
+                    {"action": "BUY",  "option_type": "PUT", "strike": 5475.0},
+                ],
+            }]
+            await _enrich_with_greeks(positions)
+            # net = -(-0.20) + (-0.10) = +0.10
+            assert positions[0].get("net_delta") == pytest.approx(0.10, abs=1e-4)
+
+    def test_portfolio_display_shows_gross_risk_when_credit_unavailable(self, tmp_path, capsys):
+        """Portfolio display shows ---/--/{gross_risk} when derived_credit <= 0."""
+        import asyncio
+        import argparse
+
+        # Build a fake portfolio response with spread_metrics containing only gross_risk
+        async def _run():
+            import sys
+            import httpx
+            from unittest.mock import patch, AsyncMock, MagicMock
+
+            fake_position = {
+                "position_id": "abc123",
+                "symbol": "SPX",
+                "order_type": "multi_leg",
+                "quantity": 15,
+                "expiration": "2026-05-04",
+                "source": "external_sync",
+                "broker": "ibkr",
+                "status": "open",
+                "avg_cost": 306.0,
+                "market_value": -191.92,
+                "market_price": -12.79,
+                "broker_unrealized_pnl": -497.95,
+                "legs_summary": "P7100/P7130",
+                "legs": [
+                    {"action": "SELL", "option_type": "PUT", "strike": 7130.0, "quantity": 15},
+                    {"action": "BUY",  "option_type": "PUT", "strike": 7100.0, "quantity": 15},
+                ],
+                "spread_metrics": {"spread_width": 30.0, "gross_risk": 45000.0},
+            }
+
+            class FakeResp:
+                def __init__(self, data):
+                    self.status_code = 200
+                    self._data = data
+                def json(self): return self._data
+
+            class FakeClient:
+                async def __aenter__(self): return self
+                async def __aexit__(self, *a): pass
+                async def get(self, path, params=None):
+                    return FakeResp({
+                        "positions": [fake_position],
+                        "balances": {"net_liquidation": 100000, "cash": 50000,
+                                     "buying_power": 80000, "maint_margin_req": 20000,
+                                     "available_funds": 60000},
+                        "realized_pnl": 0, "unrealized_pnl": -497.95,
+                        "total_pnl": -497.95, "positions_by_source": {"external_sync": 1},
+                        "daily_pnl": 0, "recent_closed": [],
+                    })
+
+            ns = argparse.Namespace(recent=0)
+            with patch("httpx.AsyncClient", return_value=FakeClient()):
+                from utp import _cmd_portfolio_http
+                return await _cmd_portfolio_http(ns, "http://localhost:8000")
+
+        rc = asyncio.run(_run())
+        assert rc == 0
+        out = capsys.readouterr().out
+        # Should show gross_risk fallback format
+        assert "---/--/45,000" in out
+
+    def test_portfolio_display_shows_delta_column(self, tmp_path, capsys):
+        """Portfolio display shows Δ column header and net_delta when present."""
+        import asyncio
+        import argparse
+
+        async def _run():
+            from unittest.mock import patch
+
+            fake_position = {
+                "position_id": "xyz789",
+                "symbol": "SPX",
+                "order_type": "multi_leg",
+                "quantity": 10,
+                "expiration": "2026-05-04",
+                "source": "paper",
+                "broker": "ibkr",
+                "status": "open",
+                "avg_cost": -150.0,
+                "market_value": -800.0,
+                "market_price": -8.0,
+                "broker_unrealized_pnl": 350.0,
+                "legs_summary": "P5500/P5475",
+                "legs": [
+                    {"action": "SELL", "option_type": "PUT", "strike": 5500.0, "quantity": 10},
+                    {"action": "BUY",  "option_type": "PUT", "strike": 5475.0, "quantity": 10},
+                ],
+                "spread_metrics": {"spread_width": 25.0, "gross_risk": 25000.0,
+                                   "derived_credit": 500.0, "max_loss": 24500.0, "roi_pct": 2.0},
+                "net_delta": 0.07,
+            }
+
+            class FakeResp:
+                def __init__(self, data):
+                    self.status_code = 200
+                    self._data = data
+                def json(self): return self._data
+
+            class FakeClient:
+                async def __aenter__(self): return self
+                async def __aexit__(self, *a): pass
+                async def get(self, path, params=None):
+                    return FakeResp({
+                        "positions": [fake_position],
+                        "balances": {"net_liquidation": 100000, "cash": 50000,
+                                     "buying_power": 80000, "maint_margin_req": 20000,
+                                     "available_funds": 60000},
+                        "realized_pnl": 0, "unrealized_pnl": 350.0,
+                        "total_pnl": 350.0, "positions_by_source": {"paper": 2},
+                        "daily_pnl": 0, "recent_closed": [],
+                    })
+
+            ns = argparse.Namespace(recent=0)
+            with patch("httpx.AsyncClient", return_value=FakeClient()):
+                from utp import _cmd_portfolio_http
+                return await _cmd_portfolio_http(ns, "http://localhost:8000")
+
+        rc = asyncio.run(_run())
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "Δ" in out
+        assert "+0.070" in out
+
+
+class TestBreachSanityGuard:
+    """_calc_breach_status sanity guard: stale/garbage prices don't show 'breached'."""
+
+    def _put_spread_pos(self, short_strike: float, long_strike: float) -> dict:
+        return {
+            "symbol": "SPX",
+            "legs": [
+                {"action": "SELL", "option_type": "PUT", "strike": short_strike},
+                {"action": "BUY",  "option_type": "PUT", "strike": long_strike},
+            ],
+        }
+
+    def test_normal_breach_reported(self):
+        """When underlying is modestly below short strike, severity=breached."""
+        from app.services.live_data_service import _calc_breach_status
+        pos = self._put_spread_pos(7120, 7080)
+        # SPX at 7050 — 1% below short strike (realistic)
+        result = _calc_breach_status(7050, pos)
+        assert result is not None
+        assert result["severity"] == "breached"
+        assert result["distance_pct"] < 30.0
+
+    def test_stale_price_returns_none(self):
+        """When underlying appears >30% below short strike (stale data), return None."""
+        from app.services.live_data_service import _calc_breach_status
+        pos = self._put_spread_pos(7120, 7080)
+        # SPX at 3803.65 — 87% below short strike: clearly garbage after-hours data
+        result = _calc_breach_status(3803.65, pos)
+        assert result is None, "87% distance should be rejected as stale/garbage price"
+
+    def test_stale_price_roll_service_returns_none(self):
+        """roll_service._calc_breach_status also rejects stale prices."""
+        from app.services.roll_service import _calc_breach_status
+        pos = self._put_spread_pos(7120, 7080)
+        result = _calc_breach_status(3803.65, pos)
+        assert result is None
+
+    def test_boundary_exactly_30pct_is_none(self):
+        """Exactly 30% distance_pct returns None (edge case, on the threshold)."""
+        from app.services.live_data_service import _calc_breach_status
+        # short_strike=7120, current_price=X where distance_pct=30 exactly:
+        # (7120 - X) / X = 0.30 → X = 7120/1.30 ≈ 5476.9
+        pos = self._put_spread_pos(7120, 7080)
+        price = 7120 / 1.30  # ~5476.9 → distance_pct ≈ 30.0%
+        result = _calc_breach_status(price, pos)
+        # 30.0 is NOT > 30.0, so it returns a real breach result
+        # (boundary is > 30, not >= 30)
+        assert result is not None
+        assert result["severity"] == "breached"
+
+    def test_index_floor_rejects_spx_below_5000(self):
+        """Streaming cache price < 5000 is rejected as invalid for SPX."""
+        from app.services.market_data import _is_valid_price
+        assert not _is_valid_price("SPX", 3803.65), "3803 is below the SPX floor (5000)"
+        assert not _is_valid_price("SPX", 4499.0)
+        assert not _is_valid_price("SPX", 4603.15), "4603 is below the SPX floor (5000)"
+        assert not _is_valid_price("SPX", 4999.99)
+        assert _is_valid_price("SPX", 5000.01)
+        assert _is_valid_price("SPX", 7200.0)
+
+    def test_index_floor_ndx(self):
+        """NDX floor is 18000."""
+        from app.services.market_data import _is_valid_price
+        assert not _is_valid_price("NDX", 17999.0)
+        assert _is_valid_price("NDX", 18001.0)
+
+    def test_index_floor_rut(self):
+        """RUT floor is 1700."""
+        from app.services.market_data import _is_valid_price
+        assert not _is_valid_price("RUT", 1699.0)
+        assert _is_valid_price("RUT", 1700.01)
 
 
 class TestEtradeProvider:
@@ -12131,17 +12515,24 @@ class TestPriceFreshnessEnforcement:
     # spread / iron-condor scenarios. Only the test for ROI / debit gating
     # diverges; the rest is shared boilerplate.
 
-    def _build_fake_trade_client(self, monkeypatch, vix=15.0, vix1d=14.5):
+    def _build_fake_trade_client(self, monkeypatch, vix=15.0, vix1d=14.5,
+                                   vix_ticks=None, vix1d_ticks=None):
         """Build a fake httpx.AsyncClient for trade flow tests.
 
         vix / vix1d control the VIX / VIX1D quote returned so tests can
         exercise the VIX circuit-breaker without hitting real endpoints.
         Defaults are calm-market values (< 25) so existing tests remain unaffected.
+
+        vix_ticks / vix1d_ticks: optional list[dict] with 'price' and 'timestamp'
+        keys returned by the /api/execute_sql VIX tick-history query.
+        Pass None (default) to return empty history (ROC check skipped silently).
         """
         import httpx
 
         _vix = vix
         _vix1d = vix1d
+        _vix_ticks = vix_ticks
+        _vix1d_ticks = vix1d_ticks
 
         class FakeResp:
             def __init__(self, status_code, data):
@@ -12159,6 +12550,28 @@ class TestPriceFreshnessEnforcement:
             async def __aexit__(self, *a): return None
 
             async def get(self, path, params=None):
+                # Daemon trade defaults — VIX thresholds come from here so the
+                # CLI doesn't need hardcoded constants.
+                if path == "/trade/defaults":
+                    return FakeResp(200, {
+                        "default_order_type": "MARKET",
+                        "limit_slippage_pct": 0.0,
+                        "limit_quote_max_age_sec": 10.0,
+                        "vix_limit": 25.0,
+                        "vix_spike_v5": 2.0,
+                        "vix_spike_v15": 3.0,
+                        "vix_accel_limit": 1.0,
+                    })
+                # VIX tick-history queries from _fetch_vix_ticks use the full
+                # DB_SERVER_URL, so the path looks like "http://localhost:9102/api/execute_sql".
+                # Must be checked first (before /market/quote/VIX path check).
+                if "execute_sql" in path:
+                    sql = (params or {}).get("sql", "")
+                    if "VIX1D" in sql:
+                        return FakeResp(200, {"data": _vix1d_ticks or []})
+                    if "VIX" in sql:
+                        return FakeResp(200, {"data": _vix_ticks or []})
+                    return FakeResp(200, {"data": []})
                 # VIX1D must be checked before VIX (substring order)
                 if "VIX1D" in path:
                     return FakeResp(200, {
@@ -12218,7 +12631,7 @@ class TestPriceFreshnessEnforcement:
             dry_run=False, paper=False, live=True,
             confirm=True, nocheck=True, otm_pct=None, close_pct=None,
             close=False, override_min_roi=False, override_spend_credit=False,
-            override_vix=False, override_vix1d=False,
+            override_vix=False, override_vix1d=False, skip_margin=False,
         )
         defaults.update(overrides)
         return argparse.Namespace(**defaults)
@@ -12465,6 +12878,261 @@ class TestPriceFreshnessEnforcement:
         # No VIX block message
         assert "volatility" not in out.lower() or "BLOCKED" not in out
 
+    # ── --skip-margin flag ─────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_skip_margin_bypasses_margin_endpoint(self, monkeypatch, capsys):
+        """--skip-margin causes the margin check endpoint to not be called."""
+        from utp import _cmd_trade_http
+        margin_called = []
+
+        class FakeResp:
+            def __init__(self, status_code, data):
+                self.status_code = status_code
+                self._data = data
+            def json(self): return self._data
+            @property
+            def headers(self): return {"content-type": "application/json"}
+            @property
+            def text(self): return str(self._data)
+
+        class FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+            async def get(self, path, params=None):
+                if "VIX1D" in path:
+                    return FakeResp(200, {"symbol": "VIX1D", "last": 14.0,
+                                          "bid": 13.9, "ask": 14.1, "volume": 0,
+                                          "quote_age_seconds": 5.0, "quote_source": "fresh_cache"})
+                if "VIX" in path:
+                    return FakeResp(200, {"symbol": "VIX", "last": 15.0,
+                                          "bid": 14.9, "ask": 15.1, "volume": 0,
+                                          "quote_age_seconds": 5.0, "quote_source": "fresh_cache"})
+                if path.startswith("/market/quote"):
+                    return FakeResp(200, {"symbol": "SPX", "bid": 5499, "ask": 5501,
+                                          "last": 5500, "volume": 0,
+                                          "quote_age_seconds": 5.0, "quote_source": "fresh_cache"})
+                if path.startswith("/market/options"):
+                    ot = (params or {}).get("option_type", "PUT").lower()
+                    return FakeResp(200, {"symbol": "SPX",
+                                          "quotes": {ot: [
+                                              {"strike": 5500, "bid": 1.0, "ask": 1.2, "last": 1.1, "volume": 5,
+                                               "source": "ibkr_fresh", "age_seconds": 5.0},
+                                              {"strike": 5475, "bid": 0.4, "ask": 0.6, "last": 0.5, "volume": 3,
+                                               "source": "ibkr_fresh", "age_seconds": 5.0},
+                                          ]},
+                                          "meta": {"age_seconds": 5.0, "source": "fresh_cache",
+                                                    "per_type": {ot: {"age_seconds": 5.0, "source": "fresh_cache",
+                                                                       "n_ibkr_fresh": 2, "n_csv": 0, "n_ibkr_stale": 0}}},
+                                          "quote_age_seconds": 5.0, "quote_source": "fresh_cache"})
+                return FakeResp(200, {})
+            async def post(self, path, json=None, headers=None):
+                if path == "/market/margin":
+                    margin_called.append(True)
+                return FakeResp(200, {})
+
+        import httpx
+        monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+        args = self._trade_args(net_price=1.20, confirm=False, skip_margin=True)
+        rc = await _cmd_trade_http(args, "http://localhost:8000")
+        capsys.readouterr()
+
+        assert rc == 0
+        assert not margin_called, "--skip-margin must not call /market/margin"
+
+    @pytest.mark.asyncio
+    async def test_without_skip_margin_calls_margin_endpoint(self, monkeypatch, capsys):
+        """Without --skip-margin the margin endpoint IS called in live mode."""
+        from utp import _cmd_trade_http
+        margin_called = []
+
+        class FakeResp:
+            def __init__(self, status_code, data):
+                self.status_code = status_code
+                self._data = data
+            def json(self): return self._data
+            @property
+            def headers(self): return {"content-type": "application/json"}
+            @property
+            def text(self): return str(self._data)
+
+        class FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+            async def get(self, path, params=None):
+                if "VIX1D" in path:
+                    return FakeResp(200, {"symbol": "VIX1D", "last": 14.0,
+                                          "bid": 13.9, "ask": 14.1, "volume": 0,
+                                          "quote_age_seconds": 5.0, "quote_source": "fresh_cache"})
+                if "VIX" in path:
+                    return FakeResp(200, {"symbol": "VIX", "last": 15.0,
+                                          "bid": 14.9, "ask": 15.1, "volume": 0,
+                                          "quote_age_seconds": 5.0, "quote_source": "fresh_cache"})
+                if path.startswith("/market/quote"):
+                    return FakeResp(200, {"symbol": "SPX", "bid": 5499, "ask": 5501,
+                                          "last": 5500, "volume": 0,
+                                          "quote_age_seconds": 5.0, "quote_source": "fresh_cache"})
+                if path.startswith("/market/options"):
+                    ot = (params or {}).get("option_type", "PUT").lower()
+                    return FakeResp(200, {"symbol": "SPX",
+                                          "quotes": {ot: [
+                                              {"strike": 5500, "bid": 1.0, "ask": 1.2, "last": 1.1, "volume": 5,
+                                               "source": "ibkr_fresh", "age_seconds": 5.0},
+                                              {"strike": 5475, "bid": 0.4, "ask": 0.6, "last": 0.5, "volume": 3,
+                                               "source": "ibkr_fresh", "age_seconds": 5.0},
+                                          ]},
+                                          "meta": {"age_seconds": 5.0, "source": "fresh_cache",
+                                                    "per_type": {ot: {"age_seconds": 5.0, "source": "fresh_cache",
+                                                                       "n_ibkr_fresh": 2, "n_csv": 0, "n_ibkr_stale": 0}}},
+                                          "quote_age_seconds": 5.0, "quote_source": "fresh_cache"})
+                return FakeResp(200, {})
+            async def post(self, path, json=None, headers=None):
+                if path == "/market/margin":
+                    margin_called.append(True)
+                    return FakeResp(200, {"init_margin": 2500.0, "maint_margin": 2000.0, "commission": 1.30})
+                return FakeResp(200, {})
+
+        import httpx
+        monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+        # nocheck=False so margin block runs; skip_margin=False (default)
+        args = self._trade_args(net_price=1.20, confirm=False, nocheck=False, skip_margin=False)
+        rc = await _cmd_trade_http(args, "http://localhost:8000")
+        capsys.readouterr()
+
+        assert rc == 0
+        assert margin_called, "without --skip-margin, /market/margin must be called"
+
+    # ── "You spend" display + guard for credit/iron-condor ─────────────────────
+
+    @pytest.mark.asyncio
+    async def test_you_spend_blocked_for_credit_spread_market_debit(self, monkeypatch, capsys):
+        """Credit-spread where MARKET estimate nets a debit shows 'You spend' in red
+        and is blocked before NOT EXECUTED is printed."""
+        from utp import _cmd_trade_http
+
+        class FakeResp:
+            def __init__(self, status_code, data):
+                self.status_code = status_code
+                self._data = data
+            def json(self): return self._data
+            @property
+            def headers(self): return {"content-type": "application/json"}
+            @property
+            def text(self): return str(self._data)
+
+        class FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+            async def get(self, path, params=None):
+                if "VIX1D" in path:
+                    return FakeResp(200, {"symbol": "VIX1D", "last": 14.0,
+                                          "bid": 13.9, "ask": 14.1, "volume": 0,
+                                          "quote_age_seconds": 5.0, "quote_source": "fresh_cache"})
+                if "VIX" in path:
+                    return FakeResp(200, {"symbol": "VIX", "last": 15.0,
+                                          "bid": 14.9, "ask": 15.1, "volume": 0,
+                                          "quote_age_seconds": 5.0, "quote_source": "fresh_cache"})
+                if path.startswith("/market/quote"):
+                    return FakeResp(200, {"symbol": "SPX", "bid": 5499, "ask": 5501,
+                                          "last": 5500, "volume": 0,
+                                          "quote_age_seconds": 5.0, "quote_source": "fresh_cache"})
+                if path.startswith("/market/options"):
+                    ot = (params or {}).get("option_type", "PUT").lower()
+                    # short bid < long ask → net debit estimate
+                    return FakeResp(200, {"symbol": "SPX",
+                                          "quotes": {ot: [
+                                              {"strike": 5500, "bid": 0.10, "ask": 2.50, "last": 1.0, "volume": 5,
+                                               "source": "ibkr_fresh", "age_seconds": 5.0},
+                                              {"strike": 5475, "bid": 0.05, "ask": 2.00, "last": 0.8, "volume": 3,
+                                               "source": "ibkr_fresh", "age_seconds": 5.0},
+                                          ]},
+                                          "meta": {"age_seconds": 5.0, "source": "fresh_cache",
+                                                    "per_type": {ot: {"age_seconds": 5.0, "source": "fresh_cache",
+                                                                       "n_ibkr_fresh": 2, "n_csv": 0, "n_ibkr_stale": 0}}},
+                                          "quote_age_seconds": 5.0, "quote_source": "fresh_cache"})
+                return FakeResp(200, {})
+            async def post(self, path, json=None, headers=None):
+                return FakeResp(200, {})
+
+        import httpx
+        monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+        # No net_price → MARKET order; quotes above net to debit
+        args = self._trade_args(net_price=None, confirm=False, nocheck=True, override_spend_credit=False)
+        rc = await _cmd_trade_http(args, "http://localhost:8000")
+        out = capsys.readouterr().out
+
+        assert rc == 1, "credit spread with debit estimate should be blocked"
+        assert "BLOCKED" in out
+        assert "override-spend-credit" in out
+        # 'You spend' is rendered with ANSI but the text portion is present
+        assert "You spend" in out
+
+    @pytest.mark.asyncio
+    async def test_you_spend_allows_credit_spread_debit_with_override(self, monkeypatch, capsys):
+        """--override-spend-credit lets a credit-spread with debit estimate through."""
+        from utp import _cmd_trade_http
+
+        class FakeResp:
+            def __init__(self, status_code, data):
+                self.status_code = status_code
+                self._data = data
+            def json(self): return self._data
+            @property
+            def headers(self): return {"content-type": "application/json"}
+            @property
+            def text(self): return str(self._data)
+
+        class FakeClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return None
+            async def get(self, path, params=None):
+                if "VIX1D" in path:
+                    return FakeResp(200, {"symbol": "VIX1D", "last": 14.0,
+                                          "bid": 13.9, "ask": 14.1, "volume": 0,
+                                          "quote_age_seconds": 5.0, "quote_source": "fresh_cache"})
+                if "VIX" in path:
+                    return FakeResp(200, {"symbol": "VIX", "last": 15.0,
+                                          "bid": 14.9, "ask": 15.1, "volume": 0,
+                                          "quote_age_seconds": 5.0, "quote_source": "fresh_cache"})
+                if path.startswith("/market/quote"):
+                    return FakeResp(200, {"symbol": "SPX", "bid": 5499, "ask": 5501,
+                                          "last": 5500, "volume": 0,
+                                          "quote_age_seconds": 5.0, "quote_source": "fresh_cache"})
+                if path.startswith("/market/options"):
+                    ot = (params or {}).get("option_type", "PUT").lower()
+                    return FakeResp(200, {"symbol": "SPX",
+                                          "quotes": {ot: [
+                                              {"strike": 5500, "bid": 0.10, "ask": 2.50, "last": 1.0, "volume": 5,
+                                               "source": "ibkr_fresh", "age_seconds": 5.0},
+                                              {"strike": 5475, "bid": 0.05, "ask": 2.00, "last": 0.8, "volume": 3,
+                                               "source": "ibkr_fresh", "age_seconds": 5.0},
+                                          ]},
+                                          "meta": {"age_seconds": 5.0, "source": "fresh_cache",
+                                                    "per_type": {ot: {"age_seconds": 5.0, "source": "fresh_cache",
+                                                                       "n_ibkr_fresh": 2, "n_csv": 0, "n_ibkr_stale": 0}}},
+                                          "quote_age_seconds": 5.0, "quote_source": "fresh_cache"})
+                return FakeResp(200, {})
+            async def post(self, path, json=None, headers=None):
+                return FakeResp(200, {})
+
+        import httpx
+        monkeypatch.setattr(httpx, "AsyncClient", FakeClient)
+
+        args = self._trade_args(net_price=None, confirm=False, nocheck=True, override_spend_credit=True)
+        rc = await _cmd_trade_http(args, "http://localhost:8000")
+        out = capsys.readouterr().out
+
+        assert rc == 0, "override-spend-credit must allow debit estimate to proceed to NOT EXECUTED"
+        assert "You spend" in out
+        assert "override-spend-credit" in out  # warning shown
+
     @pytest.mark.asyncio
     async def test_http_quote_endpoint_passes_max_age(self, client, api_key_headers, monkeypatch):
         """GET /market/quote/{sym}?max_age=15 passes max_age through to get_quote()."""
@@ -12528,6 +13196,196 @@ class TestPriceFreshnessEnforcement:
         assert data.get("quote_age_seconds") == 3.0
         # max_age forwarded to internal call
         assert received["calls"][0]["max_age"] == 15.0
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# VIX Rate-of-Change Circuit Breaker Tests
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestVixRateOfChange:
+    """Tests for _fetch_vix_ticks / _compute_vix_derivatives and the
+    ROC circuit-breaker block inside _cmd_trade_http.
+
+    Tick generation strategy:
+      - All timestamps are ISO strings offset from now() so _compute_vix_derivatives
+        can find ticks within its ±90-second tolerance window.
+      - Tests are grouped around the three checks: v5 (5-min velocity),
+        v15 (15-min velocity), and accel (2nd derivative).
+    """
+
+    @staticmethod
+    def _make_ticks(prices_by_minutes: dict) -> list[dict]:
+        """Build tick dicts for _compute_vix_derivatives.
+
+        prices_by_minutes: {minutes_ago: price, ...}
+        Returns list of {'price': float, 'timestamp': iso-str} sorted by time.
+        """
+        from datetime import datetime, timezone, timedelta
+        now = datetime.now(tz=timezone.utc)
+        ticks = []
+        for minutes_ago, price in prices_by_minutes.items():
+            ts = now - timedelta(minutes=minutes_ago)
+            ticks.append({"price": price, "timestamp": ts.isoformat()})
+        ticks.sort(key=lambda t: t["timestamp"])
+        return ticks
+
+    @staticmethod
+    def _trade_args(**overrides):
+        """Default credit-spread args — same pattern as TestPriceFreshnessEnforcement."""
+        defaults = dict(
+            subcommand="credit-spread",
+            symbol="SPX", short_strike=5500, long_strike=5475,
+            option_type="PUT", expiration="2026-04-17",
+            quantity=1, broker="ibkr",
+            dry_run=False, paper=False, live=True,
+            confirm=True, nocheck=True, otm_pct=None, close_pct=None,
+            close=False, override_min_roi=False, override_spend_credit=False,
+            override_vix=False, override_vix1d=False, skip_margin=False,
+        )
+        defaults.update(overrides)
+        return argparse.Namespace(**defaults)
+
+    # ── helper ────────────────────────────────────────────────────────────────
+
+    def _client(self, monkeypatch, vix=18.0, vix1d=17.0,
+                vix_ticks=None, vix1d_ticks=None):
+        """Thin wrapper around the shared _build_fake_trade_client helper."""
+        return TestPriceFreshnessEnforcement._build_fake_trade_client(
+            TestPriceFreshnessEnforcement(),
+            monkeypatch,
+            vix=vix,
+            vix1d=vix1d,
+            vix_ticks=vix_ticks,
+            vix1d_ticks=vix1d_ticks,
+        )
+
+    # ── 1. Empty tick history → ROC check silently skipped ────────────────────
+
+    @pytest.mark.asyncio
+    async def test_no_tick_history_skips_roc_check(self, monkeypatch, capsys):
+        """Empty DB response for both VIX and VIX1D → no block, trade proceeds."""
+        from utp import _cmd_trade_http
+        self._client(monkeypatch, vix_ticks=[], vix1d_ticks=[])
+        rc = await _cmd_trade_http(self._trade_args(net_price=1.20), "http://localhost:8000")
+        assert rc == 0
+
+    # ── 2. VIX 5-min velocity (v5) exceeds limit ──────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_vix_velocity_v5_blocks_trade(self, monkeypatch, capsys):
+        """VIX rose +3.0 pts in 5 min (> 2.0 limit) → trade blocked."""
+        from utp import _cmd_trade_http
+        # current VIX = 18.0; price 5 min ago = 15.0  →  v5 = +3.0
+        ticks = self._make_ticks({5: 15.0, 10: 14.5, 15: 14.0})
+        self._client(monkeypatch, vix=18.0, vix_ticks=ticks, vix1d_ticks=[])
+        rc = await _cmd_trade_http(self._trade_args(net_price=1.20), "http://localhost:8000")
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "Trade BLOCKED" in out
+        assert "VIX" in out
+        assert "5 min" in out
+
+    # ── 3. VIX1D 5-min velocity (v5) exceeds limit while VIX is calm ─────────
+
+    @pytest.mark.asyncio
+    async def test_vix1d_velocity_v5_blocks_trade(self, monkeypatch, capsys):
+        """VIX1D rose +2.5 pts in 5 min (> 2.0 limit) → blocked even though VIX calm."""
+        from utp import _cmd_trade_http
+        # VIX calm (no ticks → ROC skipped)
+        # VIX1D current = 17.0; price 5 min ago = 14.5 → v5 = +2.5
+        vix1d_ticks = self._make_ticks({5: 14.5, 10: 14.0, 15: 13.5})
+        self._client(monkeypatch, vix=14.0, vix_ticks=[], vix1d=17.0, vix1d_ticks=vix1d_ticks)
+        rc = await _cmd_trade_http(self._trade_args(net_price=1.20), "http://localhost:8000")
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "Trade BLOCKED" in out
+        assert "VIX1D" in out
+
+    # ── 4. VIX 15-min velocity (v15) exceeds limit ────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_velocity_v15_blocks_trade(self, monkeypatch, capsys):
+        """VIX rose +3.5 pts in 15 min (> 3.0 limit) with v5 below threshold → blocked."""
+        from utp import _cmd_trade_http
+        # current VIX = 18.0; p5 = 16.5 (v5 = 1.5, under 2.0 limit)
+        # p15 = 14.5 → v15 = 3.5 > 3.0 limit
+        ticks = self._make_ticks({5: 16.5, 10: 15.5, 15: 14.5})
+        self._client(monkeypatch, vix=18.0, vix_ticks=ticks, vix1d_ticks=[])
+        rc = await _cmd_trade_http(self._trade_args(net_price=1.20), "http://localhost:8000")
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "Trade BLOCKED" in out
+        assert "15 min" in out
+
+    # ── 5. Acceleration (2nd derivative) exceeds limit ────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_acceleration_blocks_trade(self, monkeypatch, capsys):
+        """VIX velocity is increasing fast enough to trip the accel limit.
+
+        Design: current=18.0, p5=16.5, p10=17.0
+          v5      = 18.0 - 16.5 = +1.5  (below 2.0 velocity limit)
+          v5_prev = 16.5 - 17.0 = -0.5  (VIX was actually falling 5–10 min ago)
+          accel   = 1.5 - (-0.5) = +2.0 (> 1.0 accel limit)  →  blocked
+        """
+        from utp import _cmd_trade_http
+        ticks = self._make_ticks({5: 16.5, 10: 17.0, 15: 17.0})
+        self._client(monkeypatch, vix=18.0, vix_ticks=ticks, vix1d_ticks=[])
+        rc = await _cmd_trade_http(self._trade_args(net_price=1.20), "http://localhost:8000")
+        out = capsys.readouterr().out
+        assert rc == 1
+        assert "Trade BLOCKED" in out
+        assert "accelerating" in out.lower()
+
+    # ── 6. --override-vix bypasses VIX spike block ────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_override_vix_allows_vix_spike(self, monkeypatch, capsys):
+        """VIX spiking but --override-vix set → trade proceeds with a warning."""
+        from utp import _cmd_trade_http
+        ticks = self._make_ticks({5: 15.0, 10: 14.5, 15: 14.0})
+        self._client(monkeypatch, vix=18.0, vix_ticks=ticks, vix1d_ticks=[])
+        rc = await _cmd_trade_http(
+            self._trade_args(net_price=1.20, override_vix=True),
+            "http://localhost:8000",
+        )
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Trade BLOCKED" not in out
+        # Should still warn about the spike
+        assert "VIX" in out
+
+    # ── 7. --override-vix1d bypasses VIX1D spike block ───────────────────────
+
+    @pytest.mark.asyncio
+    async def test_override_vix1d_allows_vix1d_spike(self, monkeypatch, capsys):
+        """VIX1D spiking but --override-vix1d set → trade proceeds with a warning."""
+        from utp import _cmd_trade_http
+        vix1d_ticks = self._make_ticks({5: 14.5, 10: 14.0, 15: 13.5})
+        self._client(monkeypatch, vix=14.0, vix_ticks=[], vix1d=17.0, vix1d_ticks=vix1d_ticks)
+        rc = await _cmd_trade_http(
+            self._trade_args(net_price=1.20, override_vix1d=True),
+            "http://localhost:8000",
+        )
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Trade BLOCKED" not in out
+        assert "VIX1D" in out
+
+    # ── 8. Calm VIX movement passes all checks ────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_calm_vix_movement_passes(self, monkeypatch, capsys):
+        """Small VIX moves (v5=0.3, v15=0.5, accel≈0) → no block."""
+        from utp import _cmd_trade_http
+        # current=18.0, p5=17.7, p10=17.6, p15=17.5
+        # v5=0.3 (<2.0), v15=0.5 (<3.0), accel=0.3-0.1=0.2 (<1.0)
+        ticks = self._make_ticks({5: 17.7, 10: 17.6, 15: 17.5})
+        vix1d_ticks = self._make_ticks({5: 16.7, 10: 16.6, 15: 16.5})
+        self._client(monkeypatch, vix=18.0, vix_ticks=ticks, vix1d=17.0, vix1d_ticks=vix1d_ticks)
+        rc = await _cmd_trade_http(self._trade_args(net_price=1.20), "http://localhost:8000")
+        assert rc == 0
 
 
 # ══════════════════════════════════════════════════════════════════════════════

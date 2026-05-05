@@ -445,7 +445,7 @@ class MarketDataStreamingService:
 
         # Anchor previous close (once per symbol per session)
         # Use the same per-index floor prices to reject garbage close values from TWS
-        _IDX_FLOORS = {"SPX": 3000, "NDX": 10000, "RUT": 1000, "DJX": 200, "VIX": 5}
+        _IDX_FLOORS = {"SPX": 5000, "NDX": 18000, "RUT": 1700, "DJX": 320, "VIX": 5}
         min_close = _IDX_FLOORS.get(symbol, 100) if is_index else 0
         valid_close = close and close > min_close
         if valid_close and symbol not in self._prev_close:
@@ -477,7 +477,7 @@ class MarketDataStreamingService:
                 # price passes the per-index floor check (prevents thrashing on
                 # garbage TWS data that bounces between random low values).
                 if cnt >= 200 and cnt % 200 == 0:
-                    _IDX_FLOORS_RS = {"SPX": 3000, "NDX": 10000, "RUT": 1000, "DJX": 200, "VIX": 5}
+                    _IDX_FLOORS_RS = {"SPX": 5000, "NDX": 18000, "RUT": 1700, "DJX": 320, "VIX": 5}
                     floor = _IDX_FLOORS_RS.get(symbol, 0) if is_index else 0
                     if price > floor:
                         logger.warning(
@@ -508,7 +508,7 @@ class MarketDataStreamingService:
             # Known index floor prices (well below any realistic value, but catches
             # TWS garbage like 10% of real price: 250 for RUT, 2300 for NDX, 640 for SPX).
             _INDEX_MIN_PRICES = {
-                "SPX": 3000, "NDX": 10000, "RUT": 1000, "DJX": 200, "VIX": 5,
+                "SPX": 5000, "NDX": 18000, "RUT": 1700, "DJX": 320, "VIX": 5,
             }
             min_price = _INDEX_MIN_PRICES.get(symbol, 500)
             if price < min_price:
@@ -589,7 +589,7 @@ class MarketDataStreamingService:
             is_index = symbol.upper() in _INDEX_EXCHANGES
 
             # Determine price — use per-index floor to reject garbage intermediate values
-            _IDX_MIN = {"SPX": 3000, "NDX": 10000, "RUT": 1000, "DJX": 200, "VIX": 5}
+            _IDX_MIN = {"SPX": 5000, "NDX": 18000, "RUT": 1700, "DJX": 320, "VIX": 5}
             min_price = _IDX_MIN.get(symbol, 100) if is_index else 1.0
             if is_index:
                 if last and last > min_price:
@@ -941,7 +941,7 @@ class MarketDataStreamingService:
                 self._errors += 1
 
     # Absolute floor prices per index — never publish below these
-    _PUBLISH_MIN_PRICES = {"SPX": 3000, "NDX": 10000, "RUT": 1000, "DJX": 200, "VIX": 5}
+    _PUBLISH_MIN_PRICES = {"SPX": 5000, "NDX": 18000, "RUT": 1700, "DJX": 320, "VIX": 5}
 
     async def _publish_tick(self, symbol: str, tick: dict) -> None:
         """Publish a single tick to all configured targets."""
@@ -1092,12 +1092,17 @@ class MarketDataStreamingService:
         """Write a quote record to QuestDB realtime_data table."""
         if not self._questdb_pool:
             return
-        ts = record["timestamp"]
+        raw_ts = record["timestamp"]
+        # asyncpg requires datetime objects, not ISO strings, for TIMESTAMP columns
+        if isinstance(raw_ts, datetime):
+            ts = raw_ts
+        else:
+            ts = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
         price = record["price"]
         size = record.get("size", 0)
         ask_price = record.get("ask_price")
         ask_size = record.get("ask_size")
-        write_ts = datetime.now(UTC).isoformat()
+        write_ts = datetime.now(UTC)
 
         async with self._questdb_pool.acquire() as conn:
             await conn.execute(
