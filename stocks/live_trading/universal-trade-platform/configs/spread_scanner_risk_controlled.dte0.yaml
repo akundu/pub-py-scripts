@@ -110,7 +110,7 @@ min_tier: cons         # or a percentile e.g. p95, p75, p40
 # day — the buffer keeps a minimum cushion regardless of how compressed
 # the IV distribution is. Doesn't replace `min_otm` (which is a flat
 # absolute floor); the two stack independently.
-min_buf: 0.07
+min_buf: 0.05
 
 # ── Top-N per-combo cap ──────────────────────────────────────────────────────
 # Maximum number of Top-N picks per (ticker, option_type) combo. 1 means
@@ -173,8 +173,8 @@ handlers:
     # the open-ended fallback for the rest of the day.
     min_norm_roi_schedule:
       - until: "07:30"       # PT; inclusive on the boundary
-        value: 2.0
-      - value: 1.5           # after 07:30 PT
+        value: 1.5
+      - value: 1.0           # after 07:30 PT
     # Per-ticker overrides — currently OFF. When ready to enable, e.g.:
     #   min_norm_roi_per_ticker:
     #     RUT: 1.5           # RUT rarely reaches 2+ nROI at 0DTE
@@ -238,7 +238,7 @@ handlers:
       # which is the per-(ticker, side) version. Default 3.0 — comfortable
       # cushion that prevents the scanner from spamming the broker on a
       # rapidly-moving spread.
-      min_minutes_between_trades: 4.0
+      min_minutes_between_trades: 3.0
 
   # Live trading — uncomment to activate. Uses the SAME policy as simulate_trade
   # via the YAML anchor above.

@@ -199,7 +199,7 @@ handlers:
         end:   "12:30"
       # ── Per-cycle pacing — see dte0.yaml for full notes ──
       max_trades_per_cycle: 1
-      min_minutes_between_trades: 4.0
+      min_minutes_between_trades: 3.0
 
   # Live trading — uncomment to activate. Uses the SAME policy as simulate_trade
   # via the YAML anchor above.
