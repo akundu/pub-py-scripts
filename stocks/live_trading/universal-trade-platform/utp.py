@@ -2291,8 +2291,11 @@ async def _resolve_risk_tier_strikes(args, subcommand: str, client) -> int | Non
             option_type = getattr(args, "option_type", "PUT")
             sides_to_resolve = ["put" if option_type == "PUT" else "call"]
 
-        resolved: dict[str, dict] = {}
-        for side in sides_to_resolve:
+        # Resolve all sides in parallel — for iron-condor this means fetching
+        # /range_percentiles for PUT and CALL simultaneously instead of sequentially.
+        inc = _STRIKE_INCREMENTS.get(sym, _DEFAULT_STRIKE_INCREMENT)
+
+        async def _resolve_side(side: str) -> tuple[str, dict | None]:
             strike_price, pctl_level, context_label = await _resolve_one_tier_side(
                 sym=sym, side=side,
                 active_tier=active_tier,
@@ -2300,33 +2303,40 @@ async def _resolve_risk_tier_strikes(args, subcommand: str, client) -> int | Non
                 db_url=db_url,
             )
             if not strike_price or strike_price <= 0:
-                print(f"  Error: could not resolve {side} strike for {active_tier} "
-                      f"{context_label}")
-                return 1
-            # Round AWAY from money: floor for puts, ceil for calls
-            inc = _STRIKE_INCREMENTS.get(sym, _DEFAULT_STRIKE_INCREMENT)
+                return side, None
             rnd_dir = "floor" if side == "put" else "ceil"
             short_strike = _round_strike(strike_price, inc, rnd_dir)
             long_strike = short_strike - width if side == "put" else short_strike + width
-            resolved[side] = {
+            return side, {
                 "short_strike": short_strike,
                 "long_strike": long_strike,
                 "pctl_level": pctl_level,
                 "context_label": context_label,
             }
 
-        # Snap each side to the actual chain (one snap per side — uses the
-        # side's option_type so the chain lookup matches).
+        side_results = await asyncio.gather(*[_resolve_side(s) for s in sides_to_resolve])
+        resolved: dict[str, dict] = {}
+        for side, data in side_results:
+            if data is None:
+                print(f"  Error: could not resolve {side} strike for {active_tier}")
+                return 1
+            resolved[side] = data
+
+        # Snap each side to the actual chain — PUT and CALL fetches run in parallel.
         if expiration:
-            for side, info in resolved.items():
+            async def _snap_side(side: str, info: dict) -> tuple[str, dict]:
                 opt_type = "PUT" if side == "put" else "CALL"
-                strikes = {
-                    "short_strike": info["short_strike"],
-                    "long_strike": info["long_strike"],
-                }
                 snapped = await _snap_strikes_to_chain_http(
-                    client, sym, expiration, strikes, opt_type, False,
+                    client, sym, expiration,
+                    {"short_strike": info["short_strike"], "long_strike": info["long_strike"]},
+                    opt_type, False,
                 )
+                return side, snapped
+
+            snap_results = await asyncio.gather(
+                *[_snap_side(s, info) for s, info in resolved.items()]
+            )
+            for side, snapped in snap_results:
                 resolved[side]["short_strike"] = snapped["short_strike"]
                 resolved[side]["long_strike"] = snapped["long_strike"]
 
@@ -4808,48 +4818,54 @@ async def _estimate_spread_market_price(client, order) -> dict | None:
     strike_min = min(order_strikes) - 10 if order_strikes else None
     strike_max = max(order_strikes) + 10 if order_strikes else None
 
-    # Fetch option quotes for each type, with strike range covering the order.
+    # Fetch option quotes for each type in parallel (iron-condor needs PUT + CALL).
     # Request freshness bounded by the block threshold so the daemon will force
     # a provider refresh when its cache is stale.
     block_max = _trade_price_block_max_age()
     worst_age: float | None = None
     quote_source: str = "fresh_cache"
     all_quotes: dict[tuple, dict] = {}  # (strike, type) → quote
-    for ot in types_needed:
+
+    async def _fetch_one_type(ot: str) -> tuple[str, object]:
+        params: dict = {
+            "expiration": expiration,
+            "option_type": ot,
+            "max_age": block_max,
+        }
+        if strike_min is not None:
+            params["strike_min"] = strike_min
+        if strike_max is not None:
+            params["strike_max"] = strike_max
         try:
-            params = {
-                "expiration": expiration,
-                "option_type": ot,
-                "max_age": block_max,
-            }
-            if strike_min is not None:
-                params["strike_min"] = strike_min
-            if strike_max is not None:
-                params["strike_max"] = strike_max
             resp = await client.get(f"/market/options/{symbol}", params=params)
             if resp.status_code == 200:
-                data = resp.json()
-                quotes = data.get("quotes", {}).get(ot.lower(), [])
-                if isinstance(quotes, list):
-                    for q in quotes:
-                        key = (q.get("strike", 0), ot)
-                        all_quotes[key] = q
-                # Track age/source from response meta
-                meta = data.get("meta") or {}
-                age = meta.get("age_seconds")
-                if age is None:
-                    age = data.get("quote_age_seconds")
-                if age is not None:
-                    worst_age = age if worst_age is None else max(worst_age, age)
-                src = meta.get("source") or data.get("quote_source")
-                if src == "stale_cache" or quote_source == "stale_cache":
-                    quote_source = "stale_cache"
-                elif src == "empty" and quote_source != "stale_cache":
-                    quote_source = "empty"
-                elif src == "provider" and quote_source == "fresh_cache":
-                    quote_source = "provider"
+                return ot, resp.json()
         except Exception:
             pass
+        return ot, None
+
+    fetch_results = await asyncio.gather(*[_fetch_one_type(ot) for ot in types_needed])
+    for ot, data in fetch_results:
+        if data is None:
+            continue
+        quotes = data.get("quotes", {}).get(ot.lower(), [])
+        if isinstance(quotes, list):
+            for q in quotes:
+                key = (q.get("strike", 0), ot)
+                all_quotes[key] = q
+        meta = data.get("meta") or {}
+        age = meta.get("age_seconds")
+        if age is None:
+            age = data.get("quote_age_seconds")
+        if age is not None:
+            worst_age = age if worst_age is None else max(worst_age, age)
+        src = meta.get("source") or data.get("quote_source")
+        if src == "stale_cache" or quote_source == "stale_cache":
+            quote_source = "stale_cache"
+        elif src == "empty" and quote_source != "stale_cache":
+            quote_source = "empty"
+        elif src == "provider" and quote_source == "fresh_cache":
+            quote_source = "provider"
 
     if not all_quotes:
         return None
