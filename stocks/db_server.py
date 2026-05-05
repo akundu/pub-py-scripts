@@ -15759,6 +15759,23 @@ def _inject_range_percentiles_ws_script(html: str, tickers: list[str]) -> str:
     }}
     parseOriginalCloses();
 
+    /* Initial paint: every .price-cell server-renders empty (data-pct
+       only) so the cache footprint shrinks and the formula has a single
+       client-side source of truth. After parseOriginalCloses(), walk
+       both sections per ticker and let applySectionPrices populate
+       the cells from data-pct × originalClose. Idempotent with the
+       server-side rendered .ref-close / .price-basis text. Runs once
+       on DOMContentLoaded so the page is fully hydrated before any
+       WebSocket update arrives. */
+    function paintInitialPrices() {{
+        Object.keys(originalClose).forEach(function(ticker) {{
+            var price = originalClose[ticker];
+            if (!isFinite(price) || price <= 0) return;
+            applySectionPrices(ticker, price, 'main',   /*isLive*/ false);
+            applySectionPrices(ticker, price, 'hourly', /*isLive*/ false);
+        }});
+    }}
+
     function fmtPrice(p) {{
         return '$' + p.toLocaleString('en-US', {{minimumFractionDigits: 2, maximumFractionDigits: 2}});
     }}
@@ -15922,6 +15939,11 @@ def _inject_range_percentiles_ws_script(html: str, tickers: list[str]) -> str:
             chart.update();
         }});
     }}
+
+    /* Paint the empty server-rendered cells now that all helpers are
+       defined. Done once before WS connections so the user never sees
+       a flash of empty cells, even on a slow first WebSocket message. */
+    paintInitialPrices();
 
     var connectedTickers = {{}};
     function tryConnectAll() {{

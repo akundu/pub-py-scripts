@@ -659,12 +659,16 @@ def format_as_html(results: list[dict], params: dict = None, buffer: float = 0.0
                 pct = when_down["pct"][f"p{p}"]
                 price = when_down["price"][f"p{p}"]
                 buf_pct_html = _buffer_pct_html(pct, buffer, direction="down")
-                buf_price_html = _buffer_price_html(pct, prev_close, buffer, direction="down")
                 buf_attr = _buffer_data_attr(pct, buffer, direction="down")
+                # Empty cell — client paints from data-pct × prev_close on load.
+                # Server-side `price` is no longer baked in (saves ~30%
+                # payload + halves the cache footprint, single source of
+                # truth for the formula). See db_server.py
+                # _inject_range_percentiles_ws_script → paintInitialPrices().
                 html_parts.append(f'''                        <td>
                             <div class="percentile-cell">
                                 <div class="percentile-pct">{pct}%{buf_pct_html}</div>
-                                <div class="percentile-price price-cell" data-pct="{pct}" data-ticker="{ticker}" data-section="main"{buf_attr}>${price:,.2f}{buf_price_html}</div>
+                                <div class="percentile-price price-cell" data-pct="{pct}" data-ticker="{ticker}" data-section="main"{buf_attr}></div>
                             </div>
                         </td>
 ''')
@@ -701,12 +705,11 @@ def format_as_html(results: list[dict], params: dict = None, buffer: float = 0.0
                 pct = when_up["pct"][f"p{p}"]
                 price = when_up["price"][f"p{p}"]
                 buf_pct_html = _buffer_pct_html(pct, buffer, direction="up")
-                buf_price_html = _buffer_price_html(pct, prev_close, buffer, direction="up")
                 buf_attr = _buffer_data_attr(pct, buffer, direction="up")
                 html_parts.append(f'''                        <td>
                             <div class="percentile-cell">
                                 <div class="percentile-pct">+{pct}%{buf_pct_html}</div>
-                                <div class="percentile-price price-cell" data-pct="{pct}" data-ticker="{ticker}" data-section="main"{buf_attr}>${price:,.2f}{buf_price_html}</div>
+                                <div class="percentile-price price-cell" data-pct="{pct}" data-ticker="{ticker}" data-section="main"{buf_attr}></div>
                             </div>
                         </td>
 ''')
@@ -965,7 +968,7 @@ def _generate_ticker_content_html(result: dict, ticker_id: str, buffer: float = 
                 buf_price_html = _buffer_price_html(pct, prev_close, buffer, direction="down")
                 buf_attr = _buffer_data_attr(pct, buffer, direction="down")
                 html_parts.append(f'                            <td>{pct}%{buf_pct_html}</td>\n')
-                html_parts.append(f'                            <td class="price-cell" data-pct="{pct}" data-ticker="{ticker}" data-section="main"{buf_attr}>${price:,.2f}{buf_price_html}</td>\n')
+                html_parts.append(f'                            <td class="price-cell" data-pct="{pct}" data-ticker="{ticker}" data-section="main"{buf_attr}></td>\n')
             else:
                 html_parts.append(f'                            <td class="insufficient">--</td>\n')
                 html_parts.append(f'                            <td class="insufficient">--</td>\n')
@@ -1040,7 +1043,7 @@ def _generate_ticker_content_html(result: dict, ticker_id: str, buffer: float = 
                 buf_price_html = _buffer_price_html(pct, prev_close, buffer, direction="up")
                 buf_attr = _buffer_data_attr(pct, buffer, direction="up")
                 html_parts.append(f'                            <td>+{pct}%{buf_pct_html}</td>\n')
-                html_parts.append(f'                            <td class="price-cell" data-pct="{pct}" data-ticker="{ticker}" data-section="main"{buf_attr}>${price:,.2f}{buf_price_html}</td>\n')
+                html_parts.append(f'                            <td class="price-cell" data-pct="{pct}" data-ticker="{ticker}" data-section="main"{buf_attr}></td>\n')
             else:
                 html_parts.append(f'                            <td class="insufficient">--</td>\n')
                 html_parts.append(f'                            <td class="insufficient">--</td>\n')
@@ -2137,7 +2140,7 @@ def _render_slot_table(slots: dict, sorted_keys: list[str], percentiles: list[in
                 buf_price_html = _buffer_price_html(pct, prev_close, buffer, direction=direction)
                 buf_attr = _buffer_data_attr(pct, buffer, direction=direction)
                 parts.append(f'                        <td>{sign}{pct}%{buf_pct_html}</td>\n')
-                parts.append(f'                        <td class="price-cell" data-pct="{pct}" data-ticker="{ticker}" data-section="hourly"{buf_attr}>${price:,.2f}{buf_price_html}</td>\n')
+                parts.append(f'                        <td class="price-cell" data-pct="{pct}" data-ticker="{ticker}" data-section="hourly"{buf_attr}></td>\n')
             else:
                 parts.append('                        <td class="insuf">--</td>\n                        <td class="insuf">--</td>\n')
         parts.append('                    </tr>\n')
@@ -2206,7 +2209,7 @@ def _render_max_move_table(slots: dict, sorted_keys: list[str], percentiles: lis
                 buf_price_html = _buffer_price_html(pct, prev_close, buffer, direction=direction)
                 buf_attr = _buffer_data_attr(pct, buffer, direction=direction)
                 parts.append(f'                        <td>{sign}{pct}%{buf_pct_html}</td>\n')
-                parts.append(f'                        <td class="price-cell" data-pct="{pct}" data-ticker="{ticker}" data-section="hourly"{buf_attr}>${price:,.2f}{buf_price_html}</td>\n')
+                parts.append(f'                        <td class="price-cell" data-pct="{pct}" data-ticker="{ticker}" data-section="hourly"{buf_attr}></td>\n')
             else:
                 parts.append('                        <td class="insuf">--</td>\n                        <td class="insuf">--</td>\n')
         parts.append('                    </tr>\n')

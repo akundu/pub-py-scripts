@@ -155,18 +155,30 @@ def test_format_as_html_no_buffer_omits_addendum():
 
 
 def test_format_as_html_with_buffer_emits_addendum_and_data_attrs():
+    """Buffer addendum architecture (post the cache refactor):
+      * Percentage addendum (`-1.00%` / `+1.00%`) stays SERVER-rendered
+        — it's pure pct math, no need for client involvement.
+      * Dollar addendum is now CLIENT-rendered from data-pct + data-
+        buffered-pct + the ticker's prev_close (parsed from .ref-close).
+        The server emits the data attrs and an empty .price-cell; the
+        injected JS paints the prices on DOMContentLoaded. So the
+        raw HTML no longer carries `$19,800.00` etc. — instead we
+        verify the data attrs that drive that client-side render."""
     html = format_as_html([_make_single_window_result()], buffer=0.5)
-    assert "buffer-addendum" in html
-    # DOWN cell: pct=-0.50 + buffer 0.5 → -1.00%, price=20000*(1-0.01)=19800.00
+    assert "buffer-addendum" in html  # still present for the pct addendum
+    # DOWN cell: pct=-0.50 + buffer 0.5 → -1.00% (server-rendered)
     assert "-1.00%" in html
-    assert "$19,800.00" in html
-    # UP cell: pct=+0.50 + 0.5 → +1.00%, price=20000*(1+0.01)=20200.00
+    # UP cell: pct=+0.50 + 0.5 → +1.00% (server-rendered)
     assert "+1.00%" in html
-    assert "$20,200.00" in html
-    # data attributes for live-price JS reapplication
+    # data attributes for live-price JS reapplication AND initial paint
     assert 'data-buffer="0.5000"' in html
     assert 'data-buffered-pct="-1.0000"' in html
     assert 'data-buffered-pct="1.0000"' in html
+    # Empty price-cells are emitted (no baked-in $ value): each
+    # `.price-cell` div ends with `></div>` — the closing-with-no-text.
+    assert 'class="percentile-price price-cell"' in html
+    assert '$19,800.00' not in html  # client paints it; not in server HTML
+    assert '$20,200.00' not in html
 
 
 def _make_multi_window_result() -> dict:
@@ -246,10 +258,20 @@ def _make_hourly_data() -> dict:
 
 
 def test_format_hourly_moves_as_html_with_buffer():
+    """Same architecture note as the multi-window test above: dollar
+    values are now client-painted from data-pct × prev_close on load,
+    so the raw server HTML doesn't carry them."""
     html = format_hourly_moves_as_html(_make_hourly_data(), buffer=0.5)
     assert "buffer-addendum" in html
-    assert "$19,800.00" in html  # DOWN p75 buffered: 20000 * (1 - 0.01)
-    assert "$20,200.00" in html  # UP p75 buffered: 20000 * (1 + 0.01)
+    # Buffered pct addendum is still server-rendered (pure pct math).
+    assert "-1.00%" in html  # DOWN p75 buffered: -0.5% - 0.5%
+    assert "+1.00%" in html  # UP p75 buffered: +0.5% + 0.5%
+    # Dollar values are NOT in the raw HTML — JS paints them on load.
+    assert "$19,800.00" not in html
+    assert "$20,200.00" not in html
+    # The data-buffered-pct attr that drives the client paint:
+    assert 'data-buffered-pct="-1.0000"' in html
+    assert 'data-buffered-pct="1.0000"' in html
 
 
 def test_format_hourly_moves_as_html_without_buffer():
