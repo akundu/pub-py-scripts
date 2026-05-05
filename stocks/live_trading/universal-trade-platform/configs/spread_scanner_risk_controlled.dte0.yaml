@@ -199,7 +199,7 @@ handlers:
       roi_pct: [1, 5.0]
       min_otm_pct:  {SPX: 0.8, NDX: 1.0, RUT: 1.0}
       min_credit:   {SPX: 0.35, NDX: .7, RUT: 0.3}
-      max_total_risk: 500000
+      max_total_risk: 150000
       max_per_ticker_risk: {SPX: 140000, NDX: 180000, RUT: 120000}
       # Dollar cap on RISK PER TRADE. The handler computes
       #   contracts = max(1, floor(max_risk_per_trade / per_contract_max_loss))
@@ -230,7 +230,7 @@ handlers:
       # `per_cycle_cap`. Default 1 keeps the firing pace conservative
       # (one trade per cycle, the highest-ROI candidate). Set to 0 for
       # a kill switch.
-      max_trades_per_cycle: 3
+      max_trades_per_cycle: 1
       # min_minutes_between_trades: after a successful submit, no further
       # trade fires for this many minutes (across all tickers/sides);
       # candidates in cycles within that window are logged with reason
@@ -238,7 +238,7 @@ handlers:
       # which is the per-(ticker, side) version. Default 3.0 — comfortable
       # cushion that prevents the scanner from spamming the broker on a
       # rapidly-moving spread.
-      min_minutes_between_trades: 3.0
+      min_minutes_between_trades: 4.0
 
   # Live trading — uncomment to activate. Uses the SAME policy as simulate_trade
   # via the YAML anchor above.
