@@ -158,20 +158,19 @@ class TestTradeHttpTimeout:
 
 
 class TestPollIntervalFloor:
-    """Order-status polling must not exceed IBKR's pacing — the floor is 2s."""
+    """Order-status polling floor is 0.1s — ib.trades() is a local cache read."""
 
-    def test_settings_default_is_2s(self):
+    def test_settings_default_is_025s(self):
         from app.config import Settings
         s = Settings(_env_file=None)  # ignore any .env on disk
-        assert s.order_poll_interval_seconds == 2.0
+        assert s.order_poll_interval_seconds == 0.25
 
-    def test_settings_validator_floors_sub_2s_overrides(self, monkeypatch):
-        """Even an explicit env var < 2s gets bumped to 2s — the validator
-        is the policy enforcement point."""
-        monkeypatch.setenv("ORDER_POLL_INTERVAL_SECONDS", "0.5")
+    def test_settings_validator_floors_sub_01s_overrides(self, monkeypatch):
+        """Values below the absolute floor (0.1s) are clamped up."""
+        monkeypatch.setenv("ORDER_POLL_INTERVAL_SECONDS", "0.05")
         from app.config import Settings
         s = Settings(_env_file=None)
-        assert s.order_poll_interval_seconds == 2.0
+        assert s.order_poll_interval_seconds == 0.1
 
     def test_settings_validator_passes_higher_values(self, monkeypatch):
         monkeypatch.setenv("ORDER_POLL_INTERVAL_SECONDS", "5.0")
@@ -181,8 +180,8 @@ class TestPollIntervalFloor:
 
     @pytest.mark.asyncio
     async def test_await_order_fill_floors_caller_supplied_interval(self):
-        """Defense in depth: even if a caller passes ``poll_interval=0.01``
-        directly to ``await_order_fill``, it gets bumped to the 2s floor."""
+        """Defense in depth: even if a caller passes poll_interval=0.0
+        directly to await_order_fill, it gets bumped to _MIN_POLL_INTERVAL (0.25s)."""
         from app.services import trade_service
 
         captured: list[float] = []
@@ -208,14 +207,14 @@ class TestPollIntervalFloor:
                 mock_reg.get.return_value = _OneShot()
                 await trade_service.await_order_fill(
                     broker=Broker.IBKR, order_id="t-floor",
-                    poll_interval=0.01, timeout=1.0,
+                    poll_interval=0.0, timeout=1.0,
                 )
         finally:
             trade_service.asyncio.sleep = original_sleep
 
         assert captured, "expected at least one sleep call"
-        assert captured[0] == pytest.approx(2.0), (
-            f"poll_interval should be floored to 2.0; got {captured[0]}"
+        assert captured[0] == pytest.approx(0.25), (
+            f"poll_interval should be floored to 0.25; got {captured[0]}"
         )
 
 
@@ -11016,6 +11015,172 @@ class TestClosePctResolution:
         assert args.short_strike is None
 
 
+class TestPositionGreeksRefresh:
+    """Tests for background position-greeks refresh loop and per-leg greeks display."""
+
+    def _make_position(self, symbol="SPX", exp="2026-05-05", strike1=7170.0, strike2=7150.0):
+        return {
+            "position_id": "abc123",
+            "symbol": symbol,
+            "order_type": "multi_leg",
+            "expiration": exp,
+            "status": "open",
+            "quantity": 10,
+            "legs": [
+                {"action": "SELL_TO_OPEN", "option_type": "PUT", "strike": strike1, "quantity": 10},
+                {"action": "BUY_TO_OPEN",  "option_type": "PUT", "strike": strike2, "quantity": 10},
+            ],
+        }
+
+    @pytest.mark.asyncio
+    async def test_refresh_stale_groups_calls_ibkr(self, tmp_path):
+        """refresh_strikes_for_positions() fetches groups whose IBKR cache is older than max_age."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        cfg = StreamingConfig(symbols=[])
+        fetched_jobs: list = []
+
+        class FakeProvider:
+            async def get_option_quotes(self, sym, exp, ot, strike_min=None, strike_max=None):
+                return [{"strike": 7170.0, "bid": 0.50, "ask": 0.55, "last": 0.50,
+                          "volume": 100, "open_interest": 0,
+                          "greeks": {"delta": -0.03, "gamma": 0.001, "theta": -0.5,
+                                     "vega": 0.12, "iv": 0.28}}]
+
+        svc = OptionQuoteStreamingService(cfg, FakeProvider())
+
+        async def _fake_fetch(jobs):
+            fetched_jobs.extend(jobs)
+            for sym, exp, ot, smin, smax, src in jobs:
+                svc._ibkr_cache.put(sym, exp, ot, [
+                    {"strike": 7170.0, "bid": 0.50, "ask": 0.55, "last": 0.50,
+                     "volume": 100, "open_interest": 0,
+                     "greeks": {"delta": -0.03, "gamma": 0.001, "theta": -0.5,
+                                "vega": 0.12, "iv": 0.28}}
+                ])
+
+        svc._fetch_from_ibkr = _fake_fetch
+
+        positions = [self._make_position()]
+        refreshed = await svc.refresh_strikes_for_positions(positions, max_age=90.0)
+        assert refreshed == 1  # both legs are PUT → single (SPX, exp, PUT) group
+        assert len(fetched_jobs) >= 1
+        assert fetched_jobs[0][0] == "SPX"
+
+    @pytest.mark.asyncio
+    async def test_refresh_skips_fresh_cache(self, tmp_path):
+        """refresh_strikes_for_positions() skips groups whose IBKR cache is within max_age."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        cfg = StreamingConfig(symbols=[])
+        svc = OptionQuoteStreamingService(cfg, None)
+        # Pre-populate the cache as fresh
+        svc._ibkr_cache.put("SPX", "20260505", "PUT", [
+            {"strike": 7170.0, "bid": 0.50, "ask": 0.55, "last": 0.50, "volume": 0,
+             "open_interest": 0, "greeks": {"delta": -0.03, "iv": 0.28}}
+        ])
+
+        fetched_jobs: list = []
+        async def _fake_fetch(jobs):
+            fetched_jobs.extend(jobs)
+        svc._fetch_from_ibkr = _fake_fetch
+
+        positions = [self._make_position()]
+        refreshed = await svc.refresh_strikes_for_positions(positions, max_age=90.0)
+        # Cache was just written — age is ~0s, well within 90s
+        assert refreshed == 0
+        assert len(fetched_jobs) == 0
+
+    @pytest.mark.asyncio
+    async def test_refresh_skips_when_overlay_running(self):
+        """refresh_strikes_for_positions() skips if overlay is mid-fetch to avoid stacking."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        cfg = StreamingConfig(symbols=[])
+        svc = OptionQuoteStreamingService(cfg, None)
+        svc._cycle_phase = "fetching_ibkr"  # simulate overlay in-progress
+
+        fetched_jobs: list = []
+        async def _fake_fetch(jobs):
+            fetched_jobs.extend(jobs)
+        svc._fetch_from_ibkr = _fake_fetch
+
+        positions = [self._make_position()]
+        refreshed = await svc.refresh_strikes_for_positions(positions, max_age=90.0)
+        assert refreshed == 0
+        assert len(fetched_jobs) == 0
+
+    def test_get_full_greeks_returns_ibkr_cache(self):
+        """get_full_greeks_for_strike() returns greeks from IBKR cache first."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        cfg = StreamingConfig(symbols=[])
+        svc = OptionQuoteStreamingService(cfg, None)
+        svc._ibkr_cache.put("SPX", "20260505", "PUT", [
+            {"strike": 7170.0, "bid": 0.50, "ask": 0.55, "last": 0.50, "volume": 0,
+             "open_interest": 0,
+             "greeks": {"delta": -0.030, "gamma": 0.0014, "theta": -0.54,
+                        "vega": 0.12, "iv": 0.276}}
+        ])
+        g = svc.get_full_greeks_for_strike("SPX", "2026-05-05", "PUT", 7170.0)
+        assert g is not None
+        assert abs(g["delta"] - (-0.030)) < 0.001
+        assert abs(g["iv"] - 0.276) < 0.001
+
+    def test_get_full_greeks_returns_none_when_missing(self):
+        """get_full_greeks_for_strike() returns None for unknown strike."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        cfg = StreamingConfig(symbols=[])
+        svc = OptionQuoteStreamingService(cfg, None)
+        g = svc.get_full_greeks_for_strike("SPX", "2026-05-05", "PUT", 9999.0)
+        assert g is None
+
+    @pytest.mark.asyncio
+    async def test_enrich_with_greeks_populates_leg_live_greeks(self):
+        """_enrich_with_greeks() sets live_greeks on each leg when streaming cache has data."""
+        from app.services.live_data_service import _enrich_with_greeks
+        from app.services.option_quote_streaming import (
+            OptionQuoteStreamingService, init_option_quote_streaming, reset_option_quote_streaming,
+        )
+        from app.services.streaming_config import StreamingConfig
+
+        cfg = StreamingConfig(symbols=[])
+        svc = OptionQuoteStreamingService(cfg, None)
+        svc._ibkr_cache.put("SPX", "20260505", "PUT", [
+            {"strike": 7170.0, "bid": 0.50, "ask": 0.55, "last": 0.50, "volume": 0,
+             "open_interest": 0,
+             "greeks": {"delta": -0.030, "gamma": 0.0014, "theta": -0.54,
+                        "vega": 0.12, "iv": 0.276}},
+            {"strike": 7150.0, "bid": 0.35, "ask": 0.40, "last": 0.35, "volume": 0,
+             "open_interest": 0,
+             "greeks": {"delta": -0.020, "gamma": 0.0009, "theta": -0.38,
+                        "vega": 0.086, "iv": 0.313}},
+        ])
+
+        # Register the service temporarily
+        import app.services.option_quote_streaming as _oqs_mod
+        orig = _oqs_mod._service
+        _oqs_mod._service = svc
+        try:
+            positions = [self._make_position()]
+            await _enrich_with_greeks(positions)
+        finally:
+            _oqs_mod._service = orig
+
+        legs = positions[0]["legs"]
+        assert legs[0].get("live_greeks") is not None
+        assert abs(legs[0]["live_greeks"]["delta"] - (-0.030)) < 0.001
+        assert abs(legs[0]["live_greeks"]["iv"] - 0.276) < 0.001
+        assert legs[1].get("live_greeks") is not None
+        assert abs(legs[1]["live_greeks"]["iv"] - 0.313) < 0.001
+
+
 class TestTradeReplay:
     """Tests for trade replay subcommand."""
 
@@ -12989,7 +13154,7 @@ class TestPriceFreshnessEnforcement:
                                                                        "n_ibkr_fresh": 2, "n_csv": 0, "n_ibkr_stale": 0}}},
                                           "quote_age_seconds": 5.0, "quote_source": "fresh_cache"})
                 return FakeResp(200, {})
-            async def post(self, path, json=None, headers=None):
+            async def post(self, path, json=None, headers=None, **kwargs):
                 if path == "/market/margin":
                     margin_called.append(True)
                     return FakeResp(200, {"init_margin": 2500.0, "maint_margin": 2000.0, "commission": 1.30})
@@ -17905,6 +18070,61 @@ class TestSpreadScanner:
         # Missing attrs — no crash.
         args = Namespace()
         assert _extract_pn_percentiles_from_args(args) == []
+
+    @pytest.mark.asyncio
+    async def test_fetch_tier_data_passes_timeout_to_get(self):
+        """When `timeout_sec` is supplied to fetch_tier_data, the value
+        must reach `client.get(..., timeout=…)` so the per-request
+        timeout actually applies. Regression: the global httpx default
+        of 15s was tripping ReadTimeout when the percentile server was
+        loaded; the configurable timeout fixes that."""
+        import spread_scanner as ss
+        async def fake_resolve(client, configured):
+            return configured
+        orig_resolve = ss._resolve_percentile_url
+        ss._resolve_percentile_url = fake_resolve
+        try:
+            captured: dict = {}
+            class FakeOK:
+                status_code = 200
+                def json(self): return {"hourly": {"SPX": {}}, "tickers": []}
+            class FakeClient:
+                async def get(self, url, *a, **kw):
+                    captured["timeout"] = kw.get("timeout")
+                    return FakeOK()
+            await ss.fetch_tier_data(
+                FakeClient(), "http://localhost:9100", ["SPX"],
+                dte_list=[0], timeout_sec=45.0,
+            )
+            assert captured.get("timeout") == 45.0
+        finally:
+            ss._resolve_percentile_url = orig_resolve
+
+    @pytest.mark.asyncio
+    async def test_fetch_tier_data_omits_timeout_when_none(self):
+        """When `timeout_sec=None`, no `timeout=` kwarg is set on the
+        request — preserves legacy behavior where the httpx client's
+        default timeout governs."""
+        import spread_scanner as ss
+        async def fake_resolve(client, configured):
+            return configured
+        orig_resolve = ss._resolve_percentile_url
+        ss._resolve_percentile_url = fake_resolve
+        try:
+            captured: dict = {"timeout": "_unset_"}
+            class FakeOK:
+                status_code = 200
+                def json(self): return {"hourly": {}, "tickers": []}
+            class FakeClient:
+                async def get(self, url, *a, **kw):
+                    captured["timeout"] = kw.get("timeout", "_unset_")
+                    return FakeOK()
+            await ss.fetch_tier_data(
+                FakeClient(), "http://localhost:9100", ["SPX"], dte_list=[0],
+            )
+            assert captured["timeout"] == "_unset_"
+        finally:
+            ss._resolve_percentile_url = orig_resolve
 
     @pytest.mark.asyncio
     async def test_fetch_tier_data_passes_percentiles_to_server(self):

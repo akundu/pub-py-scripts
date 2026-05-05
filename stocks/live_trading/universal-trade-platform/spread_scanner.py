@@ -277,6 +277,15 @@ class ScannerConfig:
     # see CSV-sourced picks than nothing. CSV quotes can be tens of minutes
     # old — only loosen this when you know what you're getting.
     verify_require_provider_source: bool = True
+    # Per-request HTTP timeout for tier_data fetches against the
+    # percentile server's `/range_percentiles` endpoint. The endpoint
+    # is heavyweight (~120KB response, scans many CSVs server-side)
+    # and can take 7-15s under load; the global httpx default of 15s
+    # was tripping ReadTimeout on busier days, locking the scanner
+    # into TIER_OFFLINE every cycle. Default 30s gives the server
+    # room to breathe; the 2h TierDataCache means this slow request
+    # only fires once per cache refresh anyway.
+    tier_fetch_timeout_sec: float = 30.0
     handlers: list[dict] = field(default_factory=list)
 
     @classmethod
@@ -377,6 +386,7 @@ class ScannerConfig:
         d["recent_actions_count"] = self.recent_actions_count
         d["verify_max_age_sec"] = self.verify_max_age_sec
         d["verify_require_provider_source"] = self.verify_require_provider_source
+        d["tier_fetch_timeout_sec"] = self.tier_fetch_timeout_sec
         return d
 
 
@@ -573,6 +583,7 @@ async def _try_fetch_tier_data_one_url(
     client: httpx.AsyncClient, percentile_url: str, tickers: list[str],
     dte_list: list[int] | None = None,
     percentiles: list[int] | None = None,
+    timeout_sec: float | None = None,
 ) -> dict | None:
     """Single-URL fetch attempt. Returns the JSON dict on HTTP 200 or
     None on any failure. On failure, writes a diagnostic into
@@ -583,7 +594,13 @@ async def _try_fetch_tier_data_one_url(
     these percentile values (passed as `?percentiles=…`). Without this,
     the server uses its default set (typically p1/5/10/25/50/75/90/95/
     98/99) — so a user-configured `min_tier: p93` would silently
-    disengage because `pcts.get("p93")` would be None."""
+    disengage because `pcts.get("p93")` would be None.
+
+    `timeout_sec`: per-request HTTP timeout in seconds. When None, the
+    httpx client's default timeout governs (typically 15s). The
+    `/range_percentiles` endpoint is heavyweight — scans many CSVs
+    server-side and can take 7-15s under load — so the caller
+    typically passes 30+ from `args.tier_fetch_timeout_sec`."""
     windows = sorted(set([0] + (dte_list or [0])))
     windows_str = ",".join(str(w) for w in windows)
     params = {
@@ -599,9 +616,12 @@ async def _try_fetch_tier_data_one_url(
         + (f"&percentiles={params['percentiles']}" if percentiles else "")
     )
     try:
+        get_kwargs = {"params": params}
+        if timeout_sec is not None:
+            get_kwargs["timeout"] = float(timeout_sec)
         resp = await client.get(
             f"{percentile_url}/range_percentiles",
-            params=params,
+            **get_kwargs,
         )
         if resp.status_code == 200:
             _TIER_FETCH_LAST_ERROR["reason"] = None
@@ -631,6 +651,7 @@ async def fetch_tier_data(
     fallback_url: str | None = None,
     on_swap_to_fallback: "Callable[[str], None] | None" = None,
     percentiles: list[int] | None = None,
+    timeout_sec: float | None = None,
 ) -> dict | None:
     """Fetch percentile/tier data from the percentile server.
 
@@ -666,6 +687,7 @@ async def fetch_tier_data(
     result = await _try_fetch_tier_data_one_url(
         client, percentile_url, tickers, dte_list,
         percentiles=percentiles,
+        timeout_sec=timeout_sec,
     )
     if result is not None:
         return result
@@ -688,6 +710,7 @@ async def fetch_tier_data(
     result = await _try_fetch_tier_data_one_url(
         client, fallback_url, tickers, dte_list,
         percentiles=percentiles,
+        timeout_sec=timeout_sec,
     )
     if result is not None:
         # Success on backup. Tell the caller so they can swap their
@@ -4042,12 +4065,19 @@ async def scan_all_tickers(
     # p93, the boundary lookup returns None, and the filter falls
     # through.
     requested_percentiles = _extract_pn_percentiles_from_args(args)
+    # Pull the per-fetch timeout from args (YAML / CLI). Without an
+    # explicit value the default 30s leaves headroom for the
+    # heavyweight `/range_percentiles` endpoint when the percentile
+    # server is loaded — the global httpx client's 15s default
+    # was tripping ReadTimeout on busy days.
+    tier_timeout = float(getattr(args, "tier_fetch_timeout_sec", None) or 30.0)
     tier_coro = (
         fetch_tier_data(
             client, args.percentile_url, args.tickers, args.dte,
             fallback_url=tier_fallback,
             on_swap_to_fallback=_swap_percentile_url_to_backup,
             percentiles=requested_percentiles or None,
+            timeout_sec=tier_timeout,
         )
         if should_fetch_tier else asyncio.sleep(0)
     )
@@ -4962,6 +4992,13 @@ Examples:
              "for each leg's quote must be ≤ this value before a candidate is allowed "
              "into Top-N or fired by a trade/simulate handler. Recommendation: 30 for "
              "0DTE, 60 for 1-3 DTE. YAML key: verify_max_age_sec. (default: 30.0)",
+    )
+    parser.add_argument(
+        "--tier-fetch-timeout-sec", dest="tier_fetch_timeout_sec",
+        type=float, default=30.0,
+        help="Per-request HTTP timeout (seconds) for `/range_percentiles` fetches "
+             "against the percentile server. Higher values tolerate a loaded server. "
+             "YAML key: tier_fetch_timeout_sec. (default: 30.0)",
     )
     parser.add_argument(
         "--no-verify-require-provider-source",
