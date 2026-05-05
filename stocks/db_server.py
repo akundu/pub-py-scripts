@@ -15531,6 +15531,53 @@ function toggleOutliers() {{
 """
 
 
+async def _serve_rp_cached(request: web.Request, cache_path: str) -> Optional[web.Response]:
+    """Check the range_percentiles Redis cache for this request. Returns
+    a `web.Response` to send back when cached, or None when the caller
+    should compute fresh. `cache_path` is a stable string identifying
+    the handler ("html", "api", "multi_window"). Disable per-request via
+    `?nocache=1` for debugging.
+
+    See common/range_percentiles_cache.py for envelope format and TTL
+    rule (cache lives until next market open).
+    """
+    if request.query.get("nocache") == "1":
+        return None
+    try:
+        from common.range_percentiles_cache import make_cache_key, cached_response
+    except ImportError:
+        return None
+    # `nocache` itself shouldn't be part of the cache key.
+    qd = {k: v for k, v in request.query.items() if k != "nocache"}
+    key = make_cache_key(cache_path, qd)
+    hit = await cached_response(key)
+    if hit is None:
+        return None
+    body, content_type = hit
+    headers = {"X-Cache": "HIT", "X-Cache-Key": key}
+    return web.Response(body=body, content_type=content_type, headers=headers)
+
+
+async def _store_rp_cache(request: web.Request, cache_path: str,
+                            body: bytes | str, content_type: str) -> None:
+    """Companion to _serve_rp_cached — store this response under the
+    same key, with TTL = seconds-until-next-market-open. Failures swallow
+    quietly; a cache write that fails shouldn't poison the response."""
+    if request.query.get("nocache") == "1":
+        return
+    try:
+        from common.range_percentiles_cache import (
+            make_cache_key, cache_response, seconds_until_next_market_open,
+        )
+    except ImportError:
+        return
+    qd = {k: v for k, v in request.query.items() if k != "nocache"}
+    key = make_cache_key(cache_path, qd)
+    body_bytes = body.encode("utf-8") if isinstance(body, str) else body
+    ttl = seconds_until_next_market_open()
+    await cache_response(key, body_bytes, content_type, ttl)
+
+
 async def handle_range_percentiles_api(request: web.Request) -> web.Response:
     """
     Handle API request for range percentiles analysis.
@@ -15548,6 +15595,9 @@ async def handle_range_percentiles_api(request: web.Request) -> web.Response:
 
     Returns JSON with percentile data.
     """
+    cached = await _serve_rp_cached(request, "api")
+    if cached is not None:
+        return cached
     try:
         from common.range_percentiles import (
             compute_range_percentiles_multi,
@@ -15656,7 +15706,13 @@ async def handle_range_percentiles_api(request: web.Request) -> web.Response:
             exclude_outliers=exclude_outliers,
         )
 
-        return web.json_response(results if len(results) != 1 else results[0])
+        payload = results if len(results) != 1 else results[0]
+        # Cache the JSON body so subsequent identical requests skip the
+        # whole compute path. TTL = until next market open.
+        await _store_rp_cache(
+            request, "api", json.dumps(payload), "application/json",
+        )
+        return web.json_response(payload)
 
     except Exception as e:
         logger.error(f"Error computing range percentiles: {e}", exc_info=True)
@@ -16251,6 +16307,14 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
 
     Returns styled HTML page (single or multi-window), or JSON when requested.
     """
+    # Cache check — same URL+sorted-qs as last request and entry still
+    # alive (TTL runs until next market open). HTML and JSON formats
+    # share the cache by query string so `?format=json` lands on its
+    # own key.
+    _rp_cache_path = "html_json" if _wants_json_response(request) else "html"
+    cached = await _serve_rp_cached(request, _rp_cache_path)
+    if cached is not None:
+        return cached
     try:
         from common.range_percentiles import (
             compute_range_percentiles_multi,
@@ -16517,6 +16581,7 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                 1,
             )
 
+            await _store_rp_cache(request, "html", html, "text/html")
             return web.Response(text=html, content_type="text/html")
 
         except Exception as e:
@@ -16679,7 +16744,7 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                     logger.warning(f"Could not compute 1DTE moves for {ticker_name}: {he}")
 
         if _wants_json_response(request):
-            return web.json_response({
+            json_payload = {
                 "mode": "single_window",
                 "params": {
                     "tickers": tickers,
@@ -16696,7 +16761,11 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                 "tier_definitions": _TIER_DEFINITIONS,
                 "context_definitions": _CONTEXT_DEFINITIONS,
                 "asymmetry_note": _ASYMMETRY_NOTE,
-            })
+            }
+            await _store_rp_cache(
+                request, "html_json", json.dumps(json_payload), "application/json",
+            )
+            return web.json_response(json_payload)
 
         html = format_as_html(
             results,
@@ -16737,6 +16806,7 @@ async def handle_range_percentiles_html(request: web.Request) -> web.Response:
                 1,
             )
 
+        await _store_rp_cache(request, "html", html, "text/html")
         return web.Response(text=html, content_type="text/html")
 
     except Exception as e:
@@ -16790,6 +16860,9 @@ async def handle_range_percentiles_multi_window_api(request: web.Request) -> web
 
     Returns JSON with multi-window data structure.
     """
+    cached = await _serve_rp_cached(request, "multi_window_api")
+    if cached is not None:
+        return cached
     try:
         from common.range_percentiles import (
             compute_range_percentiles_multi_window,
@@ -16890,6 +16963,9 @@ async def handle_range_percentiles_multi_window_api(request: web.Request) -> web
             ensure_tables=False,
             log_level="WARNING",
             momentum_filter=momentum_filter,
+        )
+        await _store_rp_cache(
+            request, "multi_window_api", json.dumps(result), "application/json",
         )
         return web.json_response(result)
 
