@@ -15567,14 +15567,16 @@ async def _store_rp_cache(request: web.Request, cache_path: str,
         return
     try:
         from common.range_percentiles_cache import (
-            make_cache_key, cache_response, seconds_until_next_market_open,
+            make_cache_key, cache_response, cache_ttl_seconds,
         )
     except ImportError:
         return
     qd = {k: v for k, v in request.query.items() if k != "nocache"}
     key = make_cache_key(cache_path, qd)
     body_bytes = body.encode("utf-8") if isinstance(body, str) else body
-    ttl = seconds_until_next_market_open()
+    # TTL expires 1.5h before next NYSE open — see cache_ttl_seconds
+    # docstring for why (cron has written the new previous_close by then).
+    ttl = cache_ttl_seconds()
     await cache_response(key, body_bytes, content_type, ttl)
 
 

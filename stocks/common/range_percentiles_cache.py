@@ -183,12 +183,39 @@ async def cache_response(
         return False
 
 
-def seconds_until_next_market_open(now_utc: Optional[datetime] = None) -> int:
-    """TTL helper — wraps `common.market_hours.compute_market_transition_times`
-    so callers don't have to reach into a different module just to get a
-    sensible expiration. Falls back to one hour when the helper is
-    unavailable, so the cache still works without exchange_calendars
-    installed."""
+# Default buffer: expire the cache 1.5 hours BEFORE the next NYSE open
+# (~8:00 AM ET, since open is 9:30 AM ET). The daily cron writes the
+# previous trading day's close to daily_prices around 6:10 AM ET (3:10
+# AM PT), so by 8:00 AM the new `previous_close` is in the DB. Letting
+# the cache expire at that boundary instead of at 9:30 AM means the
+# first request between 8:00 and 9:30 picks up fresh values rather
+# than serving slightly-stale entries pinned to *yesterday*'s close.
+PRE_OPEN_BUFFER_SECONDS = 5400  # 90 minutes
+
+
+def cache_ttl_seconds(
+    now_utc: Optional[datetime] = None,
+    pre_open_buffer_seconds: int = PRE_OPEN_BUFFER_SECONDS,
+) -> int:
+    """Cache TTL for /range_percentiles responses.
+
+    Returns seconds until "the new previous_close should be available"
+    — i.e. `seconds_to_next_NYSE_open - pre_open_buffer_seconds`.
+    Default buffer is 90 min so cache expiry lands at ~8:00 AM ET,
+    after the daily cron has had time to land yesterday's close into
+    daily_prices but before regular trading reopens.
+
+    Wraps `common.market_hours.compute_market_transition_times` (which
+    is exchange_calendars-aware, so holidays / early closes are
+    honored). Falls back to one hour if the helper isn't importable
+    so the cache still works without exchange_calendars installed.
+
+    Bounds:
+      * 60 second floor — avoids cache-then-expire-immediately races
+        when a request lands moments before the boundary.
+      * 36-hour cap — safety net for any miscalculation across a long
+        weekend; better to refresh more often than stale-pin entries.
+    """
     if now_utc is None:
         now_utc = datetime.now(timezone.utc)
     try:
@@ -196,10 +223,16 @@ def seconds_until_next_market_open(now_utc: Optional[datetime] = None) -> int:
         seconds_to_open, _ = compute_market_transition_times(now_utc)
         if seconds_to_open is None or seconds_to_open <= 0:
             return 3600
-        # During market hours seconds_to_open is "tomorrow's open"; off-hours
-        # it's "today/next-trading-day's open". Either way it's the right
-        # boundary — but we cap at 36 hours so a long weekend doesn't park
-        # entries forever in the rare case the helper is misconfigured.
-        return min(int(seconds_to_open), 36 * 3600)
+        adjusted = int(seconds_to_open) - int(pre_open_buffer_seconds)
+        if adjusted < 60:
+            adjusted = 60
+        return min(adjusted, 36 * 3600)
     except Exception:
         return 3600
+
+
+# Backwards-compat alias — the original name described the bare
+# transition; the new name reflects the cache-specific math (buffer
+# applied). Keep the old name working for any caller that imported
+# it directly.
+seconds_until_next_market_open = cache_ttl_seconds

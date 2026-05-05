@@ -18,9 +18,11 @@ import pytest
 import common.range_percentiles_cache as cache_mod
 from common.range_percentiles_cache import (
     cache_response,
+    cache_ttl_seconds,
     cached_response,
     make_cache_key,
-    seconds_until_next_market_open,
+    PRE_OPEN_BUFFER_SECONDS,
+    seconds_until_next_market_open,  # back-compat alias
 )
 
 
@@ -203,10 +205,53 @@ def test_cache_decode_error_returns_none(_reset_module_state):
 # ──────────────────────────────────────────────────────────────────────
 
 
-def test_seconds_until_next_market_open_returns_positive_int():
+def test_cache_ttl_seconds_returns_positive_int():
     """Sanity check — must return a positive integer in the typical
     range (≤ 36h cap). Exact value is wall-clock dependent so we only
     check the bounds."""
-    n = seconds_until_next_market_open()
+    n = cache_ttl_seconds()
     assert isinstance(n, int)
     assert 0 < n <= 36 * 3600
+
+
+def test_seconds_until_next_market_open_alias_still_works():
+    """Old name is preserved as an alias for back-compat."""
+    assert seconds_until_next_market_open is cache_ttl_seconds
+
+
+def test_cache_ttl_subtracts_pre_open_buffer():
+    """TTL = seconds_to_next_open − 1.5h. Verify by mocking the
+    market-hours helper to return a known seconds_to_open value."""
+    import common.range_percentiles_cache as mod
+    # Patch the underlying helper to return a known value: 10 hours.
+    class _FakeMarketHours:
+        @staticmethod
+        def compute_market_transition_times(now_utc, tz_name="America/New_York"):
+            return (10 * 3600, None)
+    import sys as _sys
+    _sys.modules["common.market_hours"] = _FakeMarketHours
+    try:
+        ttl = cache_ttl_seconds()
+        # Expect 10h − 1.5h = 8.5h = 30,600 seconds.
+        assert ttl == 10 * 3600 - PRE_OPEN_BUFFER_SECONDS
+        # Custom buffer override:
+        ttl_custom = cache_ttl_seconds(pre_open_buffer_seconds=600)
+        assert ttl_custom == 10 * 3600 - 600
+    finally:
+        _sys.modules.pop("common.market_hours", None)
+
+
+def test_cache_ttl_floors_at_60s_when_request_within_buffer():
+    """If we're inside the 1.5h pre-open window (e.g. 8:30 AM ET),
+    seconds_to_open might be 60 minutes, less than the 90-min buffer.
+    Result would go negative — must floor at 60s instead."""
+    import sys as _sys
+    class _FakeMarketHours:
+        @staticmethod
+        def compute_market_transition_times(now_utc, tz_name="America/New_York"):
+            return (1800, None)  # 30 min until open, well inside the 90-min buffer
+    _sys.modules["common.market_hours"] = _FakeMarketHours
+    try:
+        assert cache_ttl_seconds() == 60  # floored
+    finally:
+        _sys.modules.pop("common.market_hours", None)
