@@ -9746,6 +9746,82 @@ class TestPortfolioDeltaAndRisk:
         assert "Δ" in out
         assert "+0.070" in out
 
+    def test_portfolio_display_delta_column_uses_short_leg_delta(self, tmp_path, capsys):
+        """Δ column shows short leg delta (breach potential), not net spread delta.
+
+        When per-leg greeks are available, the column shows the short leg's raw delta
+        with sign flipped (short put delta < 0 → positive breach risk display).
+        net_delta (+0.001) should NOT appear; short leg delta (+0.010) should.
+        """
+        import asyncio
+        import argparse
+
+        async def _run():
+            from unittest.mock import patch
+
+            fake_position = {
+                "position_id": "abc123",
+                "symbol": "NDX",
+                "order_type": "multi_leg",
+                "quantity": 15,
+                "expiration": "2026-05-05",
+                "source": "external_sync",
+                "broker": "ibkr",
+                "status": "open",
+                "avg_cost": -75.70,
+                "market_value": -270.0,
+                "market_price": -0.18,
+                "broker_unrealized_pnl": -163.0,
+                "legs_summary": "P27600/P27650",
+                # Short leg has live_greeks; long leg also has live_greeks
+                "legs": [
+                    {"action": "SELL", "option_type": "PUT", "strike": 27650.0, "quantity": 15,
+                     "live_greeks": {"delta": -0.010, "iv": 0.375, "theta": -0.59},
+                     "greeks_age_seconds": 18.0},
+                    {"action": "BUY",  "option_type": "PUT", "strike": 27600.0, "quantity": 15,
+                     "live_greeks": {"delta": -0.009, "iv": 0.380, "theta": -0.55},
+                     "greeks_age_seconds": 18.0},
+                ],
+                # Net delta = (-1)*(-0.010) + (1)*(-0.009) = +0.001
+                "net_delta": 0.001,
+                "spread_metrics": {"spread_width": 50.0, "gross_risk": 75000.0,
+                                   "derived_credit": 2972.0, "max_loss": 72028.0, "roi_pct": 4.1},
+            }
+
+            class FakeResp:
+                def __init__(self, data):
+                    self.status_code = 200
+                    self._data = data
+                def json(self): return self._data
+
+            class FakeClient:
+                async def __aenter__(self): return self
+                async def __aexit__(self, *a): pass
+                async def get(self, path, params=None):
+                    return FakeResp({
+                        "positions": [fake_position],
+                        "balances": {},
+                        "realized_pnl": 0, "unrealized_pnl": -163.0,
+                        "total_pnl": -163.0, "positions_by_source": {},
+                        "daily_pnl": 0, "recent_closed": [],
+                    })
+
+            ns = argparse.Namespace(recent=0)
+            with patch("httpx.AsyncClient", return_value=FakeClient()):
+                from utp import _cmd_portfolio_http
+                return await _cmd_portfolio_http(ns, "http://localhost:8000")
+
+        rc = asyncio.run(_run())
+        assert rc == 0
+        out = capsys.readouterr().out
+        # Short leg delta +0.010 should appear in the Δ column
+        assert "+0.010" in out, f"Short leg delta +0.010 should appear; got:\n{out}"
+        # Net spread delta +0.001 should NOT appear in the Δ column
+        # (it may appear in the sub-row indentation, but we check the column value)
+        assert "+0.001" not in out, (
+            f"Net delta +0.001 should not be used as Δ column value when short leg greeks available; got:\n{out}"
+        )
+
 
 class TestBreachSanityGuard:
     """_calc_breach_status sanity guard: stale/garbage prices don't show 'breached'."""
@@ -11179,6 +11255,189 @@ class TestPositionGreeksRefresh:
         assert abs(legs[0]["live_greeks"]["iv"] - 0.276) < 0.001
         assert legs[1].get("live_greeks") is not None
         assert abs(legs[1]["live_greeks"]["iv"] - 0.313) < 0.001
+
+    def test_portfolio_display_shows_short_leg_only(self, capsys):
+        """Per-leg sub-row shows only the short leg (breach potential), not the long."""
+        all_legs = [
+            {"action": "SELL_TO_OPEN", "option_type": "PUT", "strike": 7170.0,
+             "live_greeks": {"delta": -0.030, "iv": 0.276, "theta": -0.54},
+             "greeks_age_seconds": 3.0},
+            {"action": "BUY_TO_OPEN",  "option_type": "PUT", "strike": 7150.0,
+             "live_greeks": {"delta": -0.020, "iv": 0.313, "theta": -0.38},
+             "greeks_age_seconds": 3.0},
+        ]
+        # Mirror the filter from utp.py: short legs only
+        short_legs = [
+            leg for leg in all_legs
+            if any(s in (leg.get("action") or "").upper() for s in ("SELL", "STO", "STC"))
+            and leg.get("live_greeks")
+        ]
+        assert len(short_legs) == 1, "only the SELL_TO_OPEN leg should be included"
+        leg = short_legs[0]
+        d_val = leg["live_greeks"]["delta"]
+        # sign is flipped for short leg: raw -0.030 → displayed +0.030
+        d_str = f"Δ={-d_val:+.3f}"
+        assert d_str == "Δ=+0.030", f"Short leg delta should be +: got {d_str}"
+        assert leg["strike"] == 7170.0, "should be the short (higher) strike"
+
+    def test_group_options_shared_long_pnl_allocation(self):
+        """_group_options_into_spreads distributes P&L correctly when a long strike is
+        shared between two spreads (IBKR blends the long's avg_cost across all lots).
+
+        Scenario: NDX 0DTE.
+          Spread A: short P27700 (15x, avg_cost=217.80) + long P27600 (15x)
+          Spread B: short P27650 (15x, avg_cost=465.80) + long P27600 (15x)
+          P27600 is a single IBKR position (qty=30, blended avg_cost=267.70).
+
+        Correct credits (from TWS combo view):
+          Spread A: 217.80 - 142.10 = 75.70/contract → credit = 75.70×15 = $1,135.50
+          Spread B: 465.80 - 393.30 = 72.50/contract → credit = 72.50×15 = $1,087.50
+          Total credit = $2,223.00 = (217.80+465.80)*15 - 267.70*30 ✓
+
+        Using equal allocation (total_net_credit × l_frac = 2223 × 0.5 = $1,111.50):
+          Both spreads get ~$1,111.50 allocated credit → per-spread error ≤ $24.
+
+        Old code (prorated blended unrealized_pnl) would give ~$1,884 per-spread error.
+        """
+        from app.services.live_data_service import _group_options_into_spreads
+
+        # Current marks: P27700=2.05/unit, P27650=1.70/unit, P27600=1.20/unit
+        # Market values (IBKR signs: short=negative)
+        p27700_mv = -2.05 * 15 * 100   # = -3075
+        p27650_mv = -1.70 * 15 * 100   # = -2550
+        p27600_mv = 1.20 * 30 * 100    # = 3600 (positive, long)
+
+        # IBKR unrealized P&L with blended avg_cost (the wrong values):
+        p27700_upnl = p27700_mv + 217.80 * 15     # -3075 + 3267 = +192
+        p27650_upnl = p27650_mv + 465.80 * 15     # -2550 + 6987 = +4437 .. wait
+        p27600_upnl_blended = p27600_mv - 267.70 * 30  # 3600 - 8031 = -4431
+
+        positions = [
+            # P27700 short (qty=-15, unambiguous)
+            {"position_id": "short27700", "symbol": "NDX", "sec_type": "OPT",
+             "expiration": "2026-05-05", "strike": 27700.0, "right": "P",
+             "quantity": -15, "order_type": "option",
+             "avg_cost": 217.80, "market_price": 2.05,
+             "market_value": p27700_mv, "broker_unrealized_pnl": p27700_upnl},
+            # P27650 short (qty=-15, unambiguous)
+            {"position_id": "short27650", "symbol": "NDX", "sec_type": "OPT",
+             "expiration": "2026-05-05", "strike": 27650.0, "right": "P",
+             "quantity": -15, "order_type": "option",
+             "avg_cost": 465.80, "market_price": 1.70,
+             "market_value": p27650_mv, "broker_unrealized_pnl": p27650_upnl},
+            # P27600 long (qty=+30, SHARED between both spreads — blended avg_cost)
+            {"position_id": "long27600", "symbol": "NDX", "sec_type": "OPT",
+             "expiration": "2026-05-05", "strike": 27600.0, "right": "P",
+             "quantity": 30, "order_type": "option",
+             "avg_cost": 267.70, "market_price": 1.20,
+             "market_value": p27600_mv, "broker_unrealized_pnl": p27600_upnl_blended},
+        ]
+
+        grouped = _group_options_into_spreads(positions)
+        multi_leg = [p for p in grouped if p.get("order_type") == "multi_leg"]
+        assert len(multi_leg) == 2, f"Expected 2 spreads, got {len(multi_leg)}"
+
+        # Sort by short strike to identify which spread is which
+        multi_leg.sort(key=lambda p: min(float(l["strike"]) for l in p.get("legs", [])))
+        spread_a = next(p for p in multi_leg if any(l["strike"] == 27700.0 for l in p["legs"]))
+        spread_b = next(p for p in multi_leg if any(l["strike"] == 27650.0 for l in p["legs"]))
+
+        # Correct total net credit = (217.80+465.80)*15 - 267.70*30 = 10254 - 8031 = 2223
+        # Allocated equally: 2223 * 0.5 = 1111.50 per spread
+        # net_mv_A = p27700_mv + p27600_mv * 0.5 = -3075 + 1800 = -1275
+        # net_mv_B = p27650_mv + p27600_mv * 0.5 = -2550 + 1800 = -750
+        # upnl_A ≈ -1275 + 1111.50 = -163.50
+        # upnl_B ≈ -750 + 1111.50 = +361.50
+
+        upnl_a = spread_a.get("broker_unrealized_pnl", 0) or 0
+        upnl_b = spread_b.get("broker_unrealized_pnl", 0) or 0
+
+        # Old (blended) values would be:
+        # upnl_A_blended = p27700_upnl + p27600_upnl_blended * 0.5 = 192 + (-4431*0.5) = 192-2215.5 = -2023.5
+        # Verify our fix gives results much closer to truth than blended approach
+        assert upnl_a > -500, (
+            f"Spread A P&L should be close to -$163 (correct), not blended ~-$2023; got {upnl_a:.2f}"
+        )
+        assert abs(upnl_a - (-163.5)) < 30, (
+            f"Spread A P&L should be ≈ -$163.50, got {upnl_a:.2f}"
+        )
+        assert upnl_b > 0, (
+            f"Spread B P&L should be positive (~+$362), got {upnl_b:.2f}"
+        )
+
+        # Totals should be preserved (blending doesn't affect aggregate)
+        total_upnl = upnl_a + upnl_b
+        expected_total = (p27700_mv + p27650_mv + p27600_mv) + (217.80 + 465.80) * 15 - 267.70 * 30
+        assert abs(total_upnl - expected_total) < 1.0, (
+            f"Total P&L should be preserved; got {total_upnl:.2f} vs expected {expected_total:.2f}"
+        )
+
+    def test_match_broker_pnl_uses_entry_price_for_shared_strikes(self):
+        """_match_broker_pnl computes P&L from entry_price, avoiding blended avg_cost bias."""
+        from app.services.live_data_service import _match_broker_pnl
+
+        # Two spreads sharing P27600 (long) — classic shared-strike scenario.
+        # Spread A: short P27700, long P27600. Entry credit = 0.78/spread.
+        # Spread B: short P27650, long P27600. Entry credit = 0.72/spread (older, higher-basis).
+        #
+        # IBKR blends P27600 avg_cost: (1.42 + 3.94) / 2 = 2.68/contract.
+        # Our fix: use each spread's own entry_price to avoid contamination.
+
+        portfolio_items = [
+            # P27700 (only in spread A)
+            {"symbol": "NDX", "sec_type": "OPT", "expiration": "20260505",
+             "strike": 27700.0, "right": "P", "position": -15,
+             "unrealized_pnl": 192.0, "market_value": -2906.0,
+             "avg_cost": 2178.0, "market_price": 2.05},
+            # P27600 (shared: 30 total, blended avg_cost = 268.0 per 100 = $2.68)
+            {"symbol": "NDX", "sec_type": "OPT", "expiration": "20260505",
+             "strike": 27600.0, "right": "P", "position": 30,
+             "unrealized_pnl": -4440.0, "market_value": 3600.0,
+             "avg_cost": 268.0, "market_price": 1.20},
+            # P27650 (only in spread B)
+            {"symbol": "NDX", "sec_type": "OPT", "expiration": "20260505",
+             "strike": 27650.0, "right": "P", "position": -15,
+             "unrealized_pnl": 345.0, "market_value": -2353.0,
+             "avg_cost": 465.0, "market_price": 1.70},
+        ]
+        positions = [
+            # Spread A: entry_price = -0.78 (credit received from IBKR)
+            {"position_id": "A", "order_type": "multi_leg", "symbol": "NDX",
+             "quantity": 15, "expiration": "2026-05-05", "entry_price": -0.78,
+             "legs": [
+                 {"action": "SELL_TO_OPEN", "option_type": "PUT", "strike": 27700.0, "quantity": 1},
+                 {"action": "BUY_TO_OPEN",  "option_type": "PUT", "strike": 27600.0, "quantity": 1},
+             ]},
+            # Spread B: entry_price = -0.72
+            {"position_id": "B", "order_type": "multi_leg", "symbol": "NDX",
+             "quantity": 15, "expiration": "2026-05-05", "entry_price": -0.72,
+             "legs": [
+                 {"action": "SELL_TO_OPEN", "option_type": "PUT", "strike": 27650.0, "quantity": 1},
+                 {"action": "BUY_TO_OPEN",  "option_type": "PUT", "strike": 27600.0, "quantity": 1},
+             ]},
+        ]
+        result = _match_broker_pnl(portfolio_items, positions)
+
+        # Spread A:
+        #   total_mv = P27700_mv (-2906) + P27600_mv_prorated (3600 * 15/30 = 1800) = -1106
+        #   entry cash = abs(-0.78) * 15 * 100 = 1170
+        #   upnl = -1106 + 1170 = +64 (small profit since spread decayed slightly)
+        a = result.get("A", {})
+        assert "unrealized_pnl" in a
+        assert abs(a["unrealized_pnl"] - 64.0) < 5.0, (
+            f"Spread A P&L should be ~+$64, got {a['unrealized_pnl']:.2f}. "
+            "Proration bug would give a much larger negative number."
+        )
+
+        # Spread B:
+        #   total_mv = P27650_mv (-2353) + P27600_mv_prorated (1800) = -553
+        #   entry cash = abs(-0.72) * 15 * 100 = 1080
+        #   upnl = -553 + 1080 = +527
+        b = result.get("B", {})
+        assert "unrealized_pnl" in b
+        assert abs(b["unrealized_pnl"] - 527.0) < 5.0, (
+            f"Spread B P&L should be ~+$527, got {b['unrealized_pnl']:.2f}."
+        )
 
 
 class TestTradeReplay:

@@ -3456,12 +3456,28 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                         if not strikes_s:
                             strikes_s = "/".join(parts)
 
-                    # Delta (cached, best-effort) — pre-pad to 7 chars before coloring so
-                    # ANSI escape codes don't confuse Python's format-spec width calculation.
-                    net_delta = p.get("net_delta")
-                    if net_delta is not None:
-                        delta_c = "92" if net_delta >= 0 else "91"
-                        delta_s = _color(f"{net_delta:>+7.3f}", delta_c)
+                    # Delta column: show the SHORT leg's delta (breach potential) for spreads.
+                    # Short puts have negative raw delta; we flip the sign so a larger
+                    # positive value = closer to breach. Falls back to net_delta for
+                    # single-option positions or when per-leg greeks aren't available.
+                    # Pre-pad to 7 chars before coloring so ANSI escapes don't confuse widths.
+                    display_delta = None
+                    _short_legs = [
+                        leg for leg in (p.get("legs") or [])
+                        if isinstance(leg, dict)
+                        and leg.get("live_greeks")
+                        and any(s in (leg.get("action") or "").upper()
+                                for s in ("SELL", "STO", "STC"))
+                    ]
+                    if _short_legs:
+                        _d = _short_legs[0]["live_greeks"].get("delta")
+                        if _d is not None:
+                            display_delta = -_d  # flip: short put delta<0 → positive breach risk
+                    if display_delta is None:
+                        display_delta = p.get("net_delta")
+                    if display_delta is not None:
+                        delta_c = "92" if display_delta >= 0 else "91"
+                        delta_s = _color(f"{display_delta:>+7.3f}", delta_c)
                     else:
                         delta_s = f"{'---':>7}"
 
@@ -3532,6 +3548,34 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                         entry = p.get("entry_price", 0)
                         print(f"  {pid:<6} {sym:>6} {price_s} {strikes_s:>16} {qty:>5.0f} "
                               f"{'---':>12} {'---':>12} {'---':>12} {'':>22} {exp:>12} {' ' * 14} {delta_s}")
+
+                    # Per-leg greeks sub-row — short leg only (breach potential)
+                    short_legs_with_greeks = [
+                        leg for leg in (p.get("legs") or [])
+                        if isinstance(leg, dict)
+                        and leg.get("live_greeks")
+                        and any(s in (leg.get("action") or "").upper()
+                                for s in ("SELL", "STO", "STC"))
+                    ]
+                    if short_legs_with_greeks:
+                        parts = []
+                        for leg in short_legs_with_greeks:
+                            g = leg["live_greeks"]
+                            sk = leg.get("strike", "?")
+                            ot_s = "P" if (leg.get("option_type") or "").upper() == "PUT" else "C"
+                            label = f"{ot_s}{sk:.0f}" if isinstance(sk, (int, float)) else f"{ot_s}{sk}"
+                            d_val = g.get("delta")
+                            iv_val = g.get("iv")
+                            th_val = g.get("theta")
+                            age_s = leg.get("greeks_age_seconds")
+                            # Flip sign: short put raw Δ=-0.020 → breach exposure +0.020
+                            d_str = f"Δ={-d_val:+.3f}" if d_val is not None else ""
+                            iv_str = f"IV={iv_val*100:.1f}%" if iv_val is not None else ""
+                            th_str = f"Θ={th_val:.2f}" if th_val is not None else ""
+                            age_str = f"[{age_s:.0f}s]" if age_s is not None else ""
+                            seg = "  ".join(x for x in [label, d_str, iv_str, th_str, age_str] if x)
+                            parts.append(f"  {'':6}    └ {seg}")
+                        print("\n".join(parts))
 
                 upnl_c = "92" if total_upnl >= 0 else "91"
                 total_risk_info = ""
@@ -5430,9 +5474,9 @@ async def _cmd_trade_http(args, server: str) -> int:
             # Auto-validate with IBKR margin check when --live (catches rejections early)
             if mode in ("live", "paper") and trade_request.multi_leg_order and not nocheck and not skip_margin:
                 order = trade_request.multi_leg_order
-                margin_payload = {"order": order.model_dump(), "timeout": 20.0}
+                margin_payload = {"order": order.model_dump(), "timeout": 5.0}
                 try:
-                    mr = await client.post("/market/margin", json=margin_payload)
+                    mr = await client.post("/market/margin", json=margin_payload, timeout=6.0)
                     if mr.status_code == 200:
                         md = mr.json()
                         if md.get("error"):
@@ -5462,7 +5506,8 @@ async def _cmd_trade_http(args, server: str) -> int:
                         detail = mr.json().get("detail", mr.text) if mr.headers.get("content-type", "").startswith("application/json") else mr.text
                         print(f"\n  {_color(f'IBKR margin check failed: {detail}', '91')}")
                 except Exception as e:
-                    logger.debug("Auto margin check failed: %s", e)
+                    import logging as _mlog
+                    _mlog.getLogger(__name__).debug("Auto margin check failed: %s", e)
 
             print(f"\n  {_color('NOT EXECUTED', '93')} — add --confirm to place the order")
             return 0

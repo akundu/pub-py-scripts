@@ -60,7 +60,6 @@ def _match_broker_pnl(portfolio_items: list[dict], positions: list[dict]) -> dic
             continue
 
         exp = (pos.get("expiration") or "").replace("-", "")
-        total_upnl = 0.0
         total_mv = 0.0
         total_avg_cost = 0.0
         total_mark = 0.0
@@ -84,12 +83,30 @@ def _match_broker_pnl(portfolio_items: list[dict], positions: list[dict]) -> dic
             contracts = leg_qty * spread_qty
             total_at_strike = abs(item["position"])
             ratio = contracts / total_at_strike if total_at_strike > 0 else 1.0
-            total_upnl += item["unrealized_pnl"] * ratio
             total_mv += item["market_value"] * ratio
             sign = -1 if "SELL" in action else 1
             total_avg_cost += sign * item["avg_cost"] / 100
             total_mark += sign * item["market_price"]
         if matched_all and legs:
+            # Compute unrealized P&L from our stored entry_price (combo fill price)
+            # rather than prorating IBKR's blended per-leg avg_cost. This avoids
+            # misattribution when a strike is shared across multiple spreads (IBKR
+            # blends all lots into one avg_cost which contaminates each spread's P&L).
+            entry_price = pos.get("entry_price")
+            if entry_price is not None:
+                spread_qty = int(pos.get("quantity", 1))
+                first_action = (legs[0].get("action") or "").upper() if legs else ""
+                is_credit = "SELL" in first_action
+                # credit spread: received abs(entry_price)/spread; debit: paid abs(entry_price)
+                entry_cash = abs(entry_price) * spread_qty * 100
+                if is_credit:
+                    total_upnl = total_mv + entry_cash
+                else:
+                    total_upnl = total_mv - entry_cash
+            else:
+                # Fallback: derive P&L from market value alone (no entry_price stored)
+                # total_mv already represents the current net value of the combo
+                total_upnl = total_mv  # best estimate without entry price
             result[pos_id] = {
                 "unrealized_pnl": total_upnl,
                 "market_value": total_mv,
@@ -110,6 +127,7 @@ def _positions_to_dicts(positions: list[TrackedPosition]) -> list[dict]:
             "quantity": pos.quantity,
             "expiration": pos.expiration,
             "legs": pos.legs if isinstance(pos.legs, list) else [],
+            "entry_price": getattr(pos, "entry_price", None),
         })
     return result
 
@@ -153,6 +171,44 @@ def _group_options_into_spreads(positions: list[dict]) -> list[dict]:
         paired = []
         # Track remaining long qty for partial matching
         long_remaining = {i: abs(int(l.get("quantity", 0) or 0)) for i, l in enumerate(longs)}
+
+        # Pre-pass: for each long, sum the avg_cost premiums of every short that pairs
+        # with it. Combined with the long's own total cost, this gives the total net
+        # credit collected across ALL spreads sharing that long strike — without relying
+        # on IBKR's blended avg_cost for per-spread attribution.
+        #
+        # When a long strike is shared between two spreads (e.g. P27600 backing both
+        # a P27700/P27600 and a P27650/P27600 spread), IBKR blends the avg_cost across
+        # ALL lots, making broker_unrealized_pnl wrong for each individual spread.
+        # Using total_net_credit = Σ short_premiums − long_blended_cost×qty is correct
+        # for the aggregate, so we simply allocate it proportionally (l_frac) to each
+        # spread — which exactly corrects the blending error when each lot was entered
+        # at a similar price, and is a close approximation otherwise.
+        _pre_long_rem = {i: abs(int(l.get("quantity", 0) or 0)) for i, l in enumerate(longs)}
+        _long_short_premiums: dict[int, float] = {i: 0.0 for i in range(len(longs))}
+        for _short in shorts:
+            _s_right = _short.get("right", "") or ""
+            _s_qty = abs(int(_short.get("quantity", 0) or 0))
+            _s_rem = _s_qty
+            for _i, _long in enumerate(longs):
+                if _pre_long_rem.get(_i, 0) <= 0:
+                    continue
+                if (_long.get("right", "") or "") != _s_right:
+                    continue
+                _pq = min(_s_rem, _pre_long_rem[_i])
+                _pre_long_rem[_i] -= _pq
+                _s_rem -= _pq
+                _long_short_premiums[_i] += (_short.get("avg_cost", 0) or 0) * _pq
+                if _s_rem <= 0:
+                    break
+        # total_net_credit[i] = sum(all paired short premiums) − long_blended_cost×total_qty
+        _long_net_credit: dict[int, float] = {}
+        for _i, _long in enumerate(longs):
+            _l_qty = abs(int(_long.get("quantity", 0) or 0))
+            _long_net_credit[_i] = (
+                _long_short_premiums[_i] - (_long.get("avg_cost", 0) or 0) * _l_qty
+            )
+
         for short in shorts:
             s_strike = float(short.get("strike", 0) or 0)
             s_right = short.get("right", "") or ""
@@ -185,8 +241,14 @@ def _group_options_into_spreads(positions: list[dict]) -> list[dict]:
                 # Build spread with prorated values
                 total_mv = ((short.get("market_value", 0) or 0) * s_frac +
                            (long_leg.get("market_value", 0) or 0) * l_frac)
-                total_upnl = ((short.get("broker_unrealized_pnl", 0) or 0) * s_frac +
-                             (long_leg.get("broker_unrealized_pnl", 0) or 0) * l_frac)
+                # Compute upnl from net market value + allocated net credit.
+                # Allocating total_net_credit proportionally (l_frac) eliminates the
+                # blending error that occurs when a long strike is shared between spreads
+                # and IBKR returns a single blended avg_cost for all lots combined.
+                # For non-shared longs (l_frac=1.0) this is identical to summing
+                # broker_unrealized_pnl directly.
+                net_credit_allocated = _long_net_credit.get(idx, 0) * l_frac
+                total_upnl = total_mv + net_credit_allocated
                 total_daily = ((short.get("daily_pnl", 0) or 0) * s_frac +
                               (long_leg.get("daily_pnl", 0) or 0) * l_frac)
                 total_avg = ((short.get("avg_cost", 0) or 0) * s_frac +
@@ -364,6 +426,8 @@ async def _enrich_with_greeks(positions: list[dict]) -> None:
 
     # --- Pass 1: streaming cache lookup (sync, instant) --------------------
     delta_lookup: dict[tuple, float] = {}
+    # Full greeks keyed by (sym, exp, ot, strike)
+    greeks_lookup: dict[tuple, dict] = {}
     svc = get_option_quote_streaming()
     if svc:
         # Collect all unique (sym, exp, opt_type) combos across all legs
@@ -389,12 +453,26 @@ async def _enrich_with_greeks(positions: list[dict]) -> None:
                 d = svc.get_delta_for_strike(sym, exp, ot, sk)
                 if d is not None:
                     delta_lookup[(sym, exp, ot, sk)] = d
+                g = svc.get_full_greeks_for_strike(sym, exp, ot, sk)
+                if g:
+                    greeks_lookup[(sym, exp, ot, sk)] = g
 
-    # Apply pass-1 results
+    # Apply pass-1 results — net_delta on position, full greeks on each leg
     for p in positions:
         nd = _compute_net_delta_for_position(p, delta_lookup)
         if nd is not None:
             p["net_delta"] = nd
+        sym = (p.get("symbol") or "").upper()
+        exp = p.get("expiration") or ""
+        for leg in (p.get("legs") or []):
+            ot = (leg.get("option_type") or "").upper()
+            sk = leg.get("strike")
+            if sym and exp and ot and sk is not None:
+                g = greeks_lookup.get((sym, exp, ot, float(sk)))
+                if g:
+                    leg["live_greeks"] = {k: v for k, v in g.items() if k != "_age"}
+                    if "_age" in g:
+                        leg["greeks_age_seconds"] = g["_age"]
 
     # --- Pass 2: provider fetch for positions still lacking delta ----------
     # Collect unique (sym, exp, opt_type) + strike ranges not yet resolved
@@ -449,14 +527,26 @@ async def _enrich_with_greeks(positions: list[dict]) -> None:
             d = g.get("delta")
             if sk is not None and d is not None:
                 delta_lookup[(sym, exp, ot, float(sk))] = float(d)
+            if sk is not None and any(v is not None for v in g.values()):
+                greeks_lookup[(sym, exp, ot, float(sk))] = g
 
-    # Apply pass-2 results
+    # Apply pass-2 results — net_delta and per-leg greeks
     for p in positions:
-        if p.get("net_delta") is not None:
-            continue
-        nd = _compute_net_delta_for_position(p, delta_lookup)
-        if nd is not None:
-            p["net_delta"] = nd
+        sym = (p.get("symbol") or "").upper()
+        exp = p.get("expiration") or ""
+        if p.get("net_delta") is None:
+            nd = _compute_net_delta_for_position(p, delta_lookup)
+            if nd is not None:
+                p["net_delta"] = nd
+        for leg in (p.get("legs") or []):
+            if leg.get("live_greeks"):
+                continue  # already set in pass-1
+            ot = (leg.get("option_type") or "").upper()
+            sk = leg.get("strike")
+            if sym and exp and ot and sk is not None:
+                g = greeks_lookup.get((sym, exp, ot, float(sk)))
+                if g:
+                    leg["live_greeks"] = g
 
 
 def _calc_breach_status(current_price: float, position: dict) -> dict | None:
