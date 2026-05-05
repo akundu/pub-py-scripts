@@ -206,9 +206,8 @@ def test_cache_decode_error_returns_none(_reset_module_state):
 
 
 def test_cache_ttl_seconds_returns_positive_int():
-    """Sanity check — must return a positive integer in the typical
-    range (≤ 36h cap). Exact value is wall-clock dependent so we only
-    check the bounds."""
+    """Sanity check — positive integer in the typical range. Exact
+    value is wall-clock dependent so we only check the bounds."""
     n = cache_ttl_seconds()
     assert isinstance(n, int)
     assert 0 < n <= 36 * 3600
@@ -219,39 +218,125 @@ def test_seconds_until_next_market_open_alias_still_works():
     assert seconds_until_next_market_open is cache_ttl_seconds
 
 
-def test_cache_ttl_subtracts_pre_open_buffer():
-    """TTL = seconds_to_next_open − 1.5h. Verify by mocking the
-    market-hours helper to return a known seconds_to_open value."""
-    import common.range_percentiles_cache as mod
-    # Patch the underlying helper to return a known value: 10 hours.
-    class _FakeMarketHours:
-        @staticmethod
-        def compute_market_transition_times(now_utc, tz_name="America/New_York"):
-            return (10 * 3600, None)
-    import sys as _sys
-    _sys.modules["common.market_hours"] = _FakeMarketHours
+# Helper for the case-table tests below — pin "now" and the trading-day
+# calendar so the math is deterministic.
+import sys as _sys
+from datetime import datetime as _dt
+from zoneinfo import ZoneInfo as _ZI
+
+_ET = _ZI("America/New_York")
+
+
+class _CalendarShim:
+    """Pinned calendar — Mon-Fri trading, weekends not. Plug in as
+    `common.market_hours` so cache_ttl_seconds reads from us."""
+    @staticmethod
+    def is_trading_day(d):
+        # date or datetime → weekday: Mon=0..Sun=6, treat 0..4 as trading
+        return d.weekday() < 5
+
+
+def _ttl_at(now_et: _dt) -> int:
+    """Compute cache_ttl_seconds with `now` pinned to a specific ET
+    time and the calendar shim plugged in."""
+    _sys.modules["common.market_hours"] = _CalendarShim
     try:
-        ttl = cache_ttl_seconds()
-        # Expect 10h − 1.5h = 8.5h = 30,600 seconds.
-        assert ttl == 10 * 3600 - PRE_OPEN_BUFFER_SECONDS
-        # Custom buffer override:
-        ttl_custom = cache_ttl_seconds(pre_open_buffer_seconds=600)
-        assert ttl_custom == 10 * 3600 - 600
+        return cache_ttl_seconds(now_utc=now_et.astimezone(_ZI("UTC")))
     finally:
         _sys.modules.pop("common.market_hours", None)
 
 
-def test_cache_ttl_floors_at_60s_when_request_within_buffer():
-    """If we're inside the 1.5h pre-open window (e.g. 8:30 AM ET),
-    seconds_to_open might be 60 minutes, less than the 90-min buffer.
-    Result would go negative — must floor at 60s instead."""
-    import sys as _sys
-    class _FakeMarketHours:
-        @staticmethod
-        def compute_market_transition_times(now_utc, tz_name="America/New_York"):
-            return (1800, None)  # 30 min until open, well inside the 90-min buffer
-    _sys.modules["common.market_hours"] = _FakeMarketHours
+def _hours(seconds: int) -> float:
+    return seconds / 3600.0
+
+
+def test_ttl_tue_morning_pre_open_lasts_until_wed_8am():
+    """The Tue-9-AM regression case: at 9 AM Tue (pre-open, post-cron),
+    `previous_close` is Monday's close and won't change until Wed 8 AM
+    when the next cron writes Tuesday's bar. ~23 hours."""
+    now = _dt(2026, 5, 12, 9, 0, tzinfo=_ET)  # Tue 9 AM
+    ttl = _ttl_at(now)
+    expected = _dt(2026, 5, 13, 8, 0, tzinfo=_ET)  # Wed 8 AM
+    delta = (expected - now).total_seconds()
+    assert ttl == int(delta), f"Tue 9 AM → expected {_hours(delta):.1f}h, got {_hours(ttl):.1f}h"
+
+
+def test_ttl_tue_late_morning():
+    """Tue 11 AM should also cache until Wed 8 AM — Mon's bar is the
+    current `previous_close`, Tue's bar lands tomorrow."""
+    now = _dt(2026, 5, 12, 11, 0, tzinfo=_ET)
+    ttl = _ttl_at(now)
+    expected = _dt(2026, 5, 13, 8, 0, tzinfo=_ET)
+    assert ttl == int((expected - now).total_seconds())
+
+
+def test_ttl_tue_after_close_cached_until_wed_8am():
+    """Tue 5 PM (after market close, before the night's cron) →
+    Wed 8 AM. ~15 hours."""
+    now = _dt(2026, 5, 12, 17, 0, tzinfo=_ET)
+    ttl = _ttl_at(now)
+    expected = _dt(2026, 5, 13, 8, 0, tzinfo=_ET)
+    assert ttl == int((expected - now).total_seconds())
+
+
+def test_ttl_pre_buffer_window_short_ttl():
+    """Wed 7 AM ET → today's 8 AM cron-buffer boundary is only 1 hour
+    away. TTL should be ~1 hour, not next-day."""
+    now = _dt(2026, 5, 13, 7, 0, tzinfo=_ET)  # Wed 7 AM
+    ttl = _ttl_at(now)
+    expected = _dt(2026, 5, 13, 8, 0, tzinfo=_ET)  # Wed 8 AM
+    assert ttl == int((expected - now).total_seconds())
+
+
+def test_ttl_inside_buffer_window_skips_to_tomorrow():
+    """Wed 8:30 AM ET → today's 8 AM has already passed. The cron has
+    finished, the new previous_close is in the cache request that
+    fires after this. Cache from now should last until Thu 8 AM."""
+    now = _dt(2026, 5, 13, 8, 30, tzinfo=_ET)
+    ttl = _ttl_at(now)
+    expected = _dt(2026, 5, 14, 8, 0, tzinfo=_ET)
+    assert ttl == int((expected - now).total_seconds())
+
+
+def test_ttl_saturday_caps_at_36h_through_weekend():
+    """Saturday morning → next data refresh is Tue 8 AM (Mon's cron
+    finds nothing new because Sun was a non-trading day). Raw delta
+    is ~73h, but the 36-hour cap pulls it back."""
+    now = _dt(2026, 5, 16, 11, 0, tzinfo=_ET)  # Saturday
+    ttl = _ttl_at(now)
+    assert ttl == 36 * 3600
+
+
+def test_ttl_friday_morning_until_sat_8am():
+    """Friday 11 AM ET → Friday closes at 4 PM, Saturday's cron writes
+    Friday's bar, daily_prices changes at Sat 8 AM. ~21 hours."""
+    now = _dt(2026, 5, 15, 11, 0, tzinfo=_ET)
+    ttl = _ttl_at(now)
+    expected = _dt(2026, 5, 16, 8, 0, tzinfo=_ET)
+    assert ttl == int((expected - now).total_seconds())
+
+
+def test_ttl_floors_at_60s_at_boundary():
+    """At Wed 7:59:30 ET (just barely before the 8 AM boundary), the
+    raw delta is 30 seconds — floor to 60."""
+    now = _dt(2026, 5, 13, 7, 59, 30, tzinfo=_ET)
+    ttl = _ttl_at(now)
+    assert ttl == 60
+
+
+def test_ttl_custom_buffer_shifts_the_refresh_time():
+    """A custom buffer shifts the daily refresh boundary. Setting it
+    to 30 min (1800s) means the boundary is 9:00 AM ET (= NYSE open
+    9:30 - 30 min). At Tue 11 AM the next 9:00 AM that follows a
+    trading day is Wed 9:00 AM."""
+    _sys.modules["common.market_hours"] = _CalendarShim
     try:
-        assert cache_ttl_seconds() == 60  # floored
+        now = _dt(2026, 5, 12, 11, 0, tzinfo=_ET)  # Tue 11 AM
+        ttl = cache_ttl_seconds(
+            now_utc=now.astimezone(_ZI("UTC")),
+            pre_open_buffer_seconds=1800,  # 30 min before open → 9:00 AM
+        )
+        expected = _dt(2026, 5, 13, 9, 0, tzinfo=_ET)  # Wed 9:00 AM
+        assert ttl == int((expected - now).total_seconds())
     finally:
         _sys.modules.pop("common.market_hours", None)

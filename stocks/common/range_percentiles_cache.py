@@ -183,56 +183,109 @@ async def cache_response(
         return False
 
 
-# Default buffer: expire the cache 1.5 hours BEFORE the next NYSE open
-# (~8:00 AM ET, since open is 9:30 AM ET). The daily cron writes the
-# previous trading day's close to daily_prices around 6:10 AM ET (3:10
-# AM PT), so by 8:00 AM the new `previous_close` is in the DB. Letting
-# the cache expire at that boundary instead of at 9:30 AM means the
-# first request between 8:00 and 9:30 picks up fresh values rather
-# than serving slightly-stale entries pinned to *yesterday*'s close.
+# `previous_close` for /range_percentiles changes when the daily cron
+# writes a new trading day's bar to daily_prices. The cron fires at
+# ~6:10 AM ET each morning; by 8 AM the new bar is in. So the cache's
+# "next refresh boundary" is the next 8 AM ET that follows a trading
+# day — which is NOT always tomorrow:
+#
+#   Tue 9 AM → next refresh = Wed 8 AM (Tue closes at 4 PM, Wed cron
+#                                       writes Tue's bar)
+#   Sat anytime → next refresh = Tue 8 AM (Mon's cron finds no new
+#                                          data; Tue's cron writes
+#                                          Monday's bar)
+#
+# This time-of-day is `NYSE open (9:30 AM ET) − pre-open buffer`. The
+# default 90-min buffer puts it at 8:00 AM exactly. If the cron timing
+# ever shifts you can override with `pre_open_buffer_seconds`.
+NYSE_OPEN_HOUR_ET = 9
+NYSE_OPEN_MIN_ET = 30
 PRE_OPEN_BUFFER_SECONDS = 5400  # 90 minutes
+
+
+def _next_data_refresh_et(
+    now_et: datetime,
+    pre_open_buffer_seconds: int = PRE_OPEN_BUFFER_SECONDS,
+) -> datetime:
+    """Return the next ET datetime when `previous_close` will refresh —
+    the next "open − buffer" time-of-day whose previous calendar day
+    was a trading day.
+
+    Iterates day by day (capped at 14) so an unusually long market
+    holiday (Christmas-into-New-Year stretch with weekends, e.g.) still
+    converges. Uses `common.market_hours.is_trading_day` for holiday
+    awareness; on import failure falls back to a weekday check.
+    """
+    open_seconds = NYSE_OPEN_HOUR_ET * 3600 + NYSE_OPEN_MIN_ET * 60
+    refresh_seconds = open_seconds - int(pre_open_buffer_seconds)
+    refresh_h, refresh_m = divmod(refresh_seconds // 60, 60)
+
+    try:
+        from common.market_hours import is_trading_day
+    except Exception:
+        # Fallback: treat Mon-Fri as trading days. Misses holidays
+        # but keeps the cache functional in stripped-down envs.
+        def is_trading_day(d):  # type: ignore[no-redef]
+            return d.weekday() < 5
+
+    from datetime import timedelta as _td
+    candidate = now_et.replace(
+        hour=refresh_h, minute=refresh_m, second=0, microsecond=0,
+    )
+    if candidate <= now_et:
+        candidate = candidate + _td(days=1)
+
+    for _ in range(14):
+        prev_day = (candidate - _td(days=1)).date()
+        if is_trading_day(prev_day):
+            return candidate
+        candidate = candidate + _td(days=1)
+    # Fallback if we couldn't find a refresh inside 14 days (shouldn't
+    # happen on a real calendar): expire in 24 hours.
+    return now_et + _td(hours=24)
 
 
 def cache_ttl_seconds(
     now_utc: Optional[datetime] = None,
     pre_open_buffer_seconds: int = PRE_OPEN_BUFFER_SECONDS,
 ) -> int:
-    """Cache TTL for /range_percentiles responses.
+    """TTL for the /range_percentiles response cache.
 
-    Returns seconds until "the new previous_close should be available"
-    — i.e. `seconds_to_next_NYSE_open - pre_open_buffer_seconds`.
-    Default buffer is 90 min so cache expiry lands at ~8:00 AM ET,
-    after the daily cron has had time to land yesterday's close into
-    daily_prices but before regular trading reopens.
+    Equals "seconds until the next 8 AM ET (= NYSE open − 1.5h) whose
+    previous calendar day was a trading day" — i.e. the next time the
+    daily cron will have written a new previous_close into the DB.
 
-    Wraps `common.market_hours.compute_market_transition_times` (which
-    is exchange_calendars-aware, so holidays / early closes are
-    honored). Falls back to one hour if the helper isn't importable
-    so the cache still works without exchange_calendars installed.
+      Tue 9 AM   → ~23 h (cache valid until Wed 8 AM)
+      Tue 11 AM  → ~21 h (Wed 8 AM)
+      Tue 5 PM   → ~15 h (Wed 8 AM)
+      Sat 11 AM  → ~69 h capped → 36 h
+      Pre-buffer (Wed 7 AM, before today's 8 AM refresh) → ~1 h
+
+    Holiday-aware via common.market_hours.is_trading_day. Falls back
+    to a weekday check (no exchange_calendars) if that import fails.
 
     Bounds:
       * 60 second floor — avoids cache-then-expire-immediately races
-        when a request lands moments before the boundary.
-      * 36-hour cap — safety net for any miscalculation across a long
-        weekend; better to refresh more often than stale-pin entries.
+        when a request lands within seconds of the boundary.
+      * 36-hour cap — safety net so a misconfigured calendar can't
+        stale-pin an entry across a long weekend.
     """
     if now_utc is None:
         now_utc = datetime.now(timezone.utc)
     try:
-        from common.market_hours import compute_market_transition_times
-        seconds_to_open, _ = compute_market_transition_times(now_utc)
-        if seconds_to_open is None or seconds_to_open <= 0:
-            return 3600
-        adjusted = int(seconds_to_open) - int(pre_open_buffer_seconds)
-        if adjusted < 60:
-            adjusted = 60
-        return min(adjusted, 36 * 3600)
+        from zoneinfo import ZoneInfo as _ZI
+        now_et = now_utc.astimezone(_ZI("America/New_York"))
+        next_refresh = _next_data_refresh_et(now_et, pre_open_buffer_seconds)
+        ttl = int((next_refresh - now_et).total_seconds())
     except Exception:
         return 3600
+    if ttl < 60:
+        ttl = 60
+    return min(ttl, 36 * 3600)
 
 
 # Backwards-compat alias — the original name described the bare
-# transition; the new name reflects the cache-specific math (buffer
-# applied). Keep the old name working for any caller that imported
+# transition; the new name reflects the cache-specific math (refresh
+# boundary). Keep the old name working for any caller that imported
 # it directly.
 seconds_until_next_market_open = cache_ttl_seconds
