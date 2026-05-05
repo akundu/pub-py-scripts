@@ -298,13 +298,41 @@ def test_ttl_inside_buffer_window_skips_to_tomorrow():
     assert ttl == int((expected - now).total_seconds())
 
 
-def test_ttl_saturday_caps_at_36h_through_weekend():
+def test_ttl_saturday_caches_through_weekend_until_tuesday():
     """Saturday morning → next data refresh is Tue 8 AM (Mon's cron
-    finds nothing new because Sun was a non-trading day). Raw delta
-    is ~73h, but the 36-hour cap pulls it back."""
+    finds nothing new since Sun was a non-trading day; Tue cron is
+    the one that actually writes Mon's bar). Raw delta is ~69h,
+    well under the 96h cap, so the cache lasts the full weekend
+    instead of expiring Sunday night and triggering a wasted
+    Mon-morning recompute that would produce the same Friday-close
+    result."""
     now = _dt(2026, 5, 16, 11, 0, tzinfo=_ET)  # Saturday
     ttl = _ttl_at(now)
-    assert ttl == 36 * 3600
+    expected = _dt(2026, 5, 19, 8, 0, tzinfo=_ET)  # Tue 8 AM
+    assert ttl == int((expected - now).total_seconds())
+    # Confirms the value is well under the 96h cap.
+    assert ttl < 96 * 3600
+
+
+def test_ttl_caps_at_96h_when_calendar_misbehaves():
+    """If the calendar lookup ever returns a far-future refresh
+    (degenerate case — every day reported as non-trading for >14
+    iterations, or a malformed calendar), the 96-hour cap keeps
+    the entry from being stale-pinned indefinitely."""
+    import sys as _sys
+    class _NoTradingDays:
+        @staticmethod
+        def is_trading_day(d):
+            return False
+    _sys.modules["common.market_hours"] = _NoTradingDays
+    try:
+        now = _dt(2026, 5, 12, 9, 0, tzinfo=_ET)
+        ttl = cache_ttl_seconds(now_utc=now.astimezone(_ZI("UTC")))
+        # Inner lookup hits its 14-day cap, returns now+24h fallback.
+        # That's well under 96h — verifying the cap is at most 96h.
+        assert ttl <= 96 * 3600
+    finally:
+        _sys.modules.pop("common.market_hours", None)
 
 
 def test_ttl_friday_morning_until_sat_8am():

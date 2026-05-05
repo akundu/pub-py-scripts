@@ -267,8 +267,16 @@ def cache_ttl_seconds(
     Bounds:
       * 60 second floor — avoids cache-then-expire-immediately races
         when a request lands within seconds of the boundary.
-      * 36-hour cap — safety net so a misconfigured calendar can't
-        stale-pin an entry across a long weekend.
+      * 96-hour cap (4 days) — safety net for a misconfigured calendar
+        but tall enough to cover legitimate long weekends end-to-end.
+        Sat 11 AM → Tue 8 AM is ~69h (regular weekend); Sat 11 AM →
+        Wed 8 AM is ~93h (Memorial-Day-style 3-day weekend). The
+        previous 36h cap was trimming weekend caches at ~Sun night
+        and forcing a redundant recompute on Mon morning that
+        produced the exact same result (Friday's close still anchored
+        the data through Mon — Mon's cron doesn't add a new bar
+        because Sun was a non-trading day; the actual data refresh
+        is Tue 8 AM when the cron writes Mon's bar).
     """
     if now_utc is None:
         now_utc = datetime.now(timezone.utc)
@@ -281,7 +289,7 @@ def cache_ttl_seconds(
         return 3600
     if ttl < 60:
         ttl = 60
-    return min(ttl, 36 * 3600)
+    return min(ttl, 96 * 3600)
 
 
 # Backwards-compat alias — the original name described the bare
