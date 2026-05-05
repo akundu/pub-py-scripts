@@ -144,6 +144,32 @@ def _is_percentile_tier(tier_name: str) -> bool:
     return bool(tier_name) and _TIER_PERCENTILE_RE.match(tier_name) is not None
 
 
+def _build_percentile_request_set(args) -> list[int]:
+    """Specific percentiles to request from `/range_percentiles` instead
+    of relying on the server's default set. Cuts server compute and
+    response payload, and keeps the resolved list deterministic.
+
+    Includes:
+      * Standard named-tier targets (p90/p95/p98) so that any
+        configured `aggressive` / `moderate` / `conservative` resolves
+        cleanly via the server's recommended map.
+      * User-configured `pN` form on `min_tier` / `min_tier_close`
+        (e.g., `min_tier: p93`). Without this the recommended pN
+        wouldn't be in the response and the boundary lookup would
+        return None.
+      * A coarse distribution context (p25/p50/p75) so the Hist/Pred
+        column classifier has enough resolution to bucket strikes
+        that sit close-to-money. Without these, the cells would
+        mostly degrade to `—` because no pN in the map is small
+        enough to bracket the actual strike offset.
+      * p99 because operators sometimes treat it as the next-step-up
+        from cons (~p98) for an extra-conservative gate.
+    """
+    pcts: set[int] = {25, 50, 75, 90, 95, 97, 98, 99}
+    pcts.update(_extract_pn_percentiles_from_args(args))
+    return sorted(pcts)
+
+
 def _extract_pn_percentiles_from_args(args) -> list[int]:
     """Pull out the integer N from any `pN`-form `min_tier` /
     `min_tier_close` on `args`. Used to ask the percentile server to
@@ -645,6 +671,56 @@ async def _try_fetch_tier_data_one_url(
     return None
 
 
+async def _fetch_per_ticker_parallel(
+    client: httpx.AsyncClient, percentile_url: str, tickers: list[str],
+    dte_list: list[int] | None,
+    percentiles: list[int] | None,
+    timeout_sec: float | None,
+) -> dict[str, dict | None]:
+    """Fire one /range_percentiles request per ticker concurrently.
+
+    Returns `{ticker: response_dict | None}` — None for any ticker
+    whose call failed. Each ticker's response is the same shape as
+    a multi-ticker response, just with a single ticker's data inside.
+
+    Why per-ticker:
+      * Smaller payloads → faster server compute per call → less
+        chance of tripping the per-request timeout.
+      * Failures are isolated. If NDX is timing out, SPX/RUT can
+        still complete and the scanner stays operational on those.
+    """
+    async def _one(t: str):
+        try:
+            resp = await _try_fetch_tier_data_one_url(
+                client, percentile_url, [t], dte_list,
+                percentiles=percentiles,
+                timeout_sec=timeout_sec,
+            )
+            return t, resp
+        except Exception as e:
+            print(f"[tier_fetch] {t} via {percentile_url} raised: {e}", file=sys.stderr)
+            return t, None
+
+    results = await asyncio.gather(
+        *(_one(t) for t in tickers), return_exceptions=False,
+    )
+    return {t: r for t, r in results}
+
+
+def _merge_per_ticker_responses(responses: list[dict]) -> dict:
+    """Combine N per-ticker /range_percentiles responses into the
+    aggregate shape (`hourly`, `hourly_1dte`, `tickers`) the rest of
+    the scanner expects."""
+    merged: dict = {"hourly": {}, "hourly_1dte": {}, "tickers": []}
+    for resp in responses:
+        if not resp:
+            continue
+        merged["hourly"].update(resp.get("hourly", {}) or {})
+        merged["hourly_1dte"].update(resp.get("hourly_1dte", {}) or {})
+        merged["tickers"].extend(resp.get("tickers", []) or [])
+    return merged
+
+
 async def fetch_tier_data(
     client: httpx.AsyncClient, percentile_url: str, tickers: list[str],
     dte_list: list[int] | None = None,
@@ -655,87 +731,106 @@ async def fetch_tier_data(
 ) -> dict | None:
     """Fetch percentile/tier data from the percentile server.
 
-    Returns the hourly data structure with recommended tiers per ticker.
-    Requests windows matching the DTE list so close-to-close data is
-    available. When `percentiles` is supplied, the server is asked to
-    compute exactly those percentile values (in addition to its
-    defaults) — important when `--min-tier pN` uses a non-default N
-    like p93 / p87 / p82, otherwise the resulting boundary lookup
-    silently returns None and the gate disengages.
+    Returns the merged hourly data structure (one combined dict shaped
+    like a single-call response) with recommended tiers per ticker.
 
-    Failover: when `fallback_url` is provided and differs from
-    `percentile_url`, a failure on the primary triggers a one-shot
-    retry against the fallback. If the fallback succeeds, it's
-    considered the new "current" URL — `on_swap_to_fallback(fallback_url)`
-    is invoked so the caller can persist the swap (e.g. update
-    `args.percentile_url` and the resolved-endpoints dashboard line).
-    The 2h TierDataCache then keeps using the fallback for the next
-    refresh window. Only the startup `/health` probe gets a primary
-    revisit — once we've witnessed a real data-layer failure on the
-    primary, we don't ping-pong back to it for the rest of the session.
+    Per-ticker parallel fetch: instead of one big multi-ticker call,
+    we fire N parallel single-ticker calls. Smaller individual payloads
+    are less likely to trip the per-request timeout, and a slow ticker
+    no longer takes down the others.
+
+    `percentiles`: pass an explicit list to subset the server's pct map.
+    Without this the server returns its full default set; for a tier
+    filter we typically only need ~8 percentiles, so this cuts both
+    server compute and response payload.
+
+    Partial-failure semantics:
+      * All primary calls succeed → return merged result.
+      * Some primary calls fail, others succeed, NO fallback configured
+        → return whatever succeeded (degraded mode). Failed tickers'
+        spreads will be dropped by the fail-safe in
+        `_collect_filtered_candidates` since their tier boundaries
+        won't resolve.
+      * Some/all primary fail AND fallback configured AND fallback
+        differs from primary → retry ONLY the failed tickers against
+        the fallback. If any backup call succeeds,
+        `on_swap_to_fallback(fallback_url)` fires so the caller
+        persists the swap.
+      * Every ticker failed on both URLs → return None and record a
+        joint failure reason.
 
     Side effect: captures the last failure reason in
     `_TIER_FETCH_LAST_ERROR["reason"]` so the offline banner can show
-    HTTP code + body excerpt or exception type. On a successful
-    fallback, the reason text records which URL succeeded.
+    HTTP code + body excerpt or exception type.
     """
-    # Resolve primary/fallback the first time through; subsequent calls hit
-    # the cache immediately (no extra round-trip).
+    # Resolve primary/fallback the first time through; subsequent calls
+    # hit the cache immediately (no extra round-trip).
     percentile_url = await _resolve_percentile_url(client, percentile_url)
 
-    # First attempt — the configured (or already-swapped) URL.
-    result = await _try_fetch_tier_data_one_url(
-        client, percentile_url, tickers, dte_list,
-        percentiles=percentiles,
-        timeout_sec=timeout_sec,
+    primary = await _fetch_per_ticker_parallel(
+        client, percentile_url, tickers, dte_list, percentiles, timeout_sec,
     )
-    if result is not None:
-        return result
+    primary_ok = {t: r for t, r in primary.items() if r}
+    primary_failed = [t for t in tickers if not primary.get(t)]
 
-    # Primary failed. If we have a fallback that's actually different,
-    # try it once. Avoids needless double-latency when there's no
-    # backup configured or when both fields point to the same URL
-    # (which happens when the YAML omits a backup and the resolver
-    # cached the lone URL on both sides).
+    if not primary_failed:
+        # Full primary success.
+        _TIER_FETCH_LAST_ERROR["reason"] = None
+        return _merge_per_ticker_responses(list(primary_ok.values()))
+
+    # Some primary calls failed. Decide whether to consult the backup.
     if not fallback_url or fallback_url == percentile_url:
+        # No working fallback. Return what we have if anything succeeded;
+        # else None. Downstream fail-safe drops candidates for tickers
+        # whose tier boundary didn't resolve, so partial data is OK.
+        if primary_ok:
+            print(
+                f"[tier_fetch] partial: {len(primary_ok)}/{len(tickers)} from "
+                f"{percentile_url}; failed tickers {primary_failed} will have "
+                f"no tier boundary → spreads dropped by fail-safe",
+                file=sys.stderr,
+            )
+            return _merge_per_ticker_responses(list(primary_ok.values()))
         return None
 
     primary_reason = _TIER_FETCH_LAST_ERROR.get("reason")
     print(
-        f"[tier_fetch] primary {percentile_url} failed: {primary_reason}; "
-        f"trying backup {fallback_url}",
+        f"[tier_fetch] primary {percentile_url} failed for {primary_failed} "
+        f"({primary_reason}); trying backup {fallback_url} for those tickers",
         file=sys.stderr,
     )
 
-    result = await _try_fetch_tier_data_one_url(
-        client, fallback_url, tickers, dte_list,
-        percentiles=percentiles,
-        timeout_sec=timeout_sec,
+    backup = await _fetch_per_ticker_parallel(
+        client, fallback_url, primary_failed, dte_list, percentiles, timeout_sec,
     )
-    if result is not None:
-        # Success on backup. Tell the caller so they can swap their
-        # cached URL — future refreshes go directly to backup, no
-        # second-guess re-probe of a URL we know is broken.
-        if on_swap_to_fallback is not None:
-            try:
-                on_swap_to_fallback(fallback_url)
-            except Exception as e:
-                print(f"[tier_fetch] on_swap_to_fallback raised: {e}", file=sys.stderr)
-        # Annotate so the operator sees we're on backup, while still
-        # clearing the "fetch failed" state (since we DO have data).
-        _TIER_FETCH_LAST_ERROR["reason"] = None
+    backup_ok = {t: r for t, r in backup.items() if r}
+
+    final_ok = {**primary_ok, **backup_ok}
+
+    if backup_ok and on_swap_to_fallback is not None:
+        # ANY successful backup call means the primary is unreliable.
+        # Persist the swap so future cache refreshes go directly to
+        # the backup URL — no second-guessing a host we just observed
+        # failing.
+        try:
+            on_swap_to_fallback(fallback_url)
+        except Exception as e:
+            print(f"[tier_fetch] on_swap_to_fallback raised: {e}", file=sys.stderr)
         print(
-            f"[tier_fetch] backup {fallback_url} succeeded; swapping for the rest of the session",
+            f"[tier_fetch] backup recovered {len(backup_ok)}/{len(primary_failed)} "
+            f"failed tickers; swapping percentile_url to {fallback_url}",
             file=sys.stderr,
         )
-        return result
 
-    # Both failed. Record the joint failure so the offline banner is
-    # honest about it.
+    if final_ok:
+        _TIER_FETCH_LAST_ERROR["reason"] = None
+        return _merge_per_ticker_responses(list(final_ok.values()))
+
+    # Every ticker failed on both URLs. Joint-failure error reason.
     backup_reason = _TIER_FETCH_LAST_ERROR.get("reason")
     _TIER_FETCH_LAST_ERROR["reason"] = (
-        f"primary failed ({primary_reason}); "
-        f"backup also failed ({backup_reason})"
+        f"all {len(tickers)} tickers failed on both primary and backup "
+        f"(last primary: {primary_reason}; last backup: {backup_reason})"
     )
     return None
 
@@ -4064,7 +4159,11 @@ async def scan_all_tickers(
     # percentile set (~p1/5/10/25/50/75/90/95/98/99) doesn't include
     # p93, the boundary lookup returns None, and the filter falls
     # through.
-    requested_percentiles = _extract_pn_percentiles_from_args(args)
+    # Build the explicit percentile set to request. Includes named-tier
+    # targets (p90/p95/p98), any user-configured `pN`, and a coarse
+    # context set for Hist/Pred classification — everything else the
+    # server might compute by default we don't need.
+    requested_percentiles = _build_percentile_request_set(args)
     # Pull the per-fetch timeout from args (YAML / CLI). Without an
     # explicit value the default 30s leaves headroom for the
     # heavyweight `/range_percentiles` endpoint when the percentile

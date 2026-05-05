@@ -18331,6 +18331,170 @@ class TestSpreadScanner:
         assert _extract_pn_percentiles_from_args(args) == []
 
     @pytest.mark.asyncio
+    async def test_fetch_tier_data_fires_one_call_per_ticker(self):
+        """Per-ticker parallel fetch: a 3-ticker request must produce
+        3 individual `/range_percentiles` calls (one ticker each), not
+        a single `ticker=SPX,NDX,RUT` aggregate. Smaller per-call
+        payloads avoid tripping the per-request timeout when the
+        server is loaded."""
+        import spread_scanner as ss
+
+        async def fake_resolve(client, configured):
+            return configured
+        orig_resolve = ss._resolve_percentile_url
+        ss._resolve_percentile_url = fake_resolve
+        try:
+            tickers_in_calls: list[str] = []
+            class FakeOK:
+                status_code = 200
+                def json(self):
+                    return {"hourly": {}, "tickers": []}
+            class FakeClient:
+                async def get(self, url, *a, params=None, **kw):
+                    # Capture the ticker from the params dict.
+                    tickers_in_calls.append((params or {}).get("ticker", ""))
+                    return FakeOK()
+            await ss.fetch_tier_data(
+                FakeClient(), "http://localhost:9100",
+                ["SPX", "NDX", "RUT"], dte_list=[0],
+            )
+            # 3 calls total, each with exactly one ticker.
+            assert len(tickers_in_calls) == 3, tickers_in_calls
+            assert sorted(tickers_in_calls) == ["NDX", "RUT", "SPX"]
+            # No single call carrying multiple tickers.
+            assert all("," not in t for t in tickers_in_calls), (
+                f"per-ticker fetch must NOT batch tickers in one call: "
+                f"got {tickers_in_calls}"
+            )
+        finally:
+            ss._resolve_percentile_url = orig_resolve
+
+    @pytest.mark.asyncio
+    async def test_fetch_tier_data_partial_failure_returns_partial(self):
+        """When some tickers fail and NO fallback is configured,
+        fetch_tier_data must return the merged partial result instead
+        of None — so the scanner can still operate on the tickers
+        whose data did come back. Tickers without data will have
+        their tier boundaries return None and the fail-safe in
+        `_collect_filtered_candidates` drops their spreads — no
+        silent fall-through."""
+        import spread_scanner as ss
+
+        async def fake_resolve(client, configured):
+            return configured
+        orig_resolve = ss._resolve_percentile_url
+        ss._resolve_percentile_url = fake_resolve
+        try:
+            class FakeOK:
+                status_code = 200
+                def __init__(self, sym):
+                    self._sym = sym
+                def json(self):
+                    return {"hourly": {self._sym: {"recommended": {}, "slots": {}}},
+                            "tickers": [{"ticker": self._sym, "windows": {}}]}
+            class FakeClient:
+                async def get(self, url, *a, params=None, **kw):
+                    sym = (params or {}).get("ticker", "")
+                    if sym == "NDX":
+                        # NDX times out (e.g., a slow ticker).
+                        import httpx
+                        raise httpx.ReadTimeout("NDX slow")
+                    return FakeOK(sym)
+            data = await ss.fetch_tier_data(
+                FakeClient(), "http://localhost:9100",
+                ["SPX", "NDX", "RUT"], dte_list=[0],
+            )
+            assert data is not None
+            # SPX and RUT made it; NDX did not.
+            assert "SPX" in data.get("hourly", {})
+            assert "RUT" in data.get("hourly", {})
+            assert "NDX" not in data.get("hourly", {})
+            tickers_with_windows = {t["ticker"] for t in data.get("tickers", [])}
+            assert tickers_with_windows == {"SPX", "RUT"}
+        finally:
+            ss._resolve_percentile_url = orig_resolve
+
+    @pytest.mark.asyncio
+    async def test_fetch_tier_data_per_ticker_failover_only_failed_tickers(self):
+        """When some tickers fail on primary and a fallback is
+        configured, only the FAILED tickers get retried against the
+        backup — not the ones that already succeeded. Saves time and
+        avoids hitting a slow primary harder."""
+        import spread_scanner as ss
+
+        async def fake_resolve(client, configured):
+            return configured
+        orig_resolve = ss._resolve_percentile_url
+        ss._resolve_percentile_url = fake_resolve
+        try:
+            urls_per_ticker: dict[str, list[str]] = {}
+            class FakeOK:
+                status_code = 200
+                def __init__(self, sym):
+                    self._sym = sym
+                def json(self):
+                    return {"hourly": {self._sym: {}},
+                            "tickers": [{"ticker": self._sym, "windows": {}}]}
+            class FakeClient:
+                async def get(self, url, *a, params=None, **kw):
+                    sym = (params or {}).get("ticker", "")
+                    urls_per_ticker.setdefault(sym, []).append(url)
+                    if sym == "NDX" and "primary" in url:
+                        # NDX fails on primary, succeeds on backup.
+                        import httpx
+                        raise httpx.ReadTimeout("NDX slow on primary")
+                    return FakeOK(sym)
+            swapped: list[str] = []
+            data = await ss.fetch_tier_data(
+                FakeClient(), "http://primary:9100",
+                ["SPX", "NDX", "RUT"], dte_list=[0],
+                fallback_url="http://backup:9100",
+                on_swap_to_fallback=lambda u: swapped.append(u),
+            )
+            assert data is not None
+            assert "NDX" in data.get("hourly", {})  # recovered via backup
+            # SPX/RUT fetched from primary only — NOT also from backup.
+            assert all("primary" in u for u in urls_per_ticker.get("SPX", []))
+            assert all("primary" in u for u in urls_per_ticker.get("RUT", []))
+            assert "SPX" not in [u for u in urls_per_ticker.get("SPX", []) if "backup" in u]
+            # NDX was tried on BOTH primary and backup.
+            assert any("primary" in u for u in urls_per_ticker.get("NDX", []))
+            assert any("backup" in u for u in urls_per_ticker.get("NDX", []))
+            # Swap callback fired (backup recovered something).
+            assert swapped == ["http://backup:9100"]
+        finally:
+            ss._resolve_percentile_url = orig_resolve
+
+    def test_build_percentile_request_set_covers_named_tiers_and_pn(self):
+        """The percentile-request set must include the standard named-
+        tier targets (p90/p95/p98) so any `aggressive`/`moderate`/
+        `conservative` config resolves cleanly, plus a coarse context
+        set (p25/p50/p75) for Hist/Pred classification, plus any
+        user-configured pN value pulled from min_tier/min_tier_close."""
+        from argparse import Namespace
+        from spread_scanner import _build_percentile_request_set
+
+        # Named tier — set should cover {25, 50, 75, 90, 95, 97, 98, 99}.
+        args = Namespace(min_tier="conservative", min_tier_close=None)
+        s = set(_build_percentile_request_set(args))
+        for needed in (25, 50, 75, 90, 95, 97, 98, 99):
+            assert needed in s, f"named-tier set must include p{needed}"
+
+        # pN form — gets added to the standard set.
+        args = Namespace(min_tier="p87", min_tier_close="p93")
+        s = set(_build_percentile_request_set(args))
+        assert 87 in s
+        assert 93 in s
+        assert 90 in s   # named-tier targets still present
+        assert 95 in s
+        assert 98 in s
+
+        # No tier filter at all — still returns the standard set.
+        args = Namespace(min_tier=None, min_tier_close=None)
+        s = set(_build_percentile_request_set(args))
+        assert 90 in s and 95 in s and 98 in s
+
+    @pytest.mark.asyncio
     async def test_fetch_tier_data_passes_timeout_to_get(self):
         """When `timeout_sec` is supplied to fetch_tier_data, the value
         must reach `client.get(..., timeout=…)` so the per-request
@@ -19533,10 +19697,12 @@ class TestSpreadScanner:
             )
             assert data is None
             reason = ss._TIER_FETCH_LAST_ERROR.get("reason") or ""
-            assert "primary failed" in reason
-            assert "backup also failed" in reason
-            # Both underlying error types should appear so the operator
-            # can tell timeout from connection refused.
+            # Per-ticker fetch reports a unified joint-failure summary:
+            # "all N tickers failed on both primary and backup (last
+            #  primary: ...; last backup: ...)". Both underlying
+            # error signatures must appear so the operator can tell
+            # timeout from connection refused.
+            assert "failed on both primary and backup" in reason
             assert "ReadTimeout" in reason or "primary timeout" in reason
             assert "ConnectError" in reason or "backup unreachable" in reason
         finally:
