@@ -90,7 +90,7 @@ verify_require_provider_source: false
 #                    c2c gate).
 # Leaving them null = no tier filter.
 tiers: true
-min_tier: p93 #aggr         # or a percentile e.g. p95, p75, p40
+min_tier: moderate         # or a percentile e.g. p95, p75, p40
 #min_tier_close: p92         # close-to-close variant
 
 # ── Tier-boundary buffer (additive cushion) ──────────────────────────────────
@@ -164,7 +164,7 @@ handlers:
     # behavior, or populate `min_norm_roi_per_ticker` to tune per ticker
     # (RUT routinely maxes around 1.65 p75 at DTE=1 so you'll likely
     # want RUT: 1.0-1.25 there to include it).
-    min_norm_roi: 1.5
+    min_norm_roi: 2.0
     # Per-ticker overrides — feature plumbed in but OFF.
     # When ready, e.g.:
     #   min_norm_roi_per_ticker:
