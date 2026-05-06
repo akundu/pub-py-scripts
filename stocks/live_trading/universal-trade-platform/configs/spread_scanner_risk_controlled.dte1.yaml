@@ -90,7 +90,7 @@ verify_require_provider_source: true
 #                    c2c gate).
 # Leaving them null = no tier filter.
 tiers: true
-min_tier: moderate         # or a percentile e.g. p95, p75, p40
+min_tier: mod         # or a percentile e.g. p95, p75, p40
 #min_tier_close: p92         # close-to-close variant
 
 # ── Tier-boundary buffer (additive cushion) ──────────────────────────────────
@@ -162,7 +162,7 @@ handlers:
     log_file: trades_sim_dte1.tracking_2026-05-06.jsonl
     daemon_url: http://localhost:8000
     policy: &trade_policy
-      norm_roi: [0.7, 8]
+      norm_roi: [0.8, 8]
       min_otm_pct:  {SPX: 1.5, NDX: 2, RUT: 2.5}
       min_credit:   {SPX: 0.15, NDX: 0.20, RUT: 0.15}
       max_total_risk: 300000
