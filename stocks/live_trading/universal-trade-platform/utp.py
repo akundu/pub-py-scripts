@@ -3652,7 +3652,7 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                 upnl_c = "92" if total_upnl >= 0 else "91"
                 total_risk_info = ""
                 if total_max_loss > 0:
-                    total_roi_pct = (total_upnl / total_max_loss) * 100
+                    total_roi_pct = (total_credit / total_max_loss) * 100
                     total_risk_info = f"{total_credit:,.0f}/{total_roi_pct:+.1f}%/{total_max_loss:,.0f}"
                 print(f"  {'':>6} {'':>6} {'':>10} {'':>16} {'':>5} "
                       f"${total_cost:>11,.2f} ${total_value:>11,.2f} "

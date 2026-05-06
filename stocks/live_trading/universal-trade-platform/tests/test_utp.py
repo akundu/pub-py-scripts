@@ -633,6 +633,51 @@ class TestPortfolioCommand:
         out = capsys.readouterr().out
         assert "\033[91m" in out, "delta 0.20 should be red"
 
+    def test_portfolio_aggregate_roi_uses_credit_not_upnl(self, capsys):
+        """Aggregate footer ROI = total_credit / total_max_loss, not upnl / max_loss."""
+        import asyncio
+
+        class FakeResp:
+            def __init__(self, data): self.status_code = 200; self._data = data
+            def json(self): return self._data
+
+        class FakeClient:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def get(self, path, params=None):
+                return FakeResp({
+                    "positions": [{
+                        "position_id": "roi1", "symbol": "SPX", "order_type": "multi_leg",
+                        "quantity": 1, "expiration": "2026-05-09", "source": "paper",
+                        "broker": "ibkr", "status": "open",
+                        # upnl is negative (-33 059), credit is +5 561, max_loss is 531 439
+                        "avg_cost": -5561.0, "market_value": -38620.82,
+                        "market_price": -38.62, "broker_unrealized_pnl": -33059.82,
+                        "legs_summary": "P5500/P5475",
+                        "legs": [],
+                        "net_delta": 0.03,
+                        "spread_metrics": {
+                            "spread_width": 25.0, "gross_risk": 536700.0,
+                            "derived_credit": 5561.0, "max_loss": 531139.0,
+                            "roi_pct": 1.05,
+                        },
+                    }],
+                    "balances": {}, "realized_pnl": 0, "unrealized_pnl": -33059.82,
+                    "total_pnl": -33059.82, "positions_by_source": {},
+                    "daily_pnl": 0, "recent_closed": [],
+                })
+
+        ns = argparse.Namespace(recent=0, verbose=False)
+        with patch("httpx.AsyncClient", return_value=FakeClient()):
+            from utp import _cmd_portfolio_http
+            asyncio.run(_cmd_portfolio_http(ns, "http://localhost:8000"))
+        out = capsys.readouterr().out
+        # Should show positive ROI (credit/max_loss), not negative (upnl/max_loss)
+        assert "+1." in out or "+1.0" in out, (
+            f"aggregate ROI should be ~+1% (credit/max_loss), got output:\n{out}"
+        )
+        assert "-6." not in out, "aggregate ROI must not show upnl-based -6%"
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CLI Status Command
