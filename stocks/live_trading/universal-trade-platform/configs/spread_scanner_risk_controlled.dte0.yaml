@@ -233,7 +233,7 @@ handlers:
       # `per_cycle_cap`. Default 1 keeps the firing pace conservative
       # (one trade per cycle, the highest-ROI candidate). Set to 0 for
       # a kill switch.
-      max_trades_per_cycle: 2
+      max_trades_per_cycle: 1
       # min_minutes_between_trades: after a successful submit, no further
       # trade fires for this many minutes (across all tickers/sides);
       # candidates in cycles within that window are logged with reason
@@ -241,7 +241,7 @@ handlers:
       # which is the per-(ticker, side) version. Default 3.0 — comfortable
       # cushion that prevents the scanner from spamming the broker on a
       # rapidly-moving spread.
-      min_minutes_between_trades: 4.0
+      min_minutes_between_trades: 3.0
 
   # Live trading — uncomment to activate. Uses the SAME policy as simulate_trade
   # via the YAML anchor above.
