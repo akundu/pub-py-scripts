@@ -2651,6 +2651,26 @@ class TestFillTracking:
         assert result.status == OrderStatus.CANCELLED
 
     @pytest.mark.asyncio
+    async def test_tif_preset_cancel_10349_annotated(self):
+        """IBKR error 10349 (TIF preset cancel) must be annotated as
+        [tif_preset_cancel] so callers can distinguish it from a real
+        business cancellation. Status stays CANCELLED — order was not filled."""
+        class _Tif10349Provider:
+            async def get_order_status(self, order_id):
+                return OrderResult(order_id=order_id, broker=Broker.IBKR,
+                                   status=OrderStatus.CANCELLED,
+                                   message="Cancelled; Error 10349: Order TIF was set to DAY based on order preset")
+
+        with patch("app.services.trade_service.ProviderRegistry") as mock_reg:
+            mock_reg.get.return_value = _Tif10349Provider()
+            from app.services.trade_service import await_order_fill
+            result = await await_order_fill(broker=Broker.IBKR, order_id="tif-001",
+                                             poll_interval=0.01, timeout=1.0)
+        assert result.status == OrderStatus.CANCELLED
+        assert "[tif_preset_cancel]" in result.message
+        assert "10349" in result.message
+
+    @pytest.mark.asyncio
     async def test_rejected_order(self):
         provider = _FakeProvider(polls_before_fill=0, terminal_status=OrderStatus.REJECTED)
         with patch("app.services.trade_service.ProviderRegistry") as mock_reg:
@@ -2838,6 +2858,57 @@ class TestIBKRProvider:
         # Total contract count carried by Order.totalQuantity, not leg ratios
         placed_order = provider._ib.placeOrder.call_args[0][1]
         assert placed_order.totalQuantity == 10
+
+    @pytest.mark.asyncio
+    async def test_combo_order_sets_tif_day(self):
+        """execute_multi_leg_order() must set tif='DAY' to prevent IBKR error 10349."""
+        from app.core.providers.ibkr import IBKRLiveProvider
+        provider = IBKRLiveProvider()
+        provider._connected = True
+        provider._ib = MagicMock()
+
+        mock_contract = MagicMock(conId=12345)
+        provider._ib.qualifyContractsAsync = AsyncMock(return_value=[mock_contract])
+        mock_trade = MagicMock()
+        mock_trade.order.orderId = 42
+        provider._ib.placeOrder = MagicMock(return_value=mock_trade)
+
+        with patch("app.config.settings") as mock_settings:
+            mock_settings.ibkr_readonly = False
+            order = MultiLegOrder(broker=Broker.IBKR, legs=[
+                OptionLeg(symbol="SPX", expiration="2026-03-20", strike=5500.0,
+                          option_type=OptionType.PUT, action=OptionAction.SELL_TO_OPEN, quantity=1),
+                OptionLeg(symbol="SPX", expiration="2026-03-20", strike=5475.0,
+                          option_type=OptionType.PUT, action=OptionAction.BUY_TO_OPEN, quantity=1),
+            ], order_type=OrderType.MARKET, quantity=1)
+            await provider.execute_multi_leg_order(order)
+
+        placed_order = provider._ib.placeOrder.call_args[0][1]
+        assert placed_order.tif == "DAY"
+
+    @pytest.mark.asyncio
+    async def test_equity_order_sets_tif_day(self):
+        """execute_equity_order() must set tif='DAY' to prevent IBKR error 10349."""
+        from app.core.providers.ibkr import IBKRLiveProvider
+        provider = IBKRLiveProvider()
+        provider._connected = True
+        provider._ib = MagicMock()
+
+        mock_contract = MagicMock(conId=99999)
+        provider._ib.qualifyContractsAsync = AsyncMock(return_value=[mock_contract])
+        mock_trade = MagicMock()
+        mock_trade.order.orderId = 43
+        provider._ib.placeOrder = MagicMock(return_value=mock_trade)
+
+        with patch("app.config.settings") as mock_settings:
+            mock_settings.ibkr_readonly = False
+            order = EquityOrder(broker=Broker.IBKR, symbol="SPY",
+                                side=OrderSide.BUY, quantity=5,
+                                order_type=OrderType.MARKET)
+            await provider.execute_equity_order(order)
+
+        placed_order = provider._ib.placeOrder.call_args[0][1]
+        assert placed_order.tif == "DAY"
 
     @pytest.mark.asyncio
     async def test_get_option_quotes_writes_to_cross_provider_store(self):

@@ -319,6 +319,23 @@ async def await_order_fill(
                 return result
 
         if result.status in TERMINAL_STATUSES:
+            # IBKR error 10349: "Order TIF was set to DAY based on order preset"
+            # IBKR auto-cancels and resubmits the order to apply the TIF preset.
+            # This is not a real cancellation — the order will typically fill on
+            # the next scan cycle. Annotate so the caller knows not to treat this
+            # as a business rejection. Root fix: set ib_order.tif = "DAY" before
+            # placeOrder (done in _place_equity_order / _place_combo_order).
+            if (result.status == OrderStatus.CANCELLED
+                    and result.message and "10349" in result.message):
+                result.message = (
+                    f"[tif_preset_cancel] {result.message} "
+                    "— IBKR auto-cancelled to set TIF=DAY; order was NOT filled"
+                )
+                logger.warning(
+                    "Order %s cancelled by IBKR TIF preset (error 10349). "
+                    "Setting tif='DAY' on order objects prevents this.",
+                    order_id,
+                )
             # On fill, create position from pending request (or close existing)
             if result.status == OrderStatus.FILLED and order_id in _pending_orders:
                 request = _pending_orders.pop(order_id)

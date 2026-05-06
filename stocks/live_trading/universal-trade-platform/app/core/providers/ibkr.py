@@ -854,6 +854,7 @@ class IBKRLiveProvider(BrokerProvider):
             ib_order = MarketOrder(order.side.value, order.quantity)
         else:
             ib_order = LimitOrder(order.side.value, order.quantity, order.limit_price or 0)
+        ib_order.tif = "DAY"  # prevent IBKR error 10349 (TIF preset cancel)
 
         trade = self._ib.placeOrder(contract, ib_order)
         return OrderResult(
@@ -949,6 +950,7 @@ class IBKRLiveProvider(BrokerProvider):
             ib_order = MarketOrder("BUY", order.quantity)
         else:
             ib_order = LimitOrder("BUY", order.quantity, ibkr_price)
+        ib_order.tif = "DAY"  # prevent IBKR error 10349 (TIF preset cancel)
 
         price_label = f"${ibkr_price:+.2f}" if raw_price else "MARKET"
         logger.info(
