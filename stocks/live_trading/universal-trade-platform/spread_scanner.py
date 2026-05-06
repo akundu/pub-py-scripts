@@ -4904,6 +4904,10 @@ async def scan_loop(args):
         # Wall-clock target (event-loop time) at which the NEXT dashboard
         # paint should appear. None on the very first iteration.
         next_paint_at: float | None = None
+        # 1-indexed row number of the footer line in the terminal after the
+        # most recent dashboard paint. Used for absolute cursor positioning so
+        # footer ticks are immune to cursor displacement from async prints.
+        footer_row: int | None = None
 
         while True:
             # Phase 1 — countdown wait. Skip on the very first iteration
@@ -4920,10 +4924,12 @@ async def scan_loop(args):
                     if now >= kickoff_at:
                         break
                     paint_remaining = max(0, int(round(next_paint_at - now)))
-                    print(
-                        f"\033[F\033[2K{render_footer(args, seconds_remaining=paint_remaining)}",
-                        flush=True,
-                    )
+                    if footer_row is not None:
+                        print(
+                            f"\033[{footer_row};1H\033[2K"
+                            f"{render_footer(args, seconds_remaining=paint_remaining)}",
+                            flush=True,
+                        )
                     await asyncio.sleep(min(1.0, max(0.05, kickoff_at - now)))
 
             # Phase 2 — run scan + countdown concurrently. The countdown
@@ -4945,13 +4951,14 @@ async def scan_loop(args):
                 # Mirrors the Phase-1 ticker but exits as soon as the scan
                 # completes — no point updating the footer after the new
                 # dashboard is about to overwrite the screen.
-                if next_paint_at is None:
+                if next_paint_at is None or footer_row is None:
                     return
                 while not scan_done.is_set():
                     now = asyncio.get_event_loop().time()
                     paint_remaining = max(0, int(round(next_paint_at - now)))
                     print(
-                        f"\033[F\033[2K{render_footer(args, seconds_remaining=paint_remaining)}",
+                        f"\033[{footer_row};1H\033[2K"
+                        f"{render_footer(args, seconds_remaining=paint_remaining)}",
                         flush=True,
                     )
                     try:
@@ -4978,20 +4985,22 @@ async def scan_loop(args):
             # replaced and stale countdown ticks don't survive.
             if err is None and output is not None:
                 print(output, end="", flush=True)
+                # output = "\033[2J\033[H" + "\n".join(lines); no trailing \n.
+                # Count \n chars to find which 1-indexed terminal row the footer
+                # landed on after \033[H moved the cursor to row 1. Ticks use
+                # absolute positioning (\033[{footer_row};1H) instead of \033[F
+                # so they're immune to cursor displacement from async handler
+                # prints that may fire between ticks.
+                footer_row = output.count('\n') + 1
+                print()  # advance cursor past footer so stray prints don't land on it
             else:
                 print("\033[2J\033[H")
                 print(f" {BOLD}SPREAD SCANNER{RESET} — {err}")
+                footer_row = None
 
             if args.once:
                 break
 
-            # After the paint, output ends with footer\n so the cursor is
-            # exactly one line past the footer (R+1). Each subsequent tick
-            # uses ESC[F + ESC[2K to move back to R, clear, and repaint the
-            # footer in place. Do NOT print() here — an extra newline would
-            # push the cursor to R+2, causing ESC[F to target the blank
-            # scratch line instead of the footer and leaving stale footer
-            # lines visible as new ones accumulate below.
             # Compute next paint deadline from THIS paint, not from the
             # scan start — keeps the visual cadence steady even when
             # individual scans run long.
