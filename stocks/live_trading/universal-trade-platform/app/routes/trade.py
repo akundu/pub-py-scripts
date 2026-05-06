@@ -273,11 +273,15 @@ async def trade_execute(
     _user: Annotated[TokenData, Security(require_auth, scopes=["trades:write"])],
     x_dry_run: Annotated[str | None, Header()] = None,
     x_async: Annotated[str | None, Header()] = None,
+    x_simulate: Annotated[str | None, Header()] = None,
 ) -> OrderResult:
     """Execute an equity or multi-leg options trade.
 
     Headers:
-        X-Dry-Run: true — simulate without sending to broker (paper trade).
+        X-Dry-Run: true — paper trade: validate + persist as paper position.
+        X-Simulate: true — validate only: no position store, no ledger,
+            no notifications. Used by the spread scanner's simulate handler
+            and CLI preview (trade without --confirm).
         X-Async: true — return immediately after submission; fill status
             is broadcast via WebSocket at /ws/orders. Without this header,
             the endpoint blocks until the order reaches a terminal state
@@ -285,11 +289,12 @@ async def trade_execute(
             expires (default 30s, configurable via ORDER_POLL_TIMEOUT_SECONDS).
     """
     dry_run = (x_dry_run or "").lower() == "true"
+    simulate = (x_simulate or "").lower() == "true"
     async_mode = (x_async or "").lower() == "true"
 
-    result = await execute_trade(request, dry_run=dry_run)
+    result = await execute_trade(request, dry_run=dry_run, simulate=simulate)
 
-    if dry_run:
+    if dry_run or simulate:
         return result
 
     broker = (

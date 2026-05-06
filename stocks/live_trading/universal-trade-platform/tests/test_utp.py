@@ -21658,21 +21658,21 @@ class TestSpreadScanner:
         early = datetime(2026, 5, 6, 7, 0, tzinfo=_PT)
         # DTE 0: norm = ROI / 1 (time-decay never applies to DTE 0)
         assert _compute_norm_roi(10.0, 0) == 10.0
-        # DTE 1 before 9:30 AM PT: norm = ROI / 2 (no decay yet)
+        # DTE 1 before 9:00 AM PT: norm = ROI / 2 (no decay yet)
         assert _compute_norm_roi(10.0, 1, now=early) == 5.0
-        # DTE 2 before 9:30 AM PT: norm = ROI / 3
+        # DTE 2 before 9:00 AM PT: norm = ROI / 3
         assert _compute_norm_roi(9.0, 2, now=early) == 3.0
 
     def test_compute_norm_roi_intraday_decay(self):
-        """DTE1+ nROI rises after 9:30 AM PT as today's session is consumed; DTE0 unchanged."""
+        """DTE1+ nROI rises after 9:00 AM PT as today's session is consumed; DTE0 unchanged."""
         from spread_scanner import _compute_norm_roi
         from zoneinfo import ZoneInfo
         _PT = ZoneInfo("America/Los_Angeles")
-        # Exactly at 9:30 AM — no adjustment yet.
-        at_cutoff = datetime(2026, 5, 6, 9, 30, tzinfo=_PT)
+        # Exactly at 9:00 AM — no adjustment yet (strict >).
+        at_cutoff = datetime(2026, 5, 6, 9, 0, tzinfo=_PT)
         assert _compute_norm_roi(10.0, 1, now=at_cutoff) == 5.0
-        # 11:15 AM — halfway through window (9:30→13:00 = 210 min; elapsed 105 min).
-        mid = datetime(2026, 5, 6, 11, 15, tzinfo=_PT)
+        # 11:00 AM — halfway through window (9:00→13:00 = 240 min; elapsed 120 min).
+        mid = datetime(2026, 5, 6, 11, 0, tzinfo=_PT)
         nr_mid = _compute_norm_roi(10.0, 1, now=mid)
         assert nr_mid > 5.0              # must be higher than the morning value
         assert nr_mid < 10.0             # but not yet at DTE0 level
@@ -23811,7 +23811,8 @@ class TestTradeHandlers:
 
     # --- logging + submission ---------------------------------------------
 
-    def test_simulate_handler_calls_margin_not_broker(self, monkeypatch, tmp_path):
+    def test_simulate_handler_calls_daemon_simulate_not_margin(self, monkeypatch, tmp_path):
+        """SimulateTradeHandler calls trade_credit_spread(simulate=True), not margin check."""
         import asyncio, sys
         from spread_scanner import SimulateTradeHandler, TradePolicy
 
@@ -23827,7 +23828,8 @@ class TestTradeHandlers:
                 return {"init_margin": 1800.0, "maint_margin": 1800.0, "commission": 1.0, "error": None}
             async def trade_credit_spread(self, **kw):
                 trade_calls.append(kw)
-                return {"order_id": "SHOULD-NOT-SUBMIT"}
+                return {"order_id": "sim1", "status": "PENDING", "dry_run": True,
+                        "message": "SIMULATED: Would 1x SPX 5700P/5680P"}
 
         import spread_scanner as ss
         self._bind_utp_pricing(FakeTClient)
@@ -23841,9 +23843,10 @@ class TestTradeHandlers:
                        )
         asyncio.run(h.fire([self._spread("SPX", credit=1.0)], self._ctx()))
 
-        assert len(margin_calls) == 1
-        assert margin_calls[0]["symbol"] == "SPX"
-        assert trade_calls == []  # simulate must NEVER call trade
+        assert margin_calls == [], "simulate must NOT call margin check endpoint"
+        assert len(trade_calls) == 1
+        assert trade_calls[0]["simulate"] is True  # daemon simulate flag must be set
+        assert trade_calls[0]["symbol"] == "SPX"
 
         events = [json.loads(l) for l in log_file.read_text().splitlines()]
         assert any(e["event"] == "submit" and e["handler"] == "simulate_trade" for e in events)
@@ -24534,6 +24537,191 @@ handlers:
         assert h.count_rejected == 2
 
 
+class TestSimulateMode:
+    """X-Simulate: true header — daemon validates, nothing persisted."""
+
+    @pytest.mark.asyncio
+    async def test_simulate_header_no_position_created(self, client, api_key_headers):
+        from app.services.position_store import get_position_store
+        store = get_position_store()
+        before = len(store._positions) if store else 0
+        payload = {"multi_leg_order": {
+            "broker": "ibkr",
+            "legs": [
+                {"symbol": "SPX", "expiration": "20260506", "strike": 5500.0,
+                 "option_type": "PUT", "action": "SELL_TO_OPEN", "quantity": 1},
+                {"symbol": "SPX", "expiration": "20260506", "strike": 5475.0,
+                 "option_type": "PUT", "action": "BUY_TO_OPEN", "quantity": 1},
+            ],
+            "order_type": "MARKET", "quantity": 1,
+        }}
+        headers = {**api_key_headers, "X-Simulate": "true"}
+        resp = await client.post("/trade/execute", json=payload, headers=headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "PENDING"
+        assert data["dry_run"] is True
+        after = len(store._positions) if store else 0
+        assert after == before, "simulate must not create positions"
+
+    @pytest.mark.asyncio
+    async def test_simulate_header_no_ledger_entry(self, client, api_key_headers):
+        from app.services.ledger import get_ledger
+        ledger = get_ledger()
+        before = ledger._sequence if ledger else 0
+        payload = {"equity_order": {"broker": "ibkr", "symbol": "SPY",
+                                    "side": "BUY", "quantity": 1, "order_type": "MARKET"}}
+        headers = {**api_key_headers, "X-Simulate": "true"}
+        resp = await client.post("/trade/execute", json=payload, headers=headers)
+        assert resp.status_code == 200
+        after = ledger._sequence if ledger else 0
+        assert after == before, "simulate must not write ledger entries"
+
+    @pytest.mark.asyncio
+    async def test_simulate_dry_run_still_persists(self, client, api_key_headers):
+        """X-Dry-Run (paper trade) DOES create a position; X-Simulate does not."""
+        from app.services.position_store import get_position_store
+        store = get_position_store()
+        before = len(store._positions) if store else 0
+        payload = {"equity_order": {"broker": "ibkr", "symbol": "SPY",
+                                    "side": "BUY", "quantity": 1, "order_type": "MARKET"}}
+        headers = {**api_key_headers, "X-Dry-Run": "true"}
+        resp = await client.post("/trade/execute", json=payload, headers=headers)
+        assert resp.status_code == 200
+        after = len(store._positions) if store else 0
+        assert after == before + 1, "dry_run (paper) must create a position"
+
+    @pytest.mark.asyncio
+    async def test_simulate_multileg_message_prefix(self, client, api_key_headers):
+        payload = {"multi_leg_order": {
+            "broker": "ibkr",
+            "legs": [
+                {"symbol": "RUT", "expiration": "20260506", "strike": 2400.0,
+                 "option_type": "PUT", "action": "SELL_TO_OPEN", "quantity": 1},
+                {"symbol": "RUT", "expiration": "20260506", "strike": 2380.0,
+                 "option_type": "PUT", "action": "BUY_TO_OPEN", "quantity": 1},
+            ],
+            "order_type": "MARKET", "quantity": 2,
+        }}
+        headers = {**api_key_headers, "X-Simulate": "true"}
+        resp = await client.post("/trade/execute", json=payload, headers=headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "SIMULATED" in data["message"]
+
+
+class TestSimulateHandlerConvergence:
+    """SimulateTradeHandler routes through daemon simulate, not margin check."""
+
+    @staticmethod
+    def _spread(sym="SPX"):
+        return {
+            "symbol": sym, "option_type": "PUT", "short_strike": 5700.0,
+            "long_strike": 5680.0, "width": 20, "credit": 1.5, "roi_pct": 8.0,
+            "otm_pct": 2.0, "dte": 0, "expiration": "20260506",
+            "prev_close": 5800.0, "short_delta": 0.04,
+        }
+
+    @staticmethod
+    def _ctx():
+        from spread_scanner import HandlerContext
+        return HandlerContext(client=None, args=None, scan_data={},
+                              is_market_hours=True, now_ts="2026-05-06T07:00:00")
+
+    def test_simulate_handler_calls_trade_credit_spread_not_margin(self, monkeypatch):
+        """SimulateTradeHandler._execute_one calls trade_credit_spread(simulate=True)."""
+        import asyncio
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+
+        margin_calls = []
+        trade_calls = []
+
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def trade_credit_spread(self, **kw):
+                trade_calls.append(kw)
+                return {"order_id": "sim1", "status": "PENDING", "dry_run": True,
+                        "message": "SIMULATED: Would 1x SPX 5700P/5680P"}
+            async def check_margin_credit_spread(self, **kw):
+                margin_calls.append(kw)
+                return {"init_margin": 1900.0}
+
+        import spread_scanner as ss
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+        monkeypatch.setattr(ss.TradePolicy, "within_trading_window", lambda self, now_pt=None: True)
+
+        h = SimulateTradeHandler(
+            min_norm_roi=0, log_file="/tmp/t_conv.jsonl",
+            policy=TradePolicy.from_dict({"norm_roi": [0.1, 50.0]}),
+            daemon_url="http://d", validate_prices=False,
+        )
+        asyncio.run(h.fire([self._spread()], self._ctx()))
+
+        assert margin_calls == [], "simulate must NOT call check_margin_credit_spread"
+        assert len(trade_calls) == 1
+        assert trade_calls[0]["simulate"] is True
+
+    def test_simulate_handler_daemon_rejected_surfaces_in_activity(self, monkeypatch, tmp_path):
+        """Daemon REJECTED → activity entry outcome=REJECTED, daemon_msg set."""
+        import asyncio
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def trade_credit_spread(self, **kw):
+                return {"order_id": "sim2", "status": "REJECTED", "dry_run": True,
+                        "message": "price stale: 90s old"}
+
+        import spread_scanner as ss
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+        monkeypatch.setattr(ss.TradePolicy, "within_trading_window", lambda self, now_pt=None: True)
+
+        h = SimulateTradeHandler(
+            min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+            policy=TradePolicy.from_dict({"norm_roi": [0.1, 50.0]}),
+            daemon_url="http://d", validate_prices=False,
+        )
+        asyncio.run(h.fire([self._spread()], self._ctx()))
+
+        assert len(h.recent_actions) == 1
+        act = h.recent_actions[0]
+        assert act["outcome"] == "REJECTED"
+        assert "price stale" in (act.get("daemon_msg") or "")
+
+    def test_simulate_handler_daemon_success_shows_simulated(self, monkeypatch, tmp_path):
+        """Daemon PENDING + simulated=True → outcome=SIMULATED in activity."""
+        import asyncio
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def trade_credit_spread(self, **kw):
+                return {"order_id": "sim3", "status": "PENDING", "dry_run": True,
+                        "message": "SIMULATED: Would 1x SPX 5700P/5680P"}
+
+        import spread_scanner as ss
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+        monkeypatch.setattr(ss.TradePolicy, "within_trading_window", lambda self, now_pt=None: True)
+
+        h = SimulateTradeHandler(
+            min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+            policy=TradePolicy.from_dict({"norm_roi": [0.1, 50.0]}),
+            daemon_url="http://d", validate_prices=False,
+        )
+        asyncio.run(h.fire([self._spread()], self._ctx()))
+
+        assert len(h.recent_actions) == 1
+        act = h.recent_actions[0]
+        assert act["outcome"] == "SIMULATED"
+        assert act.get("daemon_msg") is None
+
+
 class TestRecentActionsAndNotifications:
     """recent_actions buffer + dashboard panel + per-action notifications."""
 
@@ -24733,8 +24921,9 @@ class TestRecentActionsAndNotifications:
             def __init__(self, *a, **kw): pass
             async def __aenter__(self): return self
             async def __aexit__(self, *a): pass
-            async def check_margin_credit_spread(self, **kw):
-                return {"init_margin": 1000, "error": None}
+            async def trade_credit_spread(self, **kw):
+                return {"order_id": "s1", "status": "PENDING", "dry_run": True,
+                        "message": "SIMULATED: Would 1x SPX"}
 
         import spread_scanner as ss
         monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)

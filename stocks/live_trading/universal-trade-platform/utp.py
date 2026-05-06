@@ -327,8 +327,13 @@ class TradingClient:
         expiration: str,
         quantity: int = 1,
         net_price: float | None = None,
+        simulate: bool = False,
     ) -> dict:
-        """Execute a credit spread trade. Returns order result."""
+        """Execute a credit spread trade. Returns order result.
+
+        simulate=True sends X-Simulate: true — daemon validates the order
+        and returns an OrderResult without persisting anything.
+        """
         legs = [
             {
                 "symbol": symbol,
@@ -356,8 +361,13 @@ class TradingClient:
                 "quantity": quantity,
             }
         }
+        headers: dict[str, str] = {}
+        if simulate:
+            headers["X-Simulate"] = "true"
         self._ensure_connected()
-        resp = await self._client.post("/trade/execute", json=payload, timeout=_trade_http_timeout())
+        resp = await self._client.post(
+            "/trade/execute", json=payload, headers=headers, timeout=_trade_http_timeout(),
+        )
         resp.raise_for_status()
         return resp.json()
 
@@ -5577,42 +5587,39 @@ async def _cmd_trade_http(args, server: str) -> int:
                     print(f"  {_color(f'⚠ {_spike_reason} — proceeding with {_override_flag}', '93')}")
 
         if not confirm and mode != "dry-run":
-            # Await the margin check background task launched at the top of this block.
-            # Usually already complete by the time we reach here (ran concurrently with display).
+            # Cancel the old margin task — we'll get richer feedback from the
+            # daemon simulate call below (full validation pipeline, no persistence).
             if _margin_task is not None:
-                try:
-                    mr = await _margin_task
-                    if mr.status_code == 200:
-                        md = mr.json()
-                        if md.get("error"):
-                            err_msg = md["error"]
-                            upper_msg = err_msg.upper()
-                            # Timeouts are not rejections — treat as informational
-                            is_timeout = "TIMED OUT" in upper_msg or "TIMEOUT" in upper_msg
-                            # Distinguish real rejections from transient issues
-                            is_margin_reject = not is_timeout and any(kw in upper_msg for kw in (
-                                "NOT ACCEPTED", "INSUFFICIENT",
-                                "BUYING POWER", "POSITION LIMIT",
-                            ))
-                            if is_margin_reject:
-                                print(f"\n  {_color(f'IBKR rejects: {err_msg}', '91')}")
-                            else:
-                                label = "Margin check skipped" if is_timeout else "Margin check unavailable"
-                                print(f"\n  {_color(f'{label}: {err_msg}', '93')}")
-                        else:
-                            im = md.get("init_margin", 0)
-                            mm = md.get("maint_margin", 0)
-                            comm = md.get("commission", 0)
-                            print(f"\n  IBKR margin check:")
-                            print(f"    Initial:    ${im:>10,.2f}")
-                            print(f"    Maint:      ${mm:>10,.2f}")
-                            print(f"    Commission: ${comm:>10,.2f}")
-                    elif mr.status_code >= 400:
-                        detail = mr.json().get("detail", mr.text) if mr.headers.get("content-type", "").startswith("application/json") else mr.text
-                        print(f"\n  {_color(f'IBKR margin check failed: {detail}', '91')}")
-                except Exception as e:
-                    import logging as _mlog
-                    _mlog.getLogger(__name__).debug("Auto margin check failed: %s", e)
+                _margin_task.cancel()
+
+            # Route through daemon X-Simulate: real validation, nothing persisted.
+            _sim_payload = trade_request.model_dump(mode="json")
+            try:
+                _sim_resp = await client.post(
+                    "/trade/execute",
+                    json=_sim_payload,
+                    headers={"X-Simulate": "true"},
+                    timeout=10.0,
+                )
+                if _sim_resp.status_code == 200:
+                    _sr = _sim_resp.json()
+                    _ss = (_sr.get("status") or "UNKNOWN").upper()
+                    _sm = _sr.get("message") or ""
+                    if _ss == "PENDING":
+                        print(f"\n  {_color('[SIMULATE] ✓ ACCEPTED', '96')}: {_sm}")
+                    else:
+                        print(f"\n  {_color(f'[SIMULATE] {_ss}', '91')}: {_sm}")
+                else:
+                    _detail = ""
+                    try:
+                        _ct = _sim_resp.headers.get("content-type", "")
+                        _detail = (_sim_resp.json().get("detail") or _sim_resp.text) if "json" in _ct else _sim_resp.text[:120]
+                    except Exception:
+                        _detail = _sim_resp.text[:120]
+                    print(f"\n  {_color(f'[SIMULATE] daemon error ({_sim_resp.status_code})', '91')}: {_detail}")
+            except Exception as _se:
+                print(f"\n  {_color('[SIMULATE] daemon unavailable', '93')}: {_se}")
+                print(f"     Start the daemon with: python utp.py daemon --live|--paper")
 
             print(f"\n  {_color('NOT EXECUTED', '93')} — add --confirm to place the order")
             return 0

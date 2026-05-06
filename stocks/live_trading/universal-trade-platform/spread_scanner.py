@@ -87,6 +87,13 @@ _PT = ZoneInfo("America/Los_Angeles")
 _PREV_CLOSE_REFRESH_HOUR_PT = 4   # 04:00 AM Pacific
 _PREV_CLOSE_REFRESH_MIN_AGE = timedelta(hours=24)
 
+# nROI intraday decay window for DTE >= 1 (both in Pacific Time).
+# After the start time, the DTE+1 denominator shrinks proportionally so that
+# nROI rises as today's session is consumed. Override via
+# `norm_roi_decay_start_pt` in the scanner YAML config.
+_NORM_ROI_DECAY_START_PT: dtime = dtime(9, 0)   # 09:00 AM PT default
+_NORM_ROI_DECAY_END_PT:   dtime = dtime(13, 0)  # 01:00 PM PT (market close)
+
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 DEFAULT_TICKERS = ["SPX", "RUT", "NDX"]
@@ -312,6 +319,12 @@ class ScannerConfig:
     # room to breathe; the 2h TierDataCache means this slow request
     # only fires once per cache refresh anyway.
     tier_fetch_timeout_sec: float = 30.0
+    # Start time (PT) after which the DTE+1 denominator begins shrinking for
+    # DTE >= 1 spreads, causing nROI to rise proportionally as today's session
+    # is consumed. Format: "HH:MM" (24-hour, Pacific Time). Default "09:00".
+    # Set earlier to make the adjustment kick in sooner; set to "13:00" to
+    # effectively disable the intraday adjustment.
+    norm_roi_decay_start_pt: str = "09:00"
     handlers: list[dict] = field(default_factory=list)
 
     @classmethod
@@ -2506,6 +2519,7 @@ def _format_activity_row(a: dict) -> str:
         "SKIPPED":      f"{DIM}⊗{RESET}",
         "ERROR":        f"{RED}✗{RESET}",
         "REJECTED":     f"{RED}✗{RESET}",
+        "FAILED":       f"{RED}✗{RESET}",
         "CANCELLED":    f"{DIM}⊗{RESET}",
         "QUIET":        f"{DIM}·{RESET}",
         "TIER_OFFLINE": f"{RED}!{RESET}",
@@ -2551,10 +2565,10 @@ def _format_activity_row(a: dict) -> str:
     credit_str = f"{GREEN}${cr:.2f}{RESET} × {BOLD}{ct}{RESET} = {GREEN}${crd:,.0f}{RESET}"
     head = f" {ic} {DIM}{ts}{RESET}  {kt}  {spread_str:<18}  {credit_str}"
 
-    if outcome in ("SKIPPED", "ERROR", "REJECTED", "CANCELLED"):
-        reason = a.get("reason") or "—"
+    if outcome in ("SKIPPED", "ERROR", "REJECTED", "CANCELLED", "FAILED"):
+        reason = a.get("reason") or a.get("daemon_msg") or "—"
         out_tag = f"{YELLOW}SKIPPED{RESET}" if outcome == "SKIPPED" else f"{RED}{outcome}{RESET}"
-        return f"{head}  {out_tag}: {DIM}{reason}{RESET}"
+        return f"{head}  {out_tag}: {DIM}{reason[:80]}{RESET}"
 
     rc = _risk_color(risk)
     fill = a.get("fill_price")
@@ -2898,24 +2912,25 @@ def _compute_norm_roi(
 ) -> float:
     """Normalized ROI = ROI / effective_denominator.
 
-    Base denominator is (DTE + 1).  For DTE >= 1, after 9:30 AM PT the
-    denominator shrinks proportionally as today's session is consumed —
+    Base denominator is (DTE + 1).  For DTE >= 1, after `_NORM_ROI_DECAY_START_PT`
+    (default 09:00 AM PT, configurable via norm_roi_decay_start_pt in scanner YAML)
+    the denominator shrinks proportionally as today's session is consumed —
     nROI rises as the day progresses because the same credit covers fewer
-    remaining days.  At 1:00 PM PT the denominator reaches DTE (today fully
-    elapsed), matching what a DTE0 spread would show at open.
+    remaining days.  At `_NORM_ROI_DECAY_END_PT` (01:00 PM PT) the denominator
+    reaches DTE (today fully elapsed), matching what a DTE0 spread would show at open.
 
-    Window: 9:30 AM PT → 1:00 PM PT (3.5 h).  DTE 0 is never adjusted.
+    DTE 0 is never adjusted.
     """
     denom = float(dte + 1)
     if dte >= 1:
         t = (now or datetime.now(_PT)).astimezone(_PT).time()
-        _DECAY_START = dtime(9, 30)   # 9:30 AM PT
-        _DECAY_END   = dtime(13, 0)   # 1:00 PM PT
-        if t > _DECAY_START:
-            window = (_DECAY_END.hour * 60 + _DECAY_END.minute
-                      - _DECAY_START.hour * 60 - _DECAY_START.minute)  # 210 min
+        decay_start = _NORM_ROI_DECAY_START_PT
+        decay_end   = _NORM_ROI_DECAY_END_PT
+        if t > decay_start:
+            window = (decay_end.hour * 60 + decay_end.minute
+                      - decay_start.hour * 60 - decay_start.minute)
             elapsed = (t.hour * 60 + t.minute
-                       - _DECAY_START.hour * 60 - _DECAY_START.minute)
+                       - decay_start.hour * 60 - decay_start.minute)
             denom -= min(1.0, elapsed / window)
     return round(roi_pct / denom, 2)
 
@@ -3878,6 +3893,7 @@ class TradeHandlerBase(ActionHandler):
         contracts: int | None = None,
         reason: str | None = None,
         fill_price: float | None = None,
+        daemon_msg: str | None = None,
     ) -> None:
         """Push a summary of a decision (submit / result / skip / error) onto
         the handler's rolling recent-actions buffer.
@@ -3906,6 +3922,7 @@ class TradeHandlerBase(ActionHandler):
             "otm_pct": spread.get("otm_pct"),
             "reason": reason,
             "fill_price": fill_price,
+            "daemon_msg": daemon_msg,
         })
 
     # ── per-action notification ──────────────────────────────────────────
@@ -4003,17 +4020,24 @@ class TradeHandlerBase(ActionHandler):
             "result": result,
         })
         # Extract a readable outcome label for the dashboard + notification.
-        # For live trades: broker status (FILLED / PENDING / ...).
-        # For simulate: always "SIMULATED".
-        outcome = "SIMULATED"
+        # For simulate success (PENDING): label as "SIMULATED".
+        # For simulate/live daemon rejections: use the actual status + message.
+        outcome = "SUBMITTED"
         fill_price = None
+        daemon_msg: str | None = None
         if isinstance(result, dict):
-            if result.get("simulated"):
-                outcome = "SIMULATED"
-            elif isinstance(result.get("order"), dict):
-                outcome = str(result["order"].get("status") or "SUBMITTED").upper()
-                fill_price = result["order"].get("filled_price")
-        self._record_action(outcome, spread, contracts=contracts, fill_price=fill_price)
+            if isinstance(result.get("order"), dict):
+                order = result["order"]
+                status = str(order.get("status") or "SUBMITTED").upper()
+                is_sim = result.get("simulated", False)
+                if is_sim and status == "PENDING":
+                    outcome = "SIMULATED"
+                else:
+                    outcome = status
+                fill_price = order.get("filled_price")
+                if outcome not in ("SIMULATED", "FILLED", "SUBMITTED", "PENDING"):
+                    daemon_msg = order.get("message") or None
+        self._record_action(outcome, spread, contracts=contracts, fill_price=fill_price, daemon_msg=daemon_msg)
         await self._notify_action(ctx, spread, outcome, contracts)
 
     @abstractmethod
@@ -4024,22 +4048,28 @@ class TradeHandlerBase(ActionHandler):
 
 
 class SimulateTradeHandler(TradeHandlerBase):
-    """Would-have-traded shadow: margin-checks each candidate, never submits."""
+    """Would-have-traded shadow: routes through daemon X-Simulate, never persists."""
     name = "simulate_trade"
     handler_kind = "simulate_trade"
 
     async def _execute_one(
         self, spread: dict, ctx: HandlerContext, tclient, contracts: int,
     ) -> dict:
-        margin = await tclient.check_margin_credit_spread(
+        order_result = await tclient.trade_credit_spread(
             symbol=spread["symbol"],
             short_strike=spread["short_strike"],
             long_strike=spread["long_strike"],
             option_type=spread["option_type"],
             expiration=spread["expiration"],
             quantity=contracts,
+            simulate=True,
         )
-        return {"simulated": True, "margin_check": margin, "quantity": contracts}
+        return {
+            "order": order_result,
+            "quantity": contracts,
+            "order_type": "MARKET",
+            "simulated": True,
+        }
 
 
 class TradeHandler(TradeHandlerBase):
@@ -5434,6 +5464,13 @@ def _load_config(argv: list[str] | None = None) -> tuple[argparse.Namespace, lis
         cfg = ScannerConfig.from_yaml(pre_args.config)
         cli_defaults = cfg.to_cli_defaults()
         yaml_handlers = list(cfg.handlers)
+        # Apply module-level configurable decay start from YAML
+        global _NORM_ROI_DECAY_START_PT
+        try:
+            _h, _m = map(int, cfg.norm_roi_decay_start_pt.split(":"))
+            _NORM_ROI_DECAY_START_PT = dtime(_h, _m)
+        except Exception:
+            pass  # keep the default if the value is malformed
 
     args = parse_args(argv=argv, defaults=cli_defaults)
     handlers = _build_handler_list(args, yaml_handlers)

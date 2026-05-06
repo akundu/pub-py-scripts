@@ -123,13 +123,28 @@ async def _notify_trade_fill(request: TradeRequest, result: OrderResult, is_clos
         logger.warning("Trade notification HTTP client error: %s", e)
 
 
-async def execute_trade(request: TradeRequest, dry_run: bool = False) -> OrderResult:
-    """Execute a trade through the appropriate broker provider."""
+async def execute_trade(
+    request: TradeRequest, dry_run: bool = False, simulate: bool = False,
+) -> OrderResult:
+    """Execute a trade through the appropriate broker provider.
+
+    simulate=True: runs all construction/validation, returns an OrderResult,
+    but persists NOTHING (no position store, no ledger, no notifications).
+    Intended for X-Simulate calls from the scanner and CLI preview.
+    """
     from app.services.ledger import get_ledger
     from app.services.position_store import get_position_store
 
     if request.equity_order:
         broker = request.equity_order.broker
+        if simulate:
+            eq = request.equity_order
+            return OrderResult(
+                broker=broker,
+                status=OrderStatus.PENDING,
+                message=f"SIMULATED: Would {eq.side.value} {eq.quantity} {eq.symbol}",
+                dry_run=True,
+            )
         if dry_run:
             result = OrderResult(
                 broker=broker,
@@ -186,6 +201,17 @@ async def execute_trade(request: TradeRequest, dry_run: bool = False) -> OrderRe
     order = request.multi_leg_order
     assert order is not None
     broker = order.broker
+    if simulate:
+        sym = order.legs[0].symbol if order.legs else "?"
+        legs_desc = "/".join(
+            f"{l.strike}{l.option_type.value[0]}" for l in order.legs[:2]
+        )
+        return OrderResult(
+            broker=broker,
+            status=OrderStatus.PENDING,
+            message=f"SIMULATED: Would {order.quantity}x {sym} {legs_desc}",
+            dry_run=True,
+        )
     if dry_run:
         legs_desc = ", ".join(
             f"{l.action.value} {l.quantity} {l.symbol} {l.strike}{l.option_type.value[0]} {l.expiration}"
