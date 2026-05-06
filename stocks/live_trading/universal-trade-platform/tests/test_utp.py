@@ -24323,6 +24323,80 @@ class TestRecentActionsAndNotifications:
         err = capsys.readouterr().err
         assert "[notify:simulate_trade] failed" in err
 
+    def test_notification_explicit_email_passed_as_to(self, monkeypatch, tmp_path):
+        """notify_email in policy is sent as 'to' in the /api/notify POST body."""
+        import asyncio
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+
+        posts = []
+        class FakeHttpClient:
+            async def post(self, url, json=None, timeout=None):
+                posts.append({"url": url, "json": json})
+                class R: status_code = 200
+                return R()
+
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def check_margin_credit_spread(self, **kw):
+                return {"init_margin": 1000, "error": None}
+
+        import spread_scanner as ss
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+        monkeypatch.setattr(ss.TradePolicy, "within_trading_window",
+                            lambda self, now_pt=None: True)
+
+        pol = TradePolicy.from_dict({
+            "norm_roi": [1.0, 10.0],
+            "notify_email": "trader@example.com",
+        })
+        assert pol.notify_email == "trader@example.com"
+        h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                                 policy=pol, daemon_url="http://d", validate_prices=False)
+        asyncio.run(h.fire([self._spread()],
+            ss.HandlerContext(client=FakeHttpClient(), args=None, scan_data={},
+                              is_market_hours=True, now_ts="2026-04-22T07:00:00")))
+
+        notify_posts = [p for p in posts if p["url"].endswith("/api/notify")]
+        assert len(notify_posts) == 1
+        assert notify_posts[0]["json"]["to"] == "trader@example.com"
+
+    def test_notification_no_to_when_email_not_set(self, monkeypatch, tmp_path):
+        """When notify_email is not set, 'to' is absent — server uses its defaults."""
+        import asyncio
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+
+        posts = []
+        class FakeHttpClient:
+            async def post(self, url, json=None, timeout=None):
+                posts.append({"url": url, "json": json})
+                class R: status_code = 200
+                return R()
+
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def check_margin_credit_spread(self, **kw):
+                return {"init_margin": 1000, "error": None}
+
+        import spread_scanner as ss
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+        monkeypatch.setattr(ss.TradePolicy, "within_trading_window",
+                            lambda self, now_pt=None: True)
+
+        pol = TradePolicy.from_dict({"norm_roi": [1.0, 10.0]})  # no notify_email
+        h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                                 policy=pol, daemon_url="http://d", validate_prices=False)
+        asyncio.run(h.fire([self._spread()],
+            ss.HandlerContext(client=FakeHttpClient(), args=None, scan_data={},
+                              is_market_hours=True, now_ts="2026-04-22T07:00:00")))
+
+        notify_posts = [p for p in posts if p["url"].endswith("/api/notify")]
+        assert len(notify_posts) == 1
+        assert "to" not in notify_posts[0]["json"]
+
     def test_notification_on_error_outcome(self, monkeypatch, tmp_path):
         """A broker exception should still emit a notification tagged ERROR."""
         import asyncio

@@ -215,6 +215,7 @@ handlers:
         NDX: 12000       # ≈ 2 contracts (NDX width 60 → 6000/contract)
         RUT: 5000        # ≈ 2 contracts (RUT width 25 → 2500/contract)
       require_prev_close: true
+      notify_email: anirbankundu@gmail.com
       # MARKET: immediate fill at the prevailing NBBO credit.
       # LIMIT:  submit at the observed credit; may not fill.
       order_type: MARKET

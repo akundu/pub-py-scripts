@@ -3316,6 +3316,11 @@ class TradePolicy:
     # recent-actions panel. Set False to silence notifications for a handler.
     notify: bool = True
     notify_channel: str = "both"                                 # sms | email | both
+    # Explicit recipients. When set, these are passed as `to` in the /api/notify
+    # POST so notifications land even if NOTIFY_DEFAULT_EMAIL/NOTIFY_DEFAULT_SMS
+    # env vars are not configured on the server.
+    notify_email: str | None = None
+    notify_sms: str | None = None
     trading_window_pt_start: dtime = field(default_factory=lambda: dtime(6, 31))
     trading_window_pt_end: dtime = field(default_factory=lambda: dtime(10, 0))
 
@@ -3343,6 +3348,7 @@ class TradePolicy:
             "max_trades_per_cycle", "min_minutes_between_trades",
             "require_prev_close", "order_type", "stop_loss_multiplier",
             "limit_slippage_pct", "notify", "notify_channel",
+            "notify_email", "notify_sms",
         }
         known_dicts = {"min_otm_pct", "min_credit", "max_per_ticker_risk", "max_risk_per_trade"}
         for k, v in data.items():
@@ -3891,15 +3897,21 @@ class TradeHandlerBase(ActionHandler):
         if error:
             body_lines.append(f"error: {error}")
         message = "\n".join(body_lines)
+        payload: dict = {
+            "channel": self.policy.notify_channel,
+            "message": message,
+            "subject": head,
+            "tag": tag,
+        }
+        # Explicit recipients take precedence over server-side defaults.
+        if self.policy.notify_email:
+            payload["to"] = self.policy.notify_email
+        if self.policy.notify_sms:
+            payload["to_sms"] = self.policy.notify_sms
         try:
             await ctx.client.post(
                 f"{notify_url}/api/notify",
-                json={
-                    "channel": self.policy.notify_channel,
-                    "message": message,
-                    "subject": head,
-                    "tag": tag,
-                },
+                json=payload,
                 timeout=5,
             )
         except Exception as e:
