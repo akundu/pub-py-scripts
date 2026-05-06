@@ -10838,6 +10838,109 @@ class TestPctStrikeResolution:
         with pytest.raises(ValueError, match="negative"):
             _parse_split_pct("2:-1")
 
+    # ── HTTP-path stale-price fallback ────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_resolve_otm_http_stale_fallback(self, monkeypatch):
+        """When the normal quote returns 0 (market closed), retry with max_age=28800."""
+        import utp, httpx, argparse
+
+        call_log: list[str] = []
+
+        class FakeResp:
+            status_code = 200
+            def json(self):
+                return {"last": 0, "bid": 0, "ask": 0}
+
+        class FakeRespStale:
+            status_code = 200
+            def json(self):
+                return {"last": 19750.0, "bid": 0, "ask": 0}
+
+        async def fake_get(url, **_kwargs):
+            call_log.append(url)
+            if "max_age=28800" in url:
+                return FakeRespStale()
+            return FakeResp()
+
+        async def no_snap(client, sym, exp, strikes, opt_type, is_ic):
+            return strikes
+
+        monkeypatch.setattr(utp, "_snap_strikes_to_chain_http", no_snap)
+
+        args = argparse.Namespace(
+            symbol="NDX", otm_pct="2", option_type="PUT",
+            expiration="2026-05-08", width=None,
+        )
+        client = type("C", (), {})()
+        client.get = fake_get  # assign as plain attribute (not a descriptor/method)
+        rc = await utp._resolve_otm_strikes_http(args, "credit-spread", client)
+        assert rc is None, "Should succeed via stale fallback"
+        # First call: normal; second call: with max_age=28800
+        assert any("max_age=28800" in u for u in call_log), "Should retry with 8h window"
+        assert args.short_strike == 19350.0   # 19750 * 0.98 rounded to 50-pt increment
+
+    @pytest.mark.asyncio
+    async def test_resolve_otm_http_zero_price_both_paths(self, monkeypatch):
+        """When both normal and stale-fallback return 0, emit clear error."""
+        import utp, argparse
+
+        class FakeResp:
+            status_code = 200
+            def json(self):
+                return {"last": 0, "bid": 0, "ask": 0}
+
+        async def fake_get(url, **_kwargs):
+            return FakeResp()
+
+        args = argparse.Namespace(
+            symbol="NDX", otm_pct="2", option_type="PUT",
+            expiration="2026-05-08", width=None,
+        )
+        client = type("C", (), {})()
+        client.get = fake_get
+        rc = await utp._resolve_otm_strikes_http(args, "credit-spread", client)
+        assert rc == 1
+
+    @pytest.mark.asyncio
+    async def test_resolve_otm_direct_uses_attribute_not_get(self, monkeypatch):
+        """Direct path uses qd.last/.bid/.ask (Pydantic attrs), not qd.get()."""
+        import utp, argparse
+        from app.models import Quote
+        from datetime import datetime, timezone
+
+        fresh_quote = Quote(symbol="NDX", bid=0, ask=0, last=19800.0, volume=0,
+                            source="streaming_cache")
+
+        async def fake_get_quote(sym, max_age=None):
+            return fresh_quote
+
+        async def fake_init(args):
+            pass
+
+        async def no_snap(sym, exp, strikes, opt_type, is_ic):
+            return strikes
+
+        monkeypatch.setattr(utp, "_init_services", fake_init)
+        monkeypatch.setattr(utp, "_snap_strikes_to_chain_direct", no_snap)
+        import app.services.market_data as md
+        monkeypatch.setattr(md, "get_quote", fake_get_quote)
+        # Also patch the import inside the function
+        import importlib
+        monkeypatch.setattr("app.services.market_data.get_quote", fake_get_quote)
+
+        args = argparse.Namespace(
+            symbol="NDX", otm_pct="2", option_type="PUT",
+            expiration="2026-05-08", width=None,
+        )
+        monkeypatch.setattr(args, "__class__", args.__class__)
+        # Patch the mode check
+        monkeypatch.setattr(utp, "_get_mode", lambda a: "live")
+
+        rc = await utp._resolve_otm_strikes_direct(args, "credit-spread")
+        assert rc is None
+        assert args.short_strike == 19400.0   # 19800 * 0.98 = 19404 → round to 50-pt
+
     # ── Validator ──────────────────────────────────────────────────
 
     def test_validate_otm_pct_with_explicit_strikes_cs(self):
@@ -13282,8 +13385,11 @@ class TestPriceFreshnessEnforcement:
 
     @pytest.mark.asyncio
     async def test_trade_command_blocks_when_price_too_stale(self, monkeypatch, capsys):
-        """Trade command returns non-zero and prints BLOCKED when quote > block threshold."""
+        """Trade command returns non-zero and prints BLOCKED when quote > block threshold
+        (during market hours — post-close the block is intentionally skipped)."""
         from utp import _cmd_trade_http
+        import app.services.market_data as _md
+        monkeypatch.setattr(_md, "_is_market_active", lambda: True)
 
         # Fake HTTP client that returns stale quotes (90s old) for everything
         import httpx

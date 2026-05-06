@@ -2097,8 +2097,30 @@ async def _resolve_otm_strikes_http(args, subcommand: str, client) -> int | None
         qd = qr.json()
         price = qd.get("last") or qd.get("bid") or qd.get("ask")
         if not price or price <= 0:
-            print(f"  Error: no valid price for {sym} — cannot resolve --otm-pct")
+            # Market may be closed; retry with extended stale window (8 h) to pick up
+            # today's last streaming tick from the daemon's cache.
+            qr2 = await client.get(f"/market/quote/{sym}?max_age=28800")
+            if qr2.status_code == 200:
+                qd2 = qr2.json()
+                price = qd2.get("last") or qd2.get("bid") or qd2.get("ask")
+                if price and price > 0:
+                    qd = qd2
+        if not price or price <= 0:
+            # Last resort: use prev_close from streaming status (always populated from
+            # config even when no ticks received — e.g. daemon started after close).
+            try:
+                sr = await client.get("/market/streaming/status")
+                if sr.status_code == 200:
+                    ps = sr.json().get("per_symbol", {}).get(sym.upper(), {})
+                    price = ps.get("prev_close") or 0
+            except Exception:
+                pass
+        if not price or price <= 0:
+            print(f"  Error: no valid price for {sym} — cannot resolve --otm-pct"
+                  " (market closed and no cached price available)")
             return 1
+        if qd.get("source") == "market_closed" or qd.get("quote_source") == "market_closed":
+            print(f"  Note: using prev-close price ${price:,.2f} for strike resolution (market closed)")
     except Exception as e:
         print(f"  Error: could not fetch quote for {sym}: {e}")
         return 1
@@ -2424,9 +2446,16 @@ async def _resolve_otm_strikes_direct(args, subcommand: str) -> int | None:
         if not qd:
             print(f"  Error: no quote for {sym} — cannot resolve --otm-pct")
             return 1
-        price = qd.get("last") or qd.get("bid") or qd.get("ask")
+        # Quote is a Pydantic model — access attributes directly, not via .get()
+        price = qd.last or qd.bid or qd.ask
         if not price or price <= 0:
-            print(f"  Error: no valid price for {sym} — cannot resolve --otm-pct")
+            # Market may be closed; retry with extended stale window (8 h) to pick up
+            # today's last streaming tick.
+            qd2 = await get_quote(sym, max_age=28800)
+            price = qd2.last or qd2.bid or qd2.ask
+        if not price or price <= 0:
+            print(f"  Error: no valid price for {sym} — cannot resolve --otm-pct"
+                  " (market closed and no cached price available)")
             return 1
     except Exception as e:
         print(f"  Error: could not fetch quote for {sym}: {e}")
@@ -4854,8 +4883,11 @@ async def _estimate_spread_market_price(client, order) -> dict | None:
 
     # Fetch option quotes for each type in parallel (iron-condor needs PUT + CALL).
     # Request freshness bounded by the block threshold so the daemon will force
-    # a provider refresh when its cache is stale.
+    # a provider refresh when its cache is stale.  After market close, use an 8-hour
+    # window to retrieve last session's cached quotes for the order summary.
     block_max = _trade_price_block_max_age()
+    from app.services.market_data import _is_market_active as _cmo
+    _display_max_age = block_max if _cmo() else max(block_max, 28800)
     worst_age: float | None = None
     quote_source: str = "fresh_cache"
     all_quotes: dict[tuple, dict] = {}  # (strike, type) → quote
@@ -4864,7 +4896,7 @@ async def _estimate_spread_market_price(client, order) -> dict | None:
         params: dict = {
             "expiration": expiration,
             "option_type": ot,
-            "max_age": block_max,
+            "max_age": _display_max_age,
         }
         if strike_min is not None:
             params["strike_min"] = strike_min
@@ -5170,6 +5202,12 @@ async def _cmd_trade_http(args, server: str) -> int:
         price_block_reasons: list[str] = []
         enforce_freshness = mode != "dry-run"
         block_max = _trade_price_block_max_age()
+        # After market close, stale prices are expected — MARKET orders fill at
+        # IBKR's determined price and LIMIT orders have built-in protection.
+        # Freshness block is skipped post-close; stale annotations still show.
+        from app.services.market_data import _is_market_active as _check_mkt_open
+        _market_is_open = _check_mkt_open()
+        _enforce_stale_block = enforce_freshness and _market_is_open
 
         # ── Parallel pre-fetch: daemon defaults + VIX quotes ──────────────
         # All three are independent HTTP GETs — gather for one round-trip.
@@ -5240,6 +5278,9 @@ async def _cmd_trade_http(args, server: str) -> int:
         _print_header("Trade Order Summary")
         if not enforce_freshness:
             print(f"  {_color('ℹ', '96')}  Dry-run: price freshness enforcement disabled.")
+        elif not _market_is_open:
+            print(f"  {_color('⚠ Market closed', '93')} — prices are from last session; "
+                  f"IBKR will fill at current prices at execution.")
         if trade_request.equity_order:
             eo = trade_request.equity_order
             print(f"  Type:       equity")
@@ -5299,12 +5340,14 @@ async def _cmd_trade_http(args, server: str) -> int:
             print(f"  Quantity:   {order.quantity}")
             print(f"  Exchange:   SMART (best execution)")
 
-            # Fetch and show current underlying price with change from prev close
+            # Fetch and show current underlying price with change from prev close.
+            # After close, use an 8-hour window to retrieve last session's price.
+            _ul_max_age = block_max if _market_is_open else max(block_max, 28800)
             ul_age: float | None = None
             try:
                 qr = await client.get(
                     f"/market/quote/{sym}",
-                    params={"max_age": block_max},
+                    params={"max_age": _ul_max_age},
                 )
                 if qr.status_code == 200:
                     qd = qr.json()
@@ -5339,7 +5382,7 @@ async def _cmd_trade_http(args, server: str) -> int:
                             except Exception:
                                 pass
                         ul_annotation, ul_blocked = _classify_price_age(ul_age)
-                        if enforce_freshness and ul_blocked:
+                        if _enforce_stale_block and ul_blocked:
                             price_blocked = True
                             price_block_reasons.append(f"{sym} underlying quote {ul_age:.0f}s old")
                         if prev_close and prev_close > 0:
@@ -5443,7 +5486,7 @@ async def _cmd_trade_http(args, server: str) -> int:
             # Classify option-leg freshness once — annotation is applied to
             # every leg line so the user sees the staleness context.
             leg_annotation, legs_blocked = _classify_price_age(legs_age)
-            if enforce_freshness and legs_blocked and est_legs:
+            if _enforce_stale_block and legs_blocked and est_legs:
                 price_blocked = True
                 price_block_reasons.append(f"option legs {legs_age:.0f}s old")
 
