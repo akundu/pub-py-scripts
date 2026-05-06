@@ -22719,11 +22719,12 @@ class TestTradeHandlers:
 
     @staticmethod
     def _spread(sym, otype="PUT", credit=1.0, otm=1.5, roi=3.0, short=5700, long_=5680,
-                width=20, prev_close=5800.0):
+                width=20, prev_close=5800.0, short_delta=None):
         return {
             "symbol": sym, "option_type": otype, "short_strike": short, "long_strike": long_,
             "width": width, "credit": credit, "roi_pct": roi, "otm_pct": otm,
             "dte": 0, "expiration": "2026-04-21", "prev_close": prev_close,
+            "short_delta": short_delta,
         }
 
     @staticmethod
@@ -22905,6 +22906,54 @@ class TestTradeHandlers:
             self._spread("SPX", otm=1.5),
         ])
         assert len(out) == 1 and out[0]["otm_pct"] == 1.5
+
+    def test_filter_blocks_high_short_delta(self, monkeypatch, tmp_path):
+        """Spread with abs(short_delta) > max_short_delta is rejected."""
+        self._always_in_window(monkeypatch)
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+        pol = TradePolicy.from_dict({"max_short_delta": 0.10, "norm_roi": [1.0, 10.0]})
+        h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                                 policy=pol, daemon_url="http://d", validate_prices=False)
+        out = h.filter([
+            self._spread("SPX", short_delta=-0.15),  # abs=0.15 > 0.10 → blocked
+            self._spread("SPX", short_delta=-0.07),  # abs=0.07 ≤ 0.10 → passes
+        ])
+        assert len(out) == 1 and out[0]["short_delta"] == -0.07
+
+    def test_filter_short_delta_passes_when_under_threshold(self, monkeypatch, tmp_path):
+        """Spread with abs(short_delta) == threshold exactly is allowed (not strict >)."""
+        self._always_in_window(monkeypatch)
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+        pol = TradePolicy.from_dict({"max_short_delta": 0.10, "norm_roi": [1.0, 10.0]})
+        h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                                 policy=pol, daemon_url="http://d", validate_prices=False)
+        # Call delta is positive; abs should work symmetrically.
+        out = h.filter([
+            self._spread("SPX", short_delta=0.10),   # abs=0.10 == threshold → passes
+            self._spread("SPX", short_delta=0.11),   # abs=0.11 > threshold → blocked
+        ])
+        assert len(out) == 1 and out[0]["short_delta"] == 0.10
+
+    def test_filter_short_delta_none_skips_gate(self, monkeypatch, tmp_path):
+        """Spread with short_delta=None skips the delta gate (data unavailable)."""
+        self._always_in_window(monkeypatch)
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+        pol = TradePolicy.from_dict({"max_short_delta": 0.05, "norm_roi": [1.0, 10.0]})
+        h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                                 policy=pol, daemon_url="http://d", validate_prices=False)
+        # short_delta=None means no Greeks from provider — should not block.
+        out = h.filter([self._spread("SPX", short_delta=None)])
+        assert len(out) == 1
+
+    def test_filter_short_delta_disabled_when_not_set(self, monkeypatch, tmp_path):
+        """When max_short_delta is not in policy, high-delta spreads are not blocked."""
+        self._always_in_window(monkeypatch)
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+        pol = TradePolicy.from_dict({"norm_roi": [1.0, 10.0]})  # no max_short_delta
+        h = SimulateTradeHandler(min_norm_roi=0, log_file=str(tmp_path / "l.jsonl"),
+                                 policy=pol, daemon_url="http://d", validate_prices=False)
+        out = h.filter([self._spread("SPX", short_delta=-0.50)])  # very high delta, not blocked
+        assert len(out) == 1
 
     def test_filter_roi_band(self, monkeypatch, tmp_path):
         self._always_in_window(monkeypatch)

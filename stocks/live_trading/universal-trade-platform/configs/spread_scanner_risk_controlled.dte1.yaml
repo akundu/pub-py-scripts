@@ -43,7 +43,7 @@ widths:
   NDX: 60
   RUT: 30
 #otm_pcts: [0.75, 1.0, 1.5, 2.0]
-interval: 60
+interval: 45
 top: 3
 
 # ── Provider re-verify freshness ─────────────────────────────────────────────
@@ -162,7 +162,7 @@ handlers:
     log_file: trades_sim_dte1.tracking_2026-05-06.jsonl
     daemon_url: http://localhost:8000
     policy: &trade_policy
-      norm_roi: [0.7, 8]
+      norm_roi: [0.8, 8]
       min_otm_pct:  {SPX: 2.0, NDX: 2.75, RUT: 2.5}
       min_credit:   {SPX: 0.25, NDX: 0.40, RUT: 0.20}
       max_total_risk: 200000
@@ -179,6 +179,10 @@ handlers:
         RUT: 5000        # ≈ 2 contracts (RUT width 25 → 2500/contract)
       require_prev_close: true
       notify_email: anirbankundu@gmail.com
+      # Block trades where abs(short_delta) > max_short_delta.
+      # DTE1 sim data: max observed delta=0.044 — 0.10 leaves headroom without
+      # affecting current trade flow; catches strikes that drift close to ATM.
+      max_short_delta: 0.10
       # MARKET: immediate fill at the prevailing NBBO credit.
       # LIMIT:  submit at the observed credit; may not fill.
       order_type: MARKET
@@ -187,15 +191,15 @@ handlers:
         start: "06:31"
         end:   "12:30"
       # ── Per-cycle pacing — see dte0.yaml for full notes ──
-      max_trades_per_cycle: 1
-      min_minutes_between_trades: 3.0
+      max_trades_per_cycle: 2
+      min_minutes_between_trades: 4.0
 
   # Live trading — active. Uses the SAME policy as simulate_trade
   # via the YAML anchor above.
-  #- type: trade
-  #  log_file: trades_live_dte1.jsonl
-  #  daemon_url: http://localhost:8000
-  #  policy: *trade_policy
+  - type: trade
+    log_file: trades_live_dte1.jsonl
+    daemon_url: http://localhost:8000
+    policy: *trade_policy
     # Pre-fire price re-verify: drops trades whose quotes went stale
     # between screening and submission. Required for live.
-  #  validate_prices: true
+    validate_prices: true

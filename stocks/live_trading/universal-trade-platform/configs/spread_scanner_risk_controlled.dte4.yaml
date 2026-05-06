@@ -178,6 +178,10 @@ handlers:
         RUT: 5000        # ≈ 2 contracts (RUT width 25 → 2500/contract)
       require_prev_close: true
       notify_email: anirbankundu@gmail.com
+      # Block trades where abs(short_delta) > max_short_delta.
+      # DTE4 strikes are typically 2.5-4% OTM; observed deltas are very small.
+      # 0.10 is a generous ceiling that won't affect normal operation.
+      max_short_delta: 0.10
       # MARKET: immediate fill at the prevailing NBBO credit.
       # LIMIT:  submit at the observed credit; may not fill.
       order_type: MARKET

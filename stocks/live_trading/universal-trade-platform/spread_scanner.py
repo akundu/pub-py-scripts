@@ -3321,6 +3321,11 @@ class TradePolicy:
     # env vars are not configured on the server.
     notify_email: str | None = None
     notify_sms: str | None = None
+    # Maximum allowed absolute value of the short-strike delta. Trades where
+    # abs(short_delta) > max_short_delta are blocked (short strike too close to
+    # ATM / too much directional risk). None = disabled (no delta gate).
+    # Applies symmetrically to puts (negative delta) and calls (positive delta).
+    max_short_delta: float | None = None
     trading_window_pt_start: dtime = field(default_factory=lambda: dtime(6, 31))
     trading_window_pt_end: dtime = field(default_factory=lambda: dtime(10, 0))
 
@@ -3348,7 +3353,7 @@ class TradePolicy:
             "max_trades_per_cycle", "min_minutes_between_trades",
             "require_prev_close", "order_type", "stop_loss_multiplier",
             "limit_slippage_pct", "notify", "notify_channel",
-            "notify_email", "notify_sms",
+            "notify_email", "notify_sms", "max_short_delta",
         }
         known_dicts = {"min_otm_pct", "min_credit", "max_per_ticker_risk", "max_risk_per_trade"}
         for k, v in data.items():
@@ -3644,6 +3649,16 @@ class TradeHandlerBase(ActionHandler):
                     credit=c["credit"], credit_floor=min_credit,
                 )
                 continue
+
+            max_delta = self.policy.max_short_delta
+            if max_delta is not None:
+                sd = c.get("short_delta")
+                if sd is not None and abs(sd) > max_delta:
+                    self._write_rejection(
+                        c, "short_delta_too_high", now_ts,
+                        short_delta=sd, max_short_delta=max_delta,
+                    )
+                    continue
 
             passed.append(c)
 
