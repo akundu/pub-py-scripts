@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import fnmatch
 import gzip
 import json
 import time
@@ -20,6 +21,7 @@ from common.range_percentiles_cache import (
     cache_response,
     cache_ttl_seconds,
     cached_response,
+    clear_cache,
     make_cache_key,
     PRE_OPEN_BUFFER_SECONDS,
     seconds_until_next_market_open,  # back-compat alias
@@ -29,10 +31,10 @@ from common.range_percentiles_cache import (
 class _FakeAsyncRedis:
     """Minimal stand-in for a redis.asyncio client. Stores values in a
     plain dict, honors TTL via a wall-clock cutoff, supports get/set
-    with `ex=` and `ping`."""
+    with `ex=`, `ping`, `delete`, and `scan_iter` (glob-pattern walk)."""
     def __init__(self) -> None:
         self.store: dict[str, tuple[bytes, float | None]] = {}
-        self.calls = {"get": 0, "set": 0, "ping": 0}
+        self.calls = {"get": 0, "set": 0, "ping": 0, "delete": 0, "scan": 0}
 
     async def ping(self):
         self.calls["ping"] += 1
@@ -53,6 +55,21 @@ class _FakeAsyncRedis:
         self.calls["set"] += 1
         expires_at = (time.time() + ex) if ex else None
         self.store[key] = (value, expires_at)
+
+    async def delete(self, key):
+        self.calls["delete"] += 1
+        return 1 if self.store.pop(key, None) is not None else 0
+
+    async def scan_iter(self, match="*", count=500):
+        """Async-generator over keys matching the glob `match`. Real
+        Redis SCAN is non-deterministic across cursors; for tests we
+        snapshot the keys at iteration start and walk them in sorted
+        order so assertions are stable."""
+        self.calls["scan"] += 1
+        snapshot = sorted(self.store.keys())
+        for k in snapshot:
+            if fnmatch.fnmatchcase(k, match):
+                yield k
 
 
 @pytest.fixture(autouse=True)
@@ -368,3 +385,102 @@ def test_ttl_custom_buffer_shifts_the_refresh_time():
         assert ttl == int((expected - now).total_seconds())
     finally:
         _sys.modules.pop("common.market_hours", None)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# clear_cache — namespace-scoped purge
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_clear_cache_deletes_namespaced_keys(_reset_module_state):
+    """Default pattern `rp:v1:*` walks the namespace and deletes every
+    matching key. Unrelated keys are left alone — the SCAN match must
+    not greedy-match outside the prefix."""
+    fake = _reset_module_state
+    # Three rp keys + one unrelated entry sharing the same redis.
+    fake.store["rp:v1:html:tickers=NDX"] = (b"<html/>", None)
+    fake.store["rp:v1:api:tickers=SPX"] = (b"{}", None)
+    fake.store["rp:v1:multi_window_api:tickers=NDX"] = (b"{}", None)
+    fake.store["other:cache:something"] = (b"keep me", None)
+
+    n = _run(clear_cache())
+    assert n == 3
+    assert "other:cache:something" in fake.store  # unrelated key untouched
+    assert not any(k.startswith("rp:v1:") for k in fake.store)
+
+
+def test_clear_cache_with_narrow_pattern(_reset_module_state):
+    """Caller can scope to a subset of the namespace — e.g. just the
+    HTML responses — without disturbing the API cache."""
+    fake = _reset_module_state
+    fake.store["rp:v1:html:a"] = (b"a", None)
+    fake.store["rp:v1:html:b"] = (b"b", None)
+    fake.store["rp:v1:api:c"] = (b"c", None)
+
+    n = _run(clear_cache(pattern="rp:v1:html:*"))
+    assert n == 2
+    assert "rp:v1:html:a" not in fake.store
+    assert "rp:v1:html:b" not in fake.store
+    assert "rp:v1:api:c" in fake.store  # api scope untouched
+
+
+def test_clear_cache_redis_down_returns_zero(monkeypatch):
+    """When Redis is unavailable (lazy-init flagged failed), clear is
+    a no-op returning 0 — never raises into the caller. Mirrors the
+    fail-soft contract used by the read/write helpers."""
+    monkeypatch.setattr(cache_mod, "_REDIS_CLIENT", None, raising=False)
+    monkeypatch.setattr(cache_mod, "_REDIS_CLIENT_ERRORED", True, raising=False)
+    n = _run(clear_cache())
+    assert n == 0
+
+
+def test_clear_cache_empty_namespace_returns_zero(_reset_module_state):
+    """No matching keys → 0 deleted. Predictable for cron/idempotent
+    callers that may run on a freshly-restarted Redis."""
+    fake = _reset_module_state
+    fake.store["unrelated"] = (b"x", None)
+    n = _run(clear_cache())
+    assert n == 0
+    assert "unrelated" in fake.store  # unrelated still there
+
+
+def test_clear_cache_then_set_then_clear(_reset_module_state):
+    """End-to-end: store → clear → store again → clear. Ensures
+    `clear_cache` doesn't poison the client for subsequent writes
+    and the count reflects only the current generation of entries."""
+    key = make_cache_key("html", {"q": "x"})
+    _run(cache_response(key, b"first", "text/html", 60))
+    n1 = _run(clear_cache())
+    assert n1 == 1
+
+    _run(cache_response(key, b"second", "text/html", 60))
+    n2 = _run(clear_cache())
+    assert n2 == 1
+    # And we can still read/write afterward.
+    _run(cache_response(key, b"third", "text/html", 60))
+    hit = _run(cached_response(key))
+    assert hit is not None and hit[0] == b"third"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# `?nocache=1` write-through behavior — verified at module level by
+# checking that `cache_response` is called regardless of any external
+# bypass flag. The DB-server-level wiring is in `_store_rp_cache`,
+# which no longer short-circuits on `nocache=1`. We assert here that
+# the underlying cache_response API itself has no nocache concept (it
+# stores unconditionally), so the only way to skip a write is for the
+# caller (handler) to skip the call — which it does not, post-fix.
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_cache_response_is_unconditional(_reset_module_state):
+    """`cache_response` itself doesn't inspect query params — that's
+    intentional. The handler-side `_store_rp_cache` used to short-
+    circuit on `?nocache=1`; that's been removed so the fresh body
+    seeds the cache for the next regular request. Locking this
+    contract here protects the new semantics from regression."""
+    key = make_cache_key("api", {"x": "1"})
+    stored = _run(cache_response(key, b"body", "application/json", 60))
+    assert stored is True
+    hit = _run(cached_response(key))
+    assert hit is not None and hit[0] == b"body"

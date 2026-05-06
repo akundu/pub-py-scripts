@@ -297,3 +297,34 @@ def cache_ttl_seconds(
 # boundary). Keep the old name working for any caller that imported
 # it directly.
 seconds_until_next_market_open = cache_ttl_seconds
+
+
+async def clear_cache(
+    pattern: str = "rp:v1:*",
+    redis_url: Optional[str] = None,
+) -> int:
+    """Delete all cache entries matching ``pattern``. Returns the count
+    of keys deleted.
+
+    Uses Redis ``SCAN`` to iterate without blocking the server on large
+    keysets. Default pattern matches the full ``rp:v1:`` namespace; pass
+    something narrower (e.g. ``rp:v1:html:*``) to scope the purge.
+
+    Failures (Redis unavailable, scan/delete errors) return 0 and log a
+    warning — never raise into the caller. CLI/admin callers should
+    treat 0 as "nothing to clear or Redis is down" and move on.
+    """
+    client = await _get_redis_client(redis_url)
+    if client is None:
+        return 0
+    deleted = 0
+    try:
+        async for key in client.scan_iter(match=pattern, count=500):
+            try:
+                await client.delete(key)
+                deleted += 1
+            except Exception as e:
+                logger.warning("rp cache clear: delete error for %r: %s", key, e)
+    except Exception as e:
+        logger.warning("rp cache clear error (pattern=%s): %s", pattern, e)
+    return deleted

@@ -15562,9 +15562,15 @@ async def _store_rp_cache(request: web.Request, cache_path: str,
                             body: bytes | str, content_type: str) -> None:
     """Companion to _serve_rp_cached — store this response under the
     same key, with TTL = seconds-until-next-market-open. Failures swallow
-    quietly; a cache write that fails shouldn't poison the response."""
-    if request.query.get("nocache") == "1":
-        return
+    quietly; a cache write that fails shouldn't poison the response.
+
+    Stores unconditionally: `?nocache=1` only bypasses the cache READ in
+    `_serve_rp_cached` so the caller is forced to recompute. The fresh
+    body is still stored under the same canonical key (the cache key
+    strips `nocache` from the query string), so a `?nocache=1` request
+    primes the cache for the next regular request — making it a useful
+    "force refresh" trigger rather than a cache-busting dead end.
+    """
     try:
         from common.range_percentiles_cache import (
             make_cache_key, cache_response, cache_ttl_seconds,
@@ -15782,19 +15788,35 @@ def _inject_range_percentiles_ws_script(html: str, tickers: list[str]) -> str:
         return '$' + p.toLocaleString('en-US', {{minimumFractionDigits: 2, maximumFractionDigits: 2}});
     }}
 
+    /* Update the "Use Live Prices" toggle button to match a target state.
+       Used by both the manual click handler and the auto-flip on first
+       WS message so the two paths render identically. */
+    function _syncLiveToggleButton(ticker, on) {{
+        document.querySelectorAll('button[data-ticker="' + ticker + '"]').forEach(function(btn) {{
+            // Filter to the live-toggle button — guard against other
+            // ticker-tagged buttons on the page (e.g. chart-related).
+            var onclick = btn.getAttribute('onclick') || '';
+            if (onclick.indexOf('toggleLiveMain') < 0) return;
+            if (on) {{
+                btn.textContent = 'Use Previous Close';
+                btn.style.background = 'var(--up-bg, #e5ffe5)';
+                btn.style.borderColor = 'var(--up-text, #27ae60)';
+            }} else {{
+                btn.textContent = 'Use Live Prices';
+                btn.style.background = '';
+                btn.style.borderColor = '';
+            }}
+        }});
+    }}
+
     /* Toggle handler for "Use Live Prices" button */
     window.toggleLiveMain = function(btn) {{
         var ticker = btn.dataset.ticker;
         liveMain[ticker] = !liveMain[ticker];
+        _syncLiveToggleButton(ticker, !!liveMain[ticker]);
         if (liveMain[ticker]) {{
-            btn.textContent = 'Use Previous Close';
-            btn.style.background = 'var(--up-bg, #e5ffe5)';
-            btn.style.borderColor = 'var(--up-text, #27ae60)';
             if (currentPrices[ticker]) applyMainPrices(ticker, currentPrices[ticker], true);
         }} else {{
-            btn.textContent = 'Use Live Prices';
-            btn.style.background = '';
-            btn.style.borderColor = '';
             if (originalClose[ticker]) applyMainPrices(ticker, originalClose[ticker], false);
         }}
     }};
@@ -15902,7 +15924,17 @@ def _inject_range_percentiles_ws_script(html: str, tickers: list[str]) -> str:
                     currentPrices[ticker] = price;
                     /* Always update hourly section */
                     applySectionPrices(ticker, price, 'hourly', true);
-                    /* Only update main section if user toggled live on */
+                    /* First WS message after market opens auto-promotes the main
+                       section to live prices. After that, respect whatever the
+                       user has toggled — `undefined` means "not yet decided",
+                       `false` means "user explicitly chose previous close",
+                       and `true` means "user explicitly chose live". A bare
+                       falsy check would re-flip on every tick, defeating the
+                       toggle. */
+                    if (liveMain[ticker] === undefined) {{
+                        liveMain[ticker] = true;
+                        _syncLiveToggleButton(ticker, true);
+                    }}
                     if (liveMain[ticker]) {{
                         applyMainPrices(ticker, price, true);
                     }}
