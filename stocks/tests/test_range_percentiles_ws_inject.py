@@ -39,24 +39,25 @@ def test_injected_script_contains_market_open_check_and_polling():
     assert "30000" in out
 
 
-def test_injected_script_auto_flips_main_on_first_ws_message():
-    """Locks in the auto-live-prices feature: the FIRST message must
-    promote `liveMain[ticker]` from `undefined` to `true` and call the
-    button-sync helper, so the toggle UI matches the new state. After
-    that the user's explicit toggle is sticky."""
+def test_injected_script_does_not_auto_flip_main_section():
+    """Main (overall percentile bands) section MUST stay anchored on
+    previous close until the user clicks "Use Live Prices". Only the
+    intraday section auto-flips at market open. Locks the contract:
+    no `=== undefined` sentinel that would steer main into live on
+    its own. Different mental model: intraday tables show today's
+    move; main shows percentile what-ifs anchored on a stable
+    reference."""
     out = _inject(["NDX"])
-    # The sentinel — `undefined` distinguishes "not yet decided" from
-    # "user explicitly chose previous close" (false). A bare falsy
-    # check would re-flip on every tick and defeat the toggle.
-    assert "liveMain[ticker] === undefined" in out
-    # The auto-promotion path calls the shared button-state helper.
-    assert "_syncLiveToggleButton(ticker, true)" in out
+    assert "liveMain[ticker] === undefined" not in out
+    # The gate is the plain truthy check on the user-set toggle.
+    assert "if (liveMain[ticker])" in out
 
 
 def test_injected_script_keeps_hourly_section_unconditional():
-    """Hourly (intraday) section auto-update is the user-facing
-    promise we're not changing — every WS message paints it live,
-    no toggle gate. Must remain unconditional."""
+    """Hourly (intraday) section auto-updates on every WS message —
+    no toggle gate. Combined with the pre-market poller that only
+    connects WS once isMarketOpen() is true, this IS the "automatic
+    switch to live at market open" behavior for intraday data."""
     out = _inject(["NDX"])
     assert "applySectionPrices(ticker, price, 'hourly', true)" in out
 
@@ -72,14 +73,12 @@ def test_injected_script_button_sync_helper_handles_both_states():
     assert "Use Live Prices" in out
 
 
-def test_injected_script_user_explicit_off_is_sticky():
-    """`toggleLiveMain` must invert and sync the button via the helper.
-    Combined with the `=== undefined` sentinel in `ws.onmessage`, this
-    ensures clicking off doesn't get steamrolled by the next tick."""
+def test_injected_script_toggle_uses_shared_button_sync():
+    """`toggleLiveMain` flips the boolean and routes UI updates through
+    `_syncLiveToggleButton` so the visual state stays consistent.
+    The helper is shared with any future auto-flip path — keeps style
+    drift away from the manual click handler."""
     out = _inject(["NDX"])
-    # The toggle handler still flips the boolean (no auto-override
-    # logic added on the user-driven path) — and routes UI through
-    # the same helper as the auto-flip.
     assert "liveMain[ticker] = !liveMain[ticker]" in out
     assert "_syncLiveToggleButton(ticker, !!liveMain[ticker])" in out
 

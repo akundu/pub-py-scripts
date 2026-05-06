@@ -15922,19 +15922,16 @@ def _inject_range_percentiles_ws_script(html: str, tickers: list[str]) -> str:
                 var price = parseFloat(msg.data.payload[0].price);
                 if (!isNaN(price) && price > 0) {{
                     currentPrices[ticker] = price;
-                    /* Always update hourly section */
+                    /* Intraday (hourly) section auto-updates with live prices on
+                       every WS message — this is the "automatic switch to live
+                       at market open" behavior. The pre-market poller only
+                       connects WS once isMarketOpen() is true, so the first
+                       message here is by definition the first one after open. */
                     applySectionPrices(ticker, price, 'hourly', true);
-                    /* First WS message after market opens auto-promotes the main
-                       section to live prices. After that, respect whatever the
-                       user has toggled — `undefined` means "not yet decided",
-                       `false` means "user explicitly chose previous close",
-                       and `true` means "user explicitly chose live". A bare
-                       falsy check would re-flip on every tick, defeating the
-                       toggle. */
-                    if (liveMain[ticker] === undefined) {{
-                        liveMain[ticker] = true;
-                        _syncLiveToggleButton(ticker, true);
-                    }}
+                    /* Main (overall) section stays anchored on previous close
+                       unless the user explicitly clicks "Use Live Prices".
+                       Different mental model: intraday tables are about today's
+                       move; main is about percentile-bands for what-if planning. */
                     if (liveMain[ticker]) {{
                         applyMainPrices(ticker, price, true);
                     }}
