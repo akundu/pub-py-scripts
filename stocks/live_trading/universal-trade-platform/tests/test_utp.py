@@ -21664,25 +21664,25 @@ class TestSpreadScanner:
         assert _compute_norm_roi(9.0, 2, now=early) == 3.0
 
     def test_compute_norm_roi_intraday_decay(self):
-        """DTE1+ nROI decays proportionally after 9:30 AM PT; DTE0 is unchanged."""
+        """DTE1+ nROI rises after 9:30 AM PT as today's session is consumed; DTE0 unchanged."""
         from spread_scanner import _compute_norm_roi
         from zoneinfo import ZoneInfo
         _PT = ZoneInfo("America/Los_Angeles")
-        # Exactly at 9:30 AM — no decay yet.
+        # Exactly at 9:30 AM — no adjustment yet.
         at_cutoff = datetime(2026, 5, 6, 9, 30, tzinfo=_PT)
         assert _compute_norm_roi(10.0, 1, now=at_cutoff) == 5.0
-        # 11:15 AM — halfway through decay window (9:30→13:00 = 210 min; elapsed 105 min).
+        # 11:15 AM — halfway through window (9:30→13:00 = 210 min; elapsed 105 min).
         mid = datetime(2026, 5, 6, 11, 15, tzinfo=_PT)
         nr_mid = _compute_norm_roi(10.0, 1, now=mid)
-        assert nr_mid < 5.0              # must be lower than the no-decay value
-        assert nr_mid > 10.0 / 3.0      # must be higher than the fully-decayed value
-        # At 1:00 PM PT — decay fully applied; denom = DTE+2 = 3 for DTE1.
+        assert nr_mid > 5.0              # must be higher than the morning value
+        assert nr_mid < 10.0             # but not yet at DTE0 level
+        # At 1:00 PM PT — today fully elapsed; denom = DTE = 1 for DTE1.
         full = datetime(2026, 5, 6, 13, 0, tzinfo=_PT)
-        assert _compute_norm_roi(10.0, 1, now=full) == round(10.0 / 3.0, 2)
-        # DTE 0 must never decay regardless of time.
+        assert _compute_norm_roi(10.0, 1, now=full) == 10.0   # equals DTE0 nROI
+        # DTE 0 must never be adjusted regardless of time.
         assert _compute_norm_roi(10.0, 0, now=full) == 10.0
-        # DTE 2 also decays: denom goes from 3.0 to 4.0 at 1:00 PM.
-        assert _compute_norm_roi(9.0, 2, now=full) == round(9.0 / 4.0, 2)
+        # DTE 2 rises too: denom goes from 3.0 to 2.0 at 1:00 PM.
+        assert _compute_norm_roi(9.0, 2, now=full) == round(9.0 / 2.0, 2)
 
     def test_filter_by_norm_roi(self):
         from spread_scanner import _filter_by_norm_roi
@@ -21859,7 +21859,7 @@ class TestSpreadScanner:
                     "spreads": {
                         "SPX": [
                             {"option_type": "PUT", "short_strike": 5700, "long_strike": 5680,
-                             "width": 20, "credit": 1.50, "roi_pct": 8.1, "otm_pct": 1.72},
+                             "width": 20, "credit": 1.50, "roi_pct": 4.0, "otm_pct": 1.72},
                         ],
                     },
                 },
@@ -21867,8 +21867,8 @@ class TestSpreadScanner:
         }
         lines = _render_top_picks(scan_data, args)
         text = "\n".join(lines)
-        # DTE 0: nROI = 8.1/1 = 8.1 >= 5 ✓ (included)
-        # DTE 1: nROI = 8.1/2 = 4.05 < 5 ✗ (excluded)
+        # DTE 0: nROI = 8.1/1 = 8.1 >= 5 ✓ (included at any time of day)
+        # DTE 1: nROI at best = 4.0/1 = 4.0 < 5 ✗ (excluded even at max intraday adjustment)
         assert "D0" in text
         assert "D1" not in text
 

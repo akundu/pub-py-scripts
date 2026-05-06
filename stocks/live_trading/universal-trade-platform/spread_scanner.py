@@ -2899,14 +2899,12 @@ def _compute_norm_roi(
     """Normalized ROI = ROI / effective_denominator.
 
     Base denominator is (DTE + 1).  For DTE >= 1, after 9:30 AM PT the
-    denominator increases proportionally with elapsed session time so that
-    nROI decays as the day progresses — entering late means the same credit
-    covers proportionally less remaining time, so the threshold is naturally
-    harder to hit.
+    denominator shrinks proportionally as today's session is consumed —
+    nROI rises as the day progresses because the same credit covers fewer
+    remaining days.  At 1:00 PM PT the denominator reaches DTE (today fully
+    elapsed), matching what a DTE0 spread would show at open.
 
-    Decay window: 9:30 AM PT → 1:00 PM PT (3.5 h).  At 1:00 PM the
-    denominator is (DTE + 2), cutting nROI roughly in half for DTE 1.
-    DTE 0 is never adjusted (no overnight component).
+    Window: 9:30 AM PT → 1:00 PM PT (3.5 h).  DTE 0 is never adjusted.
     """
     denom = float(dte + 1)
     if dte >= 1:
@@ -2918,7 +2916,7 @@ def _compute_norm_roi(
                       - _DECAY_START.hour * 60 - _DECAY_START.minute)  # 210 min
             elapsed = (t.hour * 60 + t.minute
                        - _DECAY_START.hour * 60 - _DECAY_START.minute)
-            denom += min(1.0, elapsed / window)
+            denom -= min(1.0, elapsed / window)
     return round(roi_pct / denom, 2)
 
 
