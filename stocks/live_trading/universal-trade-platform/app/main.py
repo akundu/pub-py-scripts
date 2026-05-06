@@ -90,6 +90,41 @@ async def _roll_scan_loop(interval: float) -> None:
             logger.error("Roll scan loop error: %s", e)
 
 
+async def _position_greeks_loop(interval: float = 90.0) -> None:
+    """Background loop: refresh option greeks for all open position strikes.
+
+    Every ``interval`` seconds, checks which open positions have IBKR cache
+    data older than ``interval`` and fetches fresh quotes for those strikes.
+    This keeps the streaming cache warm for position-specific strikes that may
+    be outside the normal ±3% overlay window (e.g. far-OTM or high-DTE legs).
+    """
+    from app.services.option_quote_streaming import get_option_quote_streaming
+
+    await asyncio.sleep(30)  # brief warm-up — let the overlay populate first
+    while True:
+        try:
+            now = datetime.now(UTC)
+            # Only run during market hours + 10-min buffer (13:20–20:10 UTC = 9:20–4:10 ET)
+            if now.weekday() < 5:
+                hour_min = now.hour * 100 + now.minute
+                if 1320 <= hour_min <= 2010:
+                    store = get_position_store()
+                    svc = get_option_quote_streaming()
+                    if store and svc:
+                        open_positions = store.get_open_positions()
+                        if open_positions:
+                            refreshed = await svc.refresh_strikes_for_positions(
+                                open_positions, max_age=interval
+                            )
+                            if refreshed:
+                                logger.debug(
+                                    "Position greeks refresh: %d groups updated", refreshed
+                                )
+        except Exception as e:
+            logger.error("Position greeks loop error: %s", e)
+        await asyncio.sleep(interval)
+
+
 async def _position_sync_loop(interval: int) -> None:
     """Background loop: sync positions from all brokers."""
     from app.services.position_sync import PositionSyncService
@@ -178,6 +213,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
     tasks.append(
         asyncio.create_task(_roll_scan_loop(roll_svc.config.check_interval))
+    )
+    tasks.append(
+        asyncio.create_task(_position_greeks_loop(interval=90.0))
     )
 
     yield

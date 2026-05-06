@@ -1943,6 +1943,115 @@ class OptionQuoteStreamingService:
 
         return None
 
+    def get_full_greeks_for_strike(
+        self,
+        symbol: str,
+        expiration: str,
+        option_type: str,
+        strike: float,
+    ) -> dict | None:
+        """Return the most recent cached greeks dict for a specific strike, or None.
+
+        Priority: IBKR quote cache → greeks overlay → CSV cache.
+        Returns a dict with keys: delta, gamma, theta, vega, iv (any may be None).
+        Age-gated: only IBKR data within 90s; CSV has no age limit.
+        """
+        sym = symbol.upper()
+        exp = _normalize_exp(expiration)
+        otype = option_type.upper()
+        strike_f = float(strike)
+
+        # 1. IBKR quote cache — freshest greeks
+        for q in (self._ibkr_cache.get(sym, exp, otype, max_age_seconds=86400.0) or []):
+            if abs(float(q.get("strike", -9999)) - strike_f) < 0.01:
+                g = q.get("greeks") or {}
+                if any(v is not None for v in g.values()):
+                    age = self._ibkr_cache.get_age(sym, exp, otype)
+                    return dict(g, _age=age)
+
+        # 2. Greeks overlay (IBKR model greeks)
+        greeks_map = self._greeks_cache.get((sym, exp, otype))
+        if greeks_map:
+            g = greeks_map.get(strike_f)
+            if g and any(v is not None for v in g.values()):
+                return dict(g)
+
+        # 3. CSV cache
+        for q in (self._cache.get(sym, exp, otype, max_age_seconds=86400.0) or []):
+            if abs(float(q.get("strike", -9999)) - strike_f) < 0.01:
+                g = q.get("greeks") or {}
+                if any(v is not None for v in g.values()):
+                    return dict(g)
+
+        return None
+
+    async def refresh_strikes_for_positions(
+        self,
+        positions: list[dict],
+        max_age: float = 90.0,
+    ) -> int:
+        """Proactively refresh IBKR option quotes for all open position strikes.
+
+        For each (symbol, expiration, option_type) group whose IBKR cache entry
+        is older than max_age seconds, fetches fresh quotes directly from the
+        provider and stores them in the IBKR cache.
+
+        Skips if the regular overlay is currently mid-cycle to avoid stacking
+        concurrent IBKR requests.  The next background tick will retry.
+
+        Returns the number of (sym, exp, opt_type) groups refreshed.
+        """
+        if not self._provider or self._cycle_phase == "fetching_ibkr":
+            return 0
+
+        # Collect unique (sym, exp, opt_type) → (min_strike, max_strike)
+        groups: dict[tuple, tuple[float, float]] = {}
+        for p in positions:
+            sym = (p.get("symbol") or "").upper()
+            exp = p.get("expiration") or ""
+            if not sym or not exp:
+                continue
+            legs = p.get("legs") or []
+            if not legs and p.get("order_type") == "option":
+                ot = "PUT" if p.get("right") == "P" else "CALL"
+                sk = p.get("strike")
+                if sk is not None:
+                    key = (sym, exp, ot)
+                    sk_f = float(sk)
+                    cur_min, cur_max = groups.get(key, (sk_f, sk_f))
+                    groups[key] = (min(cur_min, sk_f), max(cur_max, sk_f))
+            for leg in legs:
+                ot = (leg.get("option_type") or "").upper()
+                sk = leg.get("strike")
+                if ot and sk is not None:
+                    key = (sym, exp, ot)
+                    sk_f = float(sk)
+                    cur_min, cur_max = groups.get(key, (sk_f, sk_f))
+                    groups[key] = (min(cur_min, sk_f), max(cur_max, sk_f))
+
+        if not groups:
+            return 0
+
+        # Only fetch groups whose IBKR cache is stale
+        stale_jobs: list[tuple] = []
+        for (sym, exp, ot), (sk_min, sk_max) in groups.items():
+            age = self._ibkr_cache.get_age(sym, exp, ot)
+            if age is None or age > max_age:
+                buf = 5.0
+                stale_jobs.append((sym, exp, ot, sk_min - buf, sk_max + buf, "position_greeks"))
+
+        if not stale_jobs:
+            return 0
+
+        # Fetch directly into the IBKR cache (same path as the overlay)
+        prev_phase = self._cycle_phase
+        try:
+            await self._fetch_from_ibkr(stale_jobs)
+        finally:
+            self._cycle_phase = prev_phase
+
+        return len(stale_jobs)
+
 
 # ── Module-level singleton ───────────────────────────────────────────────────
 
