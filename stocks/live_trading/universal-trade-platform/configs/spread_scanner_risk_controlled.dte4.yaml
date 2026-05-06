@@ -161,9 +161,9 @@ handlers:
     log_file: trades_sim_dte4.tracking_2026-05-05.jsonl
     daemon_url: http://localhost:8000
     policy: &trade_policy
-      norm_roi: [0.3, 8]
+      norm_roi: [0.75, 8]
       min_otm_pct:  {SPX: 2.5, NDX: 2.75, RUT: 4.0}
-      min_credit:   {SPX: 0.25, NDX: 0.40, RUT: 0.20}
+      min_credit:   {SPX: 0.15, NDX: 0.30, RUT: 0.10}
       max_total_risk: 500000
       max_per_ticker_risk: {SPX: 140000, NDX: 180000, RUT: 120000}
       # Dollar cap on RISK PER TRADE. The handler computes
