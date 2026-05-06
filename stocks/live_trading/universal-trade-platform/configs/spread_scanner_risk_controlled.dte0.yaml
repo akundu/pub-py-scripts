@@ -202,7 +202,7 @@ handlers:
       norm_roi: [0.35, 8]
       min_otm_pct:  {SPX: 0.5, NDX: 0.75, RUT: 0.75}
       min_credit:   {SPX: 0.25, NDX: 0.40, RUT: 0.20}
-      max_total_risk: 300000
+      max_total_risk: 450000
       max_per_ticker_risk: {SPX: 140000, NDX: 180000, RUT: 120000}
       # Dollar cap on RISK PER TRADE. The handler computes
       #   contracts = max(1, floor(max_risk_per_trade / per_contract_max_loss))
@@ -221,7 +221,7 @@ handlers:
       # are closer to ATM than the tier filter alone would catch.
       # DTE0 live data: p90 delta=0.055, max=0.062 — 0.10 is well above observed
       # range but catches genuine outliers on high-vol open prints.
-      max_short_delta: 0.10
+      max_short_delta: 0.06
       # MARKET: immediate fill at the prevailing NBBO credit.
       # LIMIT:  submit at the observed credit; may not fill.
       order_type: MARKET

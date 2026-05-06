@@ -498,6 +498,69 @@ class TestPortfolioCommand:
         assert "AAPL" in out
         assert "175.00" in out
 
+    def test_portfolio_greeks_subrow_hidden_without_verbose(self, capsys):
+        """Per-leg greeks sub-row (└) is NOT shown unless --verbose is passed."""
+        import asyncio
+
+        fake_position = {
+            "position_id": "abc123",
+            "symbol": "NDX",
+            "order_type": "multi_leg",
+            "quantity": 6,
+            "expiration": "2026-05-06",
+            "source": "paper",
+            "broker": "ibkr",
+            "status": "open",
+            "avg_cost": -765.62,
+            "market_value": -396.46,
+            "market_price": -1.80,
+            "broker_unrealized_pnl": 369.16,
+            "legs_summary": "P27800/P27880",
+            "legs": [
+                {"action": "SELL", "option_type": "PUT", "strike": 27880.0, "quantity": 6,
+                 "live_greeks": {"delta": -0.028, "iv": 0.395, "theta": -3.01},
+                 "greeks_age_seconds": 12.0},
+            ],
+            "net_delta": 0.028,
+            "spread_metrics": {"spread_width": 80.0, "gross_risk": 48000.0,
+                               "derived_credit": 4593.72, "max_loss": 43406.28, "roi_pct": 8.5},
+        }
+
+        class FakeResp:
+            def __init__(self, data):
+                self.status_code = 200
+                self._data = data
+            def json(self): return self._data
+
+        class FakeClient:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def get(self, path, params=None):
+                return FakeResp({
+                    "positions": [fake_position],
+                    "balances": {},
+                    "realized_pnl": 0, "unrealized_pnl": 369.16,
+                    "total_pnl": 369.16, "positions_by_source": {},
+                    "daily_pnl": 0, "recent_closed": [],
+                })
+
+        # Without --verbose: sub-row should NOT appear
+        ns_plain = argparse.Namespace(recent=0, verbose=False)
+        with patch("httpx.AsyncClient", return_value=FakeClient()):
+            from utp import _cmd_portfolio_http
+            asyncio.run(_cmd_portfolio_http(ns_plain, "http://localhost:8000"))
+        out_plain = capsys.readouterr().out
+        assert "└" not in out_plain, "greeks sub-row must not appear without --verbose"
+
+        # With --verbose: sub-row SHOULD appear
+        ns_verbose = argparse.Namespace(recent=0, verbose=True)
+        with patch("httpx.AsyncClient", return_value=FakeClient()):
+            asyncio.run(_cmd_portfolio_http(ns_verbose, "http://localhost:8000"))
+        out_verbose = capsys.readouterr().out
+        assert "└" in out_verbose, "greeks sub-row must appear with --verbose"
+        assert "Δ=" in out_verbose
+        assert "IV=" in out_verbose
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CLI Status Command
@@ -9543,6 +9606,113 @@ option_quotes_long_dte_ibkr_enabled: true
         delta = svc.get_delta_for_strike("SPX", "2026-05-04", "PUT", 5500.0)
         assert delta == -0.15  # greeks overlay wins
 
+    def test_ibkr_purge_expired_option_subs_removes_past_expirations(self):
+        """_purge_expired_option_subs cancels and removes entries with exp < today."""
+        from app.core.providers.ibkr import IBKRLiveProvider
+        provider = IBKRLiveProvider.__new__(IBKRLiveProvider)
+        provider._option_subs = {}
+        provider._option_subs_last_used = {}
+        provider._option_subs_budget = 2000
+        provider._ib = None
+
+        # Insert two expired keys and one live key
+        yesterday = (date.today() - timedelta(days=1)).strftime("%Y%m%d")
+        today_str = date.today().strftime("%Y%m%d")
+        provider._option_subs[("SPX", yesterday, "PUT", 5500.0)] = MagicMock()
+        provider._option_subs[("SPX", yesterday, "CALL", 5600.0)] = MagicMock()
+        provider._option_subs[("SPX", today_str, "PUT", 5400.0)] = MagicMock()
+        provider._option_subs_last_used = {k: 0.0 for k in provider._option_subs}
+
+        purged = provider._purge_expired_option_subs()
+
+        assert purged == 2
+        assert len(provider._option_subs) == 1
+        remaining = list(provider._option_subs.keys())[0]
+        assert remaining[1] == today_str
+
+    def test_ibkr_purge_expired_option_subs_noop_when_all_current(self):
+        """_purge_expired_option_subs returns 0 when no expired subscriptions exist."""
+        from app.core.providers.ibkr import IBKRLiveProvider
+        provider = IBKRLiveProvider.__new__(IBKRLiveProvider)
+        provider._option_subs = {}
+        provider._option_subs_last_used = {}
+        provider._option_subs_budget = 2000
+        provider._ib = None
+
+        today_str = date.today().strftime("%Y%m%d")
+        tomorrow_str = (date.today() + timedelta(days=1)).strftime("%Y%m%d")
+        provider._option_subs[("SPX", today_str, "PUT", 5500.0)] = MagicMock()
+        provider._option_subs[("NDX", tomorrow_str, "CALL", 20000.0)] = MagicMock()
+        provider._option_subs_last_used = {k: 0.0 for k in provider._option_subs}
+
+        purged = provider._purge_expired_option_subs()
+        assert purged == 0
+        assert len(provider._option_subs) == 2
+
+    async def test_run_one_cycle_calls_purge_before_overlay(self):
+        """_run_one_cycle triggers _purge_expired_option_subs when IBKR overlay fires."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig, StreamingSymbolConfig
+
+        provider = AsyncMock()
+        provider._purge_expired_option_subs = MagicMock(return_value=2)
+        provider.get_option_chain.return_value = {"expirations": ["2026-05-05"], "strikes": [5500]}
+        provider.get_option_quotes.return_value = [{"strike": 5500, "bid": 1.0}]
+        mock_quote = MagicMock(last=5500.0, bid=5499.0, ask=5501.0, source="test")
+
+        cfg = StreamingConfig(
+            symbols=[StreamingSymbolConfig(symbol="SPX", sec_type="IND")],
+            option_quotes_num_expirations=1,
+            option_quotes_ibkr_dte_list=[0],
+        )
+        svc = OptionQuoteStreamingService(cfg, provider=provider)
+        # Force greeks interval so overlay fires immediately
+        svc._greeks_interval = 0.0
+        svc._last_greeks_fetch = 0.0
+
+        import app.services.option_quote_streaming as oqs_mod
+        with patch("app.services.market_data.get_quote", new_callable=AsyncMock, return_value=mock_quote), \
+             patch("app.services.market_data._is_market_active", return_value=True), \
+             patch.object(oqs_mod, "date") as mock_date:
+            mock_date.today.return_value = date(2026, 5, 5)
+            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+            await svc._run_one_cycle()
+
+        provider._purge_expired_option_subs.assert_called_once()
+
+    def test_stats_include_error_split_counters(self):
+        """stats dict exposes errors_broker and errors_publish alongside errors total."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+        svc = OptionQuoteStreamingService(StreamingConfig(), provider=MagicMock())
+        svc._errors = 3
+        svc._errors_broker = 2
+        svc._errors_publish = 1
+        stats = svc.stats
+        assert stats["errors"] == 3
+        assert stats["errors_broker"] == 2
+        assert stats["errors_publish"] == 1
+
+    def test_market_data_streaming_stats_include_error_split(self):
+        """MarketDataStreamingService.stats exposes errors_broker and errors_publish."""
+        from app.services.market_data_streaming import MarketDataStreamingService
+        from app.services.streaming_config import StreamingConfig
+        svc = MarketDataStreamingService(StreamingConfig())
+        svc._start_time = time.time()
+        svc._errors = 5
+        svc._errors_broker = 4
+        svc._errors_publish = 1
+        stats = svc.stats
+        assert stats["errors"] == 5
+        assert stats["errors_broker"] == 4
+        assert stats["errors_publish"] == 1
+
+    def test_streaming_config_ibkr_strike_range_default_reduced(self):
+        """StreamingConfig default IBKR strike range is 2.75% (reduced from 3.0%)."""
+        from app.services.streaming_config import StreamingConfig
+        cfg = StreamingConfig()
+        assert cfg.option_quotes_ibkr_strike_range_pct == 2.75
+
 
 class TestPortfolioDeltaAndRisk:
     """Tests for net_delta enrichment and gross-risk display fallback."""
@@ -16206,8 +16376,8 @@ class TestTieredOptionStreaming:
         # SPX/NDX/RUT all enabled by default
         names = {s.symbol for s in cfg.symbols}
         assert {"SPX", "NDX", "RUT"} <= names
-        # IBKR ±3%, CSV ±15%, split DTE depth
-        assert cfg.option_quotes_ibkr_strike_range_pct == 3.0
+        # IBKR ±2.75% (reduced from 3.0 to shed ~8% of sub budget), CSV ±15%
+        assert cfg.option_quotes_ibkr_strike_range_pct == 2.75
         assert cfg.option_quotes_csv_strike_range_pct == 15.0
         assert cfg.option_quotes_ibkr_dte_list == [0, 1, 2]
         assert cfg.option_quotes_csv_dte_max == 10

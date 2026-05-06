@@ -176,8 +176,8 @@ option_quotes_ibkr_max_parallel: 6
 # means your broker latency is exceeding the overlay interval.
 
 # ── Strike ranges (split by tier) ────────────────────────────────────────
-# IBKR tier: ±3% of spot (fresh quotes for near-ATM strikes)
-option_quotes_ibkr_strike_range_pct: 3.0
+# IBKR tier: ±2.75% of spot (fresh quotes for near-ATM strikes)
+option_quotes_ibkr_strike_range_pct: 2.75
 
 # CSV tier: ±15% of spot (wide coverage from file reads)
 option_quotes_csv_strike_range_pct: 15.0

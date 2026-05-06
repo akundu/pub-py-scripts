@@ -41,7 +41,9 @@ class MarketDataStreamingService:
         # Stats
         self._ticks_received = 0
         self._ticks_published = 0
-        self._errors = 0
+        self._errors = 0          # total (kept for backward compat)
+        self._errors_broker = 0   # IBKR/CPG subscription and poll failures
+        self._errors_publish = 0  # Redis/QuestDB write failures
         self._start_time: Optional[float] = None
         self._streaming_mode: str = "disabled"  # set in start()
 
@@ -139,6 +141,8 @@ class MarketDataStreamingService:
             "ticks_published": self._ticks_published,
             "ticks_rejected": ticks_rejected,
             "errors": self._errors,
+            "errors_broker": self._errors_broker,
+            "errors_publish": self._errors_publish,
             "uptime_seconds": round(uptime, 1),
             "symbols": list(self._subscriptions.keys()),
             "per_symbol": per_symbol,
@@ -315,6 +319,7 @@ class MarketDataStreamingService:
             except Exception as e:
                 logger.error("Failed to subscribe to %s: %s", sym_config.symbol, e)
                 self._errors += 1
+                self._errors_broker += 1
         return subscribed
 
     async def unsubscribe(self, symbols: list[str]) -> list[str]:
@@ -361,6 +366,7 @@ class MarketDataStreamingService:
             except Exception as e:
                 logger.error("Failed to subscribe to %s: %s", sym_config.symbol, e)
                 self._errors += 1
+                self._errors_broker += 1
 
     async def _subscribe_one(self, sym_config: StreamingSymbolConfig) -> None:
         """Subscribe to a single symbol via IBKR reqMktData."""
@@ -666,6 +672,7 @@ class MarketDataStreamingService:
                 except Exception as e:
                     logger.debug("TWS poll error for %s: %s", symbol, e)
                     self._errors += 1
+                    self._errors_broker += 1
 
             await asyncio.sleep(self._config.cpg_poll_interval)
 
@@ -682,6 +689,7 @@ class MarketDataStreamingService:
             except Exception as e:
                 logger.warning("CPG conid resolve failed for %s: %s", sym_cfg.symbol, e)
                 self._errors += 1
+                self._errors_broker += 1
 
     async def _cpg_subscribe_snapshots(self) -> None:
         """Subscribe conIDs for market data by requesting initial snapshots."""
@@ -805,6 +813,7 @@ class MarketDataStreamingService:
             except Exception as e:
                 logger.warning("CPG WebSocket error: %s — reconnecting in %.0fs", e, delay)
                 self._errors += 1
+                self._errors_broker += 1
 
             if not self._running:
                 break
@@ -856,6 +865,7 @@ class MarketDataStreamingService:
             except Exception as e:
                 logger.debug("CPG poll error: %s", e)
                 self._errors += 1
+                self._errors_broker += 1
 
             await asyncio.sleep(self._config.cpg_poll_interval)
 
@@ -890,6 +900,7 @@ class MarketDataStreamingService:
             except Exception as e:
                 logger.error("Batch flush error: %s", e)
                 self._errors += 1
+                self._errors_broker += 1
 
     async def _check_subscription_health(self) -> None:
         """Detect dead ib_insync subscriptions and resubscribe if needed."""
@@ -1010,6 +1021,7 @@ class MarketDataStreamingService:
             except Exception as e:
                 logger.debug("Redis publish error for %s: %s", symbol, e)
                 self._errors += 1
+                self._errors_publish += 1
 
         # 2. QuestDB direct write
         if self._config.questdb_enabled and self._questdb_pool:
@@ -1019,6 +1031,7 @@ class MarketDataStreamingService:
             except Exception as e:
                 logger.debug("QuestDB write error for %s: %s", symbol, e)
                 self._errors += 1
+                self._errors_publish += 1
 
         # 3. WebSocket broadcast to /ws/quotes clients
         if self._config.ws_broadcast_enabled:

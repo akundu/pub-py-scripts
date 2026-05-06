@@ -121,7 +121,7 @@ class StreamingConfig:
     # broad).  IBKR option quote latency is ~5s p50 / ~10s p95 per call, so a
     # realistic IBKR cycle floor is ~60s for 3 symbols × 3 DTEs × 2 types at
     # concurrency 3.  CSV is file I/O — cheap and fast.
-    option_quotes_ibkr_strike_range_pct: float = 3.0   # ±% of spot, IBKR tier
+    option_quotes_ibkr_strike_range_pct: float = 2.75  # ±% of spot, IBKR tier
     option_quotes_csv_strike_range_pct: float = 15.0   # ±% of spot, CSV tier
     # Which DTEs to fetch from IBKR.  None = all expirations (legacy behavior).
     # Default [0, 1, 2] keeps IBKR focused on near-term where freshness matters

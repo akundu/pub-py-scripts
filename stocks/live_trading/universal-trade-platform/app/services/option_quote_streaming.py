@@ -340,7 +340,9 @@ class OptionQuoteStreamingService:
         self._cycles = 0
         self._cycles_skipped_market_closed = 0
         self._last_cycle_duration: float = 0
-        self._errors = 0
+        self._errors = 0          # total (kept for backward compat)
+        self._errors_broker = 0   # IBKR/provider call failures
+        self._errors_publish = 0  # Redis/QuestDB write failures
         self._fetches_ok = 0
         self._fetches_failed = 0
         self._cache_hits = 0
@@ -442,6 +444,8 @@ class OptionQuoteStreamingService:
             "cache_hits": self._cache_hits,
             "cache_misses": self._cache_misses,
             "errors": self._errors,
+            "errors_broker": self._errors_broker,
+            "errors_publish": self._errors_publish,
             "uptime_seconds": round(uptime, 1),
             # Source-tagged cache stats. ``cache`` retained as alias for
             # csv_cache for backwards compat with existing dashboards.
@@ -986,6 +990,7 @@ class OptionQuoteStreamingService:
                 except Exception as e:
                     self._fetches_failed += 1
                     self._errors += 1
+                    self._errors_broker += 1
                     self._symbol_errors[symbol] = self._symbol_errors.get(symbol, 0) + 1
                     logger.warning("IBKR option quote fetch failed: %s %s %s: %s",
                                    symbol, exp, opt_type, e)
@@ -1080,8 +1085,8 @@ class OptionQuoteStreamingService:
                 from app.services.market_data import check_data_freshness
                 await check_data_freshness()
             except Exception:
-                pass
                 self._errors += 1
+                self._errors_broker += 1
             self._last_cycle_duration = time.monotonic() - cycle_start
             self._cycles += 1
             self._cycle_phase = "idle"
@@ -1650,6 +1655,13 @@ class OptionQuoteStreamingService:
         # Skip if no IBKR jobs (e.g. all DTEs filtered out, CSV-only).
         now = time.monotonic()
         if ibkr_jobs and now - self._last_greeks_fetch >= self._greeks_interval:
+            # Purge expired 0DTE subscriptions before entering the overlay so the
+            # freed budget slots are available for today's strikes immediately.
+            if hasattr(self._provider, "_purge_expired_option_subs"):
+                _purge_result = self._provider._purge_expired_option_subs()
+                if asyncio.iscoroutine(_purge_result):
+                    _purge_result.close()  # discard if AsyncMock returned a coroutine
+
             # Single-flight guard: if a previous overlay is still draining,
             # skip this firing entirely.  Prevents pending IBKR requests from
             # piling up against the broker.
@@ -1731,6 +1743,7 @@ class OptionQuoteStreamingService:
             except Exception as e:
                 logger.debug("Option chain fetch failed for %s: %s", symbol, e)
                 self._errors += 1
+                self._errors_broker += 1
                 return []
 
         # Filter to upcoming trading days (both are now YYYY-MM-DD)

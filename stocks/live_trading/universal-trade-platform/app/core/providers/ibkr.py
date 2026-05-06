@@ -388,6 +388,29 @@ class IBKRLiveProvider(BrokerProvider):
                 evicted, self._option_subs_budget, len(self._option_subs),
             )
 
+    def _purge_expired_option_subs(self) -> int:
+        """Cancel and remove option subscriptions for expirations that have already passed.
+
+        Called at the start of each IBKR overlay cycle to reclaim budget slots used
+        by yesterday's 0DTE subscriptions. Returns the number of entries removed.
+        """
+        today_str = date.today().strftime("%Y%m%d")
+        expired_keys = [k for k in self._option_subs if k[1] < today_str]
+        for key in expired_keys:
+            ticker = self._option_subs.pop(key, None)
+            self._option_subs_last_used.pop(key, None)
+            if ticker is not None and self._ib is not None:
+                try:
+                    self._ib.cancelMktData(ticker.contract)
+                except Exception as e:
+                    logger.debug("cancelMktData for expired sub failed: %s", e)
+        if expired_keys:
+            logger.info(
+                "Purged %d expired option subscriptions (budget=%d, remaining=%d)",
+                len(expired_keys), self._option_subs_budget, len(self._option_subs),
+            )
+        return len(expired_keys)
+
     def _cancel_all_option_subs(self) -> None:
         """Cancel every persistent option subscription and clear state.
         Called on disconnect so orphaned tickers don't leak across reconnects."""

@@ -3598,6 +3598,8 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                               f"{'---':>12} {'---':>12} {'---':>12} {'':>22} {exp:>12} {' ' * 14} {delta_s}")
 
                     # Per-leg greeks sub-row — short leg only (breach potential)
+                    # Only shown when --verbose / -v is passed.
+                    _verbose = getattr(args, "verbose", False)
                     short_legs_with_greeks = [
                         leg for leg in (p.get("legs") or [])
                         if isinstance(leg, dict)
@@ -3605,7 +3607,7 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                         and any(s in (leg.get("action") or "").upper()
                                 for s in ("SELL", "STO", "STC"))
                     ]
-                    if short_legs_with_greeks:
+                    if _verbose and short_legs_with_greeks:
                         parts = []
                         for leg in short_legs_with_greeks:
                             g = leg["live_greeks"]
@@ -9722,6 +9724,8 @@ Aliases: port, positions, pos
                                     formatter_class=argparse.RawDescriptionHelpFormatter)
     p_port.add_argument("--recent", "-n", type=int, default=0,
                         help="Show N most recent closed trades at the bottom (default: 0 = hide)")
+    p_port.add_argument("--verbose", "-v", action="store_true",
+                        help="Show per-leg greeks sub-row (Δ, IV, Θ) below each spread position")
     _add_connection_args(p_port, default_paper=True)
 
     # ── quote ──
