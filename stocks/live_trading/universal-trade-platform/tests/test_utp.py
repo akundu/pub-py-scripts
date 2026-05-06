@@ -19219,6 +19219,55 @@ class TestSpreadScanner:
         args2, _ = _load_config(["--config", str(cfg_omit)])
         assert args2.top_per_combo is None
 
+    def test_top_per_combo_includes_dte_in_key(self):
+        """top_per_combo: 1 treats (SPX, PUT, DTE0) and (SPX, PUT, DTE1) as
+        separate combos — the best SPX put at each DTE both survive."""
+        from spread_scanner import _render_top_picks, parse_args
+
+        args = parse_args([
+            "--tickers", "SPX", "--top", "10",
+            "--top-per-combo", "1",
+        ])
+        scan_data = {
+            "prev_closes": {"SPX": 7100.0},
+            "dte_sections": {
+                0: {
+                    "expiration": "2026-05-06",
+                    "spreads": {
+                        "SPX": [
+                            {"option_type": "PUT", "short_strike": 7050,
+                             "long_strike": 7030, "credit": 1.00,
+                             "roi_pct": 5.0, "otm_pct": 0.7, "width": 20},
+                            {"option_type": "PUT", "short_strike": 7045,
+                             "long_strike": 7025, "credit": 0.80,
+                             "roi_pct": 4.0, "otm_pct": 0.8, "width": 20},
+                        ],
+                    },
+                },
+                1: {
+                    "expiration": "2026-05-07",
+                    "spreads": {
+                        "SPX": [
+                            {"option_type": "PUT", "short_strike": 7040,
+                             "long_strike": 7020, "credit": 0.90,
+                             "roi_pct": 4.5, "otm_pct": 0.85, "width": 20},
+                            {"option_type": "PUT", "short_strike": 7035,
+                             "long_strike": 7015, "credit": 0.70,
+                             "roi_pct": 3.5, "otm_pct": 0.9, "width": 20},
+                        ],
+                    },
+                },
+            },
+        }
+        text = "\n".join(_render_top_picks(scan_data, args))
+        # Best DTE-0 SPX PUT (7050) survives.
+        assert "SPX  PUT  D0  7050" in text, "best DTE-0 SPX PUT must appear"
+        # Best DTE-1 SPX PUT (7040) also survives — different DTE = different combo.
+        assert "SPX  PUT  D1  7040" in text, "best DTE-1 SPX PUT must appear"
+        # Runner-ups at each DTE are filtered.
+        assert "D0  7045" not in text, "second-best DTE-0 SPX PUT must be filtered"
+        assert "D1  7035" not in text, "second-best DTE-1 SPX PUT must be filtered"
+
     def test_min_tier_pn_routes_to_intraday_for_dte0_spreads(self, monkeypatch):
         """min_tier=p90 with a DTE-0 spread must apply the INTRADAY
         boundary (in this fixture: spot * (1 - 1.0%) = 6930 for SPX puts)."""

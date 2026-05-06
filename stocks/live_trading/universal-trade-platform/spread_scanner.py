@@ -2280,19 +2280,20 @@ def _render_top_picks(scan_data: dict, args) -> list[str]:
         seen.add(key)
         deduped.append(c)
 
-    # Per-(symbol, option_type) cap. `top_per_combo` defaults to 1 — only
-    # the highest-ROI pick per ticker × side surfaces, so the Top-N is a
+    # Per-(symbol, option_type, dte) cap. `top_per_combo` defaults to 1 — only
+    # the highest-ROI pick per ticker × side × DTE surfaces, so the Top-N is a
     # diverse list rather than 5 nearly-identical SPX puts crowding out
-    # everything else. When `top_per_combo` is None (YAML field
-    # commented out / left unset), the cap is disabled and `top_n`
-    # alone gates the count. all_candidates is sorted by ROI descending
-    # so taking the FIRST occurrence preserves "best per combo".
+    # everything else. DTE is included so multi-DTE scans can surface the best
+    # pick at each expiration independently. When `top_per_combo` is None (YAML
+    # field commented out / left unset), the cap is disabled and `top_n` alone
+    # gates the count. all_candidates is sorted by ROI descending so taking the
+    # FIRST occurrence preserves "best per combo".
     top_per_combo = getattr(args, "top_per_combo", None)
     if top_per_combo is not None and top_per_combo > 0:
-        per_combo_count: dict[tuple[str, str], int] = {}
+        per_combo_count: dict[tuple[str, str, int], int] = {}
         capped: list[dict] = []
         for c in deduped:
-            combo = (c["symbol"], c["option_type"])
+            combo = (c["symbol"], c["option_type"], c.get("dte", 0))
             if per_combo_count.get(combo, 0) >= top_per_combo:
                 continue
             per_combo_count[combo] = per_combo_count.get(combo, 0) + 1
