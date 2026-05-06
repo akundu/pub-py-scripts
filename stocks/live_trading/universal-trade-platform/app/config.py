@@ -62,16 +62,16 @@ class Settings(BaseSettings):
     position_sync_enabled: bool = True
 
     # Order fill tracking
-    # Poll interval is floored at 2.0s — sub-2s polls hit IBKR's pacing
-    # limits and don't actually surface fills any sooner (TWS only ticks
-    # status updates at ~1Hz). Two seconds is the documented contract.
-    order_poll_interval_seconds: float = 2.0
+    # With ib_insync, ib.trades() is a local cache read — no broker round-trip.
+    # Floor at 0.25s (fast detection of fills) rather than the old 2s (which
+    # was unnecessarily conservative and added up to 12s latency per trade).
+    order_poll_interval_seconds: float = 0.25
     order_poll_timeout_seconds: float = 60.0
 
     @field_validator("order_poll_interval_seconds")
     @classmethod
     def _floor_poll_interval(cls, v: float) -> float:
-        return max(float(v), 2.0)
+        return max(float(v), 0.1)
 
     # Trade defaults — applied to ANY caller (CLI `utp trade`, playbook,
     # spread_scanner handlers, future integrations) that doesn't explicitly

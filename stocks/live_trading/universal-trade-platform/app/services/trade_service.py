@@ -243,7 +243,7 @@ async def execute_trade(request: TradeRequest, dry_run: bool = False) -> OrderRe
     return result
 
 
-_MIN_POLL_INTERVAL = 2.0  # broker pacing floor — see app.config
+_MIN_POLL_INTERVAL = 0.25  # ib_insync: ib.trades() is a local cache read, not a broker round-trip
 
 
 async def await_order_fill(
@@ -259,9 +259,9 @@ async def await_order_fill(
         broker: The broker that received the order.
         order_id: The order ID to track.
         poll_interval: Seconds between status checks. Floored to
-            ``_MIN_POLL_INTERVAL`` (2s) — sub-2s polls hit IBKR's pacing
-            limits without delivering fills any sooner because TWS only
-            ticks status updates at ~1Hz.
+            ``_MIN_POLL_INTERVAL`` (0.25s). With ib_insync, ``ib.trades()``
+            is a local cache read so fast polling is safe and reduces
+            fill-confirmation latency.
         timeout: Maximum seconds to wait before giving up.
         on_status_update: Optional async callback invoked on each poll with
             (order_result, elapsed_seconds). Used for WebSocket broadcast,
