@@ -21652,15 +21652,43 @@ class TestSpreadScanner:
 
     def test_compute_norm_roi(self):
         from spread_scanner import _compute_norm_roi
-        # DTE 0: norm = ROI / 1
+        from zoneinfo import ZoneInfo
+        _PT = ZoneInfo("America/Los_Angeles")
+        # Pin to pre-decay time so DTE1+ tests are deterministic.
+        early = datetime(2026, 5, 6, 7, 0, tzinfo=_PT)
+        # DTE 0: norm = ROI / 1 (time-decay never applies to DTE 0)
         assert _compute_norm_roi(10.0, 0) == 10.0
-        # DTE 1: norm = ROI / 2
-        assert _compute_norm_roi(10.0, 1) == 5.0
-        # DTE 2: norm = ROI / 3
-        assert _compute_norm_roi(9.0, 2) == 3.0
+        # DTE 1 before 9:30 AM PT: norm = ROI / 2 (no decay yet)
+        assert _compute_norm_roi(10.0, 1, now=early) == 5.0
+        # DTE 2 before 9:30 AM PT: norm = ROI / 3
+        assert _compute_norm_roi(9.0, 2, now=early) == 3.0
+
+    def test_compute_norm_roi_intraday_decay(self):
+        """DTE1+ nROI decays proportionally after 9:30 AM PT; DTE0 is unchanged."""
+        from spread_scanner import _compute_norm_roi
+        from zoneinfo import ZoneInfo
+        _PT = ZoneInfo("America/Los_Angeles")
+        # Exactly at 9:30 AM — no decay yet.
+        at_cutoff = datetime(2026, 5, 6, 9, 30, tzinfo=_PT)
+        assert _compute_norm_roi(10.0, 1, now=at_cutoff) == 5.0
+        # 11:15 AM — halfway through decay window (9:30→13:00 = 210 min; elapsed 105 min).
+        mid = datetime(2026, 5, 6, 11, 15, tzinfo=_PT)
+        nr_mid = _compute_norm_roi(10.0, 1, now=mid)
+        assert nr_mid < 5.0              # must be lower than the no-decay value
+        assert nr_mid > 10.0 / 3.0      # must be higher than the fully-decayed value
+        # At 1:00 PM PT — decay fully applied; denom = DTE+2 = 3 for DTE1.
+        full = datetime(2026, 5, 6, 13, 0, tzinfo=_PT)
+        assert _compute_norm_roi(10.0, 1, now=full) == round(10.0 / 3.0, 2)
+        # DTE 0 must never decay regardless of time.
+        assert _compute_norm_roi(10.0, 0, now=full) == 10.0
+        # DTE 2 also decays: denom goes from 3.0 to 4.0 at 1:00 PM.
+        assert _compute_norm_roi(9.0, 2, now=full) == round(9.0 / 4.0, 2)
 
     def test_filter_by_norm_roi(self):
         from spread_scanner import _filter_by_norm_roi
+        from zoneinfo import ZoneInfo
+        # Pin to pre-decay time so DTE1 norm_roi is deterministic.
+        early = datetime(2026, 5, 6, 7, 0, tzinfo=ZoneInfo("America/Los_Angeles"))
 
         candidates = [
             {"roi_pct": 8.1, "dte": 0, "symbol": "SPX", "option_type": "PUT",
@@ -21671,10 +21699,10 @@ class TestSpreadScanner:
              "short_strike": 5900, "long_strike": 5920, "credit": 2.00, "otm_pct": 1.72},
         ]
 
-        qualifying = _filter_by_norm_roi(candidates, 4.0)
+        qualifying = _filter_by_norm_roi(candidates, 4.0, now=early)
         # DTE 0 PUT 8.1%: norm = 8.1/1 = 8.1 >= 4 ✓
         # DTE 0 PUT 1.5%: norm = 1.5/1 = 1.5 < 4 ✗
-        # DTE 1 CALL 11.1%: norm = 11.1/2 = 5.55 >= 4 ✓
+        # DTE 1 CALL 11.1%: norm = 11.1/2 = 5.55 >= 4 ✓ (no decay before 9:30 AM)
         assert len(qualifying) == 2
         assert qualifying[0]["norm_roi"] == 8.1
         assert qualifying[1]["norm_roi"] == 5.55

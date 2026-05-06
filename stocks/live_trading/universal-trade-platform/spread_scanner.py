@@ -2891,13 +2891,41 @@ def _get_prev_close(tier_data: dict, symbol: str) -> float:
 # ── Normalized ROI Logging & Notification ─────────────────────────────────────
 
 
-def _compute_norm_roi(roi_pct: float, dte: int) -> float:
-    """Normalized ROI = ROI / (DTE + 1).  Higher = better risk-adjusted return."""
-    return round(roi_pct / (dte + 1), 2)
+def _compute_norm_roi(
+    roi_pct: float,
+    dte: int,
+    now: datetime | None = None,
+) -> float:
+    """Normalized ROI = ROI / effective_denominator.
+
+    Base denominator is (DTE + 1).  For DTE >= 1, after 9:30 AM PT the
+    denominator increases proportionally with elapsed session time so that
+    nROI decays as the day progresses — entering late means the same credit
+    covers proportionally less remaining time, so the threshold is naturally
+    harder to hit.
+
+    Decay window: 9:30 AM PT → 1:00 PM PT (3.5 h).  At 1:00 PM the
+    denominator is (DTE + 2), cutting nROI roughly in half for DTE 1.
+    DTE 0 is never adjusted (no overnight component).
+    """
+    denom = float(dte + 1)
+    if dte >= 1:
+        t = (now or datetime.now(_PT)).astimezone(_PT).time()
+        _DECAY_START = dtime(9, 30)   # 9:30 AM PT
+        _DECAY_END   = dtime(13, 0)   # 1:00 PM PT
+        if t > _DECAY_START:
+            window = (_DECAY_END.hour * 60 + _DECAY_END.minute
+                      - _DECAY_START.hour * 60 - _DECAY_START.minute)  # 210 min
+            elapsed = (t.hour * 60 + t.minute
+                       - _DECAY_START.hour * 60 - _DECAY_START.minute)
+            denom += min(1.0, elapsed / window)
+    return round(roi_pct / denom, 2)
 
 
 def _filter_by_norm_roi(
-    candidates: list[dict], threshold: float,
+    candidates: list[dict],
+    threshold: float,
+    now: datetime | None = None,
 ) -> list[dict]:
     """Filter already-filtered candidates by normalized ROI threshold.
 
@@ -2910,7 +2938,7 @@ def _filter_by_norm_roi(
     qualifying = []
     ts = datetime.now().isoformat()
     for c in candidates:
-        norm_roi = _compute_norm_roi(c["roi_pct"], c["dte"])
+        norm_roi = _compute_norm_roi(c["roi_pct"], c["dte"], now)
         if norm_roi >= threshold:
             qualifying.append({
                 **c,
@@ -3146,18 +3174,20 @@ class LogHandler(ActionHandler):
         self.path = path
         self.count = 0                       # lifetime count of logged rows
 
-    def filter(self, candidates: list[dict]) -> list[dict]:
+    def filter(self, candidates: list[dict], now: datetime | None = None) -> list[dict]:
+        # Compute `now` once so all per-candidate calls share the same instant.
+        now = now or datetime.now(_PT)
         # If no per-ticker overrides and no schedule, fast-path to the shared helper.
         if not self.min_norm_roi_schedule and not self.min_norm_roi_per_ticker:
-            return _filter_by_norm_roi(candidates, self.min_norm_roi)
+            return _filter_by_norm_roi(candidates, self.min_norm_roi, now)
         # Otherwise resolve per-candidate (per-ticker threshold may differ).
-        now_ts = datetime.now().isoformat()
+        now_ts = now.isoformat()
         out: list[dict] = []
         for c in candidates:
-            thr = self._resolve_min_norm_roi(c.get("symbol"))
+            thr = self._resolve_min_norm_roi(c.get("symbol"), now_pt=now)
             if thr <= 0:
                 continue
-            nr = _compute_norm_roi(c.get("roi_pct", 0), c.get("dte", 0))
+            nr = _compute_norm_roi(c.get("roi_pct", 0), c.get("dte", 0), now)
             if nr >= thr:
                 out.append({**c, "timestamp": c.get("timestamp") or now_ts, "norm_roi": nr})
         out.sort(key=lambda x: x["norm_roi"], reverse=True)
@@ -3200,20 +3230,21 @@ class NotifyHandler(ActionHandler):
         self._sent_keys: set[str] = set()
         self.count = 0
 
-    def filter(self, candidates: list[dict]) -> list[dict]:
+    def filter(self, candidates: list[dict], now: datetime | None = None) -> list[dict]:
         if self.gate_market_hours and not is_market_hours():
             return []
+        now = now or datetime.now(_PT)
         # Fast-path: no schedule / per-ticker → use the shared helper.
         if not self.min_norm_roi_schedule and not self.min_norm_roi_per_ticker:
-            qualifying = _filter_by_norm_roi(candidates, self.min_norm_roi)
+            qualifying = _filter_by_norm_roi(candidates, self.min_norm_roi, now)
         else:
-            now_ts = datetime.now().isoformat()
+            now_ts = now.isoformat()
             qualifying = []
             for c in candidates:
-                thr = self._resolve_min_norm_roi(c.get("symbol"))
+                thr = self._resolve_min_norm_roi(c.get("symbol"), now_pt=now)
                 if thr <= 0:
                     continue
-                nr = _compute_norm_roi(c.get("roi_pct", 0), c.get("dte", 0))
+                nr = _compute_norm_roi(c.get("roi_pct", 0), c.get("dte", 0), now)
                 if nr >= thr:
                     qualifying.append({**c, "timestamp": c.get("timestamp") or now_ts,
                                         "norm_roi": nr})
@@ -3564,7 +3595,7 @@ class TradeHandlerBase(ActionHandler):
         ev.update(extra)
         self._write_event(ev)
 
-    def filter(self, candidates: list[dict]) -> list[dict]:
+    def filter(self, candidates: list[dict], now: datetime | None = None) -> list[dict]:
         """Apply policy gates that don't require live state.
 
         Every rejected candidate is logged to the handler's log file with
@@ -3575,7 +3606,8 @@ class TradeHandlerBase(ActionHandler):
         # and _run_ticker_queue cap skips feed into this dict and the quiet-
         # scan diagnoser reads it to explain exactly which gates fired.
         self.last_scan_rejection_counts = {}
-        now_ts = datetime.now().isoformat()
+        now = now or datetime.now(_PT)
+        now_ts = now.isoformat()
 
         if not self.policy.within_trading_window():
             # Emit ONE summary event per scan rather than one per candidate,
@@ -3603,9 +3635,9 @@ class TradeHandlerBase(ActionHandler):
         # stamped the candidates; otherwise fall back to now.
         enriched: list[dict] = []
         for c in candidates:
-            nr = _compute_norm_roi(c["roi_pct"], c["dte"])
+            nr = _compute_norm_roi(c["roi_pct"], c["dte"], now)
             stamped = {**c, "timestamp": c.get("timestamp") or now_ts, "norm_roi": nr}
-            thr = self._resolve_min_norm_roi(c.get("symbol"))
+            thr = self._resolve_min_norm_roi(c.get("symbol"), now_pt=now)
             if thr > 0 and nr < thr:
                 self._write_rejection(
                     stamped, "below_min_norm_roi", now_ts,
