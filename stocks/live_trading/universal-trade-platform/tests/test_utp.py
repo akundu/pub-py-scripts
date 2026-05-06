@@ -22707,6 +22707,108 @@ class TestTradeHandlers:
             fake_cls.get_trade_defaults = _raise_no_daemon
         return fake_cls
 
+    # --- daily risk recovery (persist across restarts) --------------------
+
+    @staticmethod
+    def _make_sim_handler(log_file, **policy_overrides):
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+        pol = TradePolicy.from_dict({"norm_roi": [0.3, 50.0], **policy_overrides})
+        return SimulateTradeHandler(
+            min_norm_roi=0, log_file=str(log_file),
+            policy=pol, daemon_url="http://d", validate_prices=False,
+        )
+
+    @staticmethod
+    def _write_submit_event(log_file, sym, cum_after, per_ticker_after, ts_prefix=None):
+        import json, datetime as dt
+        prefix = ts_prefix or dt.date.today().isoformat()
+        ev = {
+            "schema": "v1",
+            "ts": f"{prefix}T07:00:00",
+            "handler": "simulate_trade",
+            "event": "submit",
+            "spread": {"symbol": sym, "option_type": "PUT", "width": 20,
+                       "credit": 1.0, "roi_pct": 5.0, "dte": 0},
+            "contracts": 1,
+            "cum_risk_before": cum_after - 1900.0,
+            "cum_risk_after": cum_after,
+            "per_ticker_risk_after": per_ticker_after,
+        }
+        with open(log_file, "a") as f:
+            f.write(json.dumps(ev) + "\n")
+
+    def test_risk_recovery_no_file(self, tmp_path):
+        """Handler whose log file doesn't exist yet starts at zero."""
+        h = self._make_sim_handler(tmp_path / "nonexistent.jsonl")
+        assert h.cum_risk == 0.0
+        assert h.per_ticker_risk == {}
+
+    def test_risk_recovery_empty_file(self, tmp_path):
+        """Log file exists but has no submit events → starts at zero."""
+        log = tmp_path / "l.jsonl"
+        log.write_text("")
+        h = self._make_sim_handler(log)
+        assert h.cum_risk == 0.0
+        assert h.per_ticker_risk == {}
+
+    def test_risk_recovery_today_submit_events(self, tmp_path):
+        """Today's submit events are replayed to restore cum_risk and per_ticker_risk."""
+        log = tmp_path / "l.jsonl"
+        self._write_submit_event(log, "SPX", cum_after=5000.0, per_ticker_after=5000.0)
+        self._write_submit_event(log, "NDX", cum_after=11000.0, per_ticker_after=6000.0)
+        h = self._make_sim_handler(log)
+        assert h.cum_risk == 11000.0
+        assert h.per_ticker_risk == {"SPX": 5000.0, "NDX": 6000.0}
+
+    def test_risk_recovery_skips_old_dates(self, tmp_path):
+        """Submit events from yesterday are ignored — recovery starts at zero."""
+        import datetime as dt
+        yesterday = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+        log = tmp_path / "l.jsonl"
+        self._write_submit_event(log, "SPX", cum_after=50000.0, per_ticker_after=50000.0,
+                                 ts_prefix=yesterday)
+        h = self._make_sim_handler(log)
+        assert h.cum_risk == 0.0
+        assert h.per_ticker_risk == {}
+
+    def test_risk_recovery_caps_respected_after_restart(self, monkeypatch, tmp_path):
+        """After recovery, a trade that would exceed max_total_risk is blocked."""
+        import asyncio
+        from spread_scanner import TradeHandler, TradePolicy
+        log = tmp_path / "l.jsonl"
+        # Pre-populate log with a large committed risk close to the cap.
+        self._write_submit_event(log, "SPX", cum_after=395000.0, per_ticker_after=395000.0)
+
+        submitted = []
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def trade_credit_spread(self, **kw):
+                submitted.append(kw)
+                return {"order_id": "x", "status": "FILLED"}
+
+        import spread_scanner as ss
+        self._bind_utp_pricing(FakeTClient)
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+        self._always_in_window(monkeypatch)
+
+        pol = TradePolicy.from_dict({"norm_roi": [0.3, 50.0], "max_total_risk": 400000.0})
+        h = TradeHandler(min_norm_roi=0, log_file=str(log), policy=pol,
+                         daemon_url="http://d", validate_prices=False)
+        # cum_risk should be 395000 from recovery.
+        assert h.cum_risk == 395000.0
+
+        # A spread with max_loss > 5000 must be blocked by total_risk_cap.
+        # width=100, credit=1 → per-contract loss = 9900, well over remaining 5000.
+        big_spread = self._spread("SPX", credit=1.0, width=100,
+                                  short=5700, long_=5600, roi=1.0)
+        asyncio.run(h.fire([big_spread], self._ctx()))
+        assert submitted == [], "trade should have been blocked by total_risk_cap after recovery"
+        events = [json.loads(ln) for ln in log.read_text().splitlines()]
+        caps = [e for e in events if e.get("reason") == "total_risk_cap"]
+        assert caps, "expected a total_risk_cap skip event in the log"
+
     # --- filter() gates ---------------------------------------------------
 
     def test_filter_blocks_outside_trading_window(self, monkeypatch):

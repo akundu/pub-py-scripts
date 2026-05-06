@@ -68,7 +68,7 @@ import sys
 from abc import ABC, abstractmethod
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, time as dtime, timedelta, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -3268,7 +3268,7 @@ class TradePolicy:
     check is policy-level so both simulated and live trades share an identical
     entry horizon (default 06:31-10:00 PT, right after open through mid-morning).
     """
-    roi_pct: tuple[float, float] = (1.5, 5.0)                    # [min, max]
+    norm_roi: tuple[float, float] = (0.3, 8.0)                    # [min, max]
     min_otm_pct: dict[str, float] = field(default_factory=dict)
     min_credit: dict[str, float] = field(default_factory=dict)
     max_total_risk: float = 400_000.0
@@ -3345,10 +3345,10 @@ class TradePolicy:
         }
         known_dicts = {"min_otm_pct", "min_credit", "max_per_ticker_risk", "max_risk_per_trade"}
         for k, v in data.items():
-            if k == "roi_pct":
+            if k == "norm_roi":
                 if not (isinstance(v, (list, tuple)) and len(v) == 2):
-                    raise ValueError("policy.roi_pct must be a 2-element list: [min, max]")
-                kwargs["roi_pct"] = (float(v[0]), float(v[1]))
+                    raise ValueError("policy.norm_roi must be a 2-element list: [min, max]")
+                kwargs["norm_roi"] = (float(v[0]), float(v[1]))
             elif k == "trading_window_pt":
                 if not isinstance(v, dict):
                     raise ValueError("policy.trading_window_pt must be a mapping with start/end")
@@ -3363,9 +3363,9 @@ class TradePolicy:
         inst = cls(**kwargs)
         if inst.trading_window_pt_end < inst.trading_window_pt_start:
             raise ValueError("policy.trading_window_pt.end must be >= start")
-        lo, hi = inst.roi_pct
+        lo, hi = inst.norm_roi
         if lo > hi:
-            raise ValueError("policy.roi_pct must be [min, max] with min <= max")
+            raise ValueError("policy.norm_roi must be [min, max] with min <= max")
         return inst
 
     def within_trading_window(self, now_pt: datetime | None = None) -> bool:
@@ -3450,8 +3450,44 @@ class TradeHandlerBase(ActionHandler):
         # quiet-heartbeat diagnoser reads this to tell the user exactly which
         # gates fired when no trade happened this scan.
         self.last_scan_rejection_counts: dict[str, int] = {}
+        self._recover_daily_risk()
 
     # --- helpers ----------------------------------------------------------
+
+    def _recover_daily_risk(self) -> None:
+        """Restore cum_risk and per_ticker_risk from today's submit events.
+
+        Reads the handler's own JSONL log on startup and reconstructs the
+        running risk totals so daily caps hold across process restarts.
+        Filters by today's ISO date prefix so the caps reset at midnight
+        automatically without any explicit clear logic.
+        """
+        if not self.log_file or not os.path.exists(self.log_file):
+            return
+        today = date.today().isoformat()
+        cum = 0.0
+        per_ticker: dict[str, float] = {}
+        try:
+            with open(self.log_file) as fh:
+                for line in fh:
+                    try:
+                        ev = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if ev.get("event") != "submit":
+                        continue
+                    if not ev.get("ts", "").startswith(today):
+                        continue
+                    cum = float(ev.get("cum_risk_after", cum))
+                    sym = (ev.get("spread") or {}).get("symbol")
+                    if sym:
+                        per_ticker[sym] = float(ev.get("per_ticker_risk_after", 0.0))
+        except Exception:
+            return  # recovery failure → start from 0 (safe, not fatal)
+        if cum > 0 or per_ticker:
+            print(f"[risk-recovery] cum_risk=${cum:,.0f}  per_ticker={per_ticker}")
+        self.cum_risk = cum
+        self.per_ticker_risk = per_ticker
 
     @staticmethod
     def max_loss_dollars(spread: dict) -> float:
@@ -3472,7 +3508,7 @@ class TradeHandlerBase(ActionHandler):
 
     def _policy_snapshot(self) -> dict:
         return {
-            "roi_pct": list(self.policy.roi_pct),
+            "norm_roi": list(self.policy.norm_roi),
             "min_otm_pct": self.policy.min_otm_pct,
             "min_credit": self.policy.min_credit,
             "max_total_risk": self.policy.max_total_risk,
@@ -3577,11 +3613,12 @@ class TradeHandlerBase(ActionHandler):
                 self._write_rejection(c, "missing_prev_close", now_ts)
                 continue
 
-            lo, hi = self.policy.roi_pct
-            if not (lo <= c["roi_pct"] <= hi):
+            lo, hi = self.policy.norm_roi
+            nr = c["norm_roi"]
+            if not (lo <= nr <= hi):
                 self._write_rejection(
-                    c, "roi_outside_band", now_ts,
-                    roi_pct=c["roi_pct"], roi_band=[lo, hi],
+                    c, "norm_roi_outside_band", now_ts,
+                    norm_roi=nr, norm_roi_band=[lo, hi],
                 )
                 continue
 

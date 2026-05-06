@@ -36,7 +36,7 @@ percentile_url:
 
 # ── Scanner screening ─────────────────────────────────────────────────────────
 tickers: [SPX, NDX, RUT]
-dte: [2]
+dte: [2,4]
 types: [put, call]
 widths:
   SPX: 30
@@ -89,7 +89,7 @@ verify_require_provider_source: true
 #                    is more honest about what's happening.
 # Leaving them null = no tier filter.
 tiers: true
-min_tier: aggressive         # or a percentile e.g. p95, p75, p40
+min_tier: p95 #aggressive         # or a percentile e.g. p95, p75, p40
 #min_tier_close: p90          # close-to-close variant
 
 # ── Tier-boundary buffer (additive cushion) ──────────────────────────────────
@@ -152,36 +152,18 @@ handlers:
     # (e.g. offline-replay scenarios). Leaving the line uncommented
     # makes the safer behavior explicit for future readers.
     validate_prices: true
-    # Flat nROI floor tuned from 2026-04-22 session analysis. DTE=1 has
-    # better inherent risk/reward (~7% credit/risk ratio vs DTE=0's ~4%),
-    # so we can afford a slightly lower bar than DTE=0's 2.0. Data from
-    # today showed p75 nROI across tickers: NDX=2.70, SPX=2.00, RUT=1.65
-    # — so 2.0 catches the top ~25% of SPX/NDX and a smaller slice of RUT.
-    #
-    # The schedule + per-ticker resolver fields still work — swap the
-    # scalar for `min_norm_roi_schedule: [...]` to get time-of-day
-    # behavior, or populate `min_norm_roi_per_ticker` to tune per ticker
-    # (RUT routinely maxes around 1.65 p75 at DTE=1 so you'll likely
-    # want RUT: 1.0-1.25 there to include it).
-    min_norm_roi: 2.0
-    # Per-ticker overrides — feature plumbed in but OFF.
-    # When ready, e.g.:
-    #   min_norm_roi_per_ticker:
-    #     NDX: 2.5             # NDX p75=2.70, can be pickier
-    #     SPX: 2.0             # matches the scalar
-    #     RUT: 1.25            # RUT p75=1.65 — otherwise never fires
-    # Values may be scalars OR their own schedules.
-    min_norm_roi_per_ticker: {}
-    # ─── TRACKING SESSION — STARTED 2026-05-04 ─────────────────────────
-    # Fresh log file for the simulate-only run that precedes activating
-    # the live trade handler. Review the JSONL after a few hours of
-    # market activity to validate policy behavior before going live.
-    log_file: trades_sim_dte2.tracking_2026-05-04.jsonl
+    # min_norm_roi removed — tier filter (min_tier: aggressive + min_buf) is
+    # the primary quality gate; policy roi_pct/min_credit/min_otm_pct handle
+    # the rest. Re-enable if sim log shows too many low-quality fires.
+    #min_norm_roi: 2.0
+    #min_norm_roi_per_ticker: {}
+    # ─── TRACKING SESSION — STARTED 2026-05-05 ─────────────────────────
+    log_file: trades_sim_dte2.tracking_2026-05-05.jsonl
     daemon_url: http://localhost:8000
     policy: &trade_policy
-      roi_pct: [3, 10.0]
-      min_otm_pct:  {SPX: 2.5, NDX: 2.75, RUT: 4.0}
-      min_credit:   {SPX: 0.5, NDX: 1.0, RUT: 0.35}
+      norm_roi: [0.3, 8]
+      min_otm_pct:  {SPX: 2, NDX: 2.5, RUT: 2.75}
+      min_credit:   {SPX: 0.25, NDX: 0.40, RUT: 0.20}
       max_total_risk: 100000
       max_per_ticker_risk: {SPX: 140000, NDX: 180000, RUT: 120000}
       # Dollar cap on RISK PER TRADE. The handler computes

@@ -44,7 +44,7 @@ widths:
   RUT: 25
 #otm_pcts: [0.75, 1.0, 1.5, 2.0]
 interval: 20
-top: 4
+top: 3
 
 # ── Provider re-verify freshness ─────────────────────────────────────────────
 # Each Top-N candidate (and every spread fed to a trade/simulate handler) is
@@ -64,7 +64,7 @@ verify_max_age_sec: 30
 # missing data for a ticker (e.g. CPG silently failing to fetch SPX 0DTE). The
 # scanner will then accept CSV-sourced quotes as a fallback. CSV quotes can be
 # tens of minutes old, so loosening this trades freshness for visibility.
-#verify_require_provider_source: false
+verify_require_provider_source: true
 
 # ── Risk-tier filter (applies to top-picks + all handlers) ───────────────────
 # Requires `tiers: true` so tier data is fetched from db_server. Short-strike
@@ -171,16 +171,19 @@ handlers:
     #     range; 1.5 keeps the funnel open for the rest of the session
     # Entries are evaluated in order; the LAST entry (with no `until`) is
     # the open-ended fallback for the rest of the day.
-    min_norm_roi_schedule:
-      - until: "07:30"       # PT; inclusive on the boundary
-        value: 1.5
-      - value: 1.0           # after 07:30 PT
+    # min_norm_roi gating removed — tier filter (min_tier: cons + min_buf) is
+    # the primary quality gate; policy roi_pct/min_credit/min_otm_pct handle
+    # the rest. Re-enable if the sim log shows too many low-quality fires.
+    #min_norm_roi_schedule:
+    #  - until: "07:30"       # PT; inclusive on the boundary
+    #    value: 1.5
+    #  - value: 1.0           # after 07:30 PT
     # Per-ticker overrides — currently OFF. When ready to enable, e.g.:
     #   min_norm_roi_per_ticker:
     #     RUT: 1.5           # RUT rarely reaches 2+ nROI at 0DTE
     #     NDX: 3.0           # NDX typically has higher nROI headroom
     # Values may be scalars OR their own schedules.
-    min_norm_roi_per_ticker: {}
+    #min_norm_roi_per_ticker: {}
     # ─── TRACKING SESSION — STARTED 2026-05-04 ─────────────────────────
     # Fresh log file for the simulate-only run that precedes activating
     # the live trade handler. Review this file (line-delimited JSON,
@@ -196,9 +199,9 @@ handlers:
     log_file: trades_sim_dte0.tracking_2026-05-04.jsonl
     daemon_url: http://localhost:8000
     policy: &trade_policy
-      roi_pct: [1, 5.0]
-      min_otm_pct:  {SPX: 0.8, NDX: 1.0, RUT: 1.0}
-      min_credit:   {SPX: 0.35, NDX: .7, RUT: 0.3}
+      norm_roi: [0.3, 8]
+      min_otm_pct:  {SPX: 0.5, NDX: 0.75, RUT: 0.75}
+      min_credit:   {SPX: 0.25, NDX: 0.40, RUT: 0.20}
       max_total_risk: 150000
       max_per_ticker_risk: {SPX: 140000, NDX: 180000, RUT: 120000}
       # Dollar cap on RISK PER TRADE. The handler computes
@@ -208,9 +211,9 @@ handlers:
       # is `spread.width * 100` (≈ 1 contract's worst-case loss).
       # One trade per ticker fires per scan cycle; `contracts` is the knob.
       max_risk_per_trade:
-        SPX: 2500        # ≈ 2-3 contracts (SPX width 25 → 2500/contract max loss)
-        NDX: 6000       # ≈ 2 contracts (NDX width 60 → 6000/contract)
-        RUT: 2500        # ≈ 2 contracts (RUT width 25 → 2500/contract)
+        SPX: 7000        # ≈ 2-3 contracts (SPX width 25 → 2500/contract max loss)
+        NDX: 12000       # ≈ 2 contracts (NDX width 60 → 6000/contract)
+        RUT: 5000        # ≈ 2 contracts (RUT width 25 → 2500/contract)
       require_prev_close: true
       # MARKET: immediate fill at the prevailing NBBO credit.
       # LIMIT:  submit at the observed credit; may not fill.
@@ -230,7 +233,7 @@ handlers:
       # `per_cycle_cap`. Default 1 keeps the firing pace conservative
       # (one trade per cycle, the highest-ROI candidate). Set to 0 for
       # a kill switch.
-      max_trades_per_cycle: 1
+      max_trades_per_cycle: 2
       # min_minutes_between_trades: after a successful submit, no further
       # trade fires for this many minutes (across all tickers/sides);
       # candidates in cycles within that window are logged with reason
@@ -238,21 +241,21 @@ handlers:
       # which is the per-(ticker, side) version. Default 3.0 — comfortable
       # cushion that prevents the scanner from spamming the broker on a
       # rapidly-moving spread.
-      min_minutes_between_trades: 3.0
+      min_minutes_between_trades: 4.0
 
   # Live trading — uncomment to activate. Uses the SAME policy as simulate_trade
   # via the YAML anchor above.
-  # - type: trade
+  - type: trade
   #   # Recommend a HIGHER nROI bar for the live handler than for simulate,
   #   # so live only fires on the strongest signals while simulate captures
   #   # the wider funnel for analysis.
   #   min_norm_roi: 2.5
-  #   log_file: trades_live.jsonl
-  #   daemon_url: http://localhost:8000
-  #   policy: *trade_policy
-  #   # Per-handler pre-fire price validation. Strongly RECOMMENDED for
-  #   # live: re-fetches a fresh quote right before each order submission
-  #   # and drops the trade if the verify fails (csv_source_rejected,
-  #   # non_monotonic, no_edge). Adds latency but prevents firing on
-  #   # quotes that went stale between screening and submission.
-  #   validate_prices: true
+    log_file: trades_live_dte0.jsonl
+    daemon_url: http://localhost:8000
+    policy: *trade_policy
+    # Per-handler pre-fire price validation. Strongly RECOMMENDED for
+    # live: re-fetches a fresh quote right before each order submission
+    # and drops the trade if the verify fails (csv_source_rejected,
+    # non_monotonic, no_edge). Adds latency but prevents firing on
+    # quotes that went stale between screening and submission.
+    validate_prices: true
