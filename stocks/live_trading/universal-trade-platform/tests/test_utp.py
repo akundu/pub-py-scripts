@@ -561,6 +561,78 @@ class TestPortfolioCommand:
         assert "Δ=" in out_verbose
         assert "IV=" in out_verbose
 
+    def test_delta_color_thresholds(self):
+        """_delta_color returns correct ANSI codes for each risk tier."""
+        from utp import _delta_color
+        assert _delta_color(0.03) == "92", "≤0.05 → green"
+        assert _delta_color(0.05) == "92", "exactly 0.05 → green"
+        assert _delta_color(0.07) == "0",  "0.05–0.09 → uncolored"
+        assert _delta_color(0.09) == "0",  "exactly 0.09 → uncolored"
+        assert _delta_color(0.10) == "93", "0.09–0.15 → yellow"
+        assert _delta_color(0.14) == "93", "0.14 → yellow"
+        assert _delta_color(0.15) == "93", "exactly 0.15 → yellow"
+        assert _delta_color(0.16) == "91", ">0.15 → red"
+        assert _delta_color(0.30) == "91", "very high → red"
+
+    def test_portfolio_delta_column_colors_by_threshold(self, capsys):
+        """Portfolio Δ column uses green/yellow/red based on breach exposure magnitude."""
+        import asyncio
+
+        def _fake_resp(net_delta):
+            class FakeResp:
+                def __init__(self, d): self.status_code = 200; self._d = d
+                def json(self): return self._d
+
+            class FakeClient:
+                async def __aenter__(self): return self
+                async def __aexit__(self, *a): pass
+                async def get(self, path, params=None):
+                    return FakeResp({
+                        "positions": [{
+                            "position_id": "t1", "symbol": "SPX", "order_type": "multi_leg",
+                            "quantity": 1, "expiration": "2026-05-09", "source": "paper",
+                            "broker": "ibkr", "status": "open",
+                            "avg_cost": -300.0, "market_value": -150.0,
+                            "market_price": -1.5, "broker_unrealized_pnl": 150.0,
+                            "legs_summary": "P5500/P5475",
+                            "legs": [
+                                {"action": "SELL", "option_type": "PUT", "strike": 5500.0,
+                                 "quantity": 1,
+                                 "live_greeks": {"delta": -net_delta, "iv": 0.2, "theta": -0.5},
+                                 "greeks_age_seconds": 5.0},
+                            ],
+                            "net_delta": net_delta,
+                            "spread_metrics": {"spread_width": 25.0, "gross_risk": 2500.0,
+                                               "derived_credit": 300.0, "max_loss": 2200.0,
+                                               "roi_pct": 13.6},
+                        }],
+                        "balances": {}, "realized_pnl": 0, "unrealized_pnl": 150.0,
+                        "total_pnl": 150.0, "positions_by_source": {},
+                        "daily_pnl": 0, "recent_closed": [],
+                    })
+            return FakeClient()
+
+        from utp import _cmd_portfolio_http
+
+        # Safe (≤0.05) → green ANSI 92
+        ns = argparse.Namespace(recent=0, verbose=False)
+        with patch("httpx.AsyncClient", return_value=_fake_resp(0.03)):
+            asyncio.run(_cmd_portfolio_http(ns, "http://localhost:8000"))
+        out = capsys.readouterr().out
+        assert "\033[92m" in out, "delta 0.03 should be green"
+
+        # Warning (0.09–0.15) → yellow ANSI 93
+        with patch("httpx.AsyncClient", return_value=_fake_resp(0.12)):
+            asyncio.run(_cmd_portfolio_http(ns, "http://localhost:8000"))
+        out = capsys.readouterr().out
+        assert "\033[93m" in out, "delta 0.12 should be yellow"
+
+        # Danger (>0.15) → red ANSI 91
+        with patch("httpx.AsyncClient", return_value=_fake_resp(0.20)):
+            asyncio.run(_cmd_portfolio_http(ns, "http://localhost:8000"))
+        out = capsys.readouterr().out
+        assert "\033[91m" in out, "delta 0.20 should be red"
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CLI Status Command

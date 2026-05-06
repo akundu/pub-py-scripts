@@ -81,6 +81,24 @@ def _color(text: str, code: str) -> str:
     return f"\033[{code}m{text}\033[0m"
 
 
+def _delta_color(breach_delta: float) -> str:
+    """ANSI color code for a breach-exposure delta (already sign-flipped, positive = risk).
+
+    Thresholds:
+      > 0.15  → red    (91) — high breach risk
+      > 0.09  → yellow (93) — warning
+      > 0.05  → white  (0)  — watch zone, no color
+      ≤ 0.05  → green  (92) — safe
+    """
+    if breach_delta > 0.15:
+        return "91"
+    if breach_delta > 0.09:
+        return "93"
+    if breach_delta > 0.05:
+        return "0"
+    return "92"
+
+
 def _print_header(title: str) -> None:
     print(f"\n{'=' * 70}")
     print(f"  {title}")
@@ -3524,7 +3542,7 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                     if display_delta is None:
                         display_delta = p.get("net_delta")
                     if display_delta is not None:
-                        delta_c = "92" if display_delta >= 0 else "91"
+                        delta_c = _delta_color(display_delta) if display_delta >= 0 else "91"
                         delta_s = _color(f"{display_delta:>+7.3f}", delta_c)
                     else:
                         delta_s = f"{'---':>7}"
@@ -3619,7 +3637,11 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                             th_val = g.get("theta")
                             age_s = leg.get("greeks_age_seconds")
                             # Flip sign: short put raw Δ=-0.020 → breach exposure +0.020
-                            d_str = f"Δ={-d_val:+.3f}" if d_val is not None else ""
+                            if d_val is not None:
+                                bd = -d_val
+                                d_str = _color(f"Δ={bd:+.3f}", _delta_color(bd) if bd >= 0 else "91")
+                            else:
+                                d_str = ""
                             iv_str = f"IV={iv_val*100:.1f}%" if iv_val is not None else ""
                             th_str = f"Θ={th_val:.2f}" if th_val is not None else ""
                             age_str = f"[{age_s:.0f}s]" if age_s is not None else ""
