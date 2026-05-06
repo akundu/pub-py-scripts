@@ -4985,12 +4985,13 @@ async def scan_loop(args):
             if args.once:
                 break
 
-            # After the paint, the cursor is at the end of the footer; drop
-            # to a scratch line below it so stray logs (notify failures,
-            # prev_close diagnostics) don't clobber footer repaints. Each
-            # subsequent tick uses ESC[F + ESC[2K to clear and repaint
-            # exactly the footer line.
-            print()  # park cursor below footer
+            # After the paint, output ends with footer\n so the cursor is
+            # exactly one line past the footer (R+1). Each subsequent tick
+            # uses ESC[F + ESC[2K to move back to R, clear, and repaint the
+            # footer in place. Do NOT print() here — an extra newline would
+            # push the cursor to R+2, causing ESC[F to target the blank
+            # scratch line instead of the footer and leaving stale footer
+            # lines visible as new ones accumulate below.
             # Compute next paint deadline from THIS paint, not from the
             # scan start — keeps the visual cadence steady even when
             # individual scans run long.
