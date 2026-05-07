@@ -189,6 +189,17 @@ option_quotes_strike_range_pct: 15.0
 # IBKR: only fetch DTE 0–2 (near-term where freshness matters most)
 option_quotes_ibkr_dte_list: [0, 1, 2]
 
+# Per-DTE inner offset: shift the IBKR fetch window outward so we skip
+# near-ATM strikes we'd never trade.  The window stays 2.75% wide; it just
+# starts offset_pct OTM instead of at the money.
+#   DTE0: no offset (unchanged ±2.75% symmetric window)
+#   DTE1: 1.0% offset → CALL [+1.0%, +3.75%], PUT [-3.75%, -1.0%]
+#   DTE2: 1.5% offset → CALL [+1.5%, +4.25%], PUT [-4.25%, -1.5%]
+# Set to {} to disable for all DTEs.
+option_quotes_ibkr_dte_offsets:
+  1: 1.0
+  2: 1.5
+
 # CSV: load expirations up to 10 DTE (or whatever is available)
 option_quotes_csv_dte_max: 10
 

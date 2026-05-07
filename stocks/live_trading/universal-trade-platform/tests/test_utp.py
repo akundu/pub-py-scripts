@@ -2271,6 +2271,87 @@ class TestPositionSync:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Flush endpoint — dedup closed expired-option positions
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestFlushDedup:
+    """POST /account/flush must deduplicate closed expired-option positions
+    that accumulate when the expiration loop and sync loop race."""
+
+    @pytest.mark.anyio
+    async def test_flush_removes_duplicate_closed_expired_options(self, client, api_key_headers):
+        """Flush removes duplicate closed option positions that share a con_id
+        and have expiration on or before today (UTC)."""
+        from app.services.position_store import get_position_store
+        from app.models import Broker, PositionSource
+        from datetime import date
+
+        store = get_position_store()
+        past_exp = "2020-06-15"  # always in the past
+
+        # Simulate what the expiration+sync loop does: create 3 closed copies
+        # of the same option position (same con_id, same contract)
+        ids = []
+        for _ in range(3):
+            pid = store.add_position_from_sync(
+                broker=Broker.IBKR, symbol="SPX", quantity=-5,
+                avg_cost=100.0, market_value=0.0, unrealized_pnl=0.0,
+                con_id=55501, sec_type="OPT", expiration=past_exp,
+            )
+            store.close_position(pid, 0.0, "expired")
+            ids.append(pid)
+
+        # Confirm 3 closed copies exist
+        assert sum(1 for p in store._positions.values()
+                   if p.get("con_id") == 55501 and p.get("status") == "closed") == 3
+
+        resp = await client.post("/account/flush", headers=api_key_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+
+        # Exactly 2 duplicates removed (3 entries → 1 kept)
+        assert data.get("closed_dupes_removed", 0) == 2
+        # Only 1 closed entry for this con_id remains
+        remaining = [p for p in store._positions.values()
+                     if p.get("con_id") == 55501 and p.get("status") == "closed"]
+        assert len(remaining) == 1
+
+    @pytest.mark.anyio
+    async def test_flush_preserves_non_duplicate_closed(self, client, api_key_headers):
+        """Flush does not remove unique (non-duplicate) closed positions."""
+        from app.services.position_store import get_position_store
+        from app.models import Broker
+
+        store = get_position_store()
+        past_exp = "2020-01-10"
+
+        # Two different options (different con_ids)
+        pid1 = store.add_position_from_sync(
+            broker=Broker.IBKR, symbol="SPX", quantity=-2,
+            avg_cost=50.0, market_value=0.0, unrealized_pnl=0.0,
+            con_id=55601, sec_type="OPT", expiration=past_exp,
+        )
+        store.close_position(pid1, 0.0, "expired")
+
+        pid2 = store.add_position_from_sync(
+            broker=Broker.IBKR, symbol="NDX", quantity=-3,
+            avg_cost=200.0, market_value=0.0, unrealized_pnl=0.0,
+            con_id=55602, sec_type="OPT", expiration=past_exp,
+        )
+        store.close_position(pid2, 0.0, "expired")
+
+        resp = await client.post("/account/flush", headers=api_key_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+
+        # No duplicates — both should survive
+        assert data.get("closed_dupes_removed", 0) == 0
+        assert store.get_position(pid1)["status"] == "closed"
+        assert store.get_position(pid2)["status"] == "closed"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Reconciliation
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -17047,8 +17128,25 @@ class TestTieredOptionStreaming:
             # Strike range checks
             for _, _, _, smin, smax, _ in csv_jobs:
                 assert smin == 4250.0 and smax == 5750.0
-            for _, _, _, smin, smax, _ in ibkr_jobs:
+
+            # DTE0: symmetric ±3% (no offset in _make_streaming_config default)
+            dte0_jobs = [j for j in ibkr_jobs if j[1] == "2026-05-04"]
+            for _, _, _, smin, smax, _ in dte0_jobs:
                 assert smin == 4850.0 and smax == 5150.0
+
+            # DTE1: offset=1.0% → CALL [5050, 5187.5], PUT [4812.5, 4950]
+            dte1_by_type = {j[2]: j for j in ibkr_jobs if j[1] == "2026-05-05"}
+            _, _, _, cmin, cmax, _ = dte1_by_type["CALL"]
+            assert cmin == round(5000 * 1.01, 2) and cmax == round(5000 * 1.04, 2)
+            _, _, _, pmin, pmax, _ = dte1_by_type["PUT"]
+            assert pmin == round(5000 * 0.96, 2) and pmax == round(5000 * 0.99, 2)
+
+            # DTE2: offset=1.5% → CALL [5075, 5225], PUT [4775, 4925]
+            dte2_by_type = {j[2]: j for j in ibkr_jobs if j[1] == "2026-05-06"}
+            _, _, _, cmin, cmax, _ = dte2_by_type["CALL"]
+            assert cmin == round(5000 * 1.015, 2) and cmax == round(5000 * 1.045, 2)
+            _, _, _, pmin, pmax, _ = dte2_by_type["PUT"]
+            assert pmin == round(5000 * 0.955, 2) and pmax == round(5000 * 0.985, 2)
 
             # IBKR jobs only include DTE 0/1/2 expirations
             ibkr_exps = {j[1] for j in ibkr_jobs}
@@ -17086,6 +17184,142 @@ class TestTieredOptionStreaming:
         csv_jobs, ibkr_jobs = svc._build_fetch_jobs("SPX", 5000.0, exps, "quote")
         assert len(csv_jobs) == 4
         assert ibkr_jobs == []
+
+    def test_dte_offset_dte0_unchanged(self):
+        """DTE0 has no offset — symmetric ±2.75% window unchanged."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from unittest.mock import MagicMock
+        from datetime import date
+
+        cfg = _make_streaming_config(
+            option_quotes_ibkr_strike_range_pct=2.75,
+            option_quotes_ibkr_dte_list=[0, 1, 2],
+            option_quotes_ibkr_dte_offsets={1: 1.0, 2: 1.5},
+        )
+        svc = OptionQuoteStreamingService(cfg, MagicMock())
+
+        today = date.today()
+        exps = [today.isoformat()]  # DTE0 only
+        _, ibkr_jobs = svc._build_fetch_jobs("SPX", 5000.0, exps, "quote")
+
+        assert len(ibkr_jobs) == 2  # CALL + PUT
+        for _, _, _, jmin, jmax, _ in ibkr_jobs:
+            assert jmin == round(5000 * (1 - 0.0275), 2)
+            assert jmax == round(5000 * (1 + 0.0275), 2)
+
+    def test_dte_offset_dte1_shifts_window_outward(self):
+        """DTE1 with offset=1.0%: window is [1%, 3.75%] OTM, split by side."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from unittest.mock import MagicMock
+        from datetime import date, timedelta
+
+        cfg = _make_streaming_config(
+            option_quotes_ibkr_strike_range_pct=2.75,
+            option_quotes_ibkr_dte_list=[0, 1, 2],
+            option_quotes_ibkr_dte_offsets={1: 1.0, 2: 1.5},
+        )
+        svc = OptionQuoteStreamingService(cfg, MagicMock())
+
+        today = date.today()
+        # Need a true DTE1 (skip weekend)
+        exp1 = today + timedelta(days=1)
+        while exp1.weekday() >= 5:
+            exp1 += timedelta(days=1)
+
+        _, ibkr_jobs = svc._build_fetch_jobs("SPX", 5000.0, [exp1.isoformat()], "quote")
+        assert len(ibkr_jobs) == 2
+
+        job_by_type = {j[2]: j for j in ibkr_jobs}
+        # CALL: [5000*(1+0.01), 5000*(1+0.0375)]
+        _, _, _, cmin, cmax, _ = job_by_type["CALL"]
+        assert cmin == round(5000 * 1.01, 2)
+        assert cmax == round(5000 * 1.0375, 2)
+        # PUT: [5000*(1-0.0375), 5000*(1-0.01)]
+        _, _, _, pmin, pmax, _ = job_by_type["PUT"]
+        assert pmin == round(5000 * (1 - 0.0375), 2)
+        assert pmax == round(5000 * (1 - 0.01), 2)
+
+    def test_dte_offset_dte2_shifts_window_outward(self):
+        """DTE2 with offset=1.5%: window is [1.5%, 4.25%] OTM per side."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from unittest.mock import MagicMock
+        from datetime import date, timedelta
+
+        cfg = _make_streaming_config(
+            option_quotes_ibkr_strike_range_pct=2.75,
+            option_quotes_ibkr_dte_list=[0, 1, 2],
+            option_quotes_ibkr_dte_offsets={1: 1.0, 2: 1.5},
+        )
+        svc = OptionQuoteStreamingService(cfg, MagicMock())
+
+        today = date.today()
+        # Find a true DTE2 trading day
+        exp2 = today + timedelta(days=2)
+        trading_days = 0
+        d = today + timedelta(days=1)
+        while trading_days < 2:
+            if d.weekday() < 5:
+                trading_days += 1
+                if trading_days == 2:
+                    exp2 = d
+            d += timedelta(days=1)
+
+        _, ibkr_jobs = svc._build_fetch_jobs("SPX", 5000.0, [exp2.isoformat()], "quote")
+        assert len(ibkr_jobs) == 2
+
+        job_by_type = {j[2]: j for j in ibkr_jobs}
+        _, _, _, cmin, cmax, _ = job_by_type["CALL"]
+        assert cmin == round(5000 * 1.015, 2)
+        assert cmax == round(5000 * 1.0425, 2)
+        _, _, _, pmin, pmax, _ = job_by_type["PUT"]
+        assert pmin == round(5000 * (1 - 0.0425), 2)
+        assert pmax == round(5000 * (1 - 0.015), 2)
+
+    def test_dte_offset_no_offsets_dict_uses_symmetric(self):
+        """Empty offsets dict = no shifting for any DTE."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from unittest.mock import MagicMock
+        from datetime import date, timedelta
+
+        cfg = _make_streaming_config(
+            option_quotes_ibkr_strike_range_pct=3.0,
+            option_quotes_ibkr_dte_list=[0, 1, 2],
+            option_quotes_ibkr_dte_offsets={},
+        )
+        svc = OptionQuoteStreamingService(cfg, MagicMock())
+
+        today = date.today()
+        exp1 = today + timedelta(days=1)
+        while exp1.weekday() >= 5:
+            exp1 += timedelta(days=1)
+
+        _, ibkr_jobs = svc._build_fetch_jobs("SPX", 5000.0, [exp1.isoformat()], "quote")
+        assert len(ibkr_jobs) == 2
+        for _, _, _, jmin, jmax, _ in ibkr_jobs:
+            assert jmin == round(5000 * 0.97, 2)
+            assert jmax == round(5000 * 1.03, 2)
+
+    def test_dte_offset_yaml_roundtrip(self, tmp_path):
+        """YAML loads dte_offsets as int-keyed float dict."""
+        from app.services.streaming_config import load_streaming_config
+        cfg_yaml = tmp_path / "streaming.yaml"
+        cfg_yaml.write_text(
+            "symbols:\n  - SPX\n"
+            "option_quotes_enabled: true\n"
+            "option_quotes_ibkr_dte_offsets:\n"
+            "  1: 1.0\n"
+            "  2: 1.5\n"
+        )
+        cfg = load_streaming_config(cfg_yaml)
+        assert cfg.option_quotes_ibkr_dte_offsets == {1: 1.0, 2: 1.5}
+
+    def test_dte_offset_default_yaml_has_offsets(self):
+        """The shipped daemon_default.yaml includes the DTE offset config."""
+        from app.services.streaming_config import load_streaming_config
+        from pathlib import Path
+        cfg_path = Path(__file__).resolve().parent.parent / "configs" / "streaming_default.yaml"
+        cfg = load_streaming_config(cfg_path)
+        assert cfg.option_quotes_ibkr_dte_offsets == {1: 1.0, 2: 1.5}
 
     def test_load_yaml_parses_tiered_fields(self, tmp_path):
         """YAML loader honors the new ibkr_/csv_ fields."""

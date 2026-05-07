@@ -1424,10 +1424,11 @@ class OptionQuoteStreamingService:
         ibkr_pct = self._config.option_quotes_ibkr_strike_range_pct / 100.0
         csv_min = round(price * (1 - csv_pct), 2)
         csv_max = round(price * (1 + csv_pct), 2)
-        ibkr_min = round(price * (1 - ibkr_pct), 2)
-        ibkr_max = round(price * (1 + ibkr_pct), 2)
+        ibkr_min_sym = round(price * (1 - ibkr_pct), 2)
+        ibkr_max_sym = round(price * (1 + ibkr_pct), 2)
 
         ibkr_dtes = self._config.option_quotes_ibkr_dte_list
+        dte_offsets: dict = self._config.option_quotes_ibkr_dte_offsets or {}
         csv_dte_max = self._config.option_quotes_csv_dte_max
         csv_intervals = self._config.option_quotes_csv_intervals
         today = date.today()
@@ -1448,7 +1449,20 @@ class OptionQuoteStreamingService:
                         csv_jobs.append((symbol, exp, opt_type, csv_min, csv_max, price_source))
                 # IBKR tier: include if no DTE filter, or if DTE is in filter list
                 if ibkr_dtes is None or (dte is not None and dte in ibkr_dtes):
-                    ibkr_jobs.append((symbol, exp, opt_type, ibkr_min, ibkr_max, price_source))
+                    offset_pct = (dte_offsets.get(dte, 0.0) if dte is not None else 0.0) / 100.0
+                    if offset_pct > 0:
+                        # Offset window: skip inner buffer, fetch only OTM side.
+                        # CALL: [spot*(1+offset), spot*(1+offset+range)]
+                        # PUT:  [spot*(1-offset-range), spot*(1-offset)]
+                        if opt_type == "CALL":
+                            job_min = round(price * (1.0 + offset_pct), 2)
+                            job_max = round(price * (1.0 + offset_pct + ibkr_pct), 2)
+                        else:
+                            job_min = round(price * (1.0 - offset_pct - ibkr_pct), 2)
+                            job_max = round(price * (1.0 - offset_pct), 2)
+                    else:
+                        job_min, job_max = ibkr_min_sym, ibkr_max_sym
+                    ibkr_jobs.append((symbol, exp, opt_type, job_min, job_max, price_source))
         return csv_jobs, ibkr_jobs
 
     def _csv_job_due(

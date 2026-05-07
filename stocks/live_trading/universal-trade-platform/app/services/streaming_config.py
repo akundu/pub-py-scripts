@@ -127,6 +127,18 @@ class StreamingConfig:
     # Default [0, 1, 2] keeps IBKR focused on near-term where freshness matters
     # most; longer DTEs are served from CSV.
     option_quotes_ibkr_dte_list: Optional[list[int]] = None
+    # Per-DTE inner offset (% of spot) applied to IBKR fetch windows.
+    # For DTE > 0 you'd never trade strikes near ATM, so skip them and shift
+    # the fetch window outward.  The window width stays ibkr_strike_range_pct
+    # wide; it just starts at offset_pct OTM instead of at-the-money.
+    # e.g. {1: 1.0, 2: 1.5} means:
+    #   DTE1 CALL: [spot*(1+1%), spot*(1+3.75%)]   PUT: [spot*(1-3.75%), spot*(1-1%)]
+    #   DTE2 CALL: [spot*(1+1.5%), spot*(1+4.25%)] PUT: [spot*(1-4.25%), spot*(1-1.5%)]
+    # DTE0 is always unshifted (offset defaults to 0 when not in the dict).
+    # Set to None or {} to disable for all DTEs.
+    option_quotes_ibkr_dte_offsets: Optional[dict] = field(
+        default_factory=lambda: {1: 1.0, 2: 1.5}
+    )
     # Max DTE for CSV tier.  CSV loads expirations up to this many trading days
     # out (or whatever is available).  IBKR is independently capped by ibkr_dte_list.
     option_quotes_csv_dte_max: int = 10
@@ -378,6 +390,10 @@ def load_streaming_config(path: str | Path) -> StreamingConfig:
             )
         ),
         option_quotes_ibkr_dte_list=raw.get("option_quotes_ibkr_dte_list", None),
+        option_quotes_ibkr_dte_offsets={
+            int(k): float(v)
+            for k, v in (raw.get("option_quotes_ibkr_dte_offsets") or {1: 1.0, 2: 1.5}).items()
+        } or None,
         option_quotes_csv_dte_max=int(raw.get("option_quotes_csv_dte_max", 10)),
         option_quotes_csv_intervals=_parse_csv_intervals(
             raw.get("option_quotes_csv_intervals", None)
