@@ -6961,6 +6961,28 @@ class TestTradingClient:
         assert len(positions) == 2
         assert positions[0]["id"] == "pos-1"
 
+    def test_tradingclient_get_account_snapshot(self):
+        """TradingClient.get_account_snapshot hits /account/snapshot."""
+        import asyncio
+        from utp import TradingClient
+        captured = {}
+        class FakeHttp:
+            async def get(self, path, params=None):
+                captured["path"] = path
+                class R:
+                    status_code = 200
+                    def raise_for_status(self_): pass
+                    def json(self_): return {
+                        "available_funds": 250000.0,
+                        "net_liquidation": 300000.0,
+                    }
+                return R()
+        c = TradingClient("http://d")
+        c._client = FakeHttp()
+        data = asyncio.run(c.get_account_snapshot())
+        assert captured["path"] == "/account/snapshot"
+        assert data["available_funds"] == 250000.0
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # HTTP Client Mode (Phase 2)
@@ -14245,6 +14267,119 @@ class TestRollService:
         svc = RollService(RollConfig())
         result = await svc.build_manual_forward("no-such-pos-xyz")
         assert result is None
+
+    @pytest.mark.asyncio
+    async def test_build_manual_forward_synthetic_id(self, tmp_path):
+        """build_manual_forward resolves synthetic portfolio group IDs (MD5 of con_ids)."""
+        import hashlib
+        from app.services.roll_service import RollConfig, RollService
+        from app.services.position_store import get_position_store
+
+        svc = RollService(RollConfig())
+
+        # Raw individual legs as synced from IBKR (no legs list, have con_id + sec_type)
+        exp = datetime.now(UTC).strftime("%Y%m%d")
+        short_leg = {
+            "position_id": "syn-short-1",
+            "symbol": "SPX",
+            "sec_type": "OPT",
+            "expiration": exp,
+            "strike": 5600.0,
+            "right": "P",
+            "quantity": -4,
+            "con_id": 111111,
+            "status": "open",
+            "order_type": "option",
+        }
+        long_leg = {
+            "position_id": "syn-long-1",
+            "symbol": "SPX",
+            "sec_type": "OPT",
+            "expiration": exp,
+            "strike": 5575.0,
+            "right": "P",
+            "quantity": 4,
+            "con_id": 222222,
+            "status": "open",
+            "order_type": "option",
+        }
+        store = get_position_store()
+        store._positions["syn-short-1"] = short_leg
+        store._positions["syn-long-1"] = long_leg
+        store._save()
+
+        # Compute the same synthetic ID that _group_options_into_spreads produces
+        pair_qty = 4
+        syn_id = hashlib.md5(f"111111_222222_{pair_qty}".encode()).hexdigest()
+
+        mock_quote = MagicMock()
+        mock_quote.last = 5800.0
+        mock_quote.bid = 5800.0
+
+        with patch("app.services.market_data.get_quote", new_callable=AsyncMock, return_value=mock_quote):
+            with patch("app.services.market_data.get_option_quotes", new_callable=AsyncMock, return_value=[]):
+                suggestion = await svc.build_manual_forward(syn_id[:6])
+
+        assert suggestion is not None
+        assert suggestion.roll_type == "forward"
+        assert suggestion.current_short_strike == 5600.0
+        assert suggestion.current_long_strike == 5575.0
+        assert suggestion.current_quantity == pair_qty
+
+    @pytest.mark.asyncio
+    async def test_build_manual_mirror_synthetic_id(self, tmp_path):
+        """build_manual_mirror resolves synthetic portfolio group IDs."""
+        import hashlib
+        from app.services.roll_service import RollConfig, RollService
+        from app.services.position_store import get_position_store
+
+        svc = RollService(RollConfig())
+
+        exp = datetime.now(UTC).strftime("%Y%m%d")
+        short_leg = {
+            "position_id": "mir-short-1",
+            "symbol": "SPX",
+            "sec_type": "OPT",
+            "expiration": exp,
+            "strike": 5600.0,
+            "right": "P",
+            "quantity": -3,
+            "con_id": 333333,
+            "status": "open",
+            "order_type": "option",
+        }
+        long_leg = {
+            "position_id": "mir-long-1",
+            "symbol": "SPX",
+            "sec_type": "OPT",
+            "expiration": exp,
+            "strike": 5575.0,
+            "right": "P",
+            "quantity": 3,
+            "con_id": 444444,
+            "status": "open",
+            "order_type": "option",
+        }
+        store = get_position_store()
+        store._positions["mir-short-1"] = short_leg
+        store._positions["mir-long-1"] = long_leg
+        store._save()
+
+        pair_qty = 3
+        syn_id = hashlib.md5(f"333333_444444_{pair_qty}".encode()).hexdigest()
+
+        mock_quote = MagicMock()
+        mock_quote.last = 5800.0
+        mock_quote.bid = 5800.0
+
+        with patch("app.services.market_data.get_quote", new_callable=AsyncMock, return_value=mock_quote):
+            with patch("app.services.market_data.get_option_quotes", new_callable=AsyncMock, return_value=[]):
+                suggestion = await svc.build_manual_mirror(syn_id[:6])
+
+        assert suggestion is not None
+        assert suggestion.roll_type == "mirror"
+        assert suggestion.current_short_strike == 5600.0
+        assert suggestion.new_option_type == "CALL"
 
     # ── Route endpoints ───────────────────────────────────────────────────────
 
@@ -22775,6 +22910,166 @@ class TestSpreadScanner:
         # matches "HH:MM:SS TZ" where TZ is 1+ letters
         assert re.search(r"\d{2}:\d{2}:\d{2} [A-Z]+", footer) is not None
 
+    def test_render_risk_line_no_trade_handlers(self):
+        """log-only config → render_risk_line returns None."""
+        from spread_scanner import render_risk_line, LogHandler
+        h = LogHandler(min_norm_roi=0, path="/dev/null")
+        assert render_risk_line([h]) is None
+        assert render_risk_line([]) is None
+
+    def test_render_risk_line_sim_only_shows_shadow(self):
+        """SIM-only handler appears as dimmed '(shadow)' — not a real budget."""
+        from spread_scanner import render_risk_line, SimulateTradeHandler, TradePolicy
+        pol = TradePolicy.from_dict({"max_total_risk": 300_000})
+        h = SimulateTradeHandler(min_norm_roi=0, log_file="/dev/null",
+                                 policy=pol, daemon_url="http://d", validate_prices=False)
+        line = render_risk_line([h])
+        assert line is not None
+        assert "SIM" in line
+        assert "shadow" in line
+        assert "300,000" in line
+
+    def test_render_risk_line_live_shows_remaining(self):
+        """LIVE handler prominently shows deployed / cap / remaining."""
+        from spread_scanner import render_risk_line, TradeHandler, TradePolicy
+        pol = TradePolicy.from_dict({"max_total_risk": 100_000})
+        h = TradeHandler(min_norm_roi=0, log_file="/dev/null",
+                         policy=pol, daemon_url="http://d", validate_prices=False)
+        h.cum_risk = 40_000.0
+        line = render_risk_line([h])
+        assert line is not None
+        assert "LIVE" in line
+        assert "40,000" in line
+        assert "60,000" in line    # remaining
+        assert "left" in line
+
+    def test_render_risk_line_two_handlers_live_before_sim(self):
+        """LIVE appears before SIM; server avail shown when present."""
+        from spread_scanner import render_risk_line, SimulateTradeHandler, TradeHandler, TradePolicy
+        pol = TradePolicy.from_dict({"max_total_risk": 200_000})
+        sim = SimulateTradeHandler(min_norm_roi=0, log_file="/dev/null",
+                                   policy=pol, daemon_url="http://d", validate_prices=False)
+        live = TradeHandler(min_norm_roi=0, log_file="/dev/null",
+                            policy=pol, daemon_url="http://d", validate_prices=False)
+        live.cum_risk = 10_000.0
+        live._last_available_funds = 500_000.0
+        line = render_risk_line([sim, live])
+        assert line is not None
+        assert "Server" in line
+        assert "500,000" in line
+        assert "LIVE" in line
+        assert "SIM" in line
+        assert "shadow" in line
+        assert line.index("LIVE") < line.index("SIM")
+
+    def test_render_risk_line_pct_based_effective_cap(self):
+        """pct mode: effective_cap IS the remaining budget (available_funds already
+        reflects committed margin). cum_risk is shown as 'today', effective_cap as
+        'budget left' — no subtraction."""
+        from spread_scanner import render_risk_line, TradeHandler, TradePolicy
+        pol = TradePolicy.from_dict({"max_total_risk": 999_999, "max_total_risk_pct": 20.0})
+        h = TradeHandler(min_norm_roi=0, log_file="/dev/null",
+                         policy=pol, daemon_url="http://d", validate_prices=False)
+        h._effective_max_total_risk = 100_000.0   # 20% of 500k available
+        h._last_available_funds = 500_000.0
+        h.cum_risk = 25_000.0
+        line = render_risk_line([h])
+        assert line is not None
+        assert "Server" in line
+        assert "500,000" in line
+        assert "LIVE" in line
+        assert "100,000" in line   # effective cap IS the remaining budget
+        assert "25,000" in line    # cum_risk shown as deployed today
+        # pct mode: remaining = effective_cap (not cap - cum_risk).
+        # "100,000 left" appears (full budget left), NOT "75,000 left".
+        assert "100,000 left" in line
+        assert "75,000" not in line
+        assert "today" in line     # pct-mode label distinguishes deployed from budget
+
+    def test_render_risk_line_pct_zero_budget_shows_no_budget(self):
+        """When reserve >= available_funds, cap=0 and the display shows NO BUDGET
+        in red with a full bar — makes the trading block unmistakable."""
+        from spread_scanner import render_risk_line, TradeHandler, TradePolicy
+        # reserve=$50k > avail=$15k → base=0 → cap=0 (matches dte0 config scenario).
+        pol = TradePolicy.from_dict({
+            "max_total_risk": 999_999,
+            "max_total_risk_pct": 40.0,
+            "min_reserve": 50_000.0,
+        })
+        h = TradeHandler(min_norm_roi=0, log_file="/dev/null",
+                         policy=pol, daemon_url="http://d", validate_prices=False)
+        h._effective_max_total_risk = 0.0      # reserve($50k) > avail($15k)
+        h._last_available_funds = 15_822.0
+        h.cum_risk = 0.0                        # no trades yet this session
+        line = render_risk_line([h])
+        assert line is not None
+        assert "NO BUDGET" in line
+        assert "avail < reserve" in line
+        # Full bar (▓ × 10) should be present — indicates 100% used / blocked.
+        assert "▓▓▓▓▓▓▓▓▓▓" in line
+
+    def test_render_risk_line_pct_zero_budget_with_prior_trades(self):
+        """NO BUDGET also shown when prior trades have been logged (cum_risk > 0)."""
+        from spread_scanner import render_risk_line, TradeHandler, TradePolicy
+        pol = TradePolicy.from_dict({
+            "max_total_risk": 999_999,
+            "max_total_risk_pct": 40.0,
+            "min_reserve": 50_000.0,
+        })
+        h = TradeHandler(min_norm_roi=0, log_file="/dev/null",
+                         policy=pol, daemon_url="http://d", validate_prices=False)
+        h._effective_max_total_risk = 0.0
+        h._last_available_funds = 15_822.0
+        h.cum_risk = 140_000.0                 # deployed earlier in session
+        line = render_risk_line([h])
+        assert "NO BUDGET" in line
+        assert "140,000" in line               # still shows deployed amount
+
+    def test_render_risk_line_dollar_cap_independent_of_reserve(self):
+        """Dollar cap (no max_total_risk_pct) uses fixed max_total_risk only.
+        min_reserve has no effect — it only applies to pct mode."""
+        from spread_scanner import render_risk_line, TradeHandler, TradePolicy
+        pol = TradePolicy.from_dict({
+            "max_total_risk": 400_000,
+            "min_reserve": 50_000.0,   # ignored in dollar mode
+        })
+        h = TradeHandler(min_norm_roi=0, log_file="/dev/null",
+                         policy=pol, daemon_url="http://d", validate_prices=False)
+        # effective_max_total_risk = max_total_risk (dollar cap, reserve not applied)
+        h._effective_max_total_risk = 400_000.0
+        h._last_available_funds = 15_000.0
+        h.cum_risk = 100_000.0
+        line = render_risk_line([h])
+        assert "400,000" in line               # full dollar cap shown
+        assert "300,000" in line               # remaining = 400k - 100k
+        assert "NO BUDGET" not in line         # dollar mode never shows NO BUDGET
+
+    def test_render_dashboard_includes_risk_line_when_live_handler_present(self):
+        """render_dashboard inserts the risk budget line when a LIVE handler exists."""
+        from spread_scanner import render_dashboard, parse_args, TradeHandler, TradePolicy
+        args = parse_args(["--tickers", "SPX", "--interval", "10"])
+        pol = TradePolicy.from_dict({"max_total_risk": 200_000})
+        h = TradeHandler(min_norm_roi=0, log_file="/dev/null",
+                         policy=pol, daemon_url="http://d", validate_prices=False)
+        h.cum_risk = 50_000.0
+        h._last_available_funds = 800_000.0
+        args.handlers = [h]
+        dash = render_dashboard({"quotes": {}, "prev_closes": {}}, args)
+        assert "Server" in dash
+        assert "800,000" in dash
+        assert "LIVE" in dash
+        assert "50,000" in dash
+        assert "150,000" in dash   # remaining
+
+    def test_render_dashboard_no_risk_line_for_log_only(self):
+        """render_dashboard omits the risk line when only log handlers are present."""
+        from spread_scanner import render_dashboard, parse_args, LogHandler
+        args = parse_args(["--tickers", "SPX", "--interval", "10"])
+        args.handlers = [LogHandler(min_norm_roi=0, path="/dev/null")]
+        dash = render_dashboard({"quotes": {}, "prev_closes": {}}, args)
+        assert "SIM" not in dash
+        assert "LIVE" not in dash
+
     def test_build_spread_from_chain_snaps_to_available_grid(self):
         """If the configured width lands on a non-listed strike (e.g. NDX
         jumps from 10-pt to 50-pt grid at far-OTM), snap the long leg to the
@@ -24545,6 +24840,24 @@ class TestTradePolicy:
         assert p.trading_window_pt_start == dtime(7, 0)
         assert p.trading_window_pt_end == dtime(9, 30, 30)
 
+    def test_defaults_max_total_risk_pct_is_none(self):
+        from spread_scanner import TradePolicy
+        p = TradePolicy()
+        assert p.max_total_risk_pct is None
+        assert p.min_reserve is None
+
+    def test_from_dict_max_total_risk_pct(self):
+        from spread_scanner import TradePolicy
+        p = TradePolicy.from_dict({"max_total_risk_pct": 25.0})
+        assert p.max_total_risk_pct == 25.0
+        assert p.max_total_risk == 400_000.0   # fallback unchanged
+
+    def test_from_dict_min_reserve(self):
+        from spread_scanner import TradePolicy
+        p = TradePolicy.from_dict({"max_total_risk_pct": 40.0, "min_reserve": 50_000.0})
+        assert p.min_reserve == 50_000.0
+        assert p.max_total_risk_pct == 40.0
+
     def test_from_dict_empty(self):
         from spread_scanner import TradePolicy
         assert TradePolicy.from_dict(None).norm_roi == (0.3, 8.0)
@@ -24653,9 +24966,12 @@ class TestTradeHandlers:
         )
 
     @staticmethod
-    def _write_submit_event(log_file, sym, cum_after, per_ticker_after, ts_prefix=None):
+    def _write_submit_event(log_file, sym, cum_after, per_ticker_after,
+                            ts_prefix=None, max_loss=None):
+        """Write a submit event. max_loss defaults to 1900 (width=20, credit=1)."""
         import json, datetime as dt
         prefix = ts_prefix or dt.date.today().isoformat()
+        ml = max_loss if max_loss is not None else 1900.0
         ev = {
             "schema": "v1",
             "ts": f"{prefix}T07:00:00",
@@ -24664,7 +24980,8 @@ class TestTradeHandlers:
             "spread": {"symbol": sym, "option_type": "PUT", "width": 20,
                        "credit": 1.0, "roi_pct": 5.0, "dte": 0},
             "contracts": 1,
-            "cum_risk_before": cum_after - 1900.0,
+            "max_loss": ml,
+            "cum_risk_before": cum_after - ml,
             "cum_risk_after": cum_after,
             "per_ticker_risk_after": per_ticker_after,
         }
@@ -24688,8 +25005,12 @@ class TestTradeHandlers:
     def test_risk_recovery_today_submit_events(self, tmp_path):
         """Today's submit events are replayed to restore cum_risk and per_ticker_risk."""
         log = tmp_path / "l.jsonl"
-        self._write_submit_event(log, "SPX", cum_after=5000.0, per_ticker_after=5000.0)
-        self._write_submit_event(log, "NDX", cum_after=11000.0, per_ticker_after=6000.0)
+        # Each event: max_loss = cum_risk_after - cum_risk_before.
+        # SPX contributed 5000, NDX contributed 6000 → total 11000.
+        self._write_submit_event(log, "SPX", cum_after=5000.0, per_ticker_after=5000.0,
+                                 max_loss=5000.0)
+        self._write_submit_event(log, "NDX", cum_after=11000.0, per_ticker_after=6000.0,
+                                 max_loss=6000.0)
         h = self._make_sim_handler(log)
         assert h.cum_risk == 11000.0
         assert h.per_ticker_risk == {"SPX": 5000.0, "NDX": 6000.0}
@@ -24705,13 +25026,176 @@ class TestTradeHandlers:
         assert h.cum_risk == 0.0
         assert h.per_ticker_risk == {}
 
+    # --- expiration-aware risk recovery + runtime expiry --------------------
+
+    @staticmethod
+    def _write_submit_event_with_exp(log_file, sym, cum_after, expiration, ts_prefix=None):
+        """Write a submit event that includes a spread.expiration field."""
+        import json, datetime as dt
+        prefix = ts_prefix or dt.date.today().isoformat()
+        ml = 1900.0  # width=20, credit=1 → (20-1)*100 = 1900
+        ev = {
+            "schema": "v1",
+            "ts": f"{prefix}T07:00:00",
+            "handler": "simulate_trade",
+            "event": "submit",
+            "spread": {"symbol": sym, "option_type": "PUT", "width": 20,
+                       "credit": 1.0, "roi_pct": 5.0, "dte": 0,
+                       "expiration": expiration},
+            "contracts": 1,
+            "max_loss": ml,
+            "cum_risk_before": cum_after - ml,
+            "cum_risk_after": cum_after,
+            "per_ticker_risk_after": cum_after,
+        }
+        with open(log_file, "a") as f:
+            f.write(json.dumps(ev) + "\n")
+
+    def test_recover_skips_expired_spread(self, tmp_path):
+        """Recovery ignores spreads whose expiration < today — risk already resolved."""
+        import datetime as dt
+        yesterday = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+        today = dt.date.today().isoformat()
+        log = tmp_path / "l.jsonl"
+        # One expired spread (expiration = yesterday) and one live spread (expiration = today).
+        self._write_submit_event_with_exp(log, "SPX", cum_after=1900.0, expiration=yesterday)
+        self._write_submit_event_with_exp(log, "SPX", cum_after=3800.0, expiration=today)
+        h = self._make_sim_handler(log)
+        # Only the live spread counts; expired one is free.
+        assert abs(h.cum_risk - 1900.0) < 1.0, f"expected ~1900, got {h.cum_risk}"
+        assert abs(h.per_ticker_risk.get("SPX", 0) - 1900.0) < 1.0
+        assert len(h._tracked_risk_positions) == 1
+        assert h._tracked_risk_positions[0]["expiration"] == today
+
+    def test_recover_all_expired_yields_zero(self, tmp_path):
+        """When every today-logged spread has already expired, recovery starts at zero."""
+        import datetime as dt
+        yesterday = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+        log = tmp_path / "l.jsonl"
+        self._write_submit_event_with_exp(log, "SPX", cum_after=1900.0, expiration=yesterday)
+        self._write_submit_event_with_exp(log, "NDX", cum_after=3800.0, expiration=yesterday)
+        h = self._make_sim_handler(log)
+        assert h.cum_risk == 0.0
+        assert h.per_ticker_risk == {}
+        assert h._tracked_risk_positions == []
+
+    def test_recover_no_expiration_field_still_counts(self, tmp_path):
+        """Old log entries without expiration field are treated as live (counted)."""
+        log = tmp_path / "l.jsonl"
+        # Use the legacy helper that omits expiration.
+        self._write_submit_event(log, "SPX", cum_after=5000.0, per_ticker_after=5000.0)
+        h = self._make_sim_handler(log)
+        # No expiration → exp = "" → condition `exp and exp < today` is False → counted.
+        assert abs(h.cum_risk - 1900.0) < 1.0, (
+            f"legacy entry without expiration should be counted; got {h.cum_risk}"
+        )
+
+    def test_expire_resolved_positions_frees_cum_risk(self):
+        """_expire_resolved_positions frees risk for positions expiring before today."""
+        import datetime as dt
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+        yesterday = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+        today = dt.date.today().isoformat()
+        pol = TradePolicy.from_dict({"norm_roi": [0.3, 50.0]})
+        h = SimulateTradeHandler(min_norm_roi=0, log_file="/tmp/unused.jsonl",
+                                 policy=pol, daemon_url="http://d", validate_prices=False)
+        # Inject two tracked positions directly — one expired, one live.
+        h._tracked_risk_positions = [
+            {"expiration": yesterday, "max_loss": 2000.0, "symbol": "SPX"},
+            {"expiration": today, "max_loss": 1900.0, "symbol": "NDX"},
+        ]
+        h.cum_risk = 3900.0
+        h.per_ticker_risk = {"SPX": 2000.0, "NDX": 1900.0}
+
+        h._expire_resolved_positions()
+
+        # Expired SPX position freed.
+        assert abs(h.cum_risk - 1900.0) < 1.0
+        assert abs(h.per_ticker_risk.get("NDX", 0) - 1900.0) < 1.0
+        assert h.per_ticker_risk.get("SPX", 0) == 0.0
+        assert len(h._tracked_risk_positions) == 1
+        assert h._tracked_risk_positions[0]["symbol"] == "NDX"
+
+    def test_expire_resolved_positions_keeps_live_entries(self):
+        """_expire_resolved_positions does not touch positions expiring today or later."""
+        import datetime as dt
+        from spread_scanner import SimulateTradeHandler, TradePolicy
+        today = dt.date.today().isoformat()
+        tomorrow = (dt.date.today() + dt.timedelta(days=1)).isoformat()
+        pol = TradePolicy.from_dict({"norm_roi": [0.3, 50.0]})
+        h = SimulateTradeHandler(min_norm_roi=0, log_file="/tmp/unused.jsonl",
+                                 policy=pol, daemon_url="http://d", validate_prices=False)
+        h._tracked_risk_positions = [
+            {"expiration": today, "max_loss": 1900.0, "symbol": "SPX"},
+            {"expiration": tomorrow, "max_loss": 1900.0, "symbol": "NDX"},
+        ]
+        h.cum_risk = 3800.0
+        h.per_ticker_risk = {"SPX": 1900.0, "NDX": 1900.0}
+
+        h._expire_resolved_positions()
+
+        # Nothing freed — both positions are still live.
+        assert h.cum_risk == 3800.0
+        assert len(h._tracked_risk_positions) == 2
+
+    def test_fire_frees_expired_risk_before_cap_check(self, monkeypatch, tmp_path):
+        """Expired positions are freed at the top of fire(), enabling trades that
+        would otherwise be blocked by a stale cum_risk from an earlier cycle."""
+        import asyncio, datetime as dt
+        import spread_scanner as ss
+        from spread_scanner import TradeHandler, TradePolicy
+
+        submitted = []
+
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def trade_credit_spread(self, **kw):
+                submitted.append(kw)
+                return {"order_id": "x", "status": "FILLED"}
+
+        self._bind_utp_pricing(FakeTClient)
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+        self._always_in_window(monkeypatch)
+
+        yesterday = (dt.date.today() - dt.timedelta(days=1)).isoformat()
+        pol = TradePolicy.from_dict({
+            "norm_roi": [1.0, 10.0],
+            "max_total_risk": 3000.0,  # cap = $3,000
+            "max_trades_per_cycle": 1,
+            "min_minutes_between_trades": 0,
+        })
+        log_file = tmp_path / "t.jsonl"
+        h = TradeHandler(min_norm_roi=0, log_file=str(log_file), policy=pol,
+                         daemon_url="http://d", validate_prices=False)
+
+        # Manually load a position from a 'yesterday' expiration — already expired.
+        # cum_risk = 2900 would block a $1,900 trade (2900+1900 > 3000).
+        h.cum_risk = 2900.0
+        h.per_ticker_risk = {"SPX": 2900.0}
+        h._tracked_risk_positions = [
+            {"expiration": yesterday, "max_loss": 2900.0, "symbol": "SPX"},
+        ]
+
+        spread = self._spread("SPX", credit=1.0, short=5700, long_=5680, roi=5.0)
+        asyncio.run(h.fire([spread], self._ctx()))
+
+        # The expired risk should have been freed, allowing the new trade to proceed.
+        assert len(submitted) == 1, (
+            f"fire() should have freed expired risk and allowed 1 trade; submitted={submitted}"
+        )
+        # cum_risk should now reflect only the new trade.
+        assert abs(h.cum_risk - 1900.0) < 50.0, f"expected ~1900, got {h.cum_risk}"
+
     def test_risk_recovery_caps_respected_after_restart(self, monkeypatch, tmp_path):
         """After recovery, a trade that would exceed max_total_risk is blocked."""
         import asyncio
         from spread_scanner import TradeHandler, TradePolicy
         log = tmp_path / "l.jsonl"
         # Pre-populate log with a large committed risk close to the cap.
-        self._write_submit_event(log, "SPX", cum_after=395000.0, per_ticker_after=395000.0)
+        self._write_submit_event(log, "SPX", cum_after=395000.0, per_ticker_after=395000.0,
+                                 max_loss=395000.0)
 
         submitted = []
         class FakeTClient:
@@ -25086,6 +25570,300 @@ class TestTradeHandlers:
         skipped = [e for e in events if e["event"] == "skipped"]
         assert len(skipped) == 1
         assert skipped[0]["reason"] == "total_risk_cap"
+
+    def test_max_total_risk_pct_uses_available_funds(self, monkeypatch, tmp_path):
+        """max_total_risk_pct=10 with available_funds=20000 → effective cap=2000."""
+        import asyncio
+        import spread_scanner as ss
+        from spread_scanner import TradeHandler, TradePolicy
+
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def get_trade_defaults(self):
+                return {"default_order_type": "MARKET"}
+            async def get_account_snapshot(self):
+                return {"available_funds": 20000.0}
+            async def trade_credit_spread(self, **kw):
+                return {"order_id": "x", "status": "FILLED"}
+
+        self._bind_utp_pricing(FakeTClient)
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+
+        # width=20, credit=1.0 → max_loss = $1900. 10% of $20000 = $2000 → 1 fits, 2nd blocked.
+        pol = TradePolicy.from_dict({
+            "norm_roi": [1.0, 10.0],
+            "max_total_risk": 999_999,      # dollar fallback — should NOT be used
+            "max_total_risk_pct": 10.0,     # 10% of $20000 = $2000
+            "max_trades_per_cycle": 100,
+            "min_minutes_between_trades": 0,
+        })
+        log_file = tmp_path / "t.jsonl"
+        h = TradeHandler(min_norm_roi=0, log_file=str(log_file), policy=pol,
+                         daemon_url="http://d", validate_prices=False)
+
+        sp = self._spread
+        ctx = self._ctx()
+        asyncio.run(h.fire([sp("SPX", credit=1.0, short=5700, long_=5680),
+                            sp("SPX", credit=1.0, short=5710, long_=5690)], ctx))
+
+        events = [json.loads(l) for l in log_file.read_text().splitlines()]
+        kinds = [e["event"] for e in events]
+        assert kinds.count("submit") == 1
+        skipped = [e for e in events if e["event"] == "skipped"]
+        assert skipped[0]["reason"] == "total_risk_cap"
+
+    def test_max_total_risk_pct_fallback_when_snapshot_unavailable(self, monkeypatch, tmp_path):
+        """When snapshot call fails, falls back to max_total_risk dollar value."""
+        import asyncio
+        import spread_scanner as ss
+        from spread_scanner import TradeHandler, TradePolicy
+
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def get_trade_defaults(self):
+                return {"default_order_type": "MARKET"}
+            async def get_account_snapshot(self):
+                raise RuntimeError("snapshot unavailable")
+            async def trade_credit_spread(self, **kw):
+                return {"order_id": "x", "status": "FILLED"}
+
+        self._bind_utp_pricing(FakeTClient)
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+
+        # Dollar fallback = $10000 → both $1900 trades fit.
+        pol = TradePolicy.from_dict({
+            "norm_roi": [1.0, 10.0],
+            "max_total_risk": 10_000,
+            "max_total_risk_pct": 10.0,     # pct set but snapshot fails → use dollar fallback
+            "max_trades_per_cycle": 100,
+            "min_minutes_between_trades": 0,
+        })
+        log_file = tmp_path / "t.jsonl"
+        h = TradeHandler(min_norm_roi=0, log_file=str(log_file), policy=pol,
+                         daemon_url="http://d", validate_prices=False)
+
+        sp = self._spread
+        ctx = self._ctx()
+        asyncio.run(h.fire([sp("SPX", credit=1.0, short=5700, long_=5680),
+                            sp("SPX", credit=1.0, short=5710, long_=5690)], ctx))
+
+        events = [json.loads(l) for l in log_file.read_text().splitlines()]
+        kinds = [e["event"] for e in events]
+        assert kinds.count("submit") == 2, "both trades should fit under $10000 dollar fallback"
+
+    def test_min_reserve_reduces_pct_base(self, monkeypatch, tmp_path):
+        """min_reserve is subtracted from available_funds before applying pct.
+
+        avail=$20000, pct=40, reserve=$10000 → base=$10000 → cap=$4000.
+        Each trade max_loss=1900, so only two fit ($3800 ≤ $4000); third blocked.
+        """
+        import asyncio
+        import spread_scanner as ss
+        from spread_scanner import TradeHandler, TradePolicy
+
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def get_trade_defaults(self):
+                return {"default_order_type": "MARKET"}
+            async def get_account_snapshot(self):
+                return {"available_funds": 20000.0}
+            async def trade_credit_spread(self, **kw):
+                return {"order_id": "x", "status": "FILLED"}
+
+        self._bind_utp_pricing(FakeTClient)
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+
+        # avail=20000, reserve=10000, pct=40 → cap=($20k-$10k)×40%=$4000
+        # width=20, credit=1.0 → max_loss=1900/contract
+        # 2 trades = $3800 ≤ $4000 (fits), 3rd trade = $5700 > $4000 (blocked)
+        pol = TradePolicy.from_dict({
+            "norm_roi": [1.0, 10.0],
+            "max_total_risk": 999_999,
+            "max_total_risk_pct": 40.0,
+            "min_reserve": 10_000.0,
+            "max_trades_per_cycle": 100,
+            "min_minutes_between_trades": 0,
+        })
+        log_file = tmp_path / "t.jsonl"
+        h = TradeHandler(min_norm_roi=0, log_file=str(log_file), policy=pol,
+                         daemon_url="http://d", validate_prices=False)
+
+        sp = self._spread
+        ctx = self._ctx()
+        asyncio.run(h.fire([
+            sp("SPX", credit=1.0, short=5700, long_=5680),
+            sp("SPX", credit=1.0, short=5710, long_=5690),
+            sp("SPX", credit=1.0, short=5720, long_=5700),
+        ], ctx))
+
+        events = [json.loads(l) for l in log_file.read_text().splitlines()]
+        assert sum(1 for e in events if e["event"] == "submit") == 2
+        skipped = [e for e in events if e["event"] == "skipped"]
+        assert skipped[0]["reason"] == "total_risk_cap"
+
+    def test_min_reserve_without_pct_is_ignored(self, monkeypatch, tmp_path):
+        """min_reserve has no effect when max_total_risk_pct is not set.
+
+        Without pct mode, the scanner uses the fixed dollar cap regardless.
+        """
+        import asyncio
+        import spread_scanner as ss
+        from spread_scanner import TradeHandler, TradePolicy
+
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def get_trade_defaults(self):
+                return {"default_order_type": "MARKET"}
+            async def get_account_snapshot(self):
+                return {"available_funds": 20000.0}
+            async def trade_credit_spread(self, **kw):
+                return {"order_id": "x", "status": "FILLED"}
+
+        self._bind_utp_pricing(FakeTClient)
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+
+        # Dollar cap = $10000, min_reserve set but pct is None → reserve ignored
+        # Both trades ($1900 each = $3800 total) fit under $10000.
+        pol = TradePolicy.from_dict({
+            "norm_roi": [1.0, 10.0],
+            "max_total_risk": 10_000,
+            "min_reserve": 500_000.0,   # huge but irrelevant (no pct mode)
+            "max_trades_per_cycle": 100,
+            "min_minutes_between_trades": 0,
+        })
+        log_file = tmp_path / "t.jsonl"
+        h = TradeHandler(min_norm_roi=0, log_file=str(log_file), policy=pol,
+                         daemon_url="http://d", validate_prices=False)
+
+        sp = self._spread
+        ctx = self._ctx()
+        asyncio.run(h.fire([
+            sp("SPX", credit=1.0, short=5700, long_=5680),
+            sp("SPX", credit=1.0, short=5710, long_=5690),
+        ], ctx))
+
+        events = [json.loads(l) for l in log_file.read_text().splitlines()]
+        assert sum(1 for e in events if e["event"] == "submit") == 2
+
+    def test_min_reserve_larger_than_available_funds_zeroes_cap(self, monkeypatch, tmp_path):
+        """When reserve ≥ available_funds, base=0 and no trades fire."""
+        import asyncio
+        import spread_scanner as ss
+        from spread_scanner import TradeHandler, TradePolicy
+
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def get_trade_defaults(self):
+                return {"default_order_type": "MARKET"}
+            async def get_account_snapshot(self):
+                return {"available_funds": 5000.0}
+            async def trade_credit_spread(self, **kw):
+                return {"order_id": "x", "status": "FILLED"}
+
+        self._bind_utp_pricing(FakeTClient)
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+
+        pol = TradePolicy.from_dict({
+            "norm_roi": [1.0, 10.0],
+            "max_total_risk": 999_999,
+            "max_total_risk_pct": 50.0,
+            "min_reserve": 10_000.0,   # reserve > avail → base=0, cap=0
+            "max_trades_per_cycle": 100,
+            "min_minutes_between_trades": 0,
+        })
+        log_file = tmp_path / "t.jsonl"
+        h = TradeHandler(min_norm_roi=0, log_file=str(log_file), policy=pol,
+                         daemon_url="http://d", validate_prices=False)
+
+        sp = self._spread
+        ctx = self._ctx()
+        asyncio.run(h.fire([sp("SPX", credit=1.0, short=5700, long_=5680)], ctx))
+
+        events = [json.loads(l) for l in log_file.read_text().splitlines()]
+        assert sum(1 for e in events if e["event"] == "submit") == 0
+        skipped = [e for e in events if e["event"] == "skipped"]
+        assert skipped[0]["reason"] == "total_risk_cap"
+
+    def test_pct_cap_falls_back_on_near_zero_avail(self, monkeypatch, tmp_path):
+        """Near-zero available_funds (IBKR post-market artifact) is ignored.
+
+        The cap is computed dynamically each cycle from the most recent PLAUSIBLE
+        snapshot (>= _MIN_AVAIL_TO_LOCK_PCT_CAP).  When the first cycle sees
+        $0.10, _last_available_funds stays None and the dollar fallback is used.
+        When the second cycle sees $20,000, the pct cap is computed fresh: $2,000.
+        """
+        import asyncio
+        import spread_scanner as ss
+        from spread_scanner import TradeHandler, TradePolicy
+
+        avail_seq = [0.10, 20_000.0]
+        call_idx = [0]
+
+        class FakeTClient:
+            def __init__(self, *a, **kw): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): pass
+            async def get_trade_defaults(self):
+                return {"default_order_type": "MARKET"}
+            async def get_account_snapshot(self):
+                v = avail_seq[min(call_idx[0], len(avail_seq) - 1)]
+                call_idx[0] += 1
+                return {"available_funds": v}
+            async def trade_credit_spread(self, **kw):
+                return {"order_id": "x", "status": "FILLED"}
+
+        self._bind_utp_pricing(FakeTClient)
+        monkeypatch.setattr(ss, "_get_trading_client_cls", lambda: FakeTClient)
+
+        # Dollar fallback $3,000: allows 1 trade ($1,900 each) but not 2 ($3,800).
+        # Pct cap (10% of $20,000 = $2,000) also allows only 1 trade per cycle.
+        pol = TradePolicy.from_dict({
+            "norm_roi": [1.0, 10.0],
+            "max_total_risk": 3_000,
+            "max_total_risk_pct": 10.0,
+            "max_trades_per_cycle": 100,
+            "min_minutes_between_trades": 0,
+        })
+        log_file = tmp_path / "t.jsonl"
+        h = TradeHandler(min_norm_roi=0, log_file=str(log_file), policy=pol,
+                         daemon_url="http://d", validate_prices=False)
+
+        sp = self._spread
+        ctx = self._ctx()
+
+        # Cycle 1: avail=$0.10 — below threshold, _last_available_funds stays None,
+        # falls back to dollar cap $3,000 → 1 trade fits.
+        asyncio.run(h.fire([sp("SPX", credit=1.0, short=5700, long_=5680)], ctx))
+        assert h._last_available_funds is None, (
+            "near-zero avail must not update _last_available_funds"
+        )
+
+        # Manually clear cum_risk so cycle 2 starts fresh.
+        h.cum_risk = 0.0
+        h._tracked_risk_positions.clear()
+
+        # Cycle 2: avail=$20,000 — above threshold, pct cap computed: $2,000.
+        # One $1,900 trade fits; second blocked by total_risk_cap.
+        asyncio.run(h.fire([sp("SPX", credit=1.0, short=5700, long_=5680),
+                            sp("SPX", credit=1.0, short=5710, long_=5690)], ctx))
+        assert h._last_available_funds == 20_000.0
+        assert abs(h._effective_max_total_risk - 2_000.0) < 1.0
+
+        events = [json.loads(l) for l in log_file.read_text().splitlines()]
+        # Cycle 1: 1 submit. Cycle 2: 1 submit + 1 skipped.
+        assert sum(1 for e in events if e["event"] == "submit") == 2
+        skipped = [e for e in events if e["event"] == "skipped"]
+        assert any(e["reason"] == "total_risk_cap" for e in skipped)
 
     def test_per_ticker_cap_blocks_second_trade_same_ticker(self, monkeypatch, tmp_path):
         """Per-ticker cap prevents NDX from running up total; SPX still goes."""
@@ -27616,3 +28394,128 @@ class TestStrikeConflictCheck:
         assert len(warnings) == 1
         assert "7200" in warnings[0]
         assert "CALL" in warnings[0]
+
+
+class TestAccountSnapshot:
+    """GET /account/snapshot — periodic account balance/P&L cache."""
+
+    async def test_snapshot_503_when_no_service(self, client, api_key_headers):
+        """Endpoint returns 503 only when both snapshot cache and LiveDataService are absent."""
+        from app.services.live_data_service import reset_account_snapshot, reset_live_data_service
+        reset_account_snapshot()
+        reset_live_data_service()
+        resp = await client.get("/account/snapshot", headers=api_key_headers)
+        assert resp.status_code == 503
+
+    async def test_snapshot_live_fetch_fallback(self, client, api_key_headers):
+        """When cache is empty but LiveDataService is available, endpoint does a live fetch."""
+        from app.services.live_data_service import reset_account_snapshot
+        reset_account_snapshot()
+        resp = await client.get("/account/snapshot", headers=api_key_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "net_liquidation" in data
+        assert "age_seconds" in data
+        # On-demand live fetch must label itself correctly.
+        assert data["update_source"] == "on_demand"
+        assert data["update_count"] == 1
+
+    async def test_snapshot_returns_all_fields(self, client, api_key_headers):
+        """After update_account_snapshot, endpoint returns all expected fields."""
+        from app.services.live_data_service import update_account_snapshot, reset_account_snapshot
+        from app.models import DashboardSummary
+        reset_account_snapshot()
+
+        summary = DashboardSummary(
+            active_positions=[],
+            net_liquidation=686349.76,
+            cash_available=593846.64,
+            buying_power=160957.66,
+            available_funds=46698.83,
+            maint_margin_req=640798.63,
+            unrealized_pnl=-29551.97,
+            realized_pnl=10138.24,
+            total_pnl=-19413.73,
+            cash_deployed=92503.12,
+            positions_by_source={"live_api": 3},
+        )
+        update_account_snapshot(summary, source="background")
+
+        resp = await client.get("/account/snapshot", headers=api_key_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["net_liquidation"] == 686349.76
+        assert data["cash"] == 593846.64
+        assert data["buying_power"] == 160957.66
+        assert data["available_funds"] == 46698.83
+        assert data["maint_margin_req"] == 640798.63
+        assert data["unrealized_pnl"] == -29551.97
+        assert data["realized_pnl"] == 10138.24
+        assert data["total_pnl"] == -19413.73
+        assert data["cash_deployed"] == 92503.12
+        assert data["positions_by_source"] == {"live_api": 3}
+        assert "timestamp" in data
+        assert "age_seconds" in data
+        assert data["age_seconds"] >= 0.0
+        assert data["update_source"] == "background"
+        assert data["update_count"] >= 1
+
+    def test_get_snapshot_computes_age(self):
+        """get_account_snapshot() computes age_seconds and strips internal _ts key."""
+        from app.services.live_data_service import update_account_snapshot, get_account_snapshot, reset_account_snapshot
+        from app.models import DashboardSummary
+        reset_account_snapshot()
+        update_account_snapshot(DashboardSummary(active_positions=[]))
+        snap = get_account_snapshot()
+        assert snap is not None
+        assert "age_seconds" in snap
+        assert "_ts" not in snap
+        assert snap["age_seconds"] >= 0.0
+        assert snap["update_count"] == 1
+
+    def test_reset_clears_snapshot(self):
+        """reset_account_snapshot() makes get_account_snapshot() return None."""
+        from app.services.live_data_service import update_account_snapshot, get_account_snapshot, reset_account_snapshot
+        from app.models import DashboardSummary
+        update_account_snapshot(DashboardSummary(active_positions=[]))
+        assert get_account_snapshot() is not None
+        reset_account_snapshot()
+        assert get_account_snapshot() is None
+
+    def test_update_count_increments(self):
+        """update_count increases monotonically with each update_account_snapshot call."""
+        from app.services.live_data_service import update_account_snapshot, get_account_snapshot, reset_account_snapshot
+        from app.models import DashboardSummary
+        reset_account_snapshot()
+        ds = DashboardSummary(active_positions=[])
+        update_account_snapshot(ds, source="background")
+        assert get_account_snapshot()["update_count"] == 1
+        update_account_snapshot(ds, source="background")
+        assert get_account_snapshot()["update_count"] == 2
+        update_account_snapshot(ds, source="flush")
+        assert get_account_snapshot()["update_count"] == 3
+
+    def test_update_source_tracking(self):
+        """update_source reflects the triggering event; unknown sources map to on_demand."""
+        from app.services.live_data_service import update_account_snapshot, get_account_snapshot, reset_account_snapshot
+        from app.models import DashboardSummary
+        ds = DashboardSummary(active_positions=[])
+        for source in ("background", "flush", "hard_reset", "on_demand"):
+            reset_account_snapshot()
+            update_account_snapshot(ds, source=source)
+            assert get_account_snapshot()["update_source"] == source
+        # Unknown source falls back to "on_demand"
+        reset_account_snapshot()
+        update_account_snapshot(ds, source="unknown_trigger")
+        assert get_account_snapshot()["update_source"] == "on_demand"
+
+    def test_daemon_starts_account_snapshot_bg(self):
+        """_cmd_daemon must include the _account_snapshot_bg task."""
+        import inspect
+        import utp
+        src = inspect.getsource(utp._cmd_daemon)
+        assert "_account_snapshot_bg" in src, (
+            "_cmd_daemon does not start _account_snapshot_bg — GET /account/snapshot will always return 503"
+        )
+        # Must pass source="background" so callers can distinguish auto-refresh from manual.
+        assert 'source="background"' in src

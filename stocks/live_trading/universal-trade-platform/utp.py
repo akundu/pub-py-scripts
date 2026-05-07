@@ -908,6 +908,14 @@ class TradingClient:
         """Get open/working orders."""
         return await self._get("/account/orders")
 
+    async def get_account_snapshot(self) -> dict:
+        """Get cached account snapshot (available_funds, net_liquidation, etc.).
+
+        Updated every 30s by the daemon background refresh loop.
+        Returns {} if the snapshot endpoint is unavailable.
+        """
+        return await self._get("/account/snapshot")
+
     async def cancel_order(self, order_id: str) -> dict:
         """Cancel a working order."""
         return await self._post("/account/cancel", order_id=order_id)
@@ -8675,6 +8683,44 @@ async def _cmd_daemon(args) -> int:
     bg_tasks.append(asyncio.create_task(_roll_scan_bg()))
     print(f"  Roll service: initialized (scan every {_daemon_roll_svc.config.check_interval:.0f}s)")
 
+    # Account snapshot loop — fetches balances + P&L every N seconds during market hours.
+    # Exposes the data at GET /account/snapshot for cash-deployment control.
+    async def _account_snapshot_bg():
+        import logging
+        from datetime import UTC, datetime
+        from app.config import settings as _settings
+        from app.services.live_data_service import (
+            get_live_data_service as _get_lds,
+            update_account_snapshot as _update_snap,
+        )
+        _snap_interval = _settings.account_snapshot_interval_seconds
+        _log = logging.getLogger("utp.account_snapshot")
+        while not shutdown_event.is_set():
+            await asyncio.sleep(_snap_interval)
+            if shutdown_event.is_set():
+                break
+            # Market hours only: Mon-Fri, 13:30-20:00 UTC (9:30am-4:00pm ET)
+            now = datetime.now(UTC)
+            if now.weekday() >= 5:
+                continue
+            hour_min = now.hour * 100 + now.minute
+            if hour_min < 1330 or hour_min > 2000:
+                continue
+            lds = _get_lds()
+            if lds:
+                try:
+                    summary = await lds.get_summary()
+                    _update_snap(summary, source="background")
+                    _log.info(
+                        "Account snapshot refreshed: available_funds=%.2f",
+                        summary.available_funds,
+                    )
+                except Exception as e:
+                    _log.warning("Account snapshot refresh failed: %s", e)
+
+    bg_tasks.append(asyncio.create_task(_account_snapshot_bg()))
+    print("  Account snapshot: enabled (market-hours refresh → GET /account/snapshot)")
+
     # Daemon config (formerly "streaming config") — same YAML, expanded to
     # hold trade defaults on top of streaming targets. --config is primary;
     # --streaming-config is kept as a deprecated alias.
@@ -11191,11 +11237,11 @@ Examples:
   %(prog)s suggestions                         Show pending roll suggestions
   %(prog)s execute abc123 --confirm            Execute a roll suggestion
   %(prog)s execute abc123 --dte 2 --confirm    Execute with DTE override
-  %(prog)s execute abc123 --close-quantity 5 --confirm  Partial roll (5 of N contracts)
+  %(prog)s execute abc123 --qty 5 --confirm              Partial roll (5 of N contracts)
   %(prog)s dismiss abc123                      Dismiss a suggestion
   %(prog)s forward pos-id --confirm            Manual forward roll (any severity)
   %(prog)s forward pos-id --dte 2 --otm-pct 1.5 --confirm
-  %(prog)s forward pos-id --close-quantity 5 --quantity 5 --confirm  Split roll
+  %(prog)s forward pos-id --qty 5 --quantity 5 --confirm              Split roll
   %(prog)s mirror pos-id --confirm             Manual mirror roll
   %(prog)s mirror pos-id --width 30 --confirm  Mirror with wider spread
   %(prog)s config                              Show roll configuration
@@ -11226,7 +11272,7 @@ Aliases: rl
                               help="Override spread width for new position")
     roll_exec_p.add_argument("--quantity", type=int, default=None,
                               help="Override contracts to open in new position")
-    roll_exec_p.add_argument("--close-quantity", type=int, default=None, dest="close_quantity",
+    roll_exec_p.add_argument("--qty", "--close-quantity", type=int, default=None, dest="close_quantity",
                               help="Contracts to close from original (partial roll)")
 
     # roll dismiss <suggestion-id>
@@ -11248,7 +11294,7 @@ Aliases: rl
                              help="Spread width for new position (default: same as original)")
     roll_fwd_p.add_argument("--quantity", type=int, default=None,
                              help="Contracts to open in new position (default: same as closed)")
-    roll_fwd_p.add_argument("--close-quantity", type=int, default=None, dest="close_quantity",
+    roll_fwd_p.add_argument("--qty", "--close-quantity", type=int, default=None, dest="close_quantity",
                              help="Contracts to close from original (default: all); enables partial roll")
 
     # roll mirror <position-id>

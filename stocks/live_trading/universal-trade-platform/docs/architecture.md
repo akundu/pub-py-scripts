@@ -236,7 +236,30 @@ Note: `abs()` is used because IBKR live fills store `entry_price` as negative fo
 
 ## Background Services
 
-Three async background tasks run during the server lifespan:
+Async background tasks run during the server lifespan:
+
+### Account Snapshot Loop
+
+Runs every **30 seconds**, 24/7 (no market-hours restriction):
+1. Calls `LiveDataService.get_summary()` — fetches broker balances + P&L when IBKR is connected
+2. Stores the result as a flat dict in `live_data_service._account_snapshot` with a `_ts` timestamp
+3. `GET /account/snapshot` reads this cache instantly (no IBKR round-trip at request time)
+
+The snapshot contains: `net_liquidation`, `cash`, `buying_power`, `available_funds`, `maint_margin_req`, `unrealized_pnl`, `realized_pnl`, `total_pnl`, `cash_deployed`, `positions_by_source`. The `age_seconds` field is computed at read time from `_ts`.
+
+**Data source priority** (same as `LiveDataService.get_summary()`):
+- IBKR connected: balances + unrealized P&L are broker-authoritative
+- IBKR disconnected: balance fields default to 0; P&L comes from the local position store
+
+**Intended use**: program-driven cash-deployment decisions. Check `available_funds` and `cash_deployed` before opening new positions.
+
+```python
+# Example: gate new positions on available capital
+snap = httpx.get("http://localhost:8000/account/snapshot").json()
+if snap["available_funds"] > 10_000 and snap["age_seconds"] < 60:
+    # safe to deploy capital
+    ...
+```
 
 ### Expiration Loop
 

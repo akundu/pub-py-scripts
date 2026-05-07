@@ -749,6 +749,147 @@ dd {
 </table>
 <p><strong>Response (200):</strong> List of position dicts.</p>
 <hr />
+<h2 id="get-accountsnapshot">GET /account/snapshot</h2>
+<p>Cached account snapshot refreshed every 30 seconds by the daemon background task. Returns the full account balance and P&amp;L picture in a single fast read — no IBKR round-trip at request time.</p>
+<p><strong>Required Scope:</strong> <code>account:read</code></p>
+<p><strong>LAN clients</strong>: No auth required from private IPs.</p>
+<p><strong>When IBKR is connected</strong>: <code>unrealized_pnl</code>, <code>net_liquidation</code>, <code>cash</code>, <code>buying_power</code>, <code>available_funds</code>, and <code>maint_margin_req</code> come from broker-authoritative data. When disconnected, balance fields are 0 and P&amp;L comes from the local ledger.</p>
+<p><strong>Response (200):</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;timestamp&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;2026-05-07T15:02:31.123456+00:00&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;age_seconds&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">4.2</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;net_liquidation&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">686349.76</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;cash&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">593846.64</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;buying_power&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">160957.66</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;available_funds&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">46698.83</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;maint_margin_req&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">640798.63</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;unrealized_pnl&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">-29551.97</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;realized_pnl&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">10138.24</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;total_pnl&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">-19413.73</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;cash_deployed&quot;</span><span class="p">:</span><span class="w"> </span><span class="mf">92503.12</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;positions_by_source&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;live_api&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">&quot;paper&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+
+<p><strong>Field reference:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Source</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>timestamp</code></td>
+<td>daemon</td>
+<td>ISO8601 UTC time of last refresh</td>
+</tr>
+<tr>
+<td><code>age_seconds</code></td>
+<td>computed</td>
+<td>Seconds elapsed since last refresh (computed at read time)</td>
+</tr>
+<tr>
+<td><code>net_liquidation</code></td>
+<td>IBKR</td>
+<td>Total account value: cash + open position marks</td>
+</tr>
+<tr>
+<td><code>cash</code></td>
+<td>IBKR</td>
+<td>Settled cash balance</td>
+</tr>
+<tr>
+<td><code>buying_power</code></td>
+<td>IBKR</td>
+<td>Current buying power (typically ~2× available funds for Reg-T margin)</td>
+</tr>
+<tr>
+<td><code>available_funds</code></td>
+<td>IBKR</td>
+<td>Funds available to open new positions without margin call risk</td>
+</tr>
+<tr>
+<td><code>maint_margin_req</code></td>
+<td>IBKR</td>
+<td>Maintenance margin currently in use</td>
+</tr>
+<tr>
+<td><code>unrealized_pnl</code></td>
+<td>IBKR</td>
+<td>Open-position P&amp;L (broker-authoritative mark-to-market)</td>
+</tr>
+<tr>
+<td><code>realized_pnl</code></td>
+<td>local ledger</td>
+<td>Closed-position P&amp;L</td>
+</tr>
+<tr>
+<td><code>total_pnl</code></td>
+<td>computed</td>
+<td><code>unrealized_pnl + realized_pnl</code></td>
+</tr>
+<tr>
+<td><code>cash_deployed</code></td>
+<td>local store</td>
+<td>Cash committed to open positions (sum of position entry prices)</td>
+</tr>
+<tr>
+<td><code>positions_by_source</code></td>
+<td>local store</td>
+<td>Position count per attribution source</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Error responses:</strong></p>
+<table>
+<thead>
+<tr>
+<th>Code</th>
+<th>Condition</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>503</td>
+<td>Daemon not running, or first refresh has not yet completed</td>
+</tr>
+</tbody>
+</table>
+<p><strong>Usage — cash-deployment control:</strong></p>
+<div class="codehilite"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">httpx</span>
+
+<span class="n">snap</span> <span class="o">=</span> <span class="n">httpx</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;http://localhost:8000/account/snapshot&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
+
+<span class="c1"># How much dry powder do we have?</span>
+<span class="n">deployable</span> <span class="o">=</span> <span class="n">snap</span><span class="p">[</span><span class="s2">&quot;available_funds&quot;</span><span class="p">]</span>
+<span class="n">already_deployed</span> <span class="o">=</span> <span class="n">snap</span><span class="p">[</span><span class="s2">&quot;cash_deployed&quot;</span><span class="p">]</span>
+
+<span class="c1"># Simple gate: only open new positions if available_funds &gt; $10 000</span>
+<span class="k">if</span> <span class="n">deployable</span> <span class="o">&gt;</span> <span class="mi">10_000</span><span class="p">:</span>
+    <span class="c1"># ...place trade...</span>
+    <span class="k">pass</span>
+</code></pre></div>
+
+<div class="codehilite"><pre><span></span><code><span class="c1"># Quick health check from CLI</span>
+curl<span class="w"> </span>-s<span class="w"> </span>http://localhost:8000/account/snapshot<span class="w"> </span><span class="p">|</span><span class="w"> </span>python3<span class="w"> </span>-c<span class="w"> </span><span class="s2">&quot;</span>
+<span class="s2">import sys, json</span>
+<span class="s2">d = json.load(sys.stdin)</span>
+<span class="s2">print(f&#39;Net Liq:    \${d[\&quot;net_liquidation\&quot;]:&gt;12,.2f}&#39;)</span>
+<span class="s2">print(f&#39;Cash:       \${d[\&quot;cash\&quot;]:&gt;12,.2f}&#39;)</span>
+<span class="s2">print(f&#39;Avail Funds:\${d[\&quot;available_funds\&quot;]:&gt;12,.2f}&#39;)</span>
+<span class="s2">print(f&#39;Margin Req: \${d[\&quot;maint_margin_req\&quot;]:&gt;12,.2f}&#39;)</span>
+<span class="s2">print(f&#39;Unreal P&amp;L: \${d[\&quot;unrealized_pnl\&quot;]:&gt;12,.2f}&#39;)</span>
+<span class="s2">print(f&#39;Age:        {d[\&quot;age_seconds\&quot;]:.1f}s&#39;)</span>
+<span class="s2">&quot;</span>
+</code></pre></div>
+
+<hr />
 <h2 id="get-dashboardsummary">GET /dashboard/summary</h2>
 <p>Aggregated dashboard summary.</p>
 <p><strong>Required Scope:</strong> <code>account:read</code></p>

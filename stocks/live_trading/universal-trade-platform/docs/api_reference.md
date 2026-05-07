@@ -402,6 +402,94 @@ Preview positions expiring on a given date.
 
 ---
 
+## GET /account/snapshot
+
+Cached account snapshot refreshed every 30 seconds by the daemon background task. Returns the full account balance and P&L picture in a single fast read — no IBKR round-trip at request time.
+
+**Required Scope:** `account:read`
+
+**LAN clients**: No auth required from private IPs.
+
+**When IBKR is connected**: `unrealized_pnl`, `net_liquidation`, `cash`, `buying_power`, `available_funds`, and `maint_margin_req` come from broker-authoritative data. When disconnected, balance fields are 0 and P&L comes from the local ledger.
+
+**Response (200):**
+
+```json
+{
+  "timestamp": "2026-05-07T15:02:31.123456+00:00",
+  "age_seconds": 4.2,
+  "net_liquidation": 686349.76,
+  "cash": 593846.64,
+  "buying_power": 160957.66,
+  "available_funds": 46698.83,
+  "maint_margin_req": 640798.63,
+  "unrealized_pnl": -29551.97,
+  "realized_pnl": 10138.24,
+  "total_pnl": -19413.73,
+  "cash_deployed": 92503.12,
+  "positions_by_source": {
+    "live_api": 3,
+    "paper": 1
+  }
+}
+```
+
+**Field reference:**
+
+| Field | Source | Description |
+|-------|--------|-------------|
+| `timestamp` | daemon | ISO8601 UTC time of last refresh |
+| `age_seconds` | computed | Seconds elapsed since last refresh (computed at read time) |
+| `net_liquidation` | IBKR | Total account value: cash + open position marks |
+| `cash` | IBKR | Settled cash balance |
+| `buying_power` | IBKR | Current buying power (typically ~2× available funds for Reg-T margin) |
+| `available_funds` | IBKR | Funds available to open new positions without margin call risk |
+| `maint_margin_req` | IBKR | Maintenance margin currently in use |
+| `unrealized_pnl` | IBKR | Open-position P&L (broker-authoritative mark-to-market) |
+| `realized_pnl` | local ledger | Closed-position P&L |
+| `total_pnl` | computed | `unrealized_pnl + realized_pnl` |
+| `cash_deployed` | local store | Cash committed to open positions (sum of position entry prices) |
+| `positions_by_source` | local store | Position count per attribution source |
+
+**Error responses:**
+
+| Code | Condition |
+|------|-----------|
+| 503 | Daemon not running, or first refresh has not yet completed |
+
+**Usage — cash-deployment control:**
+
+```python
+import httpx
+
+snap = httpx.get("http://localhost:8000/account/snapshot").json()
+
+# How much dry powder do we have?
+deployable = snap["available_funds"]
+already_deployed = snap["cash_deployed"]
+
+# Simple gate: only open new positions if available_funds > $10 000
+if deployable > 10_000:
+    # ...place trade...
+    pass
+```
+
+```bash
+# Quick health check from CLI
+curl -s http://localhost:8000/account/snapshot | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+print(f'Net Liq:    \${d[\"net_liquidation\"]:>12,.2f}')
+print(f'Cash:       \${d[\"cash\"]:>12,.2f}')
+print(f'Avail Funds:\${d[\"available_funds\"]:>12,.2f}')
+print(f'Margin Req: \${d[\"maint_margin_req\"]:>12,.2f}')
+print(f'Unreal P&L: \${d[\"unrealized_pnl\"]:>12,.2f}')
+print(f'Age:        {d[\"age_seconds\"]:.1f}s')
+"
+```
+
+---
+
 ## GET /dashboard/summary
 
 Aggregated dashboard summary.

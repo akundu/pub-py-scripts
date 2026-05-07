@@ -1083,3 +1083,106 @@ def reset_live_data_service() -> None:
     """Reset the global LiveDataService (for testing)."""
     global _live_data_service
     _live_data_service = None
+
+
+# ── Account snapshot (periodic background refresh) ────────────────────────────
+#
+# The daemon's _account_snapshot_bg task calls update_account_snapshot() every
+# 30 seconds. GET /account/snapshot reads the cached result with no IBKR
+# round-trip at request time, making it safe to poll frequently from external
+# programs that gate cash-deployment decisions.
+#
+# Data source priority (same as LiveDataService.get_summary()):
+#   IBKR connected:    balances + unrealized P&L are broker-authoritative
+#   IBKR disconnected: balance fields are 0; P&L comes from the local store
+#
+# Usage pattern:
+#   import httpx
+#   snap = httpx.get("http://localhost:8000/account/snapshot").json()
+#   if snap["available_funds"] > 10_000 and snap["age_seconds"] < 60:
+#       # safe to open new positions
+#       ...
+
+_account_snapshot: Optional[dict] = None
+_account_snapshot_update_count: int = 0
+
+# Valid source values: "background", "flush", "hard_reset", "on_demand"
+_SNAPSHOT_SOURCES = frozenset({"background", "flush", "hard_reset", "on_demand"})
+
+
+def get_account_snapshot() -> Optional[dict]:
+    """Return the latest account snapshot with computed age_seconds.
+
+    Returns None if no snapshot exists yet (GET /account/snapshot returns 503).
+
+    The dict contains:
+      timestamp        (str)   ISO8601 UTC time of last refresh
+      age_seconds      (float) seconds since last refresh (computed at read time)
+      update_source    (str)   what triggered this refresh:
+                                 "background" — 30s market-hours background task
+                                 "flush"      — triggered by POST /account/flush
+                                 "hard_reset" — triggered by POST /account/hard-reset
+                                 "on_demand"  — triggered by ?refresh=true or first request
+      update_count     (int)   monotonic counter; increments on every refresh
+      net_liquidation  (float) total account value: cash + open position marks
+      cash             (float) settled cash balance
+      buying_power     (float) current buying power
+      available_funds  (float) funds available to open new positions
+      maint_margin_req (float) maintenance margin currently in use
+      unrealized_pnl   (float) open-position P&L (broker mark when IBKR connected)
+      realized_pnl     (float) closed-position P&L from local ledger
+      total_pnl        (float) unrealized_pnl + realized_pnl
+      cash_deployed    (float) cash committed to open positions (local store)
+      positions_by_source (dict[str, int]) count per attribution source
+    """
+    if _account_snapshot is None:
+        return None
+    from datetime import UTC, datetime
+    snap = dict(_account_snapshot)
+    ts = snap.pop("_ts", None)
+    if ts:
+        snap["age_seconds"] = round((datetime.now(UTC) - ts).total_seconds(), 1)
+    return snap
+
+
+def update_account_snapshot(summary, source: str = "background") -> None:
+    """Store a DashboardSummary as the current account snapshot.
+
+    Args:
+        summary: DashboardSummary instance (from LiveDataService.get_summary()).
+        source:  What triggered this update. One of:
+                   "background" — the 30s market-hours background task (default)
+                   "flush"      — POST /account/flush completed
+                   "hard_reset" — POST /account/hard-reset completed
+                   "on_demand"  — ?refresh=true query param or first-request fallback
+
+    The source is included in the snapshot response so callers can verify that
+    the background task is firing independently without relying on manual flushes.
+    """
+    from datetime import UTC, datetime
+    global _account_snapshot, _account_snapshot_update_count
+    _account_snapshot_update_count += 1
+    now = datetime.now(UTC)
+    _account_snapshot = {
+        "_ts": now,
+        "timestamp": now.isoformat(),
+        "update_source": source if source in _SNAPSHOT_SOURCES else "on_demand",
+        "update_count": _account_snapshot_update_count,
+        "net_liquidation": summary.net_liquidation,
+        "cash": summary.cash_available,
+        "buying_power": summary.buying_power,
+        "available_funds": summary.available_funds,
+        "maint_margin_req": summary.maint_margin_req,
+        "unrealized_pnl": summary.unrealized_pnl,
+        "realized_pnl": summary.realized_pnl,
+        "total_pnl": summary.total_pnl,
+        "cash_deployed": summary.cash_deployed,
+        "positions_by_source": dict(summary.positions_by_source),
+    }
+
+
+def reset_account_snapshot() -> None:
+    """Reset the account snapshot and counter to initial state (for testing)."""
+    global _account_snapshot, _account_snapshot_update_count
+    _account_snapshot = None
+    _account_snapshot_update_count = 0

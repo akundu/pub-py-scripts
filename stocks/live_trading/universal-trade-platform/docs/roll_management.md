@@ -147,7 +147,7 @@ python utp.py roll execute abc123 --confirm
 python utp.py roll execute abc123 --dte 2 --otm-pct 1.5 --width 30 --quantity 10 --confirm
 
 # Partial close: close 5 contracts, roll 5
-python utp.py roll execute abc123 --close-quantity 5 --confirm
+python utp.py roll execute abc123 --qty 5 --confirm
 ```
 
 ### Manual Force-Build (any position, any severity)
@@ -159,7 +159,7 @@ python utp.py roll forward <position-id> --confirm          # execute
 
 # With overrides
 python utp.py roll forward <position-id> --dte 3 --otm-pct 2.0 --confirm
-python utp.py roll forward <position-id> --close-quantity 5 --confirm
+python utp.py roll forward <position-id> --qty 5 --confirm
 
 # Mirror roll
 python utp.py roll mirror <position-id>                     # preview
@@ -212,16 +212,16 @@ Every roll command accepts override flags that apply **for that execution only**
 | `--otm-pct N` | `execute`, `forward`, `mirror` | Short strike OTM% from current price |
 | `--width N` | `execute`, `forward`, `mirror` | Spread width (long strike = short ± width) |
 | `--quantity N` | `execute`, `forward`, `mirror` | Contracts to open in new position |
-| `--close-quantity N` | `execute`, `forward` | Contracts to close from original (partial roll) |
+| `--qty N` | `execute`, `forward` | Contracts to close from original (partial roll); alias `--close-quantity` |
 
 **Partial roll example:**
 ```bash
 # Position has 20 contracts. Close 10, roll 10.
-python utp.py roll forward pos-abc123 --close-quantity 10 --confirm
+python utp.py roll forward pos-abc123 --qty 10 --confirm
 # → closes 10 contracts of original; opens 10 contracts at DTE+N
 ```
 
-If `--close-quantity < total_quantity`, the original position is reduced (not fully closed). The new spread opens `new_quantity = close_quantity` contracts unless `--quantity` is also specified.
+If `--qty < total_quantity`, the original position is reduced (not fully closed). The new spread opens `new_quantity = qty` contracts unless `--quantity` is also specified.
 
 ---
 
@@ -431,7 +431,7 @@ reset_roll_service()
 
 ### Partial Rolls
 
-Use `--close-quantity N` to close only part of a large position and roll that partial quantity. The original position is reduced (not fully closed). Useful for scaling out gradually instead of moving an entire position at once.
+Use `--qty N` to close only part of a large position and roll that partial quantity. The original position is reduced (not fully closed). Useful for scaling out gradually instead of moving an entire position at once.
 
 ### Max Loss Caps
 
@@ -474,7 +474,7 @@ User receives:
 # Auto-generated suggestion abc123 covers a 20-contract position
 # Only close/roll 10 contracts
 
-python utp.py roll execute abc123 --close-quantity 10 --confirm
+python utp.py roll execute abc123 --qty 10 --confirm
 # → closes 10 of 20 contracts in original
 # → opens new 10-contract spread at DTE+N
 # → original position now has 10 contracts remaining
@@ -488,6 +488,18 @@ python utp.py roll execute abc123 --close-quantity 10 --confirm
 python utp.py roll forward pos-abc123 --dte 3 --otm-pct 2.0 --confirm
 # Force-builds forward suggestion, places short strike 2% OTM
 # Executes immediately: close current + open DTE+3
+```
+
+### Example 4: Roll using the portfolio synthetic spread ID
+
+When a position is synced from IBKR as individual legs (no explicit spread record), the
+`portfolio` display groups them and shows a short synthetic ID (e.g. `4201a1`). Pass that ID
+directly to `roll forward` or `roll mirror` — the service resolves it automatically.
+
+```bash
+# Portfolio shows: 4201a1  SPX  P7260/P7310  6x  critical 0.2%
+# Roll 1 of those 6 contracts to DTE+3 at 2.2% OTM:
+python utp.py roll forward 4201a1 --dte 3 --otm-pct 2.2 --qty 1 --confirm
 ```
 
 ### Example 4: Tighten config defaults for a high-IV day

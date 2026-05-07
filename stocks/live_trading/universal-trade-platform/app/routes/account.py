@@ -183,6 +183,16 @@ async def flush_positions(
     sync_service = PositionSyncService(store, ledger)
     sync_result = await sync_service.sync_all_brokers()
 
+    # Immediately refresh the account snapshot so callers see the post-flush
+    # balances without waiting for the next background cycle.
+    from app.services.live_data_service import get_live_data_service, update_account_snapshot
+    lds = get_live_data_service()
+    if lds:
+        try:
+            update_account_snapshot(await lds.get_summary(), source="flush")
+        except Exception:
+            pass
+
     return {
         "open_cleared": open_cleared,
         "closed_preserved": closed_kept,
@@ -227,6 +237,15 @@ async def hard_reset(
     # Re-sync from broker
     sync_service = PositionSyncService(store, ledger)
     sync_result = await sync_service.sync_all_brokers()
+
+    # Immediately refresh the account snapshot.
+    from app.services.live_data_service import get_live_data_service, update_account_snapshot
+    lds = get_live_data_service()
+    if lds:
+        try:
+            update_account_snapshot(await lds.get_summary(), source="hard_reset")
+        except Exception:
+            pass
 
     return {
         "cleared": old_count,
@@ -413,3 +432,49 @@ async def delete_profit_target(
     if not svc.remove_target(position_id):
         raise HTTPException(status_code=404, detail="Position not found")
     return {"status": "removed", "position_id": position_id}
+
+
+@router.get("/snapshot")
+async def get_account_snapshot_endpoint(
+    _user: Annotated[TokenData, Security(require_auth, scopes=["account:read"])],
+    refresh: bool = False,
+) -> dict:
+    """Cached account snapshot refreshed every 30 seconds by the daemon.
+
+    Fields:
+      timestamp        — ISO8601 UTC time of last refresh
+      age_seconds      — seconds elapsed since last refresh
+      net_liquidation  — total account value (cash + open positions mark)
+      cash             — settled cash balance
+      buying_power     — current buying power
+      available_funds  — funds available to open new positions
+      maint_margin_req — maintenance margin currently in use
+      unrealized_pnl   — open-position P&L (broker-authoritative when IBKR connected)
+      realized_pnl     — closed-position P&L from local ledger
+      total_pnl        — unrealized + realized
+      cash_deployed    — cash committed to open positions (local store)
+      positions_by_source — position count per source (live_api, paper, …)
+    """
+    from app.services.live_data_service import (
+        get_account_snapshot,
+        get_live_data_service,
+        update_account_snapshot,
+    )
+    snap = get_account_snapshot()
+    # Live fetch when: cache is empty (first request), or caller explicitly
+    # requests a refresh (?refresh=true) to bypass the 30s background cycle.
+    if snap is None or refresh:
+        lds = get_live_data_service()
+        if lds:
+            try:
+                summary = await lds.get_summary()
+                update_account_snapshot(summary, source="on_demand")
+                snap = get_account_snapshot()
+            except Exception:
+                pass
+    if snap is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Account snapshot not yet available — LiveDataService not initialized",
+        )
+    return snap

@@ -2563,12 +2563,30 @@ def _format_activity_row(a: dict) -> str:
 
     spread_str = f"{BOLD}{sym}{RESET} {ot}{sh}/{lg}"
     credit_str = f"{GREEN}${cr:.2f}{RESET} × {BOLD}{ct}{RESET} = {GREEN}${crd:,.0f}{RESET}"
-    head = f" {ic} {DIM}{ts}{RESET}  {kt}  {spread_str:<18}  {credit_str}"
+    # Use _pad so ANSI codes don't break column alignment.
+    head = f" {ic} {DIM}{ts}{RESET}  {kt}  {_pad(spread_str, 18)}  {_pad(credit_str, 22)}"
 
     if outcome in ("SKIPPED", "ERROR", "REJECTED", "CANCELLED", "FAILED"):
         reason = a.get("reason") or a.get("daemon_msg") or "—"
         out_tag = f"{YELLOW}SKIPPED{RESET}" if outcome == "SKIPPED" else f"{RED}{outcome}{RESET}"
-        return f"{head}  {out_tag}: {DIM}{reason[:80]}{RESET}"
+        # Fixed-width metric columns (same fields as the Top-N table).
+        sb = a.get("short_bid")
+        la = a.get("long_ask")
+        ba_str = (f"{DIM}{sb:.2f}/{la:.2f}{RESET}" if sb is not None and la is not None
+                  else f"{DIM}—{RESET}")
+        pc = float(a.get("prev_close") or 0)
+        ss_val = float(a.get("short_strike") or 0)
+        cl_str = (f"{DIM}cl{_fmt_pct((ss_val - pc) / pc * 100)}{RESET}"
+                  if pc > 0 else f"{DIM}cl—{RESET}")
+        delta_raw = _fmt_delta(a.get("short_delta"), a.get("option_type"))
+        delta_str = f"{DIM}{delta_raw}{RESET}" if delta_raw else f"{DIM}Δ—{RESET}"
+        nroi_col  = _pad(f"{DIM}nROI={RESET}{color_roi(nroi)}", 10)
+        otm_col   = _pad(f"{DIM}OTM={otm:.1f}%{RESET}", 9)
+        cl_col    = _pad(cl_str, 8)
+        ba_col    = _pad(ba_str, 11)
+        delta_col = _pad(delta_str, 7)
+        metrics = f"  {nroi_col}  {otm_col}  {cl_col}  {ba_col}  {delta_col}"
+        return f"{head}{metrics}  {out_tag}: {DIM}{reason[:25]}{RESET}"
 
     rc = _risk_color(risk)
     fill = a.get("fill_price")
@@ -2626,6 +2644,126 @@ def render_activity_panel(
 render_recent_actions = render_activity_panel
 
 
+def render_risk_line(handlers: list) -> str | None:
+    """One compact line showing server available funds and per-handler risk budget.
+
+    pct mode layout (max_total_risk_pct set):
+      Server $619,725 avail  │  LIVE  $140,000 budget  ▓▓▓░░░░░░░  $108,000 left  │  SIM ...
+
+      effective_cap = (available_funds - reserve) × pct/100  IS the remaining budget
+      (IBKR already deducts reserved margin from available_funds, so no separate
+      cum_risk subtraction is needed).
+      bar = deployed_today / (deployed_today + effective_cap)  ≈ fraction of session budget used.
+
+    dollar mode layout (fixed max_total_risk):
+      Server $619,725 avail  │  LIVE  $230,275 / $400,000  ▓▓▓▓▓▓░░░░  $169,725 left  │  SIM ...
+
+      remaining = cap - cum_risk (IBKR doesn't know the custom dollar budget).
+
+    - "Server" = IBKR account available_funds from the daemon's snapshot.
+    - LIVE = shown prominently; SIM = dimmed shadow.
+    - Returns None when no trade/simulate handlers exist (log-only configs).
+    """
+    # Collect handlers that track risk.
+    trade_handlers = [
+        h for h in (handlers or [])
+        if getattr(h, "cum_risk", None) is not None
+        and getattr(h, "_effective_max_total_risk", None) is not None
+    ]
+    if not trade_handlers:
+        return None
+
+    # Server available_funds — use first handler that has a fresh value.
+    avail: float | None = None
+    for h in trade_handlers:
+        v = getattr(h, "_last_available_funds", None)
+        if v:
+            avail = v
+            break
+
+    parts: list[str] = []
+
+    # Server segment
+    if avail is not None:
+        parts.append(f"{BOLD}Server{RESET} {CYAN}${avail:,.0f}{RESET}{DIM} avail{RESET}")
+
+    # Per-handler segments: LIVE first (prominent), then SIM (dimmed).
+    for kind_order in ("trade", "simulate_trade"):
+        for h in trade_handlers:
+            if getattr(h, "handler_kind", "") != kind_order:
+                continue
+            is_pct_mode = getattr(h, "policy", None) and getattr(h.policy, "max_total_risk_pct", None) is not None
+            invested    = h.cum_risk
+            cap         = h._effective_max_total_risk
+            is_live     = kind_order == "trade"
+
+            if is_pct_mode:
+                # cap IS the remaining budget (available_funds already reflects
+                # committed margin). Bar shows fraction of session budget used:
+                #   deployed_today / (deployed_today + remaining_budget)
+                remaining = cap
+                total     = invested + remaining
+                # cap=0 means reserve >= available_funds — no budget at all.
+                # Force 100% so the bar fills red regardless of cum_risk.
+                pct_used  = 100.0 if cap <= 0 else (invested / total * 100) if total > 0 else 0.0
+            else:
+                # Dollar cap: remaining = cap - cumulative daily risk.
+                remaining = max(0.0, cap - invested)
+                pct_used  = 100.0 if cap <= 0 else (invested / cap * 100)
+
+            if pct_used >= 90:
+                color = RED
+            elif pct_used >= 75:
+                color = YELLOW
+            else:
+                color = GREEN
+
+            filled = min(10, round(pct_used / 10))
+            bar = f"{color}{'▓' * filled}{DIM}{'░' * (10 - filled)}{RESET}"
+
+            if is_live:
+                label = f"{BOLD}LIVE{RESET}"
+                if is_pct_mode:
+                    if cap <= 0:
+                        # Reserve exceeds available funds — make it unmistakable.
+                        seg = (
+                            f"{label} "
+                            f"{DIM}${invested:>9,.0f} today{RESET}"
+                            f"  {bar}"
+                            f"  {RED}{BOLD}NO BUDGET{RESET}"
+                            f"{DIM} (avail < reserve){RESET}"
+                        )
+                    else:
+                        seg = (
+                            f"{label} "
+                            f"{DIM}${invested:>9,.0f} today{RESET}"
+                            f"{DIM}  /  ${cap:,.0f} budget{RESET}"
+                            f"  {bar}"
+                            f"  {color}${remaining:>9,.0f} left{RESET}"
+                        )
+                else:
+                    seg = (
+                        f"{label} "
+                        f"{color}${invested:>9,.0f}{RESET}"
+                        f"{DIM} / ${cap:,.0f}{RESET}"
+                        f"  {bar}"
+                        f"  {color}${remaining:>9,.0f} left{RESET}"
+                    )
+            else:
+                label = f"{DIM}SIM{RESET}"
+                if is_pct_mode:
+                    if cap <= 0:
+                        seg = f"{label} {DIM}${invested:>9,.0f} today  /  NO BUDGET (shadow){RESET}"
+                    else:
+                        seg = f"{label} {DIM}${invested:>9,.0f} today  /  ${cap:,.0f} budget (shadow){RESET}"
+                else:
+                    seg = f"{label} {DIM}${invested:>9,.0f} / ${cap:,.0f} (shadow){RESET}"
+            parts.append(seg)
+
+    sep = f"  {DIM}│{RESET}  "
+    return "  " + sep.join(parts)
+
+
 def render_dashboard(scan_data: dict, args) -> str:
     """Render the full dashboard as a string."""
     lines = []
@@ -2648,6 +2786,13 @@ def render_dashboard(scan_data: dict, args) -> str:
     prev_closes = scan_data.get("prev_closes", {})
     lines.append(render_price_line(scan_data.get("quotes", {}), prev_closes))
     lines.append("")
+
+    # Risk budget line (only shown when trade/simulate handlers are present)
+    handlers_list = getattr(args, "handlers", []) or []
+    risk_line = render_risk_line(handlers_list)
+    if risk_line:
+        lines.append(risk_line)
+        lines.append("")
 
     # Top N best spreads
     lines.extend(_render_top_picks(scan_data, args))
@@ -3305,6 +3450,13 @@ def _parse_hhmm(s: str) -> dtime:
     raise ValueError(f"expected HH:MM or HH:MM:SS, got {s!r}")
 
 
+# Minimum available_funds required before the pct-based cap is locked.
+# Guards against locking on a near-zero IBKR reading at startup (e.g.
+# during post-market account reconciliation where the broker briefly reports
+# $0.xx available). The lock is deferred until a "real" balance appears.
+_MIN_AVAIL_TO_LOCK_PCT_CAP: float = 1_000.0
+
+
 @dataclass
 class TradePolicy:
     """Constraints a trade (or simulated trade) candidate must satisfy.
@@ -3317,6 +3469,16 @@ class TradePolicy:
     min_otm_pct: dict[str, float] = field(default_factory=dict)
     min_credit: dict[str, float] = field(default_factory=dict)
     max_total_risk: float = 400_000.0
+    # When set, overrides max_total_risk at runtime: effective cap =
+    # available_funds × (max_total_risk_pct / 100).  Falls back to
+    # max_total_risk if the daemon snapshot is unavailable.
+    max_total_risk_pct: float | None = None
+    # Minimum dollar amount to keep out of reach when computing the pct-based
+    # cap. Only applies when max_total_risk_pct is set. Formula at lock time:
+    #   effective_cap = max(0, available_funds - min_reserve) * (pct / 100)
+    # Example: available_funds=$400k, max_total_risk_pct=40, min_reserve=50000
+    #   → effective_cap = ($400k - $50k) × 40% = $140k  (not $160k)
+    min_reserve: float | None = None
     max_per_ticker_risk: dict[str, float] = field(default_factory=dict)
     # Per-trade risk cap in dollars. If a ticker isn't in the map, the default
     # at trade time is `spread.width * 100` (roughly one contract's worst-case
@@ -3393,7 +3555,8 @@ class TradePolicy:
             return cls()
         kwargs: dict = {}
         known_scalars = {
-            "max_total_risk", "cooldown_per_ticker_side_sec",
+            "max_total_risk", "max_total_risk_pct", "min_reserve",
+            "cooldown_per_ticker_side_sec",
             "max_trades_per_cycle", "min_minutes_between_trades",
             "require_prev_close", "order_type", "stop_loss_multiplier",
             "limit_slippage_pct", "notify", "notify_channel",
@@ -3489,11 +3652,31 @@ class TradeHandlerBase(ActionHandler):
         self._last_global_trade_at: datetime | None = None
         self.cum_risk: float = 0.0
         self.per_ticker_risk: dict[str, float] = {}
+        # Per-position tracking used by _expire_resolved_positions().
+        # Each entry: {expiration: str, max_loss: float, symbol: str}.
+        # Built during recovery and extended on each live submit.
+        self._tracked_risk_positions: list[dict] = []
+        # Intra-cycle risk accumulator: reset to 0 at the start of each fire().
+        # Used as the cap-enforcement variable in pct mode so that we don't
+        # double-count risk that IBKR has already deducted from available_funds.
+        # The per-ticker async lock ensures concurrent ticker queues within the
+        # same cycle see each other's in-flight commitments.
+        self._intra_cycle_risk: float = 0.0
         self.count_submitted: int = 0
         self.count_skipped: int = 0      # cap-check skips inside lock
         self.count_rejected: int = 0     # filter-stage rejections
         # Resolved per-fire(). None until fire() resolves daemon defaults.
         self._effective_order_type: str | None = None
+        # Resolved per-fire(). Recomputed dynamically each cycle when
+        # max_total_risk_pct is set; falls back to policy.max_total_risk
+        # when pct mode is off or no plausible snapshot is available.
+        self._effective_max_total_risk: float = policy.max_total_risk
+        # Last fetched account available_funds from /account/snapshot.
+        # Only updated when the snapshot returns a plausible value
+        # (>= _MIN_AVAIL_TO_LOCK_PCT_CAP) — guards against the near-zero
+        # IBKR artifact that can appear briefly during post-market
+        # reconciliation. None until the first successful fetch.
+        self._last_available_funds: float | None = None
         # Rolling buffer of the most recent action decisions — surfaced by
         # render_recent_actions() at the bottom of the dashboard so the user
         # can see at a glance WHY each trade was taken (or not) and how it
@@ -3511,18 +3694,20 @@ class TradeHandlerBase(ActionHandler):
     # --- helpers ----------------------------------------------------------
 
     def _recover_daily_risk(self) -> None:
-        """Restore cum_risk and per_ticker_risk from today's submit events.
+        """Restore cum_risk and per_ticker_risk from today's non-expired submits.
 
-        Reads the handler's own JSONL log on startup and reconstructs the
-        running risk totals so daily caps hold across process restarts.
-        Filters by today's ISO date prefix so the caps reset at midnight
-        automatically without any explicit clear logic.
+        Rules:
+          - Only today's entries (ts starts with today's ISO date).
+          - Skip entries whose spread.expiration < today (contract already
+            expired; risk resolved, no longer counts against the cap).
+          - Sum individual max_loss values so the total is correct even when
+            some entries are filtered out (using cum_risk_after alone would
+            give a wrong total after skipping expired entries).
         """
         if not self.log_file or not os.path.exists(self.log_file):
             return
         today = date.today().isoformat()
-        cum = 0.0
-        per_ticker: dict[str, float] = {}
+        tracked: list[dict] = []
         try:
             with open(self.log_file) as fh:
                 for line in fh:
@@ -3534,16 +3719,60 @@ class TradeHandlerBase(ActionHandler):
                         continue
                     if not ev.get("ts", "").startswith(today):
                         continue
-                    cum = float(ev.get("cum_risk_after", cum))
-                    sym = (ev.get("spread") or {}).get("symbol")
-                    if sym:
-                        per_ticker[sym] = float(ev.get("per_ticker_risk_after", 0.0))
+                    spread = ev.get("spread") or {}
+                    exp = spread.get("expiration", "")
+                    if exp and exp < today:
+                        continue  # expired — risk resolved, don't count
+                    # max_loss = difference in cumulative totals for this entry
+                    ml = float(ev.get("cum_risk_after", 0)) - float(ev.get("cum_risk_before", 0))
+                    if ml <= 0:
+                        # fallback for old log entries that lack cum_risk_before
+                        contracts = int(ev.get("contracts", 1))
+                        ml = (float(spread.get("width", 0)) - float(spread.get("credit", 0))) * 100 * contracts
+                    if ml > 0:
+                        tracked.append({
+                            "expiration": exp,
+                            "max_loss": ml,
+                            "symbol": spread.get("symbol", ""),
+                        })
         except Exception:
             return  # recovery failure → start from 0 (safe, not fatal)
+        cum = sum(p["max_loss"] for p in tracked)
+        per_ticker: dict[str, float] = {}
+        for p in tracked:
+            sym = p["symbol"]
+            if sym:
+                per_ticker[sym] = per_ticker.get(sym, 0.0) + p["max_loss"]
         if cum > 0 or per_ticker:
-            print(f"[risk-recovery] cum_risk=${cum:,.0f}  per_ticker={per_ticker}")
+            print(f"[risk-recovery] cum_risk=${cum:,.0f}  per_ticker={per_ticker}  positions={len(tracked)}")
         self.cum_risk = cum
         self.per_ticker_risk = per_ticker
+        self._tracked_risk_positions = tracked
+
+    def _expire_resolved_positions(self) -> None:
+        """Free cum_risk and per_ticker_risk for positions whose expiration has passed.
+
+        Called at the top of every fire() cycle so the cap self-corrects as
+        intraday spreads expire — no restart needed.
+        """
+        today = date.today().isoformat()
+        live: list[dict] = []
+        freed_by_sym: dict[str, float] = {}
+        for pos in self._tracked_risk_positions:
+            exp = pos.get("expiration", "")
+            if exp and exp < today:
+                sym = pos.get("symbol", "")
+                freed_by_sym[sym] = freed_by_sym.get(sym, 0.0) + pos["max_loss"]
+            else:
+                live.append(pos)
+        if freed_by_sym:
+            freed = sum(freed_by_sym.values())
+            self.cum_risk = max(0.0, self.cum_risk - freed)
+            for sym, amt in freed_by_sym.items():
+                self.per_ticker_risk[sym] = max(0.0, self.per_ticker_risk.get(sym, 0.0) - amt)
+            self._tracked_risk_positions = live
+            print(f"[risk-expiry] freed ${freed:,.0f} from {sum(1 for _ in freed_by_sym)} expired spread(s), "
+                  f"cum_risk=${self.cum_risk:,.0f}")
 
     @staticmethod
     def max_loss_dollars(spread: dict) -> float:
@@ -3568,6 +3797,9 @@ class TradeHandlerBase(ActionHandler):
             "min_otm_pct": self.policy.min_otm_pct,
             "min_credit": self.policy.min_credit,
             "max_total_risk": self.policy.max_total_risk,
+            "max_total_risk_pct": self.policy.max_total_risk_pct,
+            "min_reserve": self.policy.min_reserve,
+            "effective_max_total_risk": self._effective_max_total_risk,
             "max_per_ticker_risk": self.policy.max_per_ticker_risk,
             "max_risk_per_trade": self.policy.max_risk_per_trade,
             "cooldown_per_ticker_side_sec": self.policy.cooldown_per_ticker_side_sec,
@@ -3797,11 +4029,17 @@ class TradeHandlerBase(ActionHandler):
             })
             return
 
+        # Free cum_risk for any positions that have expired since the last cycle.
+        self._expire_resolved_positions()
+        # Reset intra-cycle risk counter. For pct mode, available_funds already
+        # reflects cross-cycle committed margin; only same-cycle in-flight risk
+        # needs tracking here.
+        self._intra_cycle_risk = 0.0
+
         async with TradingClient(self.daemon_url) as tclient:
-            # Resolve the effective order_type once per fire(). If the policy
-            # didn't pin one, the daemon's `default_order_type` wins — so a
-            # single env var on the daemon side flips every caller.
+            # Resolve per-fire() daemon defaults once before tickers run.
             self._effective_order_type = await self._resolve_effective_order_type(tclient)
+            self._effective_max_total_risk = await self._resolve_effective_max_total_risk(tclient)
             await asyncio.gather(*(
                 self._run_ticker_queue(sym, queue, ctx, tclient)
                 for sym, queue in by_ticker.items()
@@ -3821,6 +4059,43 @@ class TradeHandlerBase(ActionHandler):
         except Exception:
             return "MARKET"
 
+    async def _resolve_effective_max_total_risk(self, tclient) -> float:
+        """Return the effective total-risk cap for this fire() cycle.
+
+        Always tries to fetch the account snapshot so that `_last_available_funds`
+        stays current for dashboard display — the daemon caches it every 30s so
+        the extra HTTP call is cheap.
+
+        When `policy.max_total_risk_pct` is set, the cap is computed dynamically
+        every cycle:
+            effective_cap = max(0, available_funds - min_reserve) × pct/100
+
+        `available_funds` used is the most recent plausible snapshot value
+        (>= _MIN_AVAIL_TO_LOCK_PCT_CAP). Near-zero values that IBKR briefly
+        returns during post-market reconciliation are ignored; the last good
+        value is reused instead.
+
+        Falls back to the fixed `policy.max_total_risk` if:
+          - max_total_risk_pct is None (pct mode not configured)
+          - no plausible snapshot has been received yet
+          - the snapshot call fails (daemon unreachable, endpoint not ready)
+        """
+        pct     = self.policy.max_total_risk_pct
+        reserve = self.policy.min_reserve or 0.0
+        if pct is not None:
+            try:
+                snap = await tclient.get_account_snapshot()
+                avail = float(snap.get("available_funds") or 0)
+                if avail >= _MIN_AVAIL_TO_LOCK_PCT_CAP:
+                    self._last_available_funds = avail
+            except Exception:
+                pass
+            use_avail = self._last_available_funds or 0.0
+            if use_avail > 0:
+                base = max(0.0, use_avail - reserve)
+                return base * (pct / 100.0)
+        return self.policy.max_total_risk
+
     async def _run_ticker_queue(
         self, ticker: str, queue: list[dict], ctx: HandlerContext, tclient,
     ) -> None:
@@ -3834,9 +4109,20 @@ class TradeHandlerBase(ActionHandler):
                 per_contract_ml = self.max_loss_dollars(spread)
                 ml = per_contract_ml * contracts
 
-                # Within-lock TOCTOU check: re-validate caps now that a
-                # concurrent ticker may have committed additional risk.
-                if self.cum_risk + ml > self.policy.max_total_risk:
+                # Within-lock TOCTOU check: re-validate cap now that a
+                # concurrent ticker may have committed additional risk this cycle.
+                #
+                # pct mode: available_funds already reflects margin reserved by
+                # prior-cycle positions (IBKR deducts it from the balance), so
+                # effective_cap IS the remaining budget. Only track intra-cycle
+                # commitments (_intra_cycle_risk) to avoid double-counting.
+                #
+                # dollar mode: IBKR doesn't know about a custom dollar budget,
+                # so use the daily cum_risk accumulator as before.
+                check_risk = (self._intra_cycle_risk
+                              if self.policy.max_total_risk_pct is not None
+                              else self.cum_risk)
+                if check_risk + ml > self._effective_max_total_risk:
                     self._write_skip(ctx, spread, "total_risk_cap", contracts=contracts)
                     continue
 
@@ -3855,7 +4141,13 @@ class TradeHandlerBase(ActionHandler):
 
                 # Reserve the risk BEFORE submitting so other tickers see it.
                 self.cum_risk += ml
+                self._intra_cycle_risk += ml
                 self.per_ticker_risk[ticker] = self.per_ticker_risk.get(ticker, 0.0) + ml
+                self._tracked_risk_positions.append({
+                    "expiration": spread.get("expiration", ""),
+                    "max_loss": ml,
+                    "symbol": ticker,
+                })
                 self._last_trade_time_by_ticker[ticker] = datetime.now()
                 self._last_trade_time_by_ticker_side[(ticker, spread["option_type"])] = datetime.now()
                 # Set the global cooldown anchor at COMMIT time, not fill
@@ -3920,6 +4212,10 @@ class TradeHandlerBase(ActionHandler):
             "risk_dollars": round(per_contract_ml * ct, 2),
             "norm_roi": round(_compute_norm_roi(spread.get("roi_pct", 0), spread.get("dte", 0)), 2),
             "otm_pct": spread.get("otm_pct"),
+            "short_bid": spread.get("short_bid"),
+            "long_ask": spread.get("long_ask"),
+            "short_delta": spread.get("short_delta"),
+            "prev_close": spread.get("prev_close"),
             "reason": reason,
             "fill_price": fill_price,
             "daemon_msg": daemon_msg,
@@ -3990,6 +4286,7 @@ class TradeHandlerBase(ActionHandler):
             "event": "submit",
             "spread": spread,
             "contracts": contracts,
+            "max_loss": max_loss,                         # explicit for recovery
             "daemon_url": self.daemon_url,
             "policy_snapshot": self._policy_snapshot(),
             "cum_risk_before": self.cum_risk - max_loss,  # before reservation
@@ -4823,6 +5120,43 @@ def _compute_kickoff_lead(
     return min(max(raw, floor), ceiling)
 
 
+async def _refresh_account_snapshot(daemon_url: str, handlers: list) -> None:
+    """Fetch /account/snapshot from the daemon and cache available_funds on all
+    trade handlers so the dashboard risk line always shows the latest figure.
+
+    Called at startup and at the start of each scan cycle — independent of
+    whether any handlers fire — so the first paint and quiet cycles both have
+    a fresh value. Silently swallows all errors (daemon may not be up yet).
+    """
+    trade_handlers = [
+        h for h in (handlers or [])
+        if getattr(h, "_last_available_funds", None) is not None
+        or hasattr(h, "cum_risk")  # duck-type: TradeHandlerBase instances
+    ]
+    if not trade_handlers or not daemon_url:
+        return
+    try:
+        import httpx as _httpx
+        async with _httpx.AsyncClient(timeout=3.0) as c:
+            resp = await c.get(f"{daemon_url}/account/snapshot")
+            if resp.status_code == 200:
+                snap = resp.json()
+                avail = float(snap.get("available_funds") or 0)
+                if avail >= _MIN_AVAIL_TO_LOCK_PCT_CAP:
+                    # Only update from plausible values — guards against the
+                    # near-zero IBKR artifact during post-market reconciliation.
+                    for h in trade_handlers:
+                        h._last_available_funds = avail
+                        pol     = getattr(h, "policy", None)
+                        pct     = getattr(pol, "max_total_risk_pct", None)
+                        if pct is not None:
+                            reserve = getattr(pol, "min_reserve", None) or 0.0
+                            base = max(0.0, avail - reserve)
+                            h._effective_max_total_risk = base * (pct / 100.0)
+    except Exception:
+        pass
+
+
 async def _run_scan_cycle(
     client: httpx.AsyncClient,
     args,
@@ -4842,6 +5176,12 @@ async def _run_scan_cycle(
     `asyncio.gather`.
     """
     try:
+        # Refresh account snapshot on every cycle so the risk-budget line
+        # in the dashboard always shows the latest available_funds figure —
+        # even on quiet cycles where no handler fires.
+        daemon_url = getattr(args, "daemon_url", None) or ""
+        await _refresh_account_snapshot(daemon_url, handlers)
+
         data = await scan_all_tickers(
             client, args,
             prev_close_cache=prev_close_cache,
@@ -4958,6 +5298,11 @@ async def scan_loop(args):
         prev_close_cache = PrevCloseCache(args.tickers, args.db_url)
         # Initial fetch at startup (tier_data not yet available — db_server only)
         await prev_close_cache.refresh(client)
+
+        # Prime the account-snapshot cache on all trade handlers so the
+        # very first dashboard paint already shows Server available_funds.
+        _startup_daemon = getattr(args, "daemon_url", None) or ""
+        await _refresh_account_snapshot(_startup_daemon, handlers)
 
         # Tier data cache. The percentile-server `/range_percentiles`
         # response is ~120KB and takes 7-8s to compute on a cold cache,

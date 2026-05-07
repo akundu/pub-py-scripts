@@ -61,6 +61,9 @@ class Settings(BaseSettings):
     position_sync_interval_seconds: int = 120
     position_sync_enabled: bool = True
 
+    # Account snapshot background refresh (market hours only)
+    account_snapshot_interval_seconds: int = 30
+
     # Order fill tracking
     # With ib_insync, ib.trades() is a local cache read — no broker round-trip.
     # Floor at 0.25s (fast detection of fills) rather than the old 2s (which

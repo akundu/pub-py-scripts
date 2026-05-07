@@ -497,7 +497,24 @@ dd {
 - <strong>Debit spread</strong> (first leg is BUY_TO_OPEN): <code>(exit_value - abs(entry_debit)) * quantity * 100</code></p>
 <p>Note: <code>abs()</code> is used because IBKR live fills store <code>entry_price</code> as negative for credits and positive for debits, while dry-run/stub fills always store positive values. The direction (credit vs debit) is determined by the first leg's action, not the sign of the entry price.</p>
 <h2 id="background-services">Background Services</h2>
-<p>Three async background tasks run during the server lifespan:</p>
+<p>Async background tasks run during the server lifespan:</p>
+<h3 id="account-snapshot-loop">Account Snapshot Loop</h3>
+<p>Runs every <strong>30 seconds</strong>, 24/7 (no market-hours restriction):
+1. Calls <code>LiveDataService.get_summary()</code> — fetches broker balances + P&amp;L when IBKR is connected
+2. Stores the result as a flat dict in <code>live_data_service._account_snapshot</code> with a <code>_ts</code> timestamp
+3. <code>GET /account/snapshot</code> reads this cache instantly (no IBKR round-trip at request time)</p>
+<p>The snapshot contains: <code>net_liquidation</code>, <code>cash</code>, <code>buying_power</code>, <code>available_funds</code>, <code>maint_margin_req</code>, <code>unrealized_pnl</code>, <code>realized_pnl</code>, <code>total_pnl</code>, <code>cash_deployed</code>, <code>positions_by_source</code>. The <code>age_seconds</code> field is computed at read time from <code>_ts</code>.</p>
+<p><strong>Data source priority</strong> (same as <code>LiveDataService.get_summary()</code>):
+- IBKR connected: balances + unrealized P&amp;L are broker-authoritative
+- IBKR disconnected: balance fields default to 0; P&amp;L comes from the local position store</p>
+<p><strong>Intended use</strong>: program-driven cash-deployment decisions. Check <code>available_funds</code> and <code>cash_deployed</code> before opening new positions.</p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># Example: gate new positions on available capital</span>
+<span class="n">snap</span> <span class="o">=</span> <span class="n">httpx</span><span class="o">.</span><span class="n">get</span><span class="p">(</span><span class="s2">&quot;http://localhost:8000/account/snapshot&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
+<span class="k">if</span> <span class="n">snap</span><span class="p">[</span><span class="s2">&quot;available_funds&quot;</span><span class="p">]</span> <span class="o">&gt;</span> <span class="mi">10_000</span> <span class="ow">and</span> <span class="n">snap</span><span class="p">[</span><span class="s2">&quot;age_seconds&quot;</span><span class="p">]</span> <span class="o">&lt;</span> <span class="mi">60</span><span class="p">:</span>
+    <span class="c1"># safe to deploy capital</span>
+    <span class="o">...</span>
+</code></pre></div>
+
 <h3 id="expiration-loop">Expiration Loop</h3>
 <p>Runs every <code>EXPIRATION_CHECK_INTERVAL_SECONDS</code> (default: 60):
 1. Queries position store for <code>expiration &lt; today</code> (strict — same-day 0DTE options stay live until <code>check_eod_exits()</code> runs after market close)

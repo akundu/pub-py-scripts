@@ -781,6 +781,15 @@ class RollService:
             None,
         )
         if not pos:
+            # Fallback: resolve synthetic spread IDs (MD5 hash of con_ids) produced
+            # by portfolio grouping — these don't exist in the raw position store.
+            from app.services.live_data_service import _group_options_into_spreads
+            grouped = _group_options_into_spreads(list(positions))
+            pos = next(
+                (p for p in grouped if p.get("position_id", "").startswith(position_id)),
+                None,
+            )
+        if not pos:
             return None
 
         symbol = pos.get("symbol", "")
@@ -841,6 +850,13 @@ class RollService:
             (p for p in positions if p.get("position_id", "").startswith(position_id)),
             None,
         )
+        if not pos:
+            from app.services.live_data_service import _group_options_into_spreads
+            grouped = _group_options_into_spreads(list(positions))
+            pos = next(
+                (p for p in grouped if p.get("position_id", "").startswith(position_id)),
+                None,
+            )
         if not pos:
             return None
 

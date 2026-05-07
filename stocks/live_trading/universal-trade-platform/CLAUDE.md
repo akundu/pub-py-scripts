@@ -11,7 +11,7 @@ A unified multi-broker trading API (FastAPI) supporting Robinhood, E\*TRADE, and
 | File | Purpose |
 |------|---------|
 | `utp.py` | ALL CLI operations + API server |
-| `tests/test_utp.py` | ALL tests (1331 tests) |
+| `tests/test_utp.py` | ALL tests (1338 tests) |
 | `spread_scanner.py` | Live spread ROI scanner dashboard (standalone tool) |
 | `sim_trader.py` | Auto-trader CLI client (standalone tool) |
 
@@ -880,7 +880,7 @@ Every CLI command auto-detects a running daemon via HTTP health check. When daem
 |------|--------|-----------|
 | `trade.py` | `/trade` | `POST /trade/execute`, `POST /trade/close`, `POST /trade/advisor/confirm` |
 | `market.py` | `/market` | `GET /market/quote/{symbol}`, `POST /market/quotes`, `POST /market/margin`, `GET /market/options/{symbol}`, `GET /market/streaming/status`, `POST /market/streaming/subscribe`, `POST /market/streaming/unsubscribe`, `GET /market/streaming/option-quotes/status` |
-| `account.py` | `/account` | `GET /positions`, `POST /sync`, `POST /check-expirations`, `GET /expiring`, `GET /reconciliation`, `GET /trades`, `GET /orders`, `POST /cancel`, `GET /executions` |
+| `account.py` | `/account` | `GET /positions`, `POST /sync`, `POST /check-expirations`, `GET /expiring`, `GET /snapshot`, `GET /reconciliation`, `GET /trades`, `GET /orders`, `POST /cancel`, `GET /executions` |
 | `ledger.py` | `/ledger` | `GET /entries`, `GET /entries/recent`, `POST /snapshot`, `GET /snapshots`, `GET /replay` |
 | `dashboard.py` | `/dashboard` | `GET /summary`, `GET /performance`, `GET /pnl/daily`, `GET /status`, `GET /terminal`, `GET /advisor/recommendations`, `GET /advisor/status` |
 | `import_routes.py` | `/import` | `POST /csv`, `POST /preview`, `GET /formats` |
@@ -996,10 +996,12 @@ python utp.py roll suggestions
 python utp.py roll execute <id> --dte 2 --otm-pct 1.5 --confirm
 
 # Partial close: close 5 of 20 contracts, roll 5
-python utp.py roll execute <id> --close-quantity 5 --confirm
+python utp.py roll execute <id> --qty 5 --confirm
 
 # Force-build for any position (bypasses severity threshold)
+# Accepts both local position IDs and synthetic portfolio group IDs (e.g. 4201a1)
 python utp.py roll forward <pos-id> --confirm
+python utp.py roll forward 4201a1 --dte 3 --otm-pct 2.2 --qty 1 --confirm
 python utp.py roll mirror <pos-id> --otm-pct 0.5 --confirm
 
 # Configure defaults + notifications
@@ -1030,15 +1032,15 @@ Suggestions include live option quote data: `estimated_credit` (new position), `
 |----------|-------------|
 | `GET /roll/suggestions` | Pending suggestions with credit estimates |
 | `POST /roll/execute/{id}` | Execute suggestion; body overrides: `dte`, `otm_pct`, `width`, `quantity`, `close_quantity`; `X-Dry-Run: true` for preview |
-| `POST /roll/forward/{position_id}` | Force-build forward roll; body: overrides + `confirm: true` to execute |
-| `POST /roll/mirror/{position_id}` | Force-build mirror roll; body: overrides + `confirm: true` to execute |
+| `POST /roll/forward/{position_id}` | Force-build forward roll; accepts local IDs, ID prefixes, and synthetic portfolio group IDs; body: overrides + `confirm: true` to execute |
+| `POST /roll/mirror/{position_id}` | Force-build mirror roll; accepts local IDs, ID prefixes, and synthetic portfolio group IDs; body: overrides + `confirm: true` to execute |
 | `POST /roll/dismiss/{id}` | Dismiss a pending suggestion |
 | `GET /roll/config` | Current configuration |
 | `POST /roll/config` | Partial config update |
 
 ## Testing
 
-**1331 tests in `tests/test_utp.py`, all passing.** Tests use `tmp_path` for isolated persistence. The autouse `_setup_providers` fixture in `conftest.py` initializes and tears down ledger + position store per test.
+**1338 tests in `tests/test_utp.py`, all passing.** Tests use `tmp_path` for isolated persistence. The autouse `_setup_providers` fixture in `conftest.py` initializes and tears down ledger + position store per test.
 
 ```bash
 python -m pytest tests/ -v                              # All 359 tests
@@ -1115,7 +1117,8 @@ python -m pytest tests/test_utp.py -k "TestIBKR" -v     # IBKR tests only
 | `TestSimulationSweep` | 1 | Parameter sweep /sim/sweep endpoint |
 | `TestSimLoadDate` | 5 | /sim/load-date hot-swap (invalid, not-sim, no-data, success) |
 | `TestAutoTraderEngine` | 32 | Auto-trader config, run-day, run-range, spread filters, DTE filtering, carry-over, CLI config, diversity, streaming, shadow, event bus |
-| `TestRollService` | 44 | RollConfig defaults/serialization, breach notifications (cooldown, escalation bypass), credit estimates from live quotes, forward/mirror suggestion building, config defaults (otm_pct/width/quantity/partial_close_pct), per-execute overrides (dte/otm_pct/width/quantity/close_quantity), force-build for safe positions, REST endpoints (forward, mirror, execute with overrides, config notify fields) |
+| `TestRollService` | 46 | RollConfig defaults/serialization, breach notifications (cooldown, escalation bypass), credit estimates from live quotes, forward/mirror suggestion building, config defaults (otm_pct/width/quantity/partial_close_pct), per-execute overrides (dte/otm_pct/width/quantity/close_quantity), force-build for safe positions, synthetic portfolio group ID resolution (forward + mirror), REST endpoints (forward, mirror, execute with overrides, config notify fields) |
+| `TestAccountSnapshot` | 5 | GET /account/snapshot: 503 before init, all fields, age_seconds computation, reset, daemon wiring |
 
 ## IBKR Live Provider
 

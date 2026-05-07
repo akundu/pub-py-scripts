@@ -71,10 +71,12 @@ async def _setup_providers(tmp_path):
     from app.services.execution_store import reset_execution_store
     from app.services.option_quote_streaming import reset_option_quote_streaming
     from app.services.roll_service import reset_roll_service
+    from app.services.live_data_service import reset_account_snapshot
     reset_streaming_service()
     reset_execution_store()
     reset_option_quote_streaming()
     reset_roll_service()
+    reset_account_snapshot()
     from app.services.simulation_clock import reset_sim_clock
     from app.services.market_data import set_simulation_mode
     from app.services.provider_timing import reset_provider_timing

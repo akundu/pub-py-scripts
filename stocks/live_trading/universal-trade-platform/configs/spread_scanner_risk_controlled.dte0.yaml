@@ -196,13 +196,22 @@ handlers:
     #     from the offline analysis.
     # The bare-name `trades_sim_dte0.jsonl` from prior runs is preserved
     # untouched so historical comparison is straightforward.
-    log_file: trades_sim_dte0.tracking_2026-05-04.jsonl
+    log_file: trades_sim_dte0.tracking.jsonl
     daemon_url: http://localhost:8000
     policy: &trade_policy
-      norm_roi: [0.5, 8]
-      min_otm_pct:  {SPX: 0.5, NDX: 0.75, RUT: 0.75}
-      min_credit:   {SPX: 0.15, NDX: 0.40, RUT: 0.15}
-      max_total_risk: 500000
+      norm_roi: [0.7, 8]
+      min_otm_pct:  {SPX: 0.6, NDX: 0.75, RUT: 0.75}
+      min_credit:   {SPX: 0.15, NDX: 0.30, RUT: 0.15}
+      # max_total_risk: 300000
+      # Alternatively, express the cap as % of available funds (fetched live
+      # from the daemon's GET /account/snapshot). When set, overrides the
+      # dollar value above at runtime. Falls back to max_total_risk if the
+      # snapshot is unavailable. Both DTE scanners share the same account,
+      # so set the combined pct accordingly (e.g. 20 = 20% per scanner).
+      max_total_risk_pct: 40
+      min_reserve: 50000   # Keep $50k untouched when computing the pct cap.
+      #   effective_cap = max(0, available_funds - min_reserve) × pct/100
+      #   e.g. avail=$400k, pct=40, reserve=$50k → cap = $350k × 40% = $140k
       # max_per_ticker_risk: {SPX: 200000, NDX: 200000, RUT: 150000}
       # Dollar cap on RISK PER TRADE. The handler computes
       #   contracts = max(1, floor(max_risk_per_trade / per_contract_max_loss))
@@ -211,9 +220,9 @@ handlers:
       # is `spread.width * 100` (≈ 1 contract's worst-case loss).
       # One trade per ticker fires per scan cycle; `contracts` is the knob.
       max_risk_per_trade:
-        SPX: 7000        # ≈ 2-3 contracts (SPX width 25 → 2500/contract max loss)
-        NDX: 12000       # ≈ 2 contracts (NDX width 60 → 6000/contract)
-        RUT: 5000        # ≈ 2 contracts (RUT width 25 → 2500/contract)
+        SPX: 12000        # ≈ 2-3 contracts (SPX width 25 → 2500/contract max loss)
+        NDX: 20000       # ≈ 2 contracts (NDX width 60 → 6000/contract)
+        RUT: 8000        # ≈ 2 contracts (RUT width 25 → 2500/contract)
       require_prev_close: true
       notify_email: anirbankundu@gmail.com
       # Block trades where abs(short_delta) > max_short_delta. Guards against
@@ -233,7 +242,7 @@ handlers:
       # regular sessions).
       trading_window_pt:
         start: "06:31"
-        end:   "11:30"
+        end:   "11:00"
       # ── Per-cycle pacing (applies to BOTH simulate and live trade) ──
       # max_trades_per_cycle: at most this many spreads submit per scan
       # cycle, sorted by ROI desc — the rest get logged with reason
@@ -248,7 +257,7 @@ handlers:
       # which is the per-(ticker, side) version. Default 3.0 — comfortable
       # cushion that prevents the scanner from spamming the broker on a
       # rapidly-moving spread.
-      min_minutes_between_trades: 2
+      min_minutes_between_trades: 3
 
   # Live trading — uncomment to activate. Uses the SAME policy as simulate_trade
   # via the YAML anchor above.

@@ -159,13 +159,16 @@ handlers:
     #min_norm_roi: 2.0
     #min_norm_roi_per_ticker: {}
     # ─── TRACKING SESSION — STARTED 2026-05-06 ─────────────────────────
-    log_file: trades_sim_dte1.tracking_2026-05-06.jsonl
+    log_file: trades_sim_dte1.tracking.jsonl
     daemon_url: http://localhost:8000
     policy: &trade_policy
-      norm_roi: [0.8, 8]
+      norm_roi: [0.9, 8]
       min_otm_pct:  {SPX: 1.65, NDX: 2.1 , RUT: 2.5}
-      min_credit:   {SPX: 0.15, NDX: 0.20, RUT: 0.15}
-      max_total_risk: 300000
+      min_credit:   {SPX: 0.15, NDX: 0.30, RUT: 0.15}
+      # max_total_risk: 200000
+      max_total_risk_pct: 55   # optional: 15% of available_funds (overrides dollar above)
+      min_reserve: 50000   # Keep $50k untouched when computing the pct cap.
+      #   effective_cap = max(0, available_funds - min_reserve) × pct/100
       # max_per_ticker_risk: {SPX: 200000, NDX: 200000, RUT: 150000}
       # Dollar cap on RISK PER TRADE. The handler computes
       #   contracts = max(1, floor(max_risk_per_trade / per_contract_max_loss))
@@ -174,9 +177,9 @@ handlers:
       # is `spread.width * 100` (≈ 1 contract's worst-case loss).
       # One trade per ticker fires per scan cycle; `contracts` is the knob.
       max_risk_per_trade:
-        SPX: 5000        # ≈ 2-3 contracts (SPX width 25 → 2500/contract max loss)
-        NDX: 12000       # ≈ 2 contracts (NDX width 60 → 6000/contract)
-        RUT: 5000        # ≈ 2 contracts (RUT width 25 → 2500/contract)
+        SPX: 12000        # ≈ 2-3 contracts (SPX width 25 → 2500/contract max loss)
+        NDX: 20000       # ≈ 2 contracts (NDX width 60 → 6000/contract)
+        RUT: 8000        # ≈ 2 contracts (RUT width 25 → 2500/contract)
       require_prev_close: true
       notify_email: anirbankundu@gmail.com
       # Block trades where abs(short_delta) > max_short_delta.
@@ -192,7 +195,7 @@ handlers:
         end:   "12:40"
       # ── Per-cycle pacing — see dte0.yaml for full notes ──
       max_trades_per_cycle: 2
-      min_minutes_between_trades: 3.0
+      min_minutes_between_trades: 3
 
   # Live trading — active. Uses the SAME policy as simulate_trade
   # via the YAML anchor above.
