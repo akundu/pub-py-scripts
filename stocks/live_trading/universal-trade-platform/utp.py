@@ -10112,64 +10112,92 @@ Routing & timeouts:
                                      ''',
                                      epilog='''
 Examples:
-  # Equity
-  %(prog)s equity --symbol SPY --side BUY --quantity 100
-  %(prog)s equity --symbol GBTC --side SELL --quantity 4350 --live
-  %(prog)s equity --symbol AAPL --side BUY --quantity 10 --order-type LIMIT --limit-price 200.00 --paper
+  # ── Equity ───────────────────────────────────────────────────────
+  %(prog)s equity --symbol SPY --side BUY --quantity 100              # Market buy (dry-run)
+  %(prog)s equity --symbol GBTC --side SELL --quantity 4350 --live    # Sell all GBTC
+  %(prog)s equity --symbol AAPL --side BUY --quantity 10 \\
+    --order-type LIMIT --limit-price 200.00 --paper                   # Limit buy
 
-  # Single option
-  %(prog)s option --symbol SPY --strike 550 --option-type PUT --action BUY_TO_OPEN --quantity 1 --paper
+  # ── Single option ────────────────────────────────────────────────
+  %(prog)s option --symbol SPY --strike 550 --option-type PUT \\
+    --action BUY_TO_OPEN --quantity 1 --order-type LIMIT \\
+    --limit-price 2.50 --expiration 2026-03-21 --live                 # Buy to open (limit)
+  %(prog)s option --symbol SPX --strike 5600 --option-type CALL \\
+    --action SELL_TO_OPEN --quantity 2 --paper                        # Sell to open
 
-  # Credit spread (sell premium) at explicit strikes
+  # ── Credit spread — explicit strikes ─────────────────────────────
   %(prog)s credit-spread --symbol SPX --short-strike 5500 --long-strike 5475 \\
-    --option-type PUT --expiration 2026-03-20 --quantity 1 --net-price 3.50 --paper
+    --option-type PUT --expiration 2026-03-20 --quantity 1 --paper    # MARKET (preview)
+  %(prog)s credit-spread --symbol SPX --short-strike 5500 --long-strike 5475 \\
+    --option-type PUT --expiration 2026-03-20 --quantity 1 \\
+    --net-price 3.50 --live --confirm                                 # LIMIT $3.50 (submit)
 
-  # Credit spread by OTM%% (auto-pick strikes from current spot)
+  # ── Credit spread — percentage-based strike placement ─────────────
   %(prog)s credit-spread --symbol SPX --otm-pct 2 --option-type PUT \\
-    --expiration 2026-03-20 --quantity 5 --live --confirm
+    --expiration 2026-03-20 --quantity 5 --live --confirm             # 2%% OTM from spot
+  %(prog)s credit-spread --symbol SPX --close-pct 2 --option-type PUT \\
+    --expiration 2026-03-20 --quantity 5 --live --confirm             # 2%% from yesterday's close
+  %(prog)s credit-spread --symbol RUT --otm-pct 1.5 --option-type CALL \\
+    --expiration 2026-03-20 --width 20 --quantity 3 --live --confirm  # With explicit width
 
-  # Close a credit spread
+  # ── Credit spread — close / simulate ─────────────────────────────
   %(prog)s credit-spread --symbol SPX --short-strike 5500 --long-strike 5475 \\
-    --option-type PUT --expiration 2026-03-20 --close --net-price 0.10 --live
+    --option-type PUT --expiration 2026-03-20 --close --net-price 0.10 --live  # Close at $0.10
+  %(prog)s credit-spread --symbol RUT --short-strike 2460 --long-strike 2440 \\
+    --option-type PUT --expiration 2026-03-18 --quantity 1 \\
+    --live --simulate                                                 # Margin check, no execute
 
-  # Debit spread (buy premium)
+  # ── Debit spread ─────────────────────────────────────────────────
   %(prog)s debit-spread --symbol QQQ --long-strike 480 --short-strike 490 \\
-    --option-type CALL --expiration 2026-03-20 --quantity 3 --net-price 4.00 --paper
+    --option-type CALL --expiration 2026-03-20 --quantity 3 \\
+    --net-price 4.00 --paper                                          # Limit debit
+  %(prog)s debit-spread --symbol SPX --otm-pct 1 --option-type PUT \\
+    --expiration 2026-03-20 --quantity 2 --live --confirm             # OTM%%-placed
 
-  # Iron condor (symmetric wings)
+  # ── Iron condor ───────────────────────────────────────────────────
   %(prog)s iron-condor --symbol SPX --put-short 5500 --put-long 5475 \\
-    --call-short 5700 --call-long 5725 --expiration 2026-03-20 --quantity 1 --paper
-
-  # Iron condor with asymmetric OTM%% (2%% put / 3%% call)
+    --call-short 5700 --call-long 5725 --expiration 2026-03-20 \\
+    --quantity 1 --paper                                              # Explicit strikes
+  %(prog)s iron-condor --symbol SPX --otm-pct 2 --width 20 \\
+    --expiration 2026-03-20 --quantity 5 --live --confirm             # Symmetric 2%% OTM
   %(prog)s iron-condor --symbol SPX --otm-pct 2:3 --width 20 \\
-    --expiration 2026-03-20 --quantity 5 --live --confirm
+    --expiration 2026-03-20 --quantity 5 --live --confirm             # Asymmetric: 2%% put / 3%% call
+  %(prog)s iron-condor --symbol SPX --close-pct 1.5:2.5 --width 20 \\
+    --expiration 2026-03-20 --quantity 5 --live --confirm             # Anchored to yesterday's close
 
-  # Force the AM-settled SPX monthly contract (override the SPXW default)
+  # ── Override trading class (SPX uses SPXW by default) ────────────
   %(prog)s credit-spread --symbol SPX --trading-class SPX \\
     --short-strike 5500 --long-strike 5475 --option-type PUT \\
-    --expiration 2026-05-15 --quantity 1 --live --confirm
+    --expiration 2026-05-15 --quantity 1 --live --confirm             # AM-settled monthly
 
-  # Bypass safety guards when you know what you're doing
+  # ── Bypass safety guards ──────────────────────────────────────────
   %(prog)s credit-spread --symbol SPX --short-strike 5500 --long-strike 5475 \\
     --option-type PUT --expiration 2026-03-20 --net-price 0.05 \\
-    --override-min-roi --live --confirm
-  %(prog)s iron-condor … --net-price -0.50 \\
-    --override-spend-credit --live --confirm
+    --override-min-roi --live --confirm                               # ROI < 0.2%% override
+  %(prog)s iron-condor --symbol SPX --put-short 5500 --put-long 5475 \\
+    --call-short 5700 --call-long 5725 --expiration 2026-03-20 \\
+    --quantity 1 --net-price -0.50 \\
+    --override-spend-credit --live --confirm                          # Negative net price
 
-  # Quick preview without IBKR margin check (cached prices only)
+  # ── Replay — re-open a previous trade by position-ID prefix ──────
+  %(prog)s replay 2dadab --live --confirm                             # Same size/params
+  %(prog)s replay 2dadab --quantity 10 --live --confirm               # Different size
+  %(prog)s replay 2dadab --expiration 2026-05-01 --live --confirm     # New expiration
+  %(prog)s replay 7180a7 --live --confirm                             # Synthetic portfolio ID
+
+  # ── Quick preview / validation ────────────────────────────────────
   %(prog)s credit-spread --symbol RUT --short-strike 2460 --long-strike 2440 \\
-    --option-type PUT --expiration 2026-03-18 --quantity 1 --live --nocheck
+    --option-type PUT --expiration 2026-03-18 --quantity 1 --live --nocheck  # Skip margin check
+  %(prog)s --validate-all --paper                                     # Test all 5 trade types
+  %(prog)s --validate-all --cleanup --paper                           # Validate + clean up
 
-  # Replay a previous trade by position-ID prefix
-  %(prog)s replay 2dadab --live --confirm
-  %(prog)s replay 2dadab --quantity 10 --live --confirm   # Different size
-  %(prog)s replay 2dadab --expiration 2026-05-01 --live --confirm   # Roll forward
-
-  # Validate all 5 trade types (safe, no real execution)
-  %(prog)s --validate-all --paper
-  %(prog)s --validate-all --cleanup --paper    # Validate + clean up after
+Finding expirations and strikes:
+  python utp.py options SPX --list-expirations --live    # Available expirations
+  python utp.py options SPX --strike-range 2 --live      # Chains within 2%% of spot
+  python utp.py quote SPX --live                         # Current spot price
 
 Aliases: t
+Subcommand aliases: (none; type must be spelled in full)
                                      ''',
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     p_trade.add_argument("--verbose", "-v", action="store_true",
@@ -11120,15 +11148,37 @@ Auto-detects a running daemon and routes through HTTP if available.
                                      ''',
                                      epilog='''
 Examples:
-  %(prog)s 2d9a --paper                    Close position '2d9a' at MARKET
-  %(prog)s 2d9a --live                     Close on live at MARKET price
-  %(prog)s 2d9a --net-price 0.10 --live    Close at $0.10 LIMIT debit
-  %(prog)s 2d9a -q 1 --live               Partial close: 1 contract only
-  %(prog)s 2d9a --simulate --live          Margin check only, no close
-  %(prog)s 2d9a                            Dry-run close (no broker connection)
+  # ── Basic close ──────────────────────────────────────────────────
+  %(prog)s 2d9a                            Dry-run: show what would be closed (no broker)
+  %(prog)s 2d9a --paper                    Close on paper account at MARKET
+  %(prog)s 2d9a --live                     Close on live account at MARKET
+  %(prog)s 2d9a --confirm --live           Close live (--confirm required to actually submit)
 
-The position ID can be a prefix — if it uniquely matches one open position,
-that position is closed. Use 'trades --all' to find position IDs.
+  # ── Limit-price close ────────────────────────────────────────────
+  %(prog)s 2d9a --net-price 0.10 --live    LIMIT close at $0.10 debit
+  %(prog)s 2d9a --net-price 0.05 --live    Close for a nickel (tight limit)
+  %(prog)s 2d9a --net-price 0 --live       Close at zero (scratch trade)
+
+  # ── Partial close ─────────────────────────────────────────────────
+  %(prog)s 2d9a -q 1 --live               Close 1 contract (leave the rest open)
+  %(prog)s 2d9a -q 5 --net-price 0.10 --live  Partial at limit price
+
+  # ── Margin / simulation check only ───────────────────────────────
+  %(prog)s 2d9a --simulate --live          Check margin without executing
+
+  # ── Full workflow: find ID → preview → close ─────────────────────
+  python utp.py trades --all --live        List all positions with IDs
+  python utp.py portfolio --live           Grouped portfolio view (also shows IDs)
+  python utp.py close 2d9a --live          Preview (no --confirm = dry summary)
+  python utp.py close 2d9a --confirm --live   Execute
+
+Notes:
+  - The position ID can be a prefix: '2d9a' matches any position starting with '2d9a'.
+  - Credit spread: submits BUY_TO_CLOSE combo order.
+  - Debit spread: submits SELL_TO_CLOSE combo order.
+  - Iron condor: reverses all 4 legs in one combo.
+  - Without --confirm the CLI shows the order summary and stops (safe preview).
+  - Without --net-price the order is MARKET; add --net-price for LIMIT.
 
 Aliases: cl
                                      ''',
@@ -11234,22 +11284,62 @@ Forward rolls move the same-side spread to a further DTE.
                                     ''',
                                     epilog='''
 Examples:
-  %(prog)s suggestions                         Show pending roll suggestions
-  %(prog)s execute abc123 --confirm            Execute a roll suggestion
-  %(prog)s execute abc123 --dte 2 --confirm    Execute with DTE override
-  %(prog)s execute abc123 --qty 5 --confirm              Partial roll (5 of N contracts)
-  %(prog)s dismiss abc123                      Dismiss a suggestion
-  %(prog)s forward pos-id --confirm            Manual forward roll (any severity)
-  %(prog)s forward pos-id --dte 2 --otm-pct 1.5 --confirm
-  %(prog)s forward pos-id --qty 5 --quantity 5 --confirm              Split roll
-  %(prog)s mirror pos-id --confirm             Manual mirror roll
-  %(prog)s mirror pos-id --width 30 --confirm  Mirror with wider spread
-  %(prog)s config                              Show roll configuration
-  %(prog)s config --forward-trigger warning    Change forward trigger level
+  # ── View suggestions ─────────────────────────────────────────────
+  %(prog)s suggestions          Show pending roll suggestions (with credit estimates)
+
+  # ── Execute a suggestion by suggestion-ID prefix ─────────────────
+  %(prog)s execute abc123 --confirm
+  %(prog)s execute abc123 --dte 2 --confirm           Override target DTE
+  %(prog)s execute abc123 --otm-pct 1.5 --confirm     Override short strike placement
+  %(prog)s execute abc123 --width 30 --confirm         Override spread width
+  %(prog)s execute abc123 --quantity 10 --confirm      Override contracts to open
+  %(prog)s execute abc123 --qty 5 --confirm            Partial: close 5 of N contracts
+  %(prog)s execute abc123 --qty 5 --quantity 5 --confirm  Split roll: close 5, open 5
+
+  # ── Dismiss a suggestion ─────────────────────────────────────────
+  %(prog)s dismiss abc123       Won't re-fire until cooldown expires
+
+  # ── Manual forward roll — move spread to a further DTE ───────────
+  # position_id can be a local-store prefix OR a synthetic portfolio
+  # group ID (the short hash shown by 'portfolio --live', e.g. 4201a1)
+  %(prog)s forward 4201a1 --confirm                       Roll ALL contracts (preview first)
+  %(prog)s forward 4201a1 --dte 3 --confirm               Roll to DTE+3
+  %(prog)s forward 4201a1 --dte 3 --otm-pct 2.2 --confirm  DTE+3 at 2.2%% OTM
+  %(prog)s forward 4201a1 --qty 1 --confirm               Partial: close 1 contract
+  %(prog)s forward 4201a1 --qty 1 --dte 3 --otm-pct 2.2 --confirm  All overrides
+  %(prog)s forward 2d9a --width 25 --confirm              Wider spread on roll
+  %(prog)s forward 2d9a --quantity 10 --confirm           Open 10 new contracts
+  %(prog)s forward 2d9a --dte 2 --otm-pct 1.5            Preview only (no --confirm)
+
+  # ── Manual mirror roll — open opposite-side spread to hedge ──────
+  %(prog)s mirror 4201a1 --confirm                   Mirror at ATM (default)
+  %(prog)s mirror 4201a1 --otm-pct 0.5 --confirm    0.5%% OTM mirror
+  %(prog)s mirror 4201a1 --width 30 --confirm        Wider mirror spread
+  %(prog)s mirror 4201a1 --quantity 5 --confirm      5 contracts only
+  %(prog)s mirror 4201a1 --otm-pct 1 --width 20 --confirm  Full control
+
+  # ── Config: view and update roll service settings ─────────────────
+  %(prog)s config                                  Show current config
+  %(prog)s config --forward-trigger warning        Trigger forward rolls earlier
+  %(prog)s config --mirror-trigger critical        Mirror only on critical breach
   %(prog)s config --notify-severity warning,critical,breached
   %(prog)s config --notify-channel sms --notify-cooldown 10
+  %(prog)s config --notify-channel email           Switch to email alerts
+  %(prog)s config --auto-execute                   Enable auto-execution of rolls
+  %(prog)s config --no-auto-execute                Disable auto-execution
+
+Finding position IDs:
+  python utp.py trades --all --live     Local position store (prefix-matchable IDs)
+  python utp.py portfolio --live        Grouped portfolio (shows synthetic IDs like '4201a1')
+  python utp.py roll suggestions        Roll service pre-selects threatened positions
+
+Severity levels: watch → warning → critical → breached (most urgent)
+Roll types:
+  forward  — Close current + open same-type spread at further DTE with adjusted strikes
+  mirror   — Keep original + open opposite-side spread on same expiration day
 
 Aliases: rl
+Subcommand aliases: suggestions (suggest, sg), execute (ex), forward (fwd), mirror (mir), dismiss (dm)
                                     ''',
                                     formatter_class=argparse.RawDescriptionHelpFormatter)
     roll_sub = p_roll.add_subparsers(dest="roll_action")
