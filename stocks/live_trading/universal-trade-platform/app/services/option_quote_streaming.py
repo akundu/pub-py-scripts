@@ -1662,6 +1662,14 @@ class OptionQuoteStreamingService:
                 if asyncio.iscoroutine(_purge_result):
                     _purge_result.close()  # discard if AsyncMock returned a coroutine
 
+            if hasattr(self._provider, "_prune_out_of_range_option_subs"):
+                _prune_result = self._provider._prune_out_of_range_option_subs(
+                    self._symbol_last_price,
+                    self._config.option_quotes_ibkr_strike_range_pct,
+                )
+                if asyncio.iscoroutine(_prune_result):
+                    _prune_result.close()  # discard if AsyncMock returned a coroutine
+
             # Single-flight guard: if a previous overlay is still draining,
             # skip this firing entirely.  Prevents pending IBKR requests from
             # piling up against the broker.

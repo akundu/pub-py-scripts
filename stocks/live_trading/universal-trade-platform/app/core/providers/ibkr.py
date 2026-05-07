@@ -411,6 +411,50 @@ class IBKRLiveProvider(BrokerProvider):
             )
         return len(expired_keys)
 
+    def _prune_out_of_range_option_subs(
+        self,
+        symbol_price_map: dict,
+        range_pct: float,
+        buffer_pct: float = 0.5,
+    ) -> int:
+        """Cancel subscriptions for strikes that have drifted outside the fetch window.
+
+        As the underlying price moves intraday, the ±range_pct window shifts but old
+        subscriptions accumulate until LRU eviction. This method removes subscriptions
+        whose strike is more than (range_pct + buffer_pct)% from current spot.
+
+        The buffer prevents oscillating cancel/resubscribe when a strike sits right at
+        the boundary. Only symbols present in symbol_price_map are pruned; unknown
+        symbols are left untouched (their price may not have been fetched this cycle).
+
+        Returns the number of subscriptions removed.
+        """
+        pruned_keys = []
+        threshold = (range_pct + buffer_pct) / 100.0
+        for key in self._option_subs:
+            symbol, _exp, _right, strike = key
+            price = symbol_price_map.get(symbol)
+            if not price or price <= 0:
+                continue
+            if strike < price * (1.0 - threshold) or strike > price * (1.0 + threshold):
+                pruned_keys.append(key)
+
+        for key in pruned_keys:
+            ticker = self._option_subs.pop(key, None)
+            self._option_subs_last_used.pop(key, None)
+            if ticker is not None and self._ib is not None:
+                try:
+                    self._ib.cancelMktData(ticker.contract)
+                except Exception as e:
+                    logger.debug("cancelMktData for out-of-range sub failed: %s", e)
+
+        if pruned_keys:
+            logger.info(
+                "Pruned %d out-of-range option subscriptions (budget=%d, remaining=%d)",
+                len(pruned_keys), self._option_subs_budget, len(self._option_subs),
+            )
+        return len(pruned_keys)
+
     def _cancel_all_option_subs(self) -> None:
         """Cancel every persistent option subscription and clear state.
         Called on disconnect so orphaned tickers don't leak across reconnects."""

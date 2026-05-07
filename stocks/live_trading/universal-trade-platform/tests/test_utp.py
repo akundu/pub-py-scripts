@@ -10094,6 +10094,112 @@ option_quotes_long_dte_ibkr_enabled: true
 
         provider._purge_expired_option_subs.assert_called_once()
 
+    def test_ibkr_prune_out_of_range_removes_drifted_strikes(self):
+        """_prune_out_of_range_option_subs cancels strikes outside (range+buffer)% window."""
+        from app.core.providers.ibkr import IBKRLiveProvider
+        provider = IBKRLiveProvider.__new__(IBKRLiveProvider)
+        provider._option_subs = {}
+        provider._option_subs_last_used = {}
+        provider._option_subs_budget = 2000
+        provider._ib = None
+
+        today_str = date.today().strftime("%Y%m%d")
+        # SPX spot was 5700 when these were subscribed; now spot is 5800
+        # range_pct=2.75, buffer=0.5 → threshold=3.25% → keep 5800*0.9675=5610.5..5800*1.0325=5988.5
+        # Strikes inside new window (should be KEPT):
+        provider._option_subs[("SPX", today_str, "PUT", 5700.0)] = MagicMock()   # inside
+        provider._option_subs[("SPX", today_str, "PUT", 5650.0)] = MagicMock()   # inside (just above 5610)
+        # Strikes outside new window (should be PRUNED):
+        provider._option_subs[("SPX", today_str, "PUT", 5550.0)] = MagicMock()   # below 5610.5
+        provider._option_subs[("SPX", today_str, "CALL", 6050.0)] = MagicMock()  # above 5988.5
+        provider._option_subs_last_used = {k: 0.0 for k in provider._option_subs}
+
+        pruned = provider._prune_out_of_range_option_subs({"SPX": 5800.0}, range_pct=2.75)
+
+        assert pruned == 2
+        assert len(provider._option_subs) == 2
+        remaining_strikes = {k[3] for k in provider._option_subs}
+        assert 5700.0 in remaining_strikes
+        assert 5650.0 in remaining_strikes
+        assert 5550.0 not in remaining_strikes
+        assert 6050.0 not in remaining_strikes
+
+    def test_ibkr_prune_out_of_range_noop_when_all_in_range(self):
+        """_prune_out_of_range_option_subs returns 0 when all strikes are within window."""
+        from app.core.providers.ibkr import IBKRLiveProvider
+        provider = IBKRLiveProvider.__new__(IBKRLiveProvider)
+        provider._option_subs = {}
+        provider._option_subs_last_used = {}
+        provider._option_subs_budget = 2000
+        provider._ib = None
+
+        today_str = date.today().strftime("%Y%m%d")
+        # SPX at 5750, range=2.75+0.5=3.25% → keep 5562.5..5937.5
+        provider._option_subs[("SPX", today_str, "PUT", 5600.0)] = MagicMock()
+        provider._option_subs[("SPX", today_str, "PUT", 5700.0)] = MagicMock()
+        provider._option_subs[("SPX", today_str, "CALL", 5800.0)] = MagicMock()
+        provider._option_subs_last_used = {k: 0.0 for k in provider._option_subs}
+
+        pruned = provider._prune_out_of_range_option_subs({"SPX": 5750.0}, range_pct=2.75)
+
+        assert pruned == 0
+        assert len(provider._option_subs) == 3
+
+    def test_ibkr_prune_out_of_range_skips_unknown_symbols(self):
+        """Symbols not in symbol_price_map are left untouched."""
+        from app.core.providers.ibkr import IBKRLiveProvider
+        provider = IBKRLiveProvider.__new__(IBKRLiveProvider)
+        provider._option_subs = {}
+        provider._option_subs_last_used = {}
+        provider._option_subs_budget = 2000
+        provider._ib = None
+
+        today_str = date.today().strftime("%Y%m%d")
+        # NDX sub far outside SPX range — but NDX not in price map, so must survive
+        provider._option_subs[("NDX", today_str, "PUT", 1.0)] = MagicMock()
+        provider._option_subs_last_used = {k: 0.0 for k in provider._option_subs}
+
+        # Only SPX in the price map; NDX is unknown
+        pruned = provider._prune_out_of_range_option_subs({"SPX": 5750.0}, range_pct=2.75)
+
+        assert pruned == 0
+        assert len(provider._option_subs) == 1
+
+    async def test_run_one_cycle_calls_prune_after_purge(self):
+        """_run_one_cycle calls _prune_out_of_range_option_subs when IBKR overlay fires."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig, StreamingSymbolConfig
+
+        provider = AsyncMock()
+        provider._purge_expired_option_subs = MagicMock(return_value=0)
+        provider._prune_out_of_range_option_subs = MagicMock(return_value=3)
+        provider.get_option_chain.return_value = {"expirations": ["2026-05-05"], "strikes": [5500]}
+        provider.get_option_quotes.return_value = [{"strike": 5500, "bid": 1.0}]
+        mock_quote = MagicMock(last=5500.0, bid=5499.0, ask=5501.0, source="test")
+
+        cfg = StreamingConfig(
+            symbols=[StreamingSymbolConfig(symbol="SPX", sec_type="IND")],
+            option_quotes_num_expirations=1,
+            option_quotes_ibkr_dte_list=[0],
+        )
+        svc = OptionQuoteStreamingService(cfg, provider=provider)
+        svc._greeks_interval = 0.0
+        svc._last_greeks_fetch = 0.0
+
+        import app.services.option_quote_streaming as oqs_mod
+        with patch("app.services.market_data.get_quote", new_callable=AsyncMock, return_value=mock_quote), \
+             patch("app.services.market_data._is_market_active", return_value=True), \
+             patch.object(oqs_mod, "date") as mock_date:
+            mock_date.today.return_value = date(2026, 5, 5)
+            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+            await svc._run_one_cycle()
+
+        provider._prune_out_of_range_option_subs.assert_called_once()
+        call_args = provider._prune_out_of_range_option_subs.call_args
+        # First arg is symbol_price_map (dict), second is range_pct (float)
+        assert isinstance(call_args[0][0], dict)
+        assert isinstance(call_args[0][1], float)
+
     def test_stats_include_error_split_counters(self):
         """stats dict exposes errors_broker and errors_publish alongside errors total."""
         from app.services.option_quote_streaming import OptionQuoteStreamingService
