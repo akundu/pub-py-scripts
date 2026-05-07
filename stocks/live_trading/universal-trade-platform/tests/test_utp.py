@@ -18432,7 +18432,7 @@ class TestReadTimeMerge:
         assert stats["csv_cache"]["entries"] == 1
         assert stats["csv_cache"]["total_quotes"] == 2
         assert stats["merge_config"]["ibkr_max_age_sec"] == 90.0
-        assert stats["merge_config"]["csv_max_age_market_sec"] == 900.0
+        assert stats["merge_config"]["csv_max_age_market_sec"] == 300.0
         assert stats["merge_config"]["premarket_minutes"] == 10
         assert stats["merge_config"]["postmarket_minutes"] == 10
         # Backwards-compat alias still present
@@ -18727,7 +18727,7 @@ class TestIbkrFetchParallel:
             option_quotes_ibkr_dte_list = None
             option_quotes_csv_dte_max = 10
             option_quotes_ibkr_max_age_sec = 90.0
-            option_quotes_csv_max_age_market_sec = 900.0
+            option_quotes_csv_max_age_market_sec = 300.0
             option_quotes_premarket_minutes = 10
             option_quotes_postmarket_minutes = 10
             option_quotes_csv_primary = True

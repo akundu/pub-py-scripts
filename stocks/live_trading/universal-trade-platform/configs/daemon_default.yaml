@@ -226,7 +226,7 @@ option_quotes_ibkr_max_age_sec: 90
 # drop the row instead of returning stale data.  Outside market hours, CSV
 # is served regardless of age (live data isn't being produced).  Set 0 to
 # disable the gate.
-option_quotes_csv_max_age_market_sec: 900   # 15 min
+option_quotes_csv_max_age_market_sec: 300   # 5 min
 
 # ── Pre/post-market window ───────────────────────────────────────────────
 # How many minutes before regular open and after regular close to keep the

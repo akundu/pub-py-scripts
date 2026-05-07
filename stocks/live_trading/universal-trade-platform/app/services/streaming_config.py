@@ -171,7 +171,7 @@ class StreamingConfig:
     # the row so callers don't trade on minutes-old data.  Outside market
     # hours, CSV is served regardless of age (live data isn't being produced
     # anyway).  Set to 0 to disable the gate.
-    option_quotes_csv_max_age_market_sec: float = 900.0   # 15 min
+    option_quotes_csv_max_age_market_sec: float = 300.0   # 5 min
 
     # ── Pre/post-market window ───────────────────────────────────────────────
     # Extend the "market is active" window so the streamer fetches IBKR data
