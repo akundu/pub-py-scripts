@@ -1775,6 +1775,56 @@ class TestPortfolioDbServerFallback:
         await _lds._enrich_with_quotes_and_breach(positions, ibkr_provider=None)
         assert positions[0]["current_price"] == 5300.0
 
+    def test_filter_expired_removes_past_expiration_when_market_closed(self, monkeypatch):
+        """multi_leg positions with expiration ≤ today are filtered when market is closed."""
+        import datetime
+        from app.services import live_data_service as _lds
+        import app.services.market_data as _md
+        monkeypatch.setattr(_md, "_is_market_active", lambda: False)
+        today = datetime.date.today().isoformat()
+        yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
+        tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).isoformat()
+
+        positions = [
+            {"order_type": "multi_leg", "expiration": today, "symbol": "SPX"},
+            {"order_type": "multi_leg", "expiration": yesterday, "symbol": "NDX"},
+            {"order_type": "multi_leg", "expiration": tomorrow, "symbol": "RUT"},
+            {"order_type": "equity", "expiration": None, "symbol": "GBTC"},
+        ]
+        result = _lds._filter_expired_option_positions(positions)
+        symbols = [p["symbol"] for p in result]
+        assert "SPX" not in symbols   # today — expired
+        assert "NDX" not in symbols   # yesterday — expired
+        assert "RUT" in symbols       # tomorrow — still active
+        assert "GBTC" in symbols      # equity — always kept
+
+    def test_filter_expired_keeps_all_when_market_open(self, monkeypatch):
+        """No positions are filtered during market hours (0DTE still live)."""
+        import datetime
+        from app.services import live_data_service as _lds
+        import app.services.market_data as _md
+        monkeypatch.setattr(_md, "_is_market_active", lambda: True)
+        today = datetime.date.today().isoformat()
+
+        positions = [
+            {"order_type": "multi_leg", "expiration": today, "symbol": "SPX"},
+            {"order_type": "multi_leg", "expiration": today, "symbol": "NDX"},
+        ]
+        result = _lds._filter_expired_option_positions(positions)
+        assert len(result) == 2  # all kept during market hours
+
+    def test_filter_expired_handles_yyyymmdd_format(self, monkeypatch):
+        """YYYYMMDD expiration format is normalized and filtered correctly."""
+        import datetime
+        from app.services import live_data_service as _lds
+        import app.services.market_data as _md
+        monkeypatch.setattr(_md, "_is_market_active", lambda: False)
+        today_compact = datetime.date.today().strftime("%Y%m%d")
+
+        positions = [{"order_type": "multi_leg", "expiration": today_compact, "symbol": "SPX"}]
+        result = _lds._filter_expired_option_positions(positions)
+        assert len(result) == 0  # filtered out
+
     @pytest.mark.asyncio
     async def test_enrich_skips_db_server_when_price_already_set(self, monkeypatch):
         """_enrich_with_quotes_and_breach skips db_server call when current_price already set."""

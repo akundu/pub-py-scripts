@@ -667,6 +667,37 @@ async def _fetch_prices_from_db_server(tickers: list[str]) -> dict[str, float]:
     return result
 
 
+def _filter_expired_option_positions(positions: list[dict]) -> list[dict]:
+    """Remove multi_leg/option positions whose expiration has already passed.
+
+    Only active when market is closed — during trading hours today's 0DTE
+    positions are still live and must remain visible.
+
+    Handles both YYYY-MM-DD and YYYYMMDD expiration formats.
+    """
+    from datetime import date
+    from app.services.market_data import _is_market_active
+    if _is_market_active():
+        return positions
+
+    today = date.today().isoformat()
+
+    def _iso(exp: str) -> str:
+        exp = exp.strip()
+        if len(exp) == 8 and exp.isdigit():
+            return f"{exp[:4]}-{exp[4:6]}-{exp[6:8]}"
+        return exp
+
+    result = []
+    for p in positions:
+        if p.get("order_type") in ("multi_leg", "option"):
+            exp = _iso(p.get("expiration") or "")
+            if exp and exp <= today:
+                continue  # expired — omit from active view
+        result.append(p)
+    return result
+
+
 def _prefill_prices_from_portfolio(positions: list[dict], portfolio_items: list[dict]) -> None:
     """Pre-populate current_price on positions using IBKR portfolio item prices.
 
@@ -919,6 +950,9 @@ class LiveDataService:
 
         # Group option positions into spreads for display
         grouped = _group_options_into_spreads(raw_positions)
+
+        # Drop already-expired option positions from the active view (market closed)
+        grouped = _filter_expired_option_positions(grouped)
 
         # Compute spread metrics (width, credit, ROI, max_loss) for each multi-leg position
         _compute_spread_metrics(grouped)
