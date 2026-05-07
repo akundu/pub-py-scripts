@@ -2,93 +2,106 @@
 
 ## Overview
 
-The roll management system monitors open credit spread positions for breach risk and generates actionable roll suggestions. When the underlying price approaches a short strike, the system can suggest two types of defensive rolls:
+The roll management system monitors open credit spread positions for breach risk and generates actionable roll suggestions. When the underlying price approaches a short strike, the system suggests two types of defensive rolls:
 
-- **Mirror Roll**: Open an opposite-side spread on the same expiration to offset potential losses
-- **Forward Roll**: Move the same-side spread to a further DTE with adjusted strikes
+- **Forward Roll**: Close the current spread (or a partial quantity) and open the same-type spread at a further DTE with adjusted strikes
+- **Mirror Roll**: Keep the original spread and open an opposite-side spread at the current price to hedge
 
-The system runs as a background service within the UTP daemon, scanning positions every 30 seconds during market hours. Suggestions are generated automatically but require manual confirmation by default (auto-execution is opt-in).
+The system runs as a background service within the UTP daemon, scanning positions every 30 seconds during market hours. Suggestions are generated automatically but require manual confirmation by default (`auto_execute: false`). Manual force-build commands work on any position regardless of severity.
+
+---
 
 ## Roll Strategies
 
 ### Mirror Roll
 
-A mirror roll hedges a threatened credit spread by opening a spread on the opposite side of the market. If a put credit spread is at risk (price falling toward the short put strike), the system suggests selling a call credit spread at the current price level.
+Hedges a threatened credit spread by opening a spread on the opposite side. If a put credit spread is at risk, the system opens a call spread at the current price level.
 
 **When it triggers:**
 - Only on expiration day (0DTE)
-- Only within the configured time window (default: 18:00-20:00 UTC / 11am-1pm PST)
-- When breach severity meets the trigger threshold (default: `warning` = price within 1%)
+- Only within the configured time window (default: 18:00–20:00 UTC / 11am–1pm PST)
+- When breach severity meets `mirror_trigger_severity` (default: `warning` = within 1%)
 
 **How it works:**
 1. Detect the threatened side (PUT or CALL)
-2. Choose the opposite type (PUT threatened -> sell CALL spread)
+2. Choose the opposite type (PUT threatened → sell CALL spread)
 3. Place short strike near current price (rounded to nearest 5 for indices)
-4. Use same width as the original spread
-5. Cap new max loss at configured percentage of original (default: 100%)
+4. Use `forward_default_width` config or same width as original spread
+5. Use `forward_default_quantity` config or same quantity as original spread
+6. Cap new max loss at `mirror_max_cost_pct` of original (default: 100%)
 
-**Risk profile:**
-- Does not close the original position
-- Adds a new position that profits if price reverses or stays range-bound
-- Total max loss = original max loss + mirror max loss (if both go ITM)
-- Best case: price reverses, original expires OTM, mirror earns full credit
-
-**Example scenario:**
+**Example:**
 ```
 Original: SELL SPX 5600/5575 PUT spread, price drops to 5605 (critical)
 Mirror:   SELL SPX 5605/5630 CALL spread (same width 25, same expiration)
-Result:   Hedged on both sides. If SPX stays between 5600-5605, both expire OTM.
 ```
 
 ### Forward Roll
 
-A forward roll closes (or plans to close) the current spread and opens the same type of spread at a further DTE with strikes adjusted to be more OTM from the current price.
+Closes (or partially closes) the current spread and opens the same type at a further DTE with strikes adjusted to be more OTM.
 
 **When it triggers:**
 - At any DTE (not limited to expiration day)
-- When breach severity meets the trigger threshold (default: `watch` = price within 2%)
+- When breach severity meets `forward_trigger_severity` (default: `watch` = within 2%)
 
 **How it works:**
-1. Keep the same option type (PUT stays PUT)
-2. Select a target DTE (default: minimum 1 day out)
-3. Place short strike further OTM from current price (at least 1% OTM)
-4. Use same width as original
-5. Skip weekends when computing target expiration
+1. Keep the same option type
+2. Target DTE determined by `forward_min_dte` / `forward_max_dte` config, or per-execute `--dte` override
+3. Short strike placed by `forward_default_otm_pct` config (or breach-distance heuristic if unset)
+4. Width from `forward_default_width` config, or same as original
+5. Quantity from `forward_default_quantity` config, or match close quantity
+6. Close quantity from `forward_partial_close_pct` (e.g. 50% → close half, roll half)
 
-**Width expansion:**
-The `forward_max_width_multiplier` (default: 2.0x) allows the new spread to be wider than the original if needed for credit-neutral sizing. Phase 2 will use live option quotes to determine if width expansion is necessary.
-
-**Credit-neutral targeting:**
-The goal is to collect enough credit from the new spread to cover the cost of closing the old one. Phase 2 will compute actual close costs and new spread credits from live option quotes.
-
-**Example scenario:**
+**Example:**
 ```
 Original: SELL RUT 2600/2580 PUT spread, price at 2640 (watch, 1.5% from short)
-Forward:  SELL RUT 2610/2590 PUT spread, exp +2 days (1.2% OTM from 2640)
-Result:   More time for price to recover, strikes adjusted further OTM.
+Forward:  SELL RUT 2610/2590 PUT spread, DTE+2 (1.2% OTM from 2640)
 ```
+
+---
 
 ## Configuration
 
-All configuration is via the `RollConfig` dataclass. Parameters can be set at initialization or updated at runtime via the CLI or REST API.
+All parameters live in `RollConfig`. Update at runtime via `roll config` CLI or `POST /roll/config`.
+
+### Core Parameters
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `check_interval` | `30.0` | Seconds between background scans |
-| `mirror_enabled` | `true` | Enable mirror roll suggestions |
-| `mirror_trigger_severity` | `warning` | Minimum severity for mirror rolls (`breached`, `critical`, `warning`, `watch`) |
-| `mirror_time_window_utc` | `["18:00", "20:00"]` | UTC time window for mirror suggestions (11am-1pm PST) |
-| `mirror_max_cost_pct` | `1.0` | Max new position cost as fraction of original max loss (1.0 = 100%) |
+| `auto_execute` | `false` | Auto-execute suggestions without manual confirm |
 | `forward_enabled` | `true` | Enable forward roll suggestions |
 | `forward_trigger_severity` | `watch` | Minimum severity for forward rolls |
-| `forward_min_dte` | `1` | Minimum DTE for forward roll target |
-| `forward_max_dte` | `5` | Maximum DTE for forward roll target |
-| `forward_max_width_multiplier` | `2.0` | Max width expansion factor for credit-neutral sizing |
-| `auto_execute` | `false` | Auto-execute suggestions (requires explicit opt-in) |
+| `forward_min_dte` | `1` | Minimum target DTE for forward rolls |
+| `forward_max_dte` | `5` | Maximum target DTE for forward rolls |
+| `forward_max_width_multiplier` | `2.0` | Max width expansion factor |
+| `mirror_enabled` | `true` | Enable mirror roll suggestions |
+| `mirror_trigger_severity` | `warning` | Minimum severity for mirror rolls |
+| `mirror_time_window_utc` | `["18:00","20:00"]` | UTC window for mirror suggestions |
+| `mirror_max_cost_pct` | `1.0` | Max mirror cost as fraction of original max loss |
+
+### Forward Defaults (applied to every forward/mirror suggestion)
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `forward_default_otm_pct` | `null` | OTM% for new short strike (e.g. `1.5` = 1.5% OTM). If null, uses breach-distance heuristic |
+| `forward_default_width` | `null` | Spread width for new position. If null, copies original width |
+| `forward_default_quantity` | `null` | Contracts to open. If null, matches close quantity |
+| `forward_partial_close_pct` | `100.0` | % of original quantity to close (e.g. `50.0` = close half) |
+
+### Notification Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `notify_on_severity` | `["warning","critical","breached"]` | Severity levels that trigger an alert |
+| `notify_channel` | `"email"` | Delivery channel: `"email"`, `"sms"`, or `"both"` |
+| `notify_cooldown_minutes` | `15` | Minimum minutes between alerts for the same position |
+
+**Escalation bypass**: If severity increases (e.g. `warning` → `critical`), the notification fires immediately regardless of cooldown.
+
+**Notification backend**: Posts to `settings.notify_url/api/notify` (default `http://localhost:9102`). Same backend as trade fill alerts. See the Notification Service section in the parent CLAUDE.md.
 
 ### Severity Levels
-
-The severity is computed from the distance between the current price and the short strike:
 
 | Severity | Distance | Meaning |
 |----------|----------|---------|
@@ -96,77 +109,136 @@ The severity is computed from the distance between the current price and the sho
 | `critical` | < 0.5% | Very close to breach |
 | `warning` | < 1.0% | Approaching danger zone |
 | `watch` | < 2.0% | Should monitor closely |
-| `safe` | >= 2.0% | No immediate concern |
+| `safe` | ≥ 2.0% | No immediate concern |
+
+---
 
 ## CLI Commands
 
 ### View Suggestions
 
 ```bash
-# Show pending roll suggestions (triggers a scan first in direct mode)
-python utp.py roll suggestions
-python utp.py roll sg              # alias
-python utp.py rl suggest           # alias
+python utp.py roll suggestions       # show pending suggestions (scans first in direct mode)
+python utp.py roll sg                # alias
 ```
 
-Output:
+Output example:
 ```
   Roll Suggestions
-  ======================================================================
-
-  ID       Sym   Type     Severity   Dist    Action                                    Est Credit  Close Cost  Net
-  ──────── ───── ──────── ───────── ─────── ──────────────────────────────────────────  ─────────── ─────────── ───────────
-  abc12345 SPX   mirror   warning    0.87%  SELL CALL 5605/5630 exp 04-14                     ---         ---         ---
-  def45678 RUT   forward  watch      1.50%  SELL PUT 2610/2590 exp 04-16                      ---         ---         ---
+  ─────────────────────────────────────────────────────────────────────────────────
+  ID       Sym   Type     Severity   Dist    Action                         Est Credit  Close Cost  Net
+  ──────── ───── ──────── ───────── ─────── ───────────────────────────────  ─────────── ─────────── ───────────
+  abc12345 SPX   forward  watch      1.50%  SELL PUT 5560/5535 exp 05-09     $2.40       $1.80       $0.60 ✓
+  def45678 RUT   mirror   warning    0.87%  SELL CALL 2480/2500 exp 05-07    $1.20         ---         ---
 ```
 
-### Execute a Roll
+`✓` in the Net column means `covers_close: true` — the new position's estimated credit covers the close cost.
+
+### Execute a Suggestion (with optional overrides)
 
 ```bash
-# Preview a roll suggestion (shows details without executing)
+# Preview (default — shows details without executing)
 python utp.py roll execute abc123
-python utp.py roll ex abc123       # alias
 
-# Execute after confirming the preview
+# Execute
 python utp.py roll execute abc123 --confirm
+
+# Override DTE, strike placement, width, quantity
+python utp.py roll execute abc123 --dte 2 --otm-pct 1.5 --width 30 --quantity 10 --confirm
+
+# Partial close: close 5 contracts, roll 5
+python utp.py roll execute abc123 --close-quantity 5 --confirm
 ```
 
-### Manual Forward/Mirror Roll
+### Manual Force-Build (any position, any severity)
 
 ```bash
-# Forward roll: close current + open new at further DTE
-python utp.py roll forward <position-id>            # preview
-python utp.py roll forward <position-id> --confirm  # execute
+# Forward roll — works even if position is "safe"
+python utp.py roll forward <position-id>                    # preview
+python utp.py roll forward <position-id> --confirm          # execute
 
-# Mirror roll: open opposite-side spread (keep original)
-python utp.py roll mirror <position-id>             # preview
-python utp.py roll mirror <position-id> --confirm   # execute
+# With overrides
+python utp.py roll forward <position-id> --dte 3 --otm-pct 2.0 --confirm
+python utp.py roll forward <position-id> --close-quantity 5 --confirm
+
+# Mirror roll
+python utp.py roll mirror <position-id>                     # preview
+python utp.py roll mirror <position-id> --confirm           # execute
+python utp.py roll mirror <position-id> --otm-pct 0.5 --width 25 --quantity 10 --confirm
 ```
 
 ### Dismiss a Suggestion
 
 ```bash
-# Dismiss (reject) a roll suggestion
 python utp.py roll dismiss abc123
-python utp.py roll dm abc123       # alias
+python utp.py roll dm abc123
 ```
 
-### View/Update Configuration
+### View / Update Configuration
 
 ```bash
 # View current configuration
 python utp.py roll config
 
-# Update trigger levels
-python utp.py roll config --mirror-trigger critical
+# Set forward defaults
+python utp.py roll config --forward-otm-pct 1.5
+python utp.py roll config --forward-width 25
+python utp.py roll config --forward-quantity 10
+python utp.py roll config --forward-partial-close-pct 50
+
+# Change trigger levels
 python utp.py roll config --forward-trigger warning
+python utp.py roll config --mirror-trigger critical
 
-# Enable auto-execution
+# Notifications
+python utp.py roll config --notify-severity warning,critical,breached
+python utp.py roll config --notify-channel both
+python utp.py roll config --notify-cooldown 30
+
+# Auto-execution
 python utp.py roll config --auto-execute
-
-# Disable auto-execution
 python utp.py roll config --no-auto-execute
 ```
+
+---
+
+## Per-Execute Overrides
+
+Every roll command accepts override flags that apply **for that execution only** (not persisted to config).
+
+| Flag | Applies to | Effect |
+|------|-----------|--------|
+| `--dte N` | `execute`, `forward` | Target DTE for new position |
+| `--otm-pct N` | `execute`, `forward`, `mirror` | Short strike OTM% from current price |
+| `--width N` | `execute`, `forward`, `mirror` | Spread width (long strike = short ± width) |
+| `--quantity N` | `execute`, `forward`, `mirror` | Contracts to open in new position |
+| `--close-quantity N` | `execute`, `forward` | Contracts to close from original (partial roll) |
+
+**Partial roll example:**
+```bash
+# Position has 20 contracts. Close 10, roll 10.
+python utp.py roll forward pos-abc123 --close-quantity 10 --confirm
+# → closes 10 contracts of original; opens 10 contracts at DTE+N
+```
+
+If `--close-quantity < total_quantity`, the original position is reduced (not fully closed). The new spread opens `new_quantity = close_quantity` contracts unless `--quantity` is also specified.
+
+---
+
+## Credit Estimates
+
+Suggestions are populated with live option quote data (from the streaming cache or IBKR):
+
+| Field | Meaning |
+|-------|---------|
+| `estimated_credit` | Expected credit from new position: `short_bid - long_ask` |
+| `estimated_close_cost` | Expected cost to close current position: `short_ask - long_bid` |
+| `net_cost` | `estimated_credit - estimated_close_cost` (positive = net credit) |
+| `covers_close` | `true` if new credit ≥ close cost |
+
+These are estimates only — actual fills may differ. Both values default to `0.0` if quotes are unavailable (e.g. outside market hours).
+
+---
 
 ## API Endpoints
 
@@ -174,49 +246,60 @@ python utp.py roll config --no-auto-execute
 
 Returns all pending roll suggestions.
 
-**Response:**
 ```json
 [
   {
     "suggestion_id": "abc12345",
     "position_id": "pos-1",
     "symbol": "SPX",
-    "roll_type": "mirror",
-    "severity": "warning",
-    "distance_pct": 0.87,
+    "roll_type": "forward",
+    "severity": "watch",
+    "distance_pct": 1.50,
     "current_short_strike": 5600,
     "current_long_strike": 5575,
     "current_option_type": "PUT",
-    "current_expiration": "20260414",
-    "current_quantity": 1,
-    "current_max_loss": 2500,
-    "new_short_strike": 5605,
-    "new_long_strike": 5630,
-    "new_option_type": "CALL",
-    "new_expiration": "20260414",
+    "current_expiration": "20260509",
+    "current_quantity": 10,
+    "close_quantity": 5,
+    "current_max_loss": 25000,
+    "new_short_strike": 5560,
+    "new_long_strike": 5535,
+    "new_option_type": "PUT",
+    "new_expiration": "20260512",
     "new_width": 25,
-    "estimated_credit": 0,
-    "estimated_close_cost": 0,
-    "net_cost": 0,
-    "new_max_loss": 2500,
-    "covers_close": false,
-    "created_at": "2026-04-14T18:30:00+00:00",
+    "new_quantity": 5,
+    "estimated_credit": 2.40,
+    "estimated_close_cost": 1.80,
+    "net_cost": 0.60,
+    "new_max_loss": 12500,
+    "covers_close": true,
+    "created_at": "2026-05-07T18:30:00+00:00",
     "status": "pending",
-    "reason": "PUT spread warning (0.9% from short 5600), mirror with CALL 5605/5630"
+    "reason": "PUT spread watch (1.5% from short 5600), roll to DTE2 5560/5535"
   }
 ]
 ```
 
 ### POST /roll/execute/{suggestion_id}
 
-Execute a roll suggestion. Set `X-Dry-Run: true` header to preview without executing.
+Execute a suggestion. Optional body keys override for this execution only.
 
-**Headers:**
-- `X-Dry-Run: true` (optional) -- return suggestion details without executing
+**Headers:** `X-Dry-Run: true` — preview without executing
+
+**Body (all optional):**
+```json
+{
+  "dte": 2,
+  "otm_pct": 1.5,
+  "width": 30,
+  "quantity": 10,
+  "close_quantity": 5
+}
+```
 
 **Dry-run response:**
 ```json
-{"status": "dry_run", "suggestion": { ... }}
+{"status": "dry_run", "suggestion": { ...suggestion with overrides applied... }}
 ```
 
 **Execution response (forward):**
@@ -238,51 +321,61 @@ Execute a roll suggestion. Set `X-Dry-Run: true` header to preview without execu
 }
 ```
 
-**Error response (400):**
+### POST /roll/forward/{position_id}
+
+Force-build a forward roll suggestion for any open position (bypasses severity threshold).
+
+**Body:**
 ```json
-{"detail": "Failed to close: ..."}
+{
+  "confirm": false,
+  "dte": 2,
+  "otm_pct": 1.5,
+  "width": 25,
+  "quantity": 10,
+  "close_quantity": 5
+}
 ```
+
+- `confirm: false` (default) → returns preview
+- `confirm: true` → builds suggestion and immediately executes
+
+**Preview response:**
+```json
+{"status": "preview", "suggestion": { ...suggestion dict... }}
+```
+
+**Execution response:** Same as `POST /roll/execute/{id}`.
+
+### POST /roll/mirror/{position_id}
+
+Force-build a mirror roll suggestion. Same body schema as `/roll/forward` (except `dte` and `close_quantity` are not applicable to mirrors).
 
 ### POST /roll/dismiss/{suggestion_id}
 
-Dismiss a pending suggestion.
-
-**Response:**
 ```json
 {"status": "dismissed", "suggestion_id": "abc12345"}
 ```
 
 ### GET /roll/config
 
-Return current roll configuration.
-
-**Response:**
-```json
-{
-  "check_interval": 30.0,
-  "mirror_enabled": true,
-  "mirror_trigger_severity": "warning",
-  "mirror_time_window_utc": ["18:00", "20:00"],
-  "mirror_max_cost_pct": 1.0,
-  "forward_enabled": true,
-  "forward_trigger_severity": "watch",
-  "forward_min_dte": 1,
-  "forward_max_dte": 5,
-  "forward_max_width_multiplier": 2.0,
-  "auto_execute": false
-}
-```
+Returns current `RollConfig` as JSON (all fields).
 
 ### POST /roll/config
 
-Update roll configuration (partial updates accepted).
+Partial update — send only the fields you want to change.
 
-**Request body:**
 ```json
-{"mirror_trigger_severity": "critical", "auto_execute": true}
+{
+  "forward_default_otm_pct": 1.5,
+  "forward_partial_close_pct": 50.0,
+  "notify_on_severity": ["critical", "breached"],
+  "notify_channel": "both",
+  "notify_cooldown_minutes": 30
+}
 ```
 
-**Response:** Updated full configuration (same schema as GET).
+---
 
 ## Architecture
 
@@ -294,192 +387,130 @@ Background scan loop (every 30s, market hours only)
     ▼
 RollService.scan_positions()
     │
-    ├── Get open positions from PositionStore
-    ├── Filter to multi-leg (credit spread) positions
+    ├── Get open positions (multi_leg order_type only)
     ├── For each position:
-    │   ├── Get current price via market_data.get_quote()
-    │   ├── Calculate breach status (severity, distance)
-    │   ├── Check mirror eligibility (exp day + time window + severity)
-    │   ├── Check forward eligibility (severity threshold)
-    │   └── Generate RollSuggestion
-    ├── Expire old suggestions (> 5 min TTL)
-    └── Return new suggestions
-         │
-         ▼
-    CLI / REST API
-    ├── GET /roll/suggestions  →  Display table
-    ├── POST /roll/execute     →  Phase 2 (not implemented)
-    └── POST /roll/dismiss     →  Mark as rejected
+    │   ├── get_quote() → current price
+    │   ├── _calc_breach_status() → severity, distance_pct
+    │   ├── _fire_breach_notification() → httpx POST if severity in notify_on_severity
+    │   ├── check mirror eligibility (exp day + time window + severity)
+    │   └── check forward eligibility (severity threshold)
+    │       └── _build_forward/mirror_suggestion() → async, fetches option quotes
+    │           └── _estimate_open_credit(), _estimate_close_cost()
+    └── Expire old suggestions (> 5 min TTL)
+
+Manual force-build (any position, any severity):
+    build_manual_forward(position_id, overrides) → RollSuggestion | None
+    build_manual_mirror(position_id, overrides)  → RollSuggestion | None
+        │
+        └── _apply_overrides(suggestion, overrides, current_price)
+               recomputes expiration, strikes, width, quantity as needed
 ```
 
 ### Module Layout
 
 | File | Purpose |
 |------|---------|
-| `app/services/roll_service.py` | Core service: `RollConfig`, `RollSuggestion`, `RollService`, execution helpers, module accessors |
-| `app/routes/roll.py` | REST endpoints: suggestions, execute (with dry-run), dismiss, config |
-| `app/main.py` | Registration: router, service init, background loop, teardown |
-| `utp.py` | CLI: `roll` subcommand with `suggestions`, `execute`, `dismiss`, `forward`, `mirror`, `config` actions |
-| `utp_voice.py` | Voice UI proxy endpoints: `/api/roll/suggestions`, `/api/roll/execute`, `/api/roll/dismiss` |
-| `templates/utp_voice.html` | Voice UI: roll badges in portfolio, roll modal with execute/dismiss buttons |
+| `app/services/roll_service.py` | Core: `RollConfig`, `RollSuggestion`, `RollService`, credit estimates, notifications, overrides, force-build |
+| `app/routes/roll.py` | REST endpoints: suggestions, execute (with dry-run + body overrides), dismiss, forward/{id}, mirror/{id}, config |
+| `app/main.py` | Daemon registration: router, service init, background loop, teardown |
+| `utp.py` | CLI: `roll` subcommand with all actions + argparse flags |
 
 ### Singleton Pattern
-
-The roll service follows the standard UTP singleton pattern:
 
 ```python
 from app.services.roll_service import init_roll_service, get_roll_service, reset_roll_service
 
-# Initialize (done in main.py lifespan)
-svc = init_roll_service(RollConfig(check_interval=15))
-
-# Access from anywhere
+svc = init_roll_service(RollConfig(check_interval=15, forward_default_otm_pct=1.5))
 svc = get_roll_service()
-if svc:
-    suggestions = svc.get_suggestions()
-
-# Teardown
 reset_roll_service()
 ```
 
+---
+
 ## Risk Considerations
+
+### Partial Rolls
+
+Use `--close-quantity N` to close only part of a large position and roll that partial quantity. The original position is reduced (not fully closed). Useful for scaling out gradually instead of moving an entire position at once.
 
 ### Max Loss Caps
 
-Mirror rolls are capped by `mirror_max_cost_pct` (default 100%) of the original position's max loss. This prevents the mirror from creating more risk than the original position.
+Mirror rolls are capped by `mirror_max_cost_pct` (default 100%) of the original's max loss.
 
 ### Auto-Execute Safety
 
-Auto-execution is disabled by default (`auto_execute: false`). Even when enabled, Phase 1 only generates suggestions. Phase 2 will add actual execution with confirmation safeguards.
+`auto_execute: false` by default. Even when enabled, only suggestions that pass the severity threshold trigger automatic execution.
 
 ### Market Hours Only
 
-The background scan loop only runs during market hours (13:30-20:00 UTC, Mon-Fri). No scans or suggestions are generated outside trading hours.
+Background scan only runs during market hours (13:30–20:00 UTC, Mon–Fri).
 
 ### Suggestion TTL
 
-Suggestions automatically expire after 5 minutes. Stale suggestions from previous scans do not accumulate. Each scan generates fresh suggestions based on current market conditions.
+Suggestions expire after 5 minutes. Each scan position gets at most one pending suggestion per roll type.
 
-### No Duplicate Suggestions
+### Failed Partial Close
 
-The scan skips positions that already have a pending suggestion, preventing suggestion spam for the same position.
+If close succeeds but open fails, the suggestion is marked `partial` and the error response includes `close_result`. The original position has already been reduced at that point — open the new spread manually using `trade credit-spread`.
 
-## Execution Flow (Phase 2)
-
-Roll execution is implemented via `RollService.execute_roll()` which delegates to the UTP trade infrastructure.
-
-### Forward Roll Execution
-
-1. **Close current position**: Build closing legs (reverse SELL/BUY actions), submit as MARKET multi-leg order via `execute_trade()`. The `closing_position_id` is set so the position store marks it closed.
-2. **Wait for fill**: The trade service handles order polling and fill tracking.
-3. **Open new spread**: Build new legs with the suggested strikes and expiration, submit as MARKET multi-leg order.
-4. **Verify**: Both orders must succeed. If the close succeeds but the open fails, the suggestion is marked as `partial` and an error is returned with the close result for manual recovery.
-
-### Mirror Roll Execution
-
-1. **Open new spread only**: The original position is kept. A new opposite-side spread is opened at the suggested strikes.
-2. No close is needed since mirror rolls are additive hedges.
-
-### Dry-Run Mode
-
-Set `X-Dry-Run: true` header on `POST /roll/execute/{id}` to preview the suggestion details without executing. The CLI shows a preview by default and requires `--confirm` to execute.
-
-### Manual Rolls
-
-Use `roll forward <position-id>` or `roll mirror <position-id>` to manually trigger a roll for a specific position:
-
-```bash
-# Preview a forward roll for a position
-python utp.py roll forward pos-abc123
-
-# Execute it
-python utp.py roll forward pos-abc123 --confirm
-
-# Mirror roll
-python utp.py roll mirror pos-abc123 --confirm
-```
-
-These commands trigger a fresh scan, find the matching suggestion, show a preview, and execute on `--confirm`.
-
-## Voice UI Integration (Phase 3)
-
-The voice UI (`utp_voice.py` / `templates/utp_voice.html`) provides roll management through the portfolio view:
-
-### Roll Badges
-
-When a position has a pending roll suggestion, a yellow "Roll" badge appears in the Risk column of the portfolio table. The badge is clickable.
-
-### Roll Modal
-
-Clicking the Roll badge opens a modal showing:
-- Current position details (type, strikes, expiration, quantity)
-- Suggested roll (mirror or forward, new strikes, new expiration)
-- Execution plan (close+open for forward, open-only for mirror)
-- Execute / Dismiss / Cancel buttons
-
-### Proxy Endpoints
-
-The voice UI proxies roll requests through the daemon:
-- `GET /api/roll/suggestions` -- fetch pending suggestions
-- `POST /api/roll/execute/{id}` -- execute a suggestion
-- `POST /api/roll/dismiss/{id}` -- dismiss a suggestion
-
-Roll suggestions are fetched in parallel with portfolio data on each portfolio load.
-
-## Troubleshooting
-
-### No suggestions generated
-
-- **Position not multi-leg**: Only `multi_leg` order types (credit spreads) are scanned
-- **Severity too low**: Check `forward_trigger_severity` and `mirror_trigger_severity` in config
-- **Not expiration day**: Mirror rolls only trigger on expiration day
-- **Outside time window**: Mirror rolls only trigger within `mirror_time_window_utc`
-- **Already has suggestion**: Each position gets at most one pending suggestion per type
-
-### Expired suggestions
-
-Suggestions expire after 5 minutes. Run `roll suggestions` to trigger a fresh scan.
-
-### Failed close in forward roll
-
-If the close succeeds but the open fails, the result includes `close_result` for reference. The original position is already closed at this point. Manually open the intended spread or investigate the error.
-
-### No quotes available
-
-If `get_quote()` fails for a symbol, that position is skipped silently. Check that the daemon has a working IBKR connection or streaming data.
+---
 
 ## Examples
 
-### Scenario 1: Mirror Roll on 0DTE SPX Put Spread
+### Example 1: Automatic forward roll notification
 
 ```
-Setup:
-  Position: SELL SPX 5600/5575 PUT spread (25-wide), 1 contract
-  Max loss: $2,500 per contract
-  Current price: $5,605 (0.09% from short strike)
-  Severity: critical
-  Time: 11:30am PST (18:30 UTC), expiration day
+Position: SELL RUT 2460/2440 PUT spread, 20 contracts
+Current price: 2485 (1.0% from short → warning severity)
+notify_on_severity includes "warning" → alert fires via email
 
-Suggestion:
-  Type: mirror
-  Action: SELL SPX 5605/5630 CALL spread
-  Width: 25 (same as original)
-  New max loss: $2,500
-  Reason: PUT spread critical (0.1% from short 5600), mirror with CALL 5605/5630
+User receives:
+  [UTP-ALERT] Roll Alert: RUT PUT 2460/2440 (warning, 1.0% from short 2460)
 ```
 
-### Scenario 2: Forward Roll on RUT Put Spread
+### Example 2: Execute with partial close
 
-```
-Setup:
-  Position: SELL RUT 2600/2580 PUT spread (20-wide), 5 contracts
-  Max loss: $10,000
-  Current price: $2,635 (1.3% from short strike)
-  Severity: watch
+```bash
+# Auto-generated suggestion abc123 covers a 20-contract position
+# Only close/roll 10 contracts
 
-Suggestion:
-  Type: forward
-  Action: SELL RUT 2610/2590 PUT spread, DTE+1
-  Width: 20 (same as original)
-  Reason: PUT spread watch (1.3% from short 2600), roll to DTE1 2610/2590
+python utp.py roll execute abc123 --close-quantity 10 --confirm
+# → closes 10 of 20 contracts in original
+# → opens new 10-contract spread at DTE+N
+# → original position now has 10 contracts remaining
 ```
+
+### Example 3: Manual forward roll on safe position
+
+```bash
+# Position is "safe" (>2% OTM) but you want to roll early for better credit
+
+python utp.py roll forward pos-abc123 --dte 3 --otm-pct 2.0 --confirm
+# Force-builds forward suggestion, places short strike 2% OTM
+# Executes immediately: close current + open DTE+3
+```
+
+### Example 4: Tighten config defaults for a high-IV day
+
+```bash
+python utp.py roll config \
+  --forward-otm-pct 2.5 \
+  --forward-partial-close-pct 50 \
+  --notify-severity critical,breached \
+  --notify-cooldown 5
+# Only roll half the contracts, place at 2.5% OTM, alert only at critical+
+```
+
+---
+
+## Troubleshooting
+
+| Symptom | Check |
+|---------|-------|
+| No suggestions generated | Position must be `multi_leg` order_type; severity must meet trigger threshold |
+| Mirror not triggering | Mirror only runs on expiration day, within `mirror_time_window_utc` |
+| No notifications | Verify `notify_on_severity` includes the current severity; check `notify_url` is reachable |
+| Duplicate notification | `notify_cooldown_minutes` may need lowering; escalation always bypasses cooldown |
+| `covers_close: false` | Roll costs more to close than the new position earns — widen the new spread or move deeper OTM |
+| `estimated_credit: 0.0` | Option quotes unavailable (outside market hours or IBKR disconnected) — estimates are best-effort |
+| Close succeeds, open fails | Position already reduced; manually open new spread with `trade credit-spread` |

@@ -4,7 +4,7 @@
 
 The test suite uses `pytest` with `pytest-asyncio` and `httpx` to test all REST endpoints, authentication flows, symbology mapping, WebSocket broadcasting, IBKR and E\*TRADE provider logic, and the full persistence/dashboard/sync stack against mocked broker providers.
 
-**Total:** 498 tests in a single file (`tests/test_utp.py`), all passing
+**Total:** 1331 tests in a single file (`tests/test_utp.py`), all passing
 
 ## Running Tests
 
@@ -136,6 +136,7 @@ All tests live in `tests/test_utp.py`, organized into classes by functional area
 | `TestOptionQuoteStreaming` | 25 | Option quote cache, Redis persistence, streaming lifecycle, market hours TTL, route integration |
 | `TestMarketDataStreaming` | 24 | CPG polling/WS modes, snapshot parsing, tick ingestion, close-band price gate |
 | `TestTradeNotifications` | 8 | Trade fill notifications: config, equity/multi-leg, multiple recipients, close, failure isolation |
+| `TestRollService` | 44 | RollConfig defaults/serialization, breach notifications (cooldown, escalation), credit estimates, forward/mirror suggestion building, config defaults, partial close, per-execute overrides, force-build (safe positions), REST endpoints (forward, mirror, execute with overrides, config notify fields) |
 | `TestSpreadScanner` | 22 | Spread scanner: arg parsing, spread computation, tier resolution, top picks, filters |
 
 ## Testing Approach

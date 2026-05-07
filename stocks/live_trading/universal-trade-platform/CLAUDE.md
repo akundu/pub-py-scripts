@@ -11,7 +11,7 @@ A unified multi-broker trading API (FastAPI) supporting Robinhood, E\*TRADE, and
 | File | Purpose |
 |------|---------|
 | `utp.py` | ALL CLI operations + API server |
-| `tests/test_utp.py` | ALL tests (654 tests) |
+| `tests/test_utp.py` | ALL tests (1331 tests) |
 | `spread_scanner.py` | Live spread ROI scanner dashboard (standalone tool) |
 | `sim_trader.py` | Auto-trader CLI client (standalone tool) |
 
@@ -872,6 +872,7 @@ Every CLI command auto-detects a running daemon via HTTP health check. When daem
 | `option_quote_streaming.py` | `OptionQuoteStreamingService` | Background option quote pre-fetch with in-memory + Redis cache. Module accessor: `init_option_quote_streaming()` / `get_option_quote_streaming()` / `reset_option_quote_streaming()` |
 | `execution_store.py` | `ExecutionStore` | IBKR execution cache with perm_id grouping. Module accessor: `init_execution_store()` / `get_execution_store()` / `reset_execution_store()` |
 | `simulation_clock.py` | `SimulationClock` | Time control for historical simulation. Module accessor: `init_sim_clock()` / `get_sim_clock()` / `reset_sim_clock()` |
+| `roll_service.py` | `RollService` | Background breach scanner, suggestion lifecycle, credit estimates, notifications, per-execute overrides, force-build. Module accessor: `init_roll_service()` / `get_roll_service()` / `reset_roll_service()` |
 
 ### Routes (`app/routes/`)
 
@@ -884,6 +885,7 @@ Every CLI command auto-detects a running daemon via HTTP health check. When daem
 | `dashboard.py` | `/dashboard` | `GET /summary`, `GET /performance`, `GET /pnl/daily`, `GET /status`, `GET /terminal`, `GET /advisor/recommendations`, `GET /advisor/status` |
 | `import_routes.py` | `/import` | `POST /csv`, `POST /preview`, `GET /formats` |
 | `playbook.py` | `/playbook` | `POST /execute`, `POST /validate` |
+| `roll.py` | `/roll` | `GET /suggestions`, `POST /execute/{id}`, `POST /dismiss/{id}`, `POST /forward/{position_id}`, `POST /mirror/{position_id}`, `GET /config`, `POST /config` |
 | `simulation.py` | `/sim` | `GET /status`, `POST /set-time`, `POST /reset`, `GET /timestamps`, `POST /auto-advance`, `POST /picks`, `POST /execute-picks`, `POST /sweep` |
 | `auth_routes.py` | `/auth` | `POST /token` |
 | `ws.py` | `/ws` | `WS /ws/orders`, `WS /ws/quotes` |
@@ -973,9 +975,70 @@ All from env vars / `.env`:
 | `NOTIFY_ON_PAPER` | `false` | Also notify on paper/dry-run trades |
 | `NOTIFY_URL` | `http://localhost:9102` | db_server URL for `/api/notify` endpoint |
 
+## Roll Management
+
+Background service that monitors open credit spread positions for breach risk and generates actionable roll suggestions. Runs every 30 seconds during market hours. Full reference: `docs/roll_management.md`.
+
+### Roll Types
+
+| Type | When | Action |
+|------|------|--------|
+| **Forward** | Any DTE, when price within `forward_trigger_severity` of short strike | Close current + open same-type at further DTE with adjusted strikes |
+| **Mirror** | Expiration day only, within time window, when price within `mirror_trigger_severity` | Keep original + open opposite-side spread to hedge |
+
+### Quick Start
+
+```bash
+# View pending suggestions
+python utp.py roll suggestions
+
+# Execute with optional overrides
+python utp.py roll execute <id> --dte 2 --otm-pct 1.5 --confirm
+
+# Partial close: close 5 of 20 contracts, roll 5
+python utp.py roll execute <id> --close-quantity 5 --confirm
+
+# Force-build for any position (bypasses severity threshold)
+python utp.py roll forward <pos-id> --confirm
+python utp.py roll mirror <pos-id> --otm-pct 0.5 --confirm
+
+# Configure defaults + notifications
+python utp.py roll config --forward-otm-pct 1.5 --forward-partial-close-pct 50
+python utp.py roll config --notify-severity warning,critical,breached --notify-channel email --notify-cooldown 15
+```
+
+### Key RollConfig Fields
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `forward_default_otm_pct` | `null` | OTM% for new short strike (null = breach-distance heuristic) |
+| `forward_default_width` | `null` | New spread width (null = copy original) |
+| `forward_default_quantity` | `null` | Contracts to open (null = match close quantity) |
+| `forward_partial_close_pct` | `100.0` | % of original to close (e.g. 50 = close half, roll half) |
+| `notify_on_severity` | `["warning","critical","breached"]` | Severity levels that fire an alert |
+| `notify_channel` | `"email"` | Alert delivery: `"email"`, `"sms"`, or `"both"` |
+| `notify_cooldown_minutes` | `15` | Min minutes between alerts per position (escalation bypasses) |
+| `auto_execute` | `false` | Auto-execute suggestions without manual confirm |
+
+### Credit Estimates
+
+Suggestions include live option quote data: `estimated_credit` (new position), `estimated_close_cost` (close current), and `covers_close` (true if net credit ≥ 0). Defaults to 0.0 outside market hours.
+
+### REST API
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /roll/suggestions` | Pending suggestions with credit estimates |
+| `POST /roll/execute/{id}` | Execute suggestion; body overrides: `dte`, `otm_pct`, `width`, `quantity`, `close_quantity`; `X-Dry-Run: true` for preview |
+| `POST /roll/forward/{position_id}` | Force-build forward roll; body: overrides + `confirm: true` to execute |
+| `POST /roll/mirror/{position_id}` | Force-build mirror roll; body: overrides + `confirm: true` to execute |
+| `POST /roll/dismiss/{id}` | Dismiss a pending suggestion |
+| `GET /roll/config` | Current configuration |
+| `POST /roll/config` | Partial config update |
+
 ## Testing
 
-**654 tests in `tests/test_utp.py`, all passing.** Tests use `tmp_path` for isolated persistence. The autouse `_setup_providers` fixture in `conftest.py` initializes and tears down ledger + position store per test.
+**1331 tests in `tests/test_utp.py`, all passing.** Tests use `tmp_path` for isolated persistence. The autouse `_setup_providers` fixture in `conftest.py` initializes and tears down ledger + position store per test.
 
 ```bash
 python -m pytest tests/ -v                              # All 359 tests
@@ -1052,6 +1115,7 @@ python -m pytest tests/test_utp.py -k "TestIBKR" -v     # IBKR tests only
 | `TestSimulationSweep` | 1 | Parameter sweep /sim/sweep endpoint |
 | `TestSimLoadDate` | 5 | /sim/load-date hot-swap (invalid, not-sim, no-data, success) |
 | `TestAutoTraderEngine` | 32 | Auto-trader config, run-day, run-range, spread filters, DTE filtering, carry-over, CLI config, diversity, streaming, shadow, event bus |
+| `TestRollService` | 44 | RollConfig defaults/serialization, breach notifications (cooldown, escalation bypass), credit estimates from live quotes, forward/mirror suggestion building, config defaults (otm_pct/width/quantity/partial_close_pct), per-execute overrides (dte/otm_pct/width/quantity/close_quantity), force-build for safe positions, REST endpoints (forward, mirror, execute with overrides, config notify fields) |
 
 ## IBKR Live Provider
 
