@@ -6606,6 +6606,24 @@ class TestDaemonCommand:
         data = resp.json()
         assert "expirations" in data
 
+    def test_daemon_initializes_roll_service(self, tmp_path):
+        """_cmd_daemon must call init_roll_service so /roll/* endpoints work after start."""
+        import inspect
+        import utp
+        src = inspect.getsource(utp._cmd_daemon)
+        assert "init_roll_service" in src or "_init_roll_svc" in src, (
+            "_cmd_daemon does not call init_roll_service — roll endpoints will return 503 after daemon start"
+        )
+
+    def test_daemon_starts_roll_scan_bg(self, tmp_path):
+        """_cmd_daemon must start a roll scan background task."""
+        import inspect
+        import utp
+        src = inspect.getsource(utp._cmd_daemon)
+        assert "_roll_scan_bg" in src, (
+            "_cmd_daemon does not start _roll_scan_bg — roll suggestions will never be generated"
+        )
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Trading Client (HTTP Library)

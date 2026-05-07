@@ -8556,6 +8556,10 @@ async def _cmd_daemon(args) -> int:
         _daemon_dashboard = DashboardService(_daemon_store)
         init_live_data_service(_daemon_store, _daemon_dashboard, live_provider)
 
+    # Initialize roll service (must be before background tasks so _roll_scan_loop can reference it)
+    from app.services.roll_service import init_roll_service as _init_roll_svc
+    _daemon_roll_svc = _init_roll_svc()
+
     # Set daemon mode flag to prevent lifespan from re-initializing
     import app.main
     app.main._daemon_mode = True
@@ -8644,6 +8648,32 @@ async def _cmd_daemon(args) -> int:
                     _log.error("Profit monitor error: %s", e)
 
     bg_tasks.append(asyncio.create_task(_profit_monitor_bg()))
+
+    # Roll scan loop
+    async def _roll_scan_bg():
+        from datetime import UTC, datetime
+        _log = logging.getLogger("utp.roll_scan")
+        from app.services.roll_service import get_roll_service as _get_roll_svc
+        interval = _daemon_roll_svc.config.check_interval
+        while not shutdown_event.is_set():
+            await asyncio.sleep(interval)
+            if shutdown_event.is_set():
+                break
+            now = datetime.now(UTC)
+            if now.weekday() >= 5:
+                continue
+            hour_min = now.hour * 100 + now.minute
+            if hour_min < 1330 or hour_min > 2000:
+                continue
+            svc = _get_roll_svc()
+            if svc:
+                try:
+                    await svc.scan_positions()
+                except Exception as e:
+                    _log.error("Roll scan error: %s", e)
+
+    bg_tasks.append(asyncio.create_task(_roll_scan_bg()))
+    print(f"  Roll service: initialized (scan every {_daemon_roll_svc.config.check_interval:.0f}s)")
 
     # Daemon config (formerly "streaming config") — same YAML, expanded to
     # hold trade defaults on top of streaming targets. --config is primary;
