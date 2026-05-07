@@ -163,7 +163,7 @@ handlers:
     daemon_url: http://localhost:8000
     policy: &trade_policy
       norm_roi: [0.8, 8]
-      min_otm_pct:  {SPX: 1.65, NDX: 2.1, RUT: 2.5}
+      min_otm_pct:  {SPX: 1.65, NDX: 2.1 , RUT: 2.5}
       min_credit:   {SPX: 0.15, NDX: 0.20, RUT: 0.15}
       max_total_risk: 300000
       # max_per_ticker_risk: {SPX: 200000, NDX: 200000, RUT: 150000}
@@ -189,7 +189,7 @@ handlers:
       stop_loss_multiplier: 2.0
       trading_window_pt:
         start: "06:31"
-        end:   "12:30"
+        end:   "12:40"
       # ── Per-cycle pacing — see dte0.yaml for full notes ──
       max_trades_per_cycle: 2
       min_minutes_between_trades: 3.0
