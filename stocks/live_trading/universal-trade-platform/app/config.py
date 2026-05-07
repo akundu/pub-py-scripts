@@ -101,6 +101,12 @@ class Settings(BaseSettings):
     notify_on_paper: bool = False  # Also notify on paper/dry-run trades
     notify_url: str = "http://localhost:9102"  # db_server URL for HTTP notify
 
+    # db_server price lookups (portfolio after-hours price display)
+    # Primary: local db_server instance; Fallback: remote replica.
+    # Env vars: DB_SERVER_URL / DB_SERVER_FALLBACK_URL
+    db_server_url: str = "http://localhost:9100"
+    db_server_fallback_url: str = "http://lin1.kundu.dev:9100"
+
     def broker_list(self) -> list[str]:
         return [b.strip().lower() for b in self.enabled_brokers.split(",") if b.strip()]
 

@@ -1618,6 +1618,182 @@ class TestDashboard:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Portfolio db_server price fallback
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestPortfolioDbServerFallback:
+    """Tests for _fetch_prices_from_db_server() using /api/chart/{sym}?range=1d."""
+
+    def _make_chart_response(self, day_close=None, prev_close=None, bars=None):
+        stats = {}
+        if day_close is not None:
+            stats["day_close"] = day_close
+        if prev_close is not None:
+            stats["prev_close"] = prev_close
+        return {"stats": stats, "bars": bars or []}
+
+    def _make_fake_httpx(self, monkeypatch, url_responses: dict, call_log: list | None = None):
+        """Patch httpx.AsyncClient to return canned responses keyed by URL substring."""
+        import httpx as _httpx
+
+        class FakeResponse:
+            def __init__(self, status_code, data):
+                self.status_code = status_code
+                self._data = data
+            def json(self):
+                return self._data
+
+        class FakeClient:
+            async def get(self, url, **kw):
+                if call_log is not None:
+                    call_log.append(url)
+                for pattern, resp_data in url_responses.items():
+                    if pattern in url:
+                        return FakeResponse(200, resp_data)
+                return FakeResponse(404, {})
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *a):
+                pass
+
+        monkeypatch.setattr(_httpx, "AsyncClient", lambda **kw: FakeClient())
+
+    @pytest.mark.asyncio
+    async def test_fetch_price_day_close(self, monkeypatch):
+        """Returns day_close from stats when available."""
+        from app.services.live_data_service import _fetch_prices_from_db_server
+        from app.config import settings
+        monkeypatch.setattr(settings, "db_server_url", "http://localhost:9100")
+        monkeypatch.setattr(settings, "db_server_fallback_url", "")
+
+        self._make_fake_httpx(monkeypatch, {
+            "/SPX": self._make_chart_response(day_close=5300.0, prev_close=5290.0),
+        })
+        result = await _fetch_prices_from_db_server(["SPX"])
+        assert result == {"SPX": 5300.0}
+
+    @pytest.mark.asyncio
+    async def test_fetch_price_prev_close_fallback(self, monkeypatch):
+        """Uses prev_close when day_close is absent."""
+        from app.services.live_data_service import _fetch_prices_from_db_server
+        from app.config import settings
+        monkeypatch.setattr(settings, "db_server_url", "http://localhost:9100")
+        monkeypatch.setattr(settings, "db_server_fallback_url", "")
+
+        self._make_fake_httpx(monkeypatch, {
+            "/SPX": self._make_chart_response(prev_close=5290.0),
+        })
+        result = await _fetch_prices_from_db_server(["SPX"])
+        assert result == {"SPX": 5290.0}
+
+    @pytest.mark.asyncio
+    async def test_fetch_price_falls_back_to_bars(self, monkeypatch):
+        """Falls back to last bar close when stats are empty."""
+        from app.services.live_data_service import _fetch_prices_from_db_server
+        from app.config import settings
+        monkeypatch.setattr(settings, "db_server_url", "http://localhost:9100")
+        monkeypatch.setattr(settings, "db_server_fallback_url", "")
+
+        bars = [{"time": 1000, "open": 100, "high": 105, "low": 99, "close": 5280.0, "volume": 100}]
+        self._make_fake_httpx(monkeypatch, {
+            "/SPX": self._make_chart_response(bars=bars),
+        })
+        result = await _fetch_prices_from_db_server(["SPX"])
+        assert result == {"SPX": 5280.0}
+
+    @pytest.mark.asyncio
+    async def test_fetch_price_falls_back_to_secondary_url(self, monkeypatch):
+        """Tries secondary URL when primary returns no price."""
+        import httpx as _httpx
+        from app.services.live_data_service import _fetch_prices_from_db_server
+        from app.config import settings
+        monkeypatch.setattr(settings, "db_server_url", "http://localhost:9100")
+        monkeypatch.setattr(settings, "db_server_fallback_url", "http://lin1.kundu.dev:9100")
+
+        # Primary: 404; secondary: valid price
+        class FakeResponse:
+            def __init__(self, sc, data):
+                self.status_code = sc
+                self._data = data
+            def json(self):
+                return self._data
+
+        class FakeClient:
+            async def get(self, url, **kw):
+                if "localhost" in url:
+                    return FakeResponse(404, {})
+                return FakeResponse(200, {"stats": {"prev_close": 5200.0}, "bars": []})
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *a):
+                pass
+
+        monkeypatch.setattr(_httpx, "AsyncClient", lambda **kw: FakeClient())
+        result = await _fetch_prices_from_db_server(["NDX"])
+        assert result == {"NDX": 5200.0}
+
+    @pytest.mark.asyncio
+    async def test_fetch_price_both_urls_fail_returns_empty(self, monkeypatch):
+        """Returns empty dict when both URLs return empty stats."""
+        import httpx as _httpx
+        from app.services.live_data_service import _fetch_prices_from_db_server
+        from app.config import settings
+        monkeypatch.setattr(settings, "db_server_url", "http://localhost:9100")
+        monkeypatch.setattr(settings, "db_server_fallback_url", "http://lin1.kundu.dev:9100")
+
+        class FakeClient:
+            async def get(self, url, **kw):
+                raise Exception("connection refused")
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *a):
+                pass
+
+        monkeypatch.setattr(_httpx, "AsyncClient", lambda **kw: FakeClient())
+        result = await _fetch_prices_from_db_server(["SPX"])
+        assert result == {}
+
+    @pytest.mark.asyncio
+    async def test_enrich_uses_db_server_price_when_get_quote_zero(self, monkeypatch):
+        """_enrich_with_quotes_and_breach picks up db_server price when get_quote returns 0."""
+        from app.services import live_data_service as _lds
+
+        async def _fake_fetch(tickers):
+            return {"SPX": 5300.0}
+
+        async def _fake_get_quote(sym, **kw):
+            from app.models import Quote
+            from datetime import datetime, UTC
+            return Quote(symbol=sym, bid=0, ask=0, last=0, volume=0,
+                         timestamp=datetime.now(UTC))
+
+        monkeypatch.setattr(_lds, "_fetch_prices_from_db_server", _fake_fetch)
+        import app.services.market_data as _md
+        monkeypatch.setattr(_md, "get_quote", _fake_get_quote)
+
+        positions = [{"symbol": "SPX", "order_type": "multi_leg", "legs": []}]
+        await _lds._enrich_with_quotes_and_breach(positions, ibkr_provider=None)
+        assert positions[0]["current_price"] == 5300.0
+
+    @pytest.mark.asyncio
+    async def test_enrich_skips_db_server_when_price_already_set(self, monkeypatch):
+        """_enrich_with_quotes_and_breach skips db_server call when current_price already set."""
+        from app.services import live_data_service as _lds
+
+        call_count = []
+
+        async def _spy_fetch(tickers):
+            call_count.extend(tickers)
+            return {}
+
+        monkeypatch.setattr(_lds, "_fetch_prices_from_db_server", _spy_fetch)
+
+        positions = [{"symbol": "SPX", "current_price": 5300.0, "order_type": "equity"}]
+        await _lds._enrich_with_quotes_and_breach(positions, ibkr_provider=None)
+        assert "SPX" not in call_count
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # CSV Importer
 # ═══════════════════════════════════════════════════════════════════════════════
 

@@ -11,7 +11,6 @@ the local store since IBKR doesn't retain that.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Optional
 
 from app.models import DailyPnL, DashboardSummary, PerformanceMetrics, StatusReport, TrackedPosition
@@ -613,28 +612,59 @@ def _calc_breach_status(current_price: float, position: dict) -> dict | None:
     }
 
 
-DB_SERVER_URL = os.environ.get("DB_SERVER_URL", "http://localhost:8080")
-
-
 async def _fetch_prices_from_db_server(tickers: list[str]) -> dict[str, float]:
-    """Batch fetch latest prices from db_server (QuestDB realtime_data).
+    """Fetch latest prices from db_server via /api/chart/{sym}?range=1d.
 
-    Returns {ticker: price} for tickers that have data. Fast (~50ms).
+    The chart endpoint returns data from the realtime → hourly → daily fallback
+    chain, so it always has a price even after market close (at minimum prev_close
+    from the daily table). Tries `settings.db_server_url` first, then
+    `settings.db_server_fallback_url` for any tickers that failed.
+
+    Returns {ticker: price} for tickers with a valid price (> 0).
     """
+    import asyncio as _aio
     import httpx as _httpx
+    from app.config import settings
+
+    urls_to_try = [u for u in [settings.db_server_url, settings.db_server_fallback_url] if u]
+    if not urls_to_try or not tickers:
+        return {}
+
+    async def _fetch_one(client: _httpx.AsyncClient, base_url: str, sym: str) -> tuple[str, float]:
+        try:
+            r = await client.get(f"{base_url}/api/chart/{sym}?range=1d")
+            if r.status_code == 200:
+                data = r.json()
+                stats = data.get("stats") or {}
+                price = stats.get("day_close") or stats.get("prev_close")
+                if not price:
+                    bars = data.get("bars") or []
+                    if bars:
+                        price = bars[-1].get("close")
+                if price and float(price) > 0:
+                    return sym, float(price)
+        except Exception:
+            pass
+        return sym, 0.0
+
+    result: dict[str, float] = {}
+    remaining = list(tickers)
     try:
-        async with _httpx.AsyncClient(timeout=2.0) as client:
-            resp = await client.post(
-                f"{DB_SERVER_URL}/db_command",
-                json={"command": "get_latest_prices", "tickers": tickers},
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                prices = data.get("prices", {})
-                return {k: v for k, v in prices.items() if v and v > 0}
+        async with _httpx.AsyncClient(timeout=3.0) as client:
+            for base_url in urls_to_try:
+                if not remaining:
+                    break
+                fetched = await _aio.gather(*[_fetch_one(client, base_url, sym) for sym in remaining])
+                still_missing = []
+                for sym, price in fetched:
+                    if price > 0:
+                        result[sym] = price
+                    else:
+                        still_missing.append(sym)
+                remaining = still_missing
     except Exception as e:
         logger.debug("db_server price fetch failed: %s", e)
-    return {}
+    return result
 
 
 def _prefill_prices_from_portfolio(positions: list[dict], portfolio_items: list[dict]) -> None:
