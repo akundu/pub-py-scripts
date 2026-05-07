@@ -2139,6 +2139,136 @@ class TestPositionSync:
         assert updated["strike"] == 6460.0
         assert updated["right"] == "P"
 
+    # ── _is_expired_option tests ──────────────────────────────────────────────
+
+    def test_is_expired_option_past_date(self):
+        """Option with expiration in the distant past → expired."""
+        from app.services.position_sync import PositionSyncService
+
+        class _BP:
+            sec_type = "OPT"
+            expiration = "2020-01-01"  # always in the past
+
+        assert PositionSyncService._is_expired_option(_BP()) is True
+
+    def test_is_expired_option_future_not_expired(self):
+        """Option expiring in the far future is NOT expired."""
+        from app.services.position_sync import PositionSyncService
+
+        class _BP:
+            sec_type = "OPT"
+            expiration = "2099-12-31"  # always in the future
+
+        assert PositionSyncService._is_expired_option(_BP()) is False
+
+    def test_is_expired_option_yyyymmdd_format(self):
+        """YYYYMMDD expiration format (as returned by IBKR) is normalized correctly."""
+        from app.services.position_sync import PositionSyncService
+
+        class _BP:
+            sec_type = "OPT"
+            expiration = "20200101"  # YYYYMMDD, always in the past
+
+        assert PositionSyncService._is_expired_option(_BP()) is True
+
+    def test_is_expired_option_equity_not_affected(self):
+        """STK positions are never filtered regardless of expiration field."""
+        from app.services.position_sync import PositionSyncService
+
+        class _BP:
+            sec_type = "STK"
+            expiration = "2020-01-01"  # far in the past
+
+        assert PositionSyncService._is_expired_option(_BP()) is False
+
+    def test_is_expired_option_no_expiration(self):
+        """OPT with no expiration field is not filtered (missing data → safe to import)."""
+        from app.services.position_sync import PositionSyncService
+
+        class _BP:
+            sec_type = "OPT"
+            expiration = None
+
+        assert PositionSyncService._is_expired_option(_BP()) is False
+
+    @pytest.mark.asyncio
+    async def test_sync_skips_expired_options_after_close(self, _store, _ledger):
+        """Sync must not re-create expired option positions after the expiration
+        service has closed them — doing so double-counts realized P&L."""
+        from app.services.position_sync import PositionSyncService
+        from app.models import Broker, Position
+        from app.core.provider import ProviderRegistry
+        from unittest.mock import AsyncMock
+
+        past_exp_ibkr = "20200115"   # YYYYMMDD as IBKR returns it
+        past_exp_iso = "2020-01-15"  # normalized ISO form stored in position
+
+        # Simulate: option was synced once, then closed by expiration service
+        pos_id = _store.add_position_from_sync(
+            broker=Broker.IBKR, symbol="SPX", quantity=-10,
+            avg_cost=100.0, market_value=-1000.0, unrealized_pnl=0,
+            con_id=99001, sec_type="OPT", expiration=past_exp_iso,
+        )
+        _store.close_position(pos_id, 0.0, "expired")
+        assert _store.get_position(pos_id)["status"] == "closed"
+        pnl_before = _store.get_position(pos_id)["pnl"]
+
+        # IBKR still reports the same option (pending settlement)
+        mock_provider = AsyncMock()
+        mock_provider.broker = Broker.IBKR
+        mock_provider.get_positions.return_value = [
+            Position(
+                broker=Broker.IBKR, symbol="SPX", quantity=-10,
+                avg_cost=100.0, market_value=-1000.0, unrealized_pnl=0,
+                con_id=99001, sec_type="OPT", expiration=past_exp_ibkr,
+            )
+        ]
+
+        original_all = ProviderRegistry.all
+        ProviderRegistry.all = lambda: [mock_provider]
+        try:
+            result = await PositionSyncService(_store, _ledger).sync_all_brokers()
+        finally:
+            ProviderRegistry.all = original_all
+
+        # No new positions were created — the expired option was skipped
+        assert result.new_positions == 0
+        # The already-closed position is untouched — P&L not double-counted
+        assert _store.get_position(pos_id)["pnl"] == pnl_before
+        open_positions = _store.get_open_positions()
+        assert not any(p.get("con_id") == 99001 for p in open_positions)
+
+    @pytest.mark.asyncio
+    async def test_sync_imports_future_option_normally(self, _store, _ledger):
+        """Options expiring in the future are still imported normally."""
+        from app.services.position_sync import PositionSyncService
+        from app.models import Broker, Position
+        from app.core.provider import ProviderRegistry
+        from unittest.mock import AsyncMock
+
+        future_exp = "20991231"  # YYYYMMDD, always in the future
+
+        mock_provider = AsyncMock()
+        mock_provider.broker = Broker.IBKR
+        mock_provider.get_positions.return_value = [
+            Position(
+                broker=Broker.IBKR, symbol="SPX", quantity=-5,
+                avg_cost=80.0, market_value=-400.0, unrealized_pnl=0,
+                con_id=99002, sec_type="OPT", expiration=future_exp,
+            )
+        ]
+
+        original_all = ProviderRegistry.all
+        ProviderRegistry.all = lambda: [mock_provider]
+        try:
+            result = await PositionSyncService(_store, _ledger).sync_all_brokers()
+        finally:
+            ProviderRegistry.all = original_all
+
+        assert result.new_positions == 1
+        open_positions = _store.get_open_positions()
+        assert any(p.get("con_id") == 99002 for p in open_positions)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Reconciliation

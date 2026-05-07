@@ -38,6 +38,35 @@ class PositionSyncService:
         self._ledger = ledger
         self._ws = ws_manager
 
+    @staticmethod
+    def _is_expired_option(bp) -> bool:
+        """Return True if this broker position is an option that has already expired.
+
+        IBKR keeps expired options in ib.portfolio() for settlement purposes.
+        We must not re-import them after the expiration service has closed them,
+        otherwise the P&L is double (or N-tuple) counted every sync cycle.
+        """
+        from datetime import date as _date
+        sec_type = getattr(bp, "sec_type", None)
+        if sec_type not in ("OPT", "FOP"):
+            return False
+        exp_str = getattr(bp, "expiration", None)
+        if not exp_str:
+            return False
+        # Normalize YYYYMMDD → YYYY-MM-DD
+        if len(exp_str) == 8 and "-" not in exp_str:
+            exp_str = f"{exp_str[:4]}-{exp_str[4:6]}-{exp_str[6:8]}"
+        # Use UTC date to match what the expiration service uses
+        # (expiration_loop calls datetime.now(UTC).date()).
+        # Using local date would miss the window between midnight UTC and
+        # local midnight where UTC is already "tomorrow" but local is "today".
+        from datetime import datetime, timezone
+        utc_today = datetime.now(timezone.utc).date()
+        try:
+            return _date.fromisoformat(exp_str) < utc_today
+        except (ValueError, TypeError):
+            return False
+
     async def sync_all_brokers(self) -> SyncResult:
         """Sync positions from all registered providers.
 
@@ -61,6 +90,12 @@ class PositionSyncService:
                         existing = self._store.find_by_broker_symbol(broker, bp.symbol)
 
                     if existing is None:
+                        # Don't re-import expired options: IBKR keeps them in
+                        # portfolio for settlement but the expiration service
+                        # already closed them. Re-importing would double-count P&L.
+                        if self._is_expired_option(bp):
+                            continue
+
                         pos_id = self._store.add_position_from_sync(
                             broker=broker,
                             symbol=bp.symbol,
