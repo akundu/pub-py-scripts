@@ -13107,7 +13107,8 @@ class TestRollService:
         )
         svc = RollService(cfg)
 
-        suggestion = svc._build_mirror_suggestion(pos, breach, 5603)
+        with patch("app.services.market_data.get_option_quotes", new_callable=AsyncMock, return_value=[]):
+            suggestion = await svc._build_mirror_suggestion(pos, breach, 5603)
         assert suggestion is not None
         assert suggestion.roll_type == "mirror"
         assert suggestion.new_option_type == "CALL"  # Opposite of PUT
@@ -13133,7 +13134,8 @@ class TestRollService:
         cfg = RollConfig(mirror_time_window_utc=("00:00", "23:59"))
         svc = RollService(cfg)
 
-        suggestion = svc._build_mirror_suggestion(pos, breach, 5597)
+        with patch("app.services.market_data.get_option_quotes", new_callable=AsyncMock, return_value=[]):
+            suggestion = await svc._build_mirror_suggestion(pos, breach, 5597)
         assert suggestion is not None
         assert suggestion.new_option_type == "PUT"  # Opposite of CALL
         assert suggestion.new_width == 25
@@ -13189,7 +13191,8 @@ class TestRollService:
         cfg = RollConfig(forward_trigger_severity="watch", forward_min_dte=2)
         svc = RollService(cfg)
 
-        suggestion = svc._build_forward_suggestion(pos, breach, 5680)
+        with patch("app.services.market_data.get_option_quotes", new_callable=AsyncMock, return_value=[]):
+            suggestion = await svc._build_forward_suggestion(pos, breach, 5680)
         assert suggestion is not None
         assert suggestion.roll_type == "forward"
         assert suggestion.new_option_type == "PUT"  # Same type
@@ -13646,6 +13649,681 @@ class TestRollService:
         # Nonexistent position
         legs = svc._get_position_legs("no-such-pos")
         assert legs == []
+
+
+    # ── New config fields ─────────────────────────────────────────────────────
+
+    def test_roll_config_new_defaults(self):
+        """New config fields should have correct defaults."""
+        from app.services.roll_service import RollConfig
+
+        cfg = RollConfig()
+        assert cfg.forward_default_otm_pct is None
+        assert cfg.forward_default_width is None
+        assert cfg.forward_default_quantity is None
+        assert cfg.forward_partial_close_pct == 100.0
+        assert "warning" in cfg.notify_on_severity
+        assert "critical" in cfg.notify_on_severity
+        assert "breached" in cfg.notify_on_severity
+        assert cfg.notify_channel == "email"
+        assert cfg.notify_cooldown_minutes == 15
+
+    def test_roll_config_new_fields_serialization(self):
+        """New fields round-trip through to_dict/from_dict."""
+        from app.services.roll_service import RollConfig
+
+        cfg = RollConfig(
+            forward_default_otm_pct=1.5,
+            forward_default_width=30.0,
+            forward_default_quantity=5,
+            forward_partial_close_pct=50.0,
+            notify_on_severity=["critical", "breached"],
+            notify_channel="sms",
+            notify_cooldown_minutes=30,
+        )
+        d = cfg.to_dict()
+        cfg2 = RollConfig.from_dict(d)
+        assert cfg2.forward_default_otm_pct == 1.5
+        assert cfg2.forward_default_width == 30.0
+        assert cfg2.forward_default_quantity == 5
+        assert cfg2.forward_partial_close_pct == 50.0
+        assert cfg2.notify_on_severity == ["critical", "breached"]
+        assert cfg2.notify_channel == "sms"
+        assert cfg2.notify_cooldown_minutes == 30
+
+    # ── Config-level defaults applied in build ────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_forward_suggestion_uses_config_otm_default(self):
+        """forward_default_otm_pct overrides breach-distance calculation."""
+        from app.services.roll_service import RollConfig, RollService, _calc_breach_status
+
+        pos = self._make_position(short_strike=5600, long_strike=5575, option_type="PUT")
+        breach = _calc_breach_status(5650, pos)  # ~0.88% from short = warning
+        assert breach is not None
+
+        cfg = RollConfig(forward_default_otm_pct=3.0)
+        svc = RollService(cfg)
+
+        with patch("app.services.market_data.get_option_quotes", new_callable=AsyncMock, return_value=[]):
+            s = await svc._build_forward_suggestion(pos, breach, 5650)
+
+        assert s is not None
+        # At 3% OTM from 5650: short ≈ 5650 * 0.97 = 5480.5 → rounded = 5480
+        assert abs(s.new_short_strike - 5650 * 0.97) < 10
+
+    @pytest.mark.asyncio
+    async def test_forward_suggestion_uses_config_width_default(self):
+        """forward_default_width overrides original spread width."""
+        from app.services.roll_service import RollConfig, RollService, _calc_breach_status
+
+        pos = self._make_position(short_strike=5600, long_strike=5575, option_type="PUT")
+        breach = _calc_breach_status(5650, pos)
+
+        cfg = RollConfig(forward_default_width=50.0)
+        svc = RollService(cfg)
+
+        with patch("app.services.market_data.get_option_quotes", new_callable=AsyncMock, return_value=[]):
+            s = await svc._build_forward_suggestion(pos, breach, 5650)
+
+        assert s is not None
+        assert s.new_width == 50.0
+        assert abs(s.new_short_strike - s.new_long_strike) == 50.0
+
+    @pytest.mark.asyncio
+    async def test_forward_suggestion_partial_close_pct(self):
+        """forward_partial_close_pct sets close_quantity proportionally."""
+        from app.services.roll_service import RollConfig, RollService, _calc_breach_status
+
+        pos = self._make_position(short_strike=5600, long_strike=5575, quantity=10)
+        breach = _calc_breach_status(5650, pos)
+
+        cfg = RollConfig(forward_partial_close_pct=50.0)
+        svc = RollService(cfg)
+
+        with patch("app.services.market_data.get_option_quotes", new_callable=AsyncMock, return_value=[]):
+            s = await svc._build_forward_suggestion(pos, breach, 5650)
+
+        assert s is not None
+        assert s.close_quantity == 5  # 50% of 10
+
+    # ── _apply_overrides ──────────────────────────────────────────────────────
+
+    def test_apply_overrides_dte(self):
+        """DTE override recomputes new_expiration."""
+        from app.services.roll_service import RollConfig, RollService, RollSuggestion
+
+        svc = RollService(RollConfig())
+        s = self._make_suggestion()
+        w = svc._apply_overrides(s, {"dte": 3})
+
+        exp_date = datetime.strptime(w.new_expiration, "%Y%m%d").date()
+        today = datetime.now(UTC).date()
+        delta = (exp_date - today).days
+        assert 3 <= delta <= 5  # 3 business days forward (may skip weekend)
+
+    def test_apply_overrides_width(self):
+        """Width override recomputes long strike."""
+        from app.services.roll_service import RollConfig, RollService
+
+        svc = RollService(RollConfig())
+        s = self._make_suggestion(new_short=5500, new_long=5475, new_width=25, opt_type="PUT")
+        w = svc._apply_overrides(s, {"width": 50.0})
+
+        assert w.new_width == 50.0
+        assert w.new_long_strike == 5500 - 50  # PUT: long = short - width
+
+    def test_apply_overrides_call_width(self):
+        """Width override for CALL: long = short + width."""
+        from app.services.roll_service import RollConfig, RollService
+
+        svc = RollService(RollConfig())
+        s = self._make_suggestion(new_short=5700, new_long=5725, new_width=25, opt_type="CALL")
+        w = svc._apply_overrides(s, {"width": 50.0})
+
+        assert w.new_width == 50.0
+        assert w.new_long_strike == 5700 + 50  # CALL: long = short + width
+
+    def test_apply_overrides_otm_pct(self):
+        """OTM% override recomputes short strike from current price."""
+        from app.services.roll_service import RollConfig, RollService
+
+        svc = RollService(RollConfig())
+        s = self._make_suggestion(new_short=5500, new_long=5475, new_width=25, opt_type="PUT")
+        # At 2% OTM from 5700: short = 5700 * 0.98 = 5586 → rounded to 5585
+        w = svc._apply_overrides(s, {"otm_pct": 2.0}, current_price=5700)
+
+        expected = round(5700 * 0.98 / 5) * 5  # SPX rounding = 5
+        assert w.new_short_strike == expected
+        assert w.new_long_strike == expected - 25  # PUT: long = short - original width
+
+    def test_apply_overrides_quantity_and_close(self):
+        """Quantity and close_quantity overrides set correctly."""
+        from app.services.roll_service import RollConfig, RollService
+
+        svc = RollService(RollConfig())
+        s = self._make_suggestion()
+        w = svc._apply_overrides(s, {"quantity": 3, "close_quantity": 5})
+
+        assert w.new_quantity == 3
+        assert w.close_quantity == 5
+
+    def _make_suggestion(
+        self,
+        new_short=5500,
+        new_long=5475,
+        new_width=25,
+        opt_type="PUT",
+    ):
+        from app.services.roll_service import RollSuggestion
+
+        return RollSuggestion(
+            suggestion_id="ovr-001",
+            position_id="pos-ovr",
+            symbol="SPX",
+            roll_type="forward",
+            severity="watch",
+            distance_pct=1.4,
+            current_short_strike=5600,
+            current_long_strike=5575,
+            current_option_type=opt_type,
+            current_expiration="20260501",
+            current_quantity=10,
+            current_max_loss=25000,
+            new_short_strike=new_short,
+            new_long_strike=new_long,
+            new_option_type=opt_type,
+            new_expiration="20260502",
+            new_width=new_width,
+            estimated_credit=0,
+            estimated_close_cost=0,
+            net_cost=0,
+            new_max_loss=25000,
+            covers_close=False,
+            reason="test override",
+        )
+
+    # ── execute_roll with overrides ───────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_execute_roll_with_dte_override(self, tmp_path):
+        """execute_roll with dte override uses the new expiration."""
+        from app.services.roll_service import RollConfig, RollService, RollSuggestion
+        from app.services.position_store import get_position_store
+        from app.models import OrderResult, Broker, OrderStatus
+
+        svc = RollService(RollConfig())
+        pos = self._make_position(position_id="dte-pos-1")
+        store = get_position_store()
+        store._positions["dte-pos-1"] = {**pos, "status": "open"}
+        store._save()
+
+        s = RollSuggestion(
+            suggestion_id="dte-001",
+            position_id="dte-pos-1",
+            symbol="SPX",
+            roll_type="forward",
+            severity="watch",
+            distance_pct=1.5,
+            current_short_strike=5600,
+            current_long_strike=5575,
+            current_option_type="PUT",
+            current_expiration="20260414",
+            current_quantity=10,
+            current_max_loss=25000,
+            new_short_strike=5550,
+            new_long_strike=5525,
+            new_option_type="PUT",
+            new_expiration="20260415",
+            new_width=25,
+            estimated_credit=0,
+            estimated_close_cost=0,
+            net_cost=0,
+            new_max_loss=25000,
+            covers_close=False,
+            reason="test dte override",
+        )
+        svc._suggestions["dte-001"] = s
+
+        executed_requests = []
+        mock_result = OrderResult(broker=Broker.IBKR, status=OrderStatus.FILLED, message="ok", filled_price=1.0)
+
+        async def capture_execute(request, dry_run=False):
+            executed_requests.append(request)
+            return mock_result
+
+        with patch("app.services.trade_service.execute_trade", side_effect=capture_execute):
+            result = await svc.execute_roll("dte-001", overrides={"dte": 3})
+
+        assert result["status"] == "executed"
+        # The open order should use the 3-day-out expiration
+        open_req = executed_requests[1]  # second call = open new
+        exp_date = datetime.strptime(
+            open_req.multi_leg_order.legs[0].expiration.replace("-", ""), "%Y%m%d"
+        ).date()
+        today = datetime.now(UTC).date()
+        assert (exp_date - today).days >= 3
+
+    @pytest.mark.asyncio
+    async def test_execute_partial_close(self, tmp_path):
+        """Partial roll: close_quantity < current_quantity uses closing_quantity."""
+        from app.services.roll_service import RollConfig, RollService, RollSuggestion
+        from app.services.position_store import get_position_store
+        from app.models import OrderResult, Broker, OrderStatus
+
+        svc = RollService(RollConfig())
+        pos = self._make_position(position_id="partial-pos-1", quantity=10)
+        store = get_position_store()
+        store._positions["partial-pos-1"] = {**pos, "status": "open", "quantity": 10}
+        store._save()
+
+        s = RollSuggestion(
+            suggestion_id="partial-001",
+            position_id="partial-pos-1",
+            symbol="SPX",
+            roll_type="forward",
+            severity="watch",
+            distance_pct=1.5,
+            current_short_strike=5600,
+            current_long_strike=5575,
+            current_option_type="PUT",
+            current_expiration="20260414",
+            current_quantity=10,
+            current_max_loss=25000,
+            new_short_strike=5550,
+            new_long_strike=5525,
+            new_option_type="PUT",
+            new_expiration="20260415",
+            new_width=25,
+            estimated_credit=0,
+            estimated_close_cost=0,
+            net_cost=0,
+            new_max_loss=12500,
+            covers_close=False,
+            close_quantity=5,
+            new_quantity=5,
+            reason="partial roll test",
+        )
+        svc._suggestions["partial-001"] = s
+
+        captured = []
+        mock_result = OrderResult(broker=Broker.IBKR, status=OrderStatus.FILLED, message="ok", filled_price=1.0)
+
+        async def capture(request, dry_run=False):
+            captured.append(request)
+            return mock_result
+
+        with patch("app.services.trade_service.execute_trade", side_effect=capture):
+            result = await svc.execute_roll("partial-001")
+
+        assert result["status"] == "executed"
+        assert result["close_quantity"] == 5
+        assert result["new_quantity"] == 5
+        # Close order should have closing_quantity=5
+        close_req = captured[0]
+        assert close_req.closing_quantity == 5
+        # Open order should have quantity=5
+        open_req = captured[1]
+        assert open_req.multi_leg_order.quantity == 5
+
+    # ── Credit estimates ──────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_credit_estimates_populated_from_quotes(self):
+        """Live quotes feed into estimated_credit and estimated_close_cost."""
+        from app.services.roll_service import RollConfig, RollService, _calc_breach_status
+
+        pos = self._make_position(short_strike=5600, long_strike=5575, option_type="PUT")
+        breach = _calc_breach_status(5650, pos)
+
+        svc = RollService(RollConfig())
+
+        fake_quotes = [
+            {"strike": 5575, "bid": 2.50, "ask": 2.70},  # long of current (for close_cost)
+            {"strike": 5600, "bid": 5.00, "ask": 5.20},  # short of current (for close_cost)
+            {"strike": 5545, "bid": 1.80, "ask": 1.95},  # long of new spread
+            {"strike": 5565, "bid": 3.20, "ask": 3.40},  # short of new spread
+        ]
+
+        with patch("app.services.market_data.get_option_quotes", new_callable=AsyncMock, return_value=fake_quotes):
+            s = await svc._build_forward_suggestion(pos, breach, 5650)
+
+        assert s is not None
+        # estimated_close_cost = short_ask - long_bid = 5.20 - 2.50 = 2.70
+        assert s.estimated_close_cost == pytest.approx(2.70, abs=0.01)
+        # estimated_credit depends on which strikes match for the new spread
+        # (may vary based on strike matching — just ensure non-zero if quotes matched)
+        # At minimum, net_cost should be estimated_close_cost - estimated_credit
+        assert abs(s.net_cost - (s.estimated_close_cost - s.estimated_credit)) < 0.01
+
+    @pytest.mark.asyncio
+    async def test_credit_estimates_zero_on_no_quotes(self):
+        """No quotes gracefully falls back to 0.0 estimates."""
+        from app.services.roll_service import RollConfig, RollService, _calc_breach_status
+
+        pos = self._make_position(short_strike=5600, long_strike=5575, option_type="PUT")
+        breach = _calc_breach_status(5650, pos)
+
+        svc = RollService(RollConfig())
+
+        with patch("app.services.market_data.get_option_quotes", new_callable=AsyncMock, return_value=[]):
+            s = await svc._build_forward_suggestion(pos, breach, 5650)
+
+        assert s is not None
+        assert s.estimated_credit == 0.0
+        assert s.estimated_close_cost == 0.0
+
+    # ── Breach notifications ──────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_breach_notification_fires_at_threshold(self):
+        """Notification fires when severity is in notify_on_severity list."""
+        from app.services.roll_service import RollConfig, RollService
+
+        cfg = RollConfig(notify_on_severity=["warning", "critical", "breached"], notify_channel="email")
+        svc = RollService(cfg)
+
+        breach = {"short_strike": 5600, "distance_pct": 0.8, "option_type": "PUT", "is_itm": False}
+        sent = []
+
+        async def fake_post(url, **kwargs):
+            sent.append(kwargs.get("json", {}))
+            return MagicMock(status_code=200)
+
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(side_effect=lambda url, **kw: sent.append(kw.get("json", {})) or MagicMock())
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            with patch("app.config.settings") as mock_settings:
+                mock_settings.notify_url = "http://localhost:9102"
+                await svc._fire_breach_notification("pos-1", "SPX", "20260501", "warning", breach)
+
+        assert len(sent) == 1
+        assert "WARNING" in sent[0].get("subject", "")
+
+    @pytest.mark.asyncio
+    async def test_breach_notification_respects_cooldown(self):
+        """Second alert within cooldown window is suppressed."""
+        from app.services.roll_service import RollConfig, RollService
+
+        cfg = RollConfig(notify_on_severity=["warning"], notify_cooldown_minutes=30)
+        svc = RollService(cfg)
+
+        breach = {"short_strike": 5600, "distance_pct": 0.8, "option_type": "PUT", "is_itm": False}
+        sent = []
+
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(side_effect=lambda url, **kw: sent.append(kw.get("json", {})))
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            with patch("app.config.settings") as mock_settings:
+                mock_settings.notify_url = "http://localhost:9102"
+                await svc._fire_breach_notification("pos-1", "SPX", "20260501", "warning", breach)
+                await svc._fire_breach_notification("pos-1", "SPX", "20260501", "warning", breach)
+
+        # Only one notification sent — second suppressed by cooldown
+        assert len(sent) == 1
+
+    @pytest.mark.asyncio
+    async def test_breach_notification_escalation_bypasses_cooldown(self):
+        """Severity escalation fires immediately even within cooldown."""
+        from app.services.roll_service import RollConfig, RollService
+
+        cfg = RollConfig(notify_on_severity=["warning", "critical"], notify_cooldown_minutes=30)
+        svc = RollService(cfg)
+
+        breach_warn = {"short_strike": 5600, "distance_pct": 0.8, "option_type": "PUT", "is_itm": False}
+        breach_crit = {"short_strike": 5600, "distance_pct": 0.3, "option_type": "PUT", "is_itm": False}
+        sent = []
+
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(side_effect=lambda url, **kw: sent.append(kw.get("json", {})))
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            with patch("app.config.settings") as mock_settings:
+                mock_settings.notify_url = "http://localhost:9102"
+                await svc._fire_breach_notification("pos-1", "SPX", "20260501", "warning", breach_warn)
+                # Escalation to critical — fires despite being within cooldown
+                await svc._fire_breach_notification("pos-1", "SPX", "20260501", "critical", breach_crit)
+
+        assert len(sent) == 2
+
+    @pytest.mark.asyncio
+    async def test_breach_notification_disabled_when_empty_list(self):
+        """No notification sent when notify_on_severity is empty."""
+        from app.services.roll_service import RollConfig, RollService
+
+        cfg = RollConfig(notify_on_severity=[])
+        svc = RollService(cfg)
+
+        breach = {"short_strike": 5600, "distance_pct": 0.8, "option_type": "PUT", "is_itm": False}
+        sent = []
+
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client.post = AsyncMock(side_effect=lambda url, **kw: sent.append(kw.get("json", {})))
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            with patch("app.config.settings") as mock_settings:
+                mock_settings.notify_url = "http://localhost:9102"
+                await svc._fire_breach_notification("pos-1", "SPX", "20260501", "warning", breach)
+
+        assert len(sent) == 0
+
+    # ── build_manual_forward / build_manual_mirror ────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_build_manual_forward_safe_position(self, tmp_path):
+        """build_manual_forward works even when position is at safe severity."""
+        from app.services.roll_service import RollConfig, RollService
+        from app.services.position_store import get_position_store
+
+        svc = RollService(RollConfig())
+
+        # Position far OTM (safe)
+        pos = self._make_position(
+            position_id="manual-fwd-1",
+            short_strike=5000,
+            long_strike=4975,
+            option_type="PUT",
+        )
+        store = get_position_store()
+        store._positions["manual-fwd-1"] = {**pos, "status": "open"}
+        store._save()
+
+        mock_quote = MagicMock()
+        mock_quote.last = 5700  # Far above short strike = safe
+        mock_quote.bid = 5700
+
+        with patch("app.services.market_data.get_quote", new_callable=AsyncMock, return_value=mock_quote):
+            with patch("app.services.market_data.get_option_quotes", new_callable=AsyncMock, return_value=[]):
+                suggestion = await svc.build_manual_forward("manual-fwd-1")
+
+        assert suggestion is not None
+        assert suggestion.roll_type == "forward"
+        assert suggestion.position_id == "manual-fwd-1"
+        assert suggestion.suggestion_id in svc._suggestions
+
+    @pytest.mark.asyncio
+    async def test_build_manual_forward_with_overrides(self, tmp_path):
+        """build_manual_forward applies overrides correctly."""
+        from app.services.roll_service import RollConfig, RollService
+        from app.services.position_store import get_position_store
+
+        svc = RollService(RollConfig(forward_min_dte=1))
+
+        pos = self._make_position(
+            position_id="manual-fwd-2",
+            short_strike=5600,
+            long_strike=5575,
+            option_type="PUT",
+            quantity=10,
+        )
+        store = get_position_store()
+        store._positions["manual-fwd-2"] = {**pos, "status": "open", "quantity": 10}
+        store._save()
+
+        mock_quote = MagicMock()
+        mock_quote.last = 5650
+        mock_quote.bid = 5650
+
+        with patch("app.services.market_data.get_quote", new_callable=AsyncMock, return_value=mock_quote):
+            with patch("app.services.market_data.get_option_quotes", new_callable=AsyncMock, return_value=[]):
+                suggestion = await svc.build_manual_forward(
+                    "manual-fwd-2",
+                    overrides={"dte": 2, "close_quantity": 5, "quantity": 5},
+                )
+
+        assert suggestion is not None
+        assert suggestion.close_quantity == 5
+        assert suggestion.new_quantity == 5
+        # DTE=2 should push expiration 2+ days out
+        exp_date = datetime.strptime(suggestion.new_expiration, "%Y%m%d").date()
+        today = datetime.now(UTC).date()
+        assert (exp_date - today).days >= 2
+
+    @pytest.mark.asyncio
+    async def test_build_manual_mirror_safe_position(self, tmp_path):
+        """build_manual_mirror works even when position is at safe severity."""
+        from app.services.roll_service import RollConfig, RollService
+        from app.services.position_store import get_position_store
+
+        svc = RollService(RollConfig())
+
+        pos = self._make_position(
+            position_id="manual-mir-1",
+            short_strike=5000,
+            long_strike=4975,
+            option_type="PUT",
+        )
+        store = get_position_store()
+        store._positions["manual-mir-1"] = {**pos, "status": "open"}
+        store._save()
+
+        mock_quote = MagicMock()
+        mock_quote.last = 5700
+        mock_quote.bid = 5700
+
+        with patch("app.services.market_data.get_quote", new_callable=AsyncMock, return_value=mock_quote):
+            with patch("app.services.market_data.get_option_quotes", new_callable=AsyncMock, return_value=[]):
+                suggestion = await svc.build_manual_mirror("manual-mir-1")
+
+        assert suggestion is not None
+        assert suggestion.roll_type == "mirror"
+        assert suggestion.new_option_type == "CALL"  # opposite of PUT
+
+    @pytest.mark.asyncio
+    async def test_build_manual_forward_nonexistent_position(self):
+        """build_manual_forward returns None for unknown position."""
+        from app.services.roll_service import RollConfig, RollService
+
+        svc = RollService(RollConfig())
+        result = await svc.build_manual_forward("no-such-pos-xyz")
+        assert result is None
+
+    # ── Route endpoints ───────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_forward_endpoint_preview(self, client, api_key_headers, tmp_path):
+        """POST /roll/forward/{id} without confirm returns preview."""
+        from app.services.roll_service import init_roll_service, RollConfig
+        from app.services.position_store import get_position_store
+
+        init_roll_service(RollConfig())
+
+        pos = self._make_position(position_id="fwd-ep-1", short_strike=5600, long_strike=5575)
+        store = get_position_store()
+        store._positions["fwd-ep-1"] = {**pos, "status": "open"}
+        store._save()
+
+        mock_quote = MagicMock()
+        mock_quote.last = 5700
+        mock_quote.bid = 5700
+
+        with patch("app.services.market_data.get_quote", new_callable=AsyncMock, return_value=mock_quote):
+            with patch("app.services.market_data.get_option_quotes", new_callable=AsyncMock, return_value=[]):
+                resp = await client.post("/roll/forward/fwd-ep-1", headers=api_key_headers, json={})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "preview"
+        assert data["suggestion"]["roll_type"] == "forward"
+
+    @pytest.mark.asyncio
+    async def test_execute_endpoint_with_overrides(self, client, api_key_headers):
+        """POST /roll/execute with body overrides applies them to dry-run preview."""
+        from app.services.roll_service import init_roll_service, RollConfig, RollSuggestion
+
+        svc = init_roll_service(RollConfig())
+        s = RollSuggestion(
+            suggestion_id="ovr-ep-001",
+            position_id="pos-ovr-ep",
+            symbol="SPX",
+            roll_type="forward",
+            severity="watch",
+            distance_pct=1.5,
+            current_short_strike=5600,
+            current_long_strike=5575,
+            current_option_type="PUT",
+            current_expiration="20260414",
+            current_quantity=10,
+            current_max_loss=25000,
+            new_short_strike=5550,
+            new_long_strike=5525,
+            new_option_type="PUT",
+            new_expiration="20260415",
+            new_width=25,
+            estimated_credit=0,
+            estimated_close_cost=0,
+            net_cost=0,
+            new_max_loss=25000,
+            covers_close=False,
+            reason="test endpoint overrides",
+        )
+        svc._suggestions["ovr-ep-001"] = s
+
+        headers = {**api_key_headers, "X-Dry-Run": "true"}
+        resp = await client.post(
+            "/roll/execute/ovr-ep-001",
+            headers=headers,
+            json={"close_quantity": 5, "width": 50},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "dry_run"
+        # Overrides should be applied to the preview suggestion
+        sugg = data["suggestion"]
+        assert sugg["close_quantity"] == 5
+        assert sugg["new_width"] == 50.0
+
+    @pytest.mark.asyncio
+    async def test_config_endpoint_notify_fields(self, client, api_key_headers):
+        """POST /roll/config updates notify_on_severity and related fields."""
+        from app.services.roll_service import init_roll_service, RollConfig
+
+        init_roll_service(RollConfig())
+
+        resp = await client.post(
+            "/roll/config",
+            headers=api_key_headers,
+            json={
+                "notify_on_severity": ["critical", "breached"],
+                "notify_channel": "sms",
+                "notify_cooldown_minutes": 10,
+            },
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["notify_on_severity"] == ["critical", "breached"]
+        assert data["notify_channel"] == "sms"
+        assert data["notify_cooldown_minutes"] == 10
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

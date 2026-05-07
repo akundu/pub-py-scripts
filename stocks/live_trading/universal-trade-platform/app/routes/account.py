@@ -122,19 +122,61 @@ async def flush_positions(
     if not store or not ledger:
         raise HTTPException(status_code=503, detail="Services not initialized")
 
-    # Clear only open positions, preserve closed
+    # Clear open positions and deduplicate closed expired-option positions.
+    # The expiration service + sync loop can create duplicate closed entries
+    # for options that IBKR keeps reporting pending settlement; dedup here
+    # so flush is the one-stop cleanup command.
+    from datetime import date as _date
+    from collections import defaultdict as _defaultdict
+
     open_cleared = 0
     closed_kept = 0
+    dupes_removed = 0
+    utc_today = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).date()
+
     with store._lock:
-        to_remove = []
-        for pid, pos in store._positions.items():
-            if pos.get("status") == "open":
-                to_remove.append(pid)
-            else:
-                closed_kept += 1
+        # --- Step 1: remove open positions ---
+        to_remove = [pid for pid, pos in store._positions.items()
+                     if pos.get("status") == "open"]
         for pid in to_remove:
             del store._positions[pid]
             open_cleared += 1
+
+        # --- Step 2: dedup closed expired-option positions by con_id ---
+        expired_closed: dict = _defaultdict(list)
+        for pid, p in store._positions.items():
+            if p.get("status") != "closed":
+                continue
+            if p.get("order_type") != "option":
+                continue
+            con_id = p.get("con_id")
+            if not con_id:
+                continue
+            exp = p.get("expiration", "")
+            if not exp:
+                continue
+            if len(exp) == 8 and "-" not in exp:
+                exp = f"{exp[:4]}-{exp[4:6]}-{exp[6:8]}"
+            try:
+                if _date.fromisoformat(exp) <= utc_today:
+                    expired_closed[con_id].append((pid, p))
+            except (ValueError, TypeError):
+                pass
+
+        dupe_pids: set = set()
+        for con_id, group in expired_closed.items():
+            if len(group) <= 1:
+                continue
+            group.sort(key=lambda x: x[1].get("entry_time", ""))
+            for pid, _ in group[1:]:
+                dupe_pids.add(pid)
+
+        for pid in dupe_pids:
+            del store._positions[pid]
+            dupes_removed += 1
+
+        closed_kept = sum(1 for p in store._positions.values()
+                          if p.get("status") == "closed")
         store._save()
 
     # Re-sync from broker
@@ -144,6 +186,7 @@ async def flush_positions(
     return {
         "open_cleared": open_cleared,
         "closed_preserved": closed_kept,
+        "closed_dupes_removed": dupes_removed,
         "synced_new": sync_result.new_positions,
         "synced_updated": sync_result.updated_positions,
         "open_positions": len(store.get_open_positions()),

@@ -4618,7 +4618,9 @@ async def _cmd_reconcile_http(args, server: str) -> int:
                 return 1
             d = resp.json()
             print(f"  Open cleared:      {d.get('open_cleared', 0)}")
-            print(f"  Closed preserved:  {d.get('closed_preserved', 0)}")
+            dupes = d.get('closed_dupes_removed', 0)
+            print(f"  Closed preserved:  {d.get('closed_preserved', 0)}"
+                  + (f"  ({dupes} duplicates removed)" if dupes else ""))
             print(f"  Re-synced:         {d.get('synced_new', 0)} new, {d.get('synced_updated', 0)} updated")
             print(f"  Open positions:    {d.get('open_positions', 0)}")
             print()
@@ -7198,7 +7200,9 @@ async def _cmd_flush(args) -> int:
             d = resp.json()
             print(f"  Flushed via daemon:")
             print(f"    Open cleared:     {d.get('open_cleared', 0)}")
-            print(f"    Closed preserved: {d.get('closed_preserved', 0)}")
+            dupes2 = d.get('closed_dupes_removed', 0)
+            print(f"    Closed preserved: {d.get('closed_preserved', 0)}"
+                  + (f"  ({dupes2} duplicates removed)" if dupes2 else ""))
             print(f"    Re-synced:        {d.get('synced_new', 0)} new")
         return 0
     import json
@@ -7781,6 +7785,16 @@ async def _cmd_executions(args) -> int:
 # ── roll ──────────────────────────────────────────────────────────────────────
 
 
+def _collect_roll_overrides(args) -> dict:
+    """Collect per-execute override flags from parsed CLI args. Returns only set values."""
+    overrides = {}
+    for key in ("dte", "otm_pct", "width", "quantity", "close_quantity"):
+        val = getattr(args, key, None)
+        if val is not None:
+            overrides[key] = val
+    return overrides
+
+
 async def _cmd_roll_http(args, server: str) -> int:
     """Roll commands via HTTP daemon."""
     import httpx
@@ -7800,16 +7814,17 @@ async def _cmd_roll_http(args, server: str) -> int:
         elif action in ("execute", "ex"):
             sid = getattr(args, "suggestion_id", "")
             confirm = getattr(args, "confirm", False)
+            overrides = _collect_roll_overrides(args)
 
-            # First preview the suggestion
+            # Preview (with overrides applied)
             resp = await client.post(
                 f"/roll/execute/{sid}",
                 headers={"X-Dry-Run": "true"},
+                json=overrides,
             )
             if resp.status_code != 200:
                 print(f"  Error: {resp.status_code} {resp.text}")
                 return 1
-
             preview = resp.json()
             suggestion = preview.get("suggestion", {})
             _print_roll_preview(suggestion)
@@ -7818,13 +7833,11 @@ async def _cmd_roll_http(args, server: str) -> int:
                 print("  Add --confirm to execute this roll.")
                 return 0
 
-            # Execute
-            resp = await client.post(f"/roll/execute/{sid}")
+            resp = await client.post(f"/roll/execute/{sid}", json=overrides)
             if resp.status_code != 200:
                 print(f"  Error: {resp.status_code} {resp.text}")
                 return 1
-            result = resp.json()
-            _print_roll_result(result)
+            _print_roll_result(resp.json())
             return 0
 
         elif action in ("dismiss", "dm"):
@@ -7845,12 +7858,14 @@ async def _cmd_roll_http(args, server: str) -> int:
             return await _cmd_roll_manual_http(client, pos_id, "mirror", args)
 
         elif action == "config":
-            # Check if any updates
             updates = {}
             mt = getattr(args, "mirror_trigger", None)
             ft = getattr(args, "forward_trigger", None)
             ae = getattr(args, "auto_execute", None)
             nae = getattr(args, "no_auto_execute", None)
+            ns = getattr(args, "notify_severity", None)
+            nc = getattr(args, "notify_channel", None)
+            ncd = getattr(args, "notify_cooldown", None)
             if mt:
                 updates["mirror_trigger_severity"] = mt
             if ft:
@@ -7859,6 +7874,12 @@ async def _cmd_roll_http(args, server: str) -> int:
                 updates["auto_execute"] = True
             if nae:
                 updates["auto_execute"] = False
+            if ns is not None:
+                updates["notify_on_severity"] = [s.strip() for s in ns.split(",") if s.strip()]
+            if nc:
+                updates["notify_channel"] = nc
+            if ncd is not None:
+                updates["notify_cooldown_minutes"] = int(ncd)
 
             if updates:
                 resp = await client.post("/roll/config", json=updates)
@@ -7877,40 +7898,23 @@ async def _cmd_roll_http(args, server: str) -> int:
 
 
 async def _cmd_roll_manual_http(client, pos_id: str, roll_type: str, args) -> int:
-    """Manual roll: trigger a scan, find/create suggestion for position, show preview."""
+    """Manual forward/mirror roll via force-build endpoint (works for any severity)."""
     confirm = getattr(args, "confirm", False)
+    overrides = _collect_roll_overrides(args)
+    body = {**overrides, "confirm": confirm}
 
-    # Trigger a scan to generate fresh suggestions
-    resp = await client.get("/roll/suggestions")
-    if resp.status_code != 200:
-        print(f"  Error fetching suggestions: {resp.status_code}")
-        return 1
-
-    suggestions = resp.json()
-    # Find a suggestion matching this position and roll type
-    match = None
-    for s in suggestions:
-        if s.get("position_id", "").startswith(pos_id) and s.get("roll_type") == roll_type:
-            match = s
-            break
-
-    if not match:
-        print(f"  No {roll_type} roll suggestion found for position {pos_id}")
-        print(f"  Ensure the position exists and meets the {roll_type} trigger threshold.")
-        return 1
-
-    sid = match["suggestion_id"]
-    _print_roll_preview(match)
-
-    if not confirm:
-        print(f"  To execute: utp.py roll {roll_type} {pos_id} --confirm")
-        return 0
-
-    resp = await client.post(f"/roll/execute/{sid}")
+    resp = await client.post(f"/roll/{roll_type}/{pos_id}", json=body)
     if resp.status_code != 200:
         print(f"  Error: {resp.status_code} {resp.text}")
         return 1
-    _print_roll_result(resp.json())
+    data = resp.json()
+
+    if not confirm:
+        _print_roll_preview(data.get("suggestion", data))
+        print(f"  To execute: utp.py roll {roll_type} {pos_id} --confirm")
+        return 0
+
+    _print_roll_result(data)
     return 0
 
 
@@ -7974,19 +7978,40 @@ def _print_roll_preview(suggestion: dict) -> None:
     print(f"  Symbol:        {sym}")
     print(f"  Severity:      {sev} ({dist:.1f}% from short strike)")
     print()
+
+    cur_qty = suggestion.get("current_quantity", 0)
+    close_qty = suggestion.get("close_quantity") or cur_qty
+    new_qty = suggestion.get("new_quantity") or close_qty
+
     print(f"  Current position:")
     print(f"    {suggestion.get('current_option_type', '')} "
           f"{suggestion.get('current_short_strike', 0):.0f}/"
           f"{suggestion.get('current_long_strike', 0):.0f} "
           f"exp {suggestion.get('current_expiration', '')} "
-          f"x{suggestion.get('current_quantity', 0)}")
+          f"x{cur_qty}")
+    if rtype == "forward" and close_qty < cur_qty:
+        print(f"    Closing {close_qty} of {cur_qty} contracts (partial roll)")
     print()
+
     print(f"  New position:")
     print(f"    {suggestion.get('new_option_type', '')} "
           f"{suggestion.get('new_short_strike', 0):.0f}/"
           f"{suggestion.get('new_long_strike', 0):.0f} "
           f"exp {suggestion.get('new_expiration', '')} "
-          f"x{suggestion.get('current_quantity', 0)}")
+          f"x{new_qty}")
+
+    credit = suggestion.get("estimated_credit", 0)
+    close_cost = suggestion.get("estimated_close_cost", 0)
+    net = suggestion.get("net_cost", 0)
+    if credit or close_cost:
+        print()
+        if rtype == "forward":
+            print(f"  Est. close cost:  ${close_cost:.2f}  |  Est. open credit: ${credit:.2f}")
+        else:
+            print(f"  Est. open credit: ${credit:.2f}")
+        covers = suggestion.get("covers_close", False)
+        net_label = "credit" if net <= 0 else "debit"
+        print(f"  Net cost:         ${abs(net):.2f} {net_label}  ({'covers close' if covers else 'does not cover close'})")
     print()
 
     if rtype == "forward":
@@ -8042,8 +8067,21 @@ def _print_roll_config(config: dict) -> None:
     print(f"  Forward rolls:")
     print(f"    Enabled:                   {config.get('forward_enabled', True)}")
     print(f"    Trigger severity:          {config.get('forward_trigger_severity', 'watch')}")
-    print(f"    DTE range:                 {config.get('forward_min_dte', 1)}-{config.get('forward_max_dte', 5)}")
-    print(f"    Max width multiplier:      {config.get('forward_max_width_multiplier', 2.0)}x")
+    print(f"    Target DTE:                {config.get('forward_min_dte', 1)}")
+    def_otm = config.get('forward_default_otm_pct')
+    def_w = config.get('forward_default_width')
+    def_q = config.get('forward_default_quantity')
+    pclose = config.get('forward_partial_close_pct', 100.0)
+    print(f"    Default OTM%:              {f'{def_otm:.2f}%' if def_otm is not None else 'auto (breach distance)'}")
+    print(f"    Default width:             {f'{def_w:.0f}' if def_w is not None else 'same as original'}")
+    print(f"    Default quantity:          {def_q if def_q is not None else 'same as original'}")
+    print(f"    Partial close pct:         {pclose:.0f}%")
+    print()
+    print(f"  Notifications:")
+    sev_list = config.get("notify_on_severity", ["warning", "critical", "breached"])
+    print(f"    Alert on severity:         {', '.join(sev_list) if sev_list else 'disabled'}")
+    print(f"    Channel:                   {config.get('notify_channel', 'email')}")
+    print(f"    Cooldown:                  {config.get('notify_cooldown_minutes', 15)} min")
     print()
 
 
@@ -8074,19 +8112,21 @@ async def _cmd_roll(args) -> int:
     elif action in ("execute", "ex"):
         sid = getattr(args, "suggestion_id", "")
         confirm = getattr(args, "confirm", False)
+        overrides = _collect_roll_overrides(args)
 
         s = svc.get_suggestion(sid)
         if not s:
             print(f"  Suggestion {sid} not found")
             return 1
 
-        _print_roll_preview(s.to_dict())
+        preview = svc._apply_overrides(s, overrides) if overrides else s
+        _print_roll_preview(preview.to_dict())
 
         if not confirm:
             print("  Add --confirm to execute this roll.")
             return 0
 
-        result = await svc.execute_roll(sid)
+        result = await svc.execute_roll(sid, overrides=overrides or None)
         if "error" in result:
             print(f"  Error: {result['error']}")
             return 1
@@ -8106,29 +8146,26 @@ async def _cmd_roll(args) -> int:
         pos_id = getattr(args, "position_id", "")
         confirm = getattr(args, "confirm", False)
         roll_type = "forward" if action in ("forward", "fwd") else "mirror"
+        overrides = _collect_roll_overrides(args)
 
-        # Trigger scan to generate suggestions
-        await svc.scan_positions()
-        suggestions = svc.get_suggestions()
+        # Force-build suggestion (works regardless of severity)
+        if roll_type == "forward":
+            suggestion = await svc.build_manual_forward(pos_id, overrides=overrides or None)
+        else:
+            suggestion = await svc.build_manual_mirror(pos_id, overrides=overrides or None)
 
-        match = None
-        for s_dict in suggestions:
-            if s_dict.get("position_id", "").startswith(pos_id) and s_dict.get("roll_type") == roll_type:
-                match = s_dict
-                break
-
-        if not match:
-            print(f"  No {roll_type} roll suggestion found for position {pos_id}")
+        if not suggestion:
+            print(f"  Position {pos_id} not found or could not build {roll_type} suggestion.")
+            print(f"  Ensure the position exists and is an open multi-leg credit spread.")
             return 1
 
-        sid = match["suggestion_id"]
-        _print_roll_preview(match)
+        _print_roll_preview(suggestion.to_dict())
 
         if not confirm:
             print(f"  To execute: utp.py roll {roll_type} {pos_id} --confirm")
             return 0
 
-        result = await svc.execute_roll(sid)
+        result = await svc.execute_roll(suggestion.suggestion_id)
         if "error" in result:
             print(f"  Error: {result['error']}")
             return 1
@@ -8141,6 +8178,9 @@ async def _cmd_roll(args) -> int:
         ft = getattr(args, "forward_trigger", None)
         ae = getattr(args, "auto_execute", None)
         nae = getattr(args, "no_auto_execute", None)
+        ns = getattr(args, "notify_severity", None)
+        nc = getattr(args, "notify_channel", None)
+        ncd = getattr(args, "notify_cooldown", None)
         if mt:
             updates["mirror_trigger_severity"] = mt
         if ft:
@@ -8149,6 +8189,12 @@ async def _cmd_roll(args) -> int:
             updates["auto_execute"] = True
         if nae:
             updates["auto_execute"] = False
+        if ns is not None:
+            updates["notify_on_severity"] = [s.strip() for s in ns.split(",") if s.strip()]
+        if nc:
+            updates["notify_channel"] = nc
+        if ncd is not None:
+            updates["notify_cooldown_minutes"] = int(ncd)
         if updates:
             svc.update_config(updates)
         _print_roll_config(svc.config.to_dict())
@@ -11112,13 +11158,20 @@ Forward rolls move the same-side spread to a further DTE.
                                     ''',
                                     epilog='''
 Examples:
-  %(prog)s suggestions              Show pending roll suggestions
-  %(prog)s execute abc123 --confirm Execute a roll suggestion
-  %(prog)s dismiss abc123           Dismiss a suggestion
-  %(prog)s forward pos-id --confirm Manual forward roll for a position
-  %(prog)s mirror pos-id --confirm  Manual mirror roll for a position
-  %(prog)s config                   Show roll configuration
-  %(prog)s config --mirror-trigger critical  Change mirror trigger level
+  %(prog)s suggestions                         Show pending roll suggestions
+  %(prog)s execute abc123 --confirm            Execute a roll suggestion
+  %(prog)s execute abc123 --dte 2 --confirm    Execute with DTE override
+  %(prog)s execute abc123 --close-quantity 5 --confirm  Partial roll (5 of N contracts)
+  %(prog)s dismiss abc123                      Dismiss a suggestion
+  %(prog)s forward pos-id --confirm            Manual forward roll (any severity)
+  %(prog)s forward pos-id --dte 2 --otm-pct 1.5 --confirm
+  %(prog)s forward pos-id --close-quantity 5 --quantity 5 --confirm  Split roll
+  %(prog)s mirror pos-id --confirm             Manual mirror roll
+  %(prog)s mirror pos-id --width 30 --confirm  Mirror with wider spread
+  %(prog)s config                              Show roll configuration
+  %(prog)s config --forward-trigger warning    Change forward trigger level
+  %(prog)s config --notify-severity warning,critical,breached
+  %(prog)s config --notify-channel sms --notify-cooldown 10
 
 Aliases: rl
                                     ''',
@@ -11135,6 +11188,16 @@ Aliases: rl
     roll_exec_p.add_argument("suggestion_id", help="Suggestion ID (or prefix)")
     roll_exec_p.add_argument("--confirm", action="store_true",
                               help="Confirm execution (without this, shows preview only)")
+    roll_exec_p.add_argument("--dte", type=int, default=None,
+                              help="Override target DTE for new position")
+    roll_exec_p.add_argument("--otm-pct", type=float, default=None, dest="otm_pct",
+                              help="Override OTM%% for new short strike (e.g. 1.5 = 1.5%% from spot)")
+    roll_exec_p.add_argument("--width", type=float, default=None,
+                              help="Override spread width for new position")
+    roll_exec_p.add_argument("--quantity", type=int, default=None,
+                              help="Override contracts to open in new position")
+    roll_exec_p.add_argument("--close-quantity", type=int, default=None, dest="close_quantity",
+                              help="Contracts to close from original (partial roll)")
 
     # roll dismiss <suggestion-id>
     roll_dismiss_p = roll_sub.add_parser("dismiss", aliases=["dm"],
@@ -11143,17 +11206,33 @@ Aliases: rl
 
     # roll forward <position-id>
     roll_fwd_p = roll_sub.add_parser("forward", aliases=["fwd"],
-                                      help="Manual forward roll for a position")
+                                      help="Manual forward roll for a position (works at any severity)")
     roll_fwd_p.add_argument("position_id", help="Position ID (or prefix)")
     roll_fwd_p.add_argument("--confirm", action="store_true",
                              help="Confirm execution (without this, shows preview only)")
+    roll_fwd_p.add_argument("--dte", type=int, default=None,
+                             help="Target DTE for new position (default: forward_min_dte config)")
+    roll_fwd_p.add_argument("--otm-pct", type=float, default=None, dest="otm_pct",
+                             help="Short strike OTM%% from current price (e.g. 1.5 = 1.5%%)")
+    roll_fwd_p.add_argument("--width", type=float, default=None,
+                             help="Spread width for new position (default: same as original)")
+    roll_fwd_p.add_argument("--quantity", type=int, default=None,
+                             help="Contracts to open in new position (default: same as closed)")
+    roll_fwd_p.add_argument("--close-quantity", type=int, default=None, dest="close_quantity",
+                             help="Contracts to close from original (default: all); enables partial roll")
 
     # roll mirror <position-id>
     roll_mir_p = roll_sub.add_parser("mirror", aliases=["mir"],
-                                      help="Manual mirror roll for a position")
+                                      help="Manual mirror roll for a position (works at any severity)")
     roll_mir_p.add_argument("position_id", help="Position ID (or prefix)")
     roll_mir_p.add_argument("--confirm", action="store_true",
                              help="Confirm execution (without this, shows preview only)")
+    roll_mir_p.add_argument("--otm-pct", type=float, default=None, dest="otm_pct",
+                             help="Short strike OTM%% from current price (default: ATM)")
+    roll_mir_p.add_argument("--width", type=float, default=None,
+                             help="Spread width (default: same as original)")
+    roll_mir_p.add_argument("--quantity", type=int, default=None,
+                             help="Contracts to open (default: same as original)")
 
     # roll config
     roll_config_p = roll_sub.add_parser("config", help="View or update roll configuration")
@@ -11167,6 +11246,15 @@ Aliases: rl
                                 help="Enable auto-execution of roll suggestions")
     roll_config_p.add_argument("--no-auto-execute", action="store_true", default=None,
                                 help="Disable auto-execution")
+    roll_config_p.add_argument("--notify-severity", default=None, dest="notify_severity",
+                                help="Comma-separated severity levels that trigger alerts "
+                                     "(e.g. 'warning,critical,breached' or '' to disable)")
+    roll_config_p.add_argument("--notify-channel",
+                                choices=["email", "sms", "both"],
+                                default=None, dest="notify_channel",
+                                help="Notification channel for breach alerts")
+    roll_config_p.add_argument("--notify-cooldown", type=int, default=None, dest="notify_cooldown",
+                                help="Minutes between repeat alerts per position (default: 15)")
 
     # Parse
     args = parser.parse_args()
