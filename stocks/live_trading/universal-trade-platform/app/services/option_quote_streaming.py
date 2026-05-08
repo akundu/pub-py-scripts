@@ -398,6 +398,11 @@ class OptionQuoteStreamingService:
         # short-DTE greeks overlay so the two cadences are fully independent).
         self._long_dte_ibkr_last_fetch: float = 0.0
 
+        # Daily pre-market purge tracking: fires once per calendar day on the
+        # first loop tick inside the market window (default 09:20 ET) to clear
+        # yesterday's 0DTE subscriptions before today's overlay starts.
+        self._last_daily_purge_date: date | None = None
+
     @staticmethod
     def _resolve_csv_dir(configured: str) -> str:
         """Resolve CSV exports directory. Empty = auto-resolve relative to this file."""
@@ -594,6 +599,14 @@ class OptionQuoteStreamingService:
                 )
             except (TypeError, ValueError) as e:
                 logger.warning("Invalid option-subscription budget: %s", e)
+
+        # Purge any expired subscriptions left from a prior session.  Normally
+        # a no-op on a fresh process (empty _option_subs), but guards against
+        # stale state if the service is restarted within the same process.
+        if hasattr(self._provider, "_purge_expired_option_subs"):
+            n = self._provider._purge_expired_option_subs()
+            if n:
+                logger.info("Startup: purged %d expired option subscriptions", n)
 
         logger.info("Option quote streaming started")
 
@@ -1072,6 +1085,24 @@ class OptionQuoteStreamingService:
     async def run_loop(self, shutdown_event: asyncio.Event) -> None:
         """Main loop — call after start(). Runs until shutdown_event is set."""
         while not shutdown_event.is_set() and self._running:
+            # Daily pre-market expired-sub purge.  Fires once per calendar day
+            # on the first loop tick inside the market window (default 09:20 ET,
+            # 10 min before regular open).  Clears yesterday's 0DTE subscriptions
+            # before the overlay starts loading today's strikes, keeping the TWS
+            # budget well below saturation even after days of continuous uptime.
+            _today = date.today()
+            if _is_market_hours() and self._last_daily_purge_date != _today:
+                self._last_daily_purge_date = _today
+                if hasattr(self._provider, "_purge_expired_option_subs"):
+                    _n = self._provider._purge_expired_option_subs()
+                    _budget = getattr(self._provider, "_option_subs_budget", "?")
+                    _used = len(getattr(self._provider, "_option_subs", {}))
+                    logger.info(
+                        "Daily pre-market purge: cleared %d expired option subs "
+                        "(budget=%s, remaining=%s)",
+                        _n, _budget, _used,
+                    )
+
             cycle_start = time.monotonic()
             try:
                 await self._run_one_cycle()

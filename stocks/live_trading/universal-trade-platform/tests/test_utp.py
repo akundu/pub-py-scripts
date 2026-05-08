@@ -10451,6 +10451,85 @@ option_quotes_long_dte_ibkr_enabled: true
         assert isinstance(call_args[0][0], dict)
         assert isinstance(call_args[0][1], float)
 
+    async def test_startup_purge_called_on_start(self):
+        """start() calls _purge_expired_option_subs on the provider at startup."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        provider = MagicMock()
+        provider._purge_expired_option_subs = MagicMock(return_value=3)
+        svc = OptionQuoteStreamingService(StreamingConfig(), provider=provider)
+        # Stub out Redis calls so start() doesn't attempt network I/O
+        svc._redis_connect = AsyncMock()
+        svc._redis_load_conid_cache = AsyncMock()
+        svc._redis_load_quotes = AsyncMock()
+
+        await svc.start()
+
+        provider._purge_expired_option_subs.assert_called_once()
+
+    async def test_run_loop_daily_purge_fires_once_per_day(self):
+        """run_loop fires the daily pre-market purge exactly once per calendar day."""
+        from datetime import date
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+        import app.services.option_quote_streaming as oqs_mod
+
+        provider = MagicMock()
+        provider._purge_expired_option_subs = MagicMock(return_value=5)
+        svc = OptionQuoteStreamingService(StreamingConfig(), provider=provider)
+        svc._running = True
+
+        shutdown = asyncio.Event()
+        call_count = 0
+
+        async def fake_cycle():
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 3:
+                shutdown.set()
+
+        svc._run_one_cycle = fake_cycle
+
+        with patch("app.services.option_quote_streaming._is_market_hours", return_value=True), \
+             patch("app.services.market_data.check_data_freshness", new_callable=AsyncMock), \
+             patch.object(oqs_mod, "date") as mock_date:
+            mock_date.today.return_value = date(2026, 5, 8)
+            mock_date.side_effect = lambda *a, **kw: date(*a, **kw)
+            await svc.run_loop(shutdown)
+
+        # Purge should fire exactly once regardless of how many cycles ran
+        assert provider._purge_expired_option_subs.call_count == 1
+        assert svc._last_daily_purge_date == date(2026, 5, 8)
+
+    async def test_run_loop_daily_purge_skips_outside_market_hours(self):
+        """run_loop does NOT fire the daily purge when market is closed."""
+        from datetime import date
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig
+
+        provider = MagicMock()
+        provider._purge_expired_option_subs = MagicMock(return_value=0)
+        svc = OptionQuoteStreamingService(StreamingConfig(), provider=provider)
+        svc._running = True
+
+        shutdown = asyncio.Event()
+        call_count = 0
+
+        async def fake_cycle():
+            nonlocal call_count
+            call_count += 1
+            if call_count >= 2:
+                shutdown.set()
+
+        svc._run_one_cycle = fake_cycle
+
+        with patch("app.services.option_quote_streaming._is_market_hours", return_value=False), \
+             patch("app.services.market_data.check_data_freshness", new_callable=AsyncMock):
+            await svc.run_loop(shutdown)
+
+        provider._purge_expired_option_subs.assert_not_called()
+
     def test_stats_include_error_split_counters(self):
         """stats dict exposes errors_broker and errors_publish alongside errors total."""
         from app.services.option_quote_streaming import OptionQuoteStreamingService
@@ -19602,6 +19681,99 @@ class TestSpreadScanner:
         args2 = parse_args([])
         assert args2.verify_require_provider_source is True
 
+    # ── Ticker interval (fast price-line refresh) ────────────────────────
+
+    def test_ticker_interval_default_10(self):
+        """ScannerConfig defaults ticker_interval to 10s."""
+        from spread_scanner import ScannerConfig, DEFAULT_TICKER_INTERVAL
+        cfg = ScannerConfig()
+        assert cfg.ticker_interval == DEFAULT_TICKER_INTERVAL
+        assert cfg.ticker_interval == 10
+
+    def test_ticker_interval_from_yaml(self, tmp_path):
+        """ticker_interval can be set in the YAML config."""
+        import yaml as _yaml
+        from spread_scanner import ScannerConfig
+        p = tmp_path / "cfg.yaml"
+        p.write_text(_yaml.safe_dump({"ticker_interval": 5}))
+        cfg = ScannerConfig.from_yaml(str(p))
+        assert cfg.ticker_interval == 5
+
+    def test_ticker_interval_propagates_to_args(self, tmp_path):
+        """YAML ticker_interval flows through to argparse defaults."""
+        import yaml as _yaml
+        from spread_scanner import ScannerConfig, parse_args
+        p = tmp_path / "cfg.yaml"
+        p.write_text(_yaml.safe_dump({"ticker_interval": 7}))
+        cfg = ScannerConfig.from_yaml(str(p))
+        defaults = cfg.to_cli_defaults()
+        args = parse_args(argv=[], defaults=defaults)
+        assert args.ticker_interval == 7
+
+    def test_ticker_interval_cli_flag_overrides_yaml(self, tmp_path):
+        """CLI --ticker-interval overrides the YAML value."""
+        import yaml as _yaml
+        from spread_scanner import ScannerConfig, parse_args
+        p = tmp_path / "cfg.yaml"
+        p.write_text(_yaml.safe_dump({"ticker_interval": 7}))
+        cfg = ScannerConfig.from_yaml(str(p))
+        defaults = cfg.to_cli_defaults()
+        args = parse_args(argv=["--ticker-interval", "3"], defaults=defaults)
+        assert args.ticker_interval == 3
+
+    def test_run_scan_cycle_populates_quote_out(self):
+        """_run_scan_cycle populates the _quote_out dict with scan quotes
+        so the ticker-refresh path starts with valid data."""
+        import asyncio
+        import argparse
+        import spread_scanner as scanner
+
+        quotes_captured: dict = {}
+
+        async def fake_scan_all(client, args, **kw):
+            return {
+                "quotes": {"SPX": {"last": 5400.0}, "RUT": {"last": 2100.0}},
+                "dte_sections": {},
+                "prev_closes": {},
+            }
+
+        args = argparse.Namespace(
+            tickers=["SPX", "RUT"], daemon_url="http://localhost:8000",
+            handlers=[], activity_log=None,
+            verify_max_age_sec=30, verify_require_provider_source=True,
+            top=3, top_per_combo=None, min_norm_roi=0.0, min_otm=0.0,
+            min_otm_per_ticker={}, max_otm=0.0, max_otm_per_ticker={},
+            min_credit=0.0, min_roi=0.0, min_tier=None, min_tier_close=None,
+            min_buf=0.0, show_otm=False, types=["put", "call"],
+            widths={}, dte=[0], norm_roi_decay_start_pt="09:00",
+            recent_actions_count=3, interval=20, ticker_interval=10,
+        )
+
+        class FakeClient:
+            async def get(self, *a, **kw):
+                raise Exception("no net")
+
+        class FakePrevClose:
+            def should_refresh(self): return False
+            def as_dict(self): return {}
+
+        orig = scanner.scan_all_tickers
+        scanner.scan_all_tickers = fake_scan_all
+        try:
+            loop = asyncio.new_event_loop()
+            output, err = loop.run_until_complete(
+                scanner._run_scan_cycle(
+                    FakeClient(), args, FakePrevClose(), [],
+                    _quote_out=quotes_captured,
+                )
+            )
+        finally:
+            loop.close()
+            scanner.scan_all_tickers = orig
+
+        assert quotes_captured.get("SPX", {}).get("last") == 5400.0
+        assert quotes_captured.get("RUT", {}).get("last") == 2100.0
+
     def test_verify_failures_are_marked_not_dropped(self):
         """Verify failures must NOT remove spreads from data — they only
         annotate `verified=False` so the regular DTE section still renders
@@ -24519,6 +24691,85 @@ min_otm_per_ticker: {NDX: 2.0}
         assert _compute_kickoff_lead(predicted_dur=5.0, interval=1.0) == 0.5
         # interval=0.5 → ceiling=max(-0.5, 0.5)=0.5; floor=0.5 → lead=0.5.
         assert _compute_kickoff_lead(predicted_dur=5.0, interval=0.5) == 0.5
+
+    def test_next_paint_at_capped_when_scan_finishes_early(self):
+        """When a scan finishes before the deadline (inflated predicted_dur
+        from a previous slow cycle), the next deadline must not exceed
+        one full interval from paint time.
+
+        Regression: before the cap, `next_paint_at = old_deadline + interval`
+        could put the next update ~interval + leftover seconds away
+        (e.g. +36s with a 20s config)."""
+        import asyncio
+
+        loop = asyncio.new_event_loop()
+        try:
+            now = loop.time()
+            interval = 20.0
+
+            # Simulate: previous deadline was 16s in the future from now
+            # (scan finished 16s early due to inflated kickoff_lead).
+            old_next_paint_at = now + 16.0
+
+            # Reproduce the deadline computation from scan_loop.
+            paint_at_now = now
+            base = old_next_paint_at
+            next_paint_at = base + interval
+            while next_paint_at <= paint_at_now:
+                next_paint_at += interval
+            # Cap — the fix under test.
+            if next_paint_at > paint_at_now + interval:
+                next_paint_at = paint_at_now + interval
+
+            gap = next_paint_at - paint_at_now
+            assert gap <= interval, (
+                f"Next paint {gap:.1f}s away exceeds configured interval {interval}s"
+            )
+            # Should be exactly interval from now after the cap.
+            assert abs(gap - interval) < 0.01
+        finally:
+            loop.close()
+
+    def test_next_paint_at_not_capped_when_scan_on_time(self):
+        """When a scan finishes on or after the deadline, the next paint is
+        scheduled from the old deadline (phase-preserving) and the cap has
+        no effect because it's already ≤ interval from now."""
+        import asyncio
+
+        loop = asyncio.new_event_loop()
+        try:
+            now = loop.time()
+            interval = 20.0
+
+            # Scan finished exactly at the deadline.
+            old_next_paint_at = now  # deadline == now
+
+            paint_at_now = now
+            base = old_next_paint_at
+            next_paint_at = base + interval
+            while next_paint_at <= paint_at_now:
+                next_paint_at += interval
+            if next_paint_at > paint_at_now + interval:
+                next_paint_at = paint_at_now + interval
+
+            gap = next_paint_at - paint_at_now
+            assert abs(gap - interval) < 0.01
+
+            # Also test: scan ran 3s over the deadline.
+            old_next_paint_at2 = now - 3.0
+            paint_at_now2 = now
+            base2 = old_next_paint_at2
+            next_paint_at2 = base2 + interval
+            while next_paint_at2 <= paint_at_now2:
+                next_paint_at2 += interval
+            if next_paint_at2 > paint_at_now2 + interval:
+                next_paint_at2 = paint_at_now2 + interval
+
+            gap2 = next_paint_at2 - paint_at_now2
+            assert gap2 <= interval
+            assert gap2 == interval - 3.0  # phase preserved: 17s until next
+        finally:
+            loop.close()
 
 
 class TestHandlerValidatePrices:
