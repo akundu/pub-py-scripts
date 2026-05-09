@@ -73,9 +73,21 @@ fi
 echo "start date $start_date"
 echo "end date $end_date"
 
-python fetch_symbol_data.py I:RUT --latest --db-path $QUEST_DB_STRING --timezone PST  --force-fetch
-python fetch_symbol_data.py I:SPX  --latest --db-path $QUEST_DB_STRING --timezone PST  --force-fetch
-python fetch_symbol_data.py I:NDX --latest --db-path $QUEST_DB_STRING --timezone PST  --force-fetch
+# Use absolute venv python — bare `python` is fragile across db_server restarts
+# with different PATH/VIRTUAL_ENV. May 2026: cron silently stopped writing daily
+# bars for ~3 days because the script was importing alpaca_trade_api from the
+# wrong interpreter; pinning the path eliminates that whole class of failure.
+PY=.venv/bin/python
+$PY fetch_symbol_data.py I:RUT   --latest --db-path $QUEST_DB_STRING --timezone PST --force-fetch
+$PY fetch_symbol_data.py I:SPX   --latest --db-path $QUEST_DB_STRING --timezone PST --force-fetch
+$PY fetch_symbol_data.py I:NDX   --latest --db-path $QUEST_DB_STRING --timezone PST --force-fetch
+$PY fetch_symbol_data.py I:VIX1D --latest --db-path $QUEST_DB_STRING --timezone PST --force-fetch
+$PY fetch_symbol_data.py I:VIX   --latest --db-path $QUEST_DB_STRING --timezone PST --force-fetch
+$PY fetch_symbol_data.py TQQQ    --latest --db-path $QUEST_DB_STRING --timezone PST --force-fetch
+$PY fetch_symbol_data.py SPY     --latest --db-path $QUEST_DB_STRING --timezone PST --force-fetch
+$PY fetch_symbol_data.py QQQ     --latest --db-path $QUEST_DB_STRING --timezone PST --force-fetch
+# DJX index is not on Yahoo (^DJX doesn't exist); force polygon for it.
+$PY fetch_symbol_data.py I:DJX   --latest --db-path $QUEST_DB_STRING --timezone PST --force-fetch --data-source polygon
 
 
 python3 scripts/options_chain_download.py SPX NDX RUT --zero-dte-date-start $start_date  --zero-dte-date-end $end_date  --max-connections 30 --num-processes 2  --interval 5min --format-chain-csv --output-dir options_csv_output/
