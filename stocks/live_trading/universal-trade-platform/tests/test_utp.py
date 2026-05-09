@@ -29554,3 +29554,31 @@ class TestWatchdogService:
         hint = {"severity": "warning", "title": "Close 55% profit"}
         result = utp._format_watchdog_hint(hint)
         assert "⚠" in result or "Close 55% profit" in result
+
+    def test_format_watchdog_hint_fixed_width_none(self):
+        """_format_watchdog_hint(None) produces exactly _WATCHDOG_COL_WIDTH visible chars."""
+        import utp
+        import re
+        raw = utp._format_watchdog_hint(None)
+        # Strip ANSI escape codes to measure visible width
+        visible = re.sub(r"\x1b\[[0-9;]*m", "", raw)
+        assert len(visible) == utp._WATCHDOG_COL_WIDTH
+
+    def test_format_watchdog_hint_fixed_width_short_title(self):
+        """Short title is padded to _WATCHDOG_COL_WIDTH visible chars."""
+        import utp
+        import re
+        hint = {"severity": "info", "title": "Hi"}
+        raw = utp._format_watchdog_hint(hint)
+        visible = re.sub(r"\x1b\[[0-9;]*m", "", raw)
+        assert len(visible) == utp._WATCHDOG_COL_WIDTH
+
+    def test_format_watchdog_hint_fixed_width_long_title(self):
+        """Long title is truncated with '…' to stay within _WATCHDOG_COL_WIDTH."""
+        import utp
+        import re
+        hint = {"severity": "critical", "title": "A" * 60}
+        raw = utp._format_watchdog_hint(hint)
+        visible = re.sub(r"\x1b\[[0-9;]*m", "", raw)
+        assert len(visible) == utp._WATCHDOG_COL_WIDTH
+        assert "…" in visible

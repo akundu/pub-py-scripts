@@ -99,16 +99,29 @@ def _delta_color(breach_delta: float) -> str:
     return "92"
 
 
-def _format_watchdog_hint(hint: dict | None) -> str:
-    """Format a watchdog suggestion for the portfolio Watchdog column."""
-    if not hint:
-        return _color("—", "2")
-    sev = hint.get("severity", "info")
-    title = hint.get("title", "?")
+_WATCHDOG_COL_WIDTH = 30  # visible chars (icon + space + title)
+
+
+def _format_watchdog_hint(hint: dict | None, width: int = _WATCHDOG_COL_WIDTH) -> str:
+    """Format a watchdog suggestion as a fixed-width colored string.
+
+    Always returns exactly `width` visible characters so the column
+    stays aligned regardless of whether ANSI codes are present.
+    """
     sev_colors = {"urgent": "91", "critical": "93", "warning": "93", "info": "36"}
-    sev_icons = {"urgent": "✖", "critical": "⚠", "warning": "⚠", "info": "ℹ"}
-    icon = sev_icons.get(sev, "•")
-    return _color(f"{icon} {title}", sev_colors.get(sev, "0"))
+    sev_icons  = {"urgent": "✖", "critical": "⚠", "warning": "⚠", "info": "ℹ"}
+    if not hint:
+        text = "—" + " " * (width - 1)
+        return _color(text, "2")
+    sev   = hint.get("severity", "info")
+    title = hint.get("title", "?")
+    icon  = sev_icons.get(sev, "•")
+    # Build plain text, cap at width, left-pad to width
+    raw   = f"{icon} {title}"
+    if len(raw) > width:
+        raw = raw[: width - 1] + "…"
+    plain = raw.ljust(width)
+    return _color(plain, sev_colors.get(sev, "0"))
 
 
 def _print_header(title: str) -> None:
@@ -3544,15 +3557,12 @@ async def _cmd_portfolio_http(args, server: str) -> int:
             # Check if we have broker-enriched data
             has_marks = any(p.get("avg_cost") is not None for p in positions)
 
-            # Check if any position has a watchdog hint (determines if column is shown)
-            has_watchdog = any(p.get("watchdog_hint") for p in positions)
+            # Watchdog column is always shown (fixed width = _WATCHDOG_COL_WIDTH)
+            _wd_hdr = f"{'Watchdog':<{_WATCHDOG_COL_WIDTH}}"
+            _wd_sep = "─" * _WATCHDOG_COL_WIDTH
             if has_marks:
-                if has_watchdog:
-                    print(f"  {'ID':<6} {'Symbol':>6} {'Price':>10} {'Strikes':>16} {'Qty':>5} {'Cost':>12} {'Value':>12} {'P&L':>12} {'Cr/ROI/MaxLoss':>22} {'Exp':>12} {'Risk':>14} {'Δ':>7} {'Watchdog'}")
-                    print(f"  {'─'*6} {'─'*6} {'─'*10} {'─'*16} {'─'*5} {'─'*12} {'─'*12} {'─'*12} {'─'*22} {'─'*12} {'─'*14} {'─'*7} {'─'*26}")
-                else:
-                    print(f"  {'ID':<6} {'Symbol':>6} {'Price':>10} {'Strikes':>16} {'Qty':>5} {'Cost':>12} {'Value':>12} {'P&L':>12} {'Cr/ROI/MaxLoss':>22} {'Exp':>12} {'Risk':>14} {'Δ':>7}")
-                    print(f"  {'─'*6} {'─'*6} {'─'*10} {'─'*16} {'─'*5} {'─'*12} {'─'*12} {'─'*12} {'─'*22} {'─'*12} {'─'*14} {'─'*7}")
+                print(f"  {'ID':<6} {'Symbol':>6} {'Price':>10} {'Strikes':>16} {'Qty':>5} {'Cost':>12} {'Value':>12} {'P&L':>12} {'Cr/ROI/MaxLoss':>22} {'Exp':>12} {'Risk':>14} {'Δ':>7}  {_wd_hdr}")
+                print(f"  {'─'*6} {'─'*6} {'─'*10} {'─'*16} {'─'*5} {'─'*12} {'─'*12} {'─'*12} {'─'*22} {'─'*12} {'─'*14} {'─'*7}  {_wd_sep}")
                 total_upnl = 0.0
                 total_daily = 0.0
                 total_max_loss = 0.0
@@ -3671,19 +3681,18 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                             risk_s = _color(f"{sev} {dist:.1f}%".rjust(14), sev_colors.get(sev, "0"))
                         else:
                             risk_s = " " * 14
-                        # Watchdog hint column
-                        wd_s = _format_watchdog_hint(p.get("watchdog_hint")) if has_watchdog else ""
+                        # Watchdog hint column — always shown, fixed width
+                        wd_s = _format_watchdog_hint(p.get("watchdog_hint"))
                         row = (f"  {pid:<6} {sym:>6} {price_s} {strikes_s:>16} {qty:>5.0f} "
                                f"{cost_s} {value_s} {upnl_s} {risk_info:>22} {exp:>12} {risk_s} {delta_s}")
-                        print(row + (f"  {wd_s}" if has_watchdog else ""))
+                        print(f"{row}  {wd_s}")
                     else:
                         cur_price = p.get("current_price", 0)
                         price_s = f"${cur_price:>9,.2f}" if cur_price else f"{'---':>10}"
-                        entry = p.get("entry_price", 0)
-                        wd_s = _format_watchdog_hint(p.get("watchdog_hint")) if has_watchdog else ""
+                        wd_s = _format_watchdog_hint(p.get("watchdog_hint"))
                         row = (f"  {pid:<6} {sym:>6} {price_s} {strikes_s:>16} {qty:>5.0f} "
                                f"{'---':>12} {'---':>12} {'---':>12} {'':>22} {exp:>12} {' ' * 14} {delta_s}")
-                        print(row + (f"  {wd_s}" if has_watchdog else ""))
+                        print(f"{row}  {wd_s}")
 
                     # Per-leg greeks sub-row — short leg only (breach potential)
                     # Only shown when --verbose / -v is passed.
@@ -3728,14 +3737,17 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                       f"${total_cost:>11,.2f} ${total_value:>11,.2f} "
                       f"{_color(f'${total_upnl:>+11,.2f}', upnl_c)} {total_risk_info:>22}")
             else:
-                print(f"  {'Symbol':<10} {'Type':<10} {'Qty':>6} {'Entry':>10} {'P&L':>10} {'Status':<8}")
-                print(f"  {'---':<10} {'---':<10} {'---':>6} {'---':>10} {'---':>10} {'---':<8}")
+                _wd_hdr2 = f"{'Watchdog':<{_WATCHDOG_COL_WIDTH}}"
+                _wd_sep2  = "─" * _WATCHDOG_COL_WIDTH
+                print(f"  {'Symbol':<10} {'Type':<10} {'Qty':>6} {'Entry':>10} {'P&L':>10} {'Status':<8}  {_wd_hdr2}")
+                print(f"  {'─'*10} {'─'*10} {'─'*6} {'─'*10} {'─'*10} {'─'*8}  {_wd_sep2}")
                 for p in positions:
                     pnl = p.get("unrealized_pnl") or 0
                     pnl_color = "92" if pnl >= 0 else "91"
+                    wd_s = _format_watchdog_hint(p.get("watchdog_hint"))
                     print(f"  {p.get('symbol',''):<10} {p.get('order_type',''):<10} "
                           f"{p.get('quantity',0):>6} {p.get('entry_price',0):>10.2f} "
-                          f"{_color(f'${pnl:>8.2f}', pnl_color)} {p.get('status',''):<8}")
+                          f"{_color(f'${pnl:>8.2f}', pnl_color)} {p.get('status',''):<8}  {wd_s}")
 
         # Recent closed trades
         recent_n = getattr(args, "recent", 0)
