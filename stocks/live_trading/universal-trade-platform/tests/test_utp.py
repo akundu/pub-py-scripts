@@ -10451,6 +10451,68 @@ option_quotes_long_dte_ibkr_enabled: true
         assert isinstance(call_args[0][0], dict)
         assert isinstance(call_args[0][1], float)
 
+    async def test_cpg_provider_cycle_populates_cache(self):
+        """CPG-mode provider (no _option_subs) runs full cycle and populates cache."""
+        from app.services.option_quote_streaming import OptionQuoteStreamingService
+        from app.services.streaming_config import StreamingConfig, StreamingSymbolConfig
+
+        # Simulate a CPG provider: has get_option_quotes but no TWS subscription attrs.
+        class CPGLikeProvider:
+            async def get_option_quotes(self, symbol, expiration, opt_type, min_strike, max_strike):
+                return [
+                    {"strike": 5500.0, "bid": 1.20, "ask": 1.40, "last": 1.30,
+                     "volume": 100, "open_interest": 500},
+                ]
+            async def get_option_chain(self, symbol):
+                return {"expirations": ["2026-05-09"], "strikes": [5500.0]}
+
+        provider = CPGLikeProvider()
+        mock_quote = MagicMock(last=5500.0, bid=5499.0, ask=5501.0, source="test")
+
+        cfg = StreamingConfig(
+            symbols=[StreamingSymbolConfig(symbol="SPX", sec_type="IND")],
+            option_quotes_num_expirations=1,
+            option_quotes_ibkr_dte_list=[0],
+        )
+        svc = OptionQuoteStreamingService(cfg, provider=provider)
+        svc._greeks_interval = 0.0  # force IBKR overlay immediately
+
+        with patch("app.services.market_data.get_quote", new_callable=AsyncMock, return_value=mock_quote), \
+             patch("app.services.market_data._is_market_active", return_value=True):
+            await svc._run_one_cycle()
+
+        # Cache should have been populated (either ibkr_cache or csv_cache)
+        s = svc.stats
+        total = s.get("ibkr_cache", {}).get("total_quotes", 0) + s.get("csv_cache", {}).get("total_quotes", 0)
+        assert total > 0
+
+        # Purge/prune attrs absent → no AttributeError, and tws_option_subs returns None
+        from app.services.option_quote_streaming import _tws_option_subs_stats
+        assert _tws_option_subs_stats(provider) is None
+
+    async def test_tws_option_subs_stats_none_for_cpg(self):
+        """_tws_option_subs_stats returns None when provider has no _option_subs dict."""
+        from app.services.option_quote_streaming import _tws_option_subs_stats
+
+        class CPGProvider:
+            pass
+
+        assert _tws_option_subs_stats(CPGProvider()) is None
+
+    def test_tws_option_subs_stats_returns_dict_for_tws(self):
+        """_tws_option_subs_stats returns current/budget/util_pct when _option_subs present."""
+        from app.services.option_quote_streaming import _tws_option_subs_stats
+
+        class TWSTProvider:
+            _option_subs = {("SPX", "2026-05-09", "C", 5500.0): object()}
+            _option_subs_budget = 3500
+
+        result = _tws_option_subs_stats(TWSTProvider())
+        assert result is not None
+        assert result["current"] == 1
+        assert result["budget"] == 3500
+        assert result["util_pct"] == round(100.0 / 3500, 1)
+
     async def test_startup_purge_called_on_start(self):
         """start() calls _purge_expired_option_subs on the provider at startup."""
         from app.services.option_quote_streaming import OptionQuoteStreamingService

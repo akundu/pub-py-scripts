@@ -281,14 +281,22 @@ def _next_n_trading_days(n: int, start: date | None = None) -> list[str]:
 
 def _tws_option_subs_stats(provider) -> dict:
     """Return TWS persistent option-subscription registry stats for the
-    streaming status endpoint. Tolerates non-IBKR providers (CPG, stub) by
-    returning zeros instead of raising. Coerces values defensively because
-    test fixtures sometimes pass a ``MagicMock`` whose attribute access
-    auto-creates non-comparable mocks."""
+    streaming status endpoint.
+
+    For TWS (IBKRLiveProvider) returns current/budget/util_pct.
+    For CPG (IBKRRestProvider) and stubs that have no ``_option_subs`` dict,
+    returns ``None`` so callers can omit the field or label it N/A — 0/0
+    would be misleading since CPG has no finite subscription budget.
+    Coerces values defensively because test fixtures sometimes pass a
+    ``MagicMock`` whose attribute access auto-creates non-comparable mocks."""
     subs = getattr(provider, "_option_subs", None)
+    if not isinstance(subs, dict):
+        # Provider does not maintain a persistent subscription registry
+        # (CPG uses stateless snapshot polling — no budget to track).
+        return None
     budget_raw = getattr(provider, "_option_subs_budget", 0)
     try:
-        current = len(subs) if isinstance(subs, dict) else 0
+        current = len(subs)
     except Exception:
         current = 0
     try:
