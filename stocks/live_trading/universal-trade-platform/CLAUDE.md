@@ -11,7 +11,7 @@ A unified multi-broker trading API (FastAPI) supporting Robinhood, E\*TRADE, and
 | File | Purpose |
 |------|---------|
 | `utp.py` | ALL CLI operations + API server |
-| `tests/test_utp.py` | ALL tests (1338 tests) |
+| `tests/test_utp.py` | ALL tests (1431 tests) |
 | `spread_scanner.py` | Live spread ROI scanner dashboard (standalone tool) |
 | `sim_trader.py` | Auto-trader CLI client (standalone tool) |
 
@@ -873,6 +873,7 @@ Every CLI command auto-detects a running daemon via HTTP health check. When daem
 | `execution_store.py` | `ExecutionStore` | IBKR execution cache with perm_id grouping. Module accessor: `init_execution_store()` / `get_execution_store()` / `reset_execution_store()` |
 | `simulation_clock.py` | `SimulationClock` | Time control for historical simulation. Module accessor: `init_sim_clock()` / `get_sim_clock()` / `reset_sim_clock()` |
 | `roll_service.py` | `RollService` | Background breach scanner, suggestion lifecycle, credit estimates, notifications, per-execute overrides, force-build. Module accessor: `init_roll_service()` / `get_roll_service()` / `reset_roll_service()` |
+| `watchdog_service.py` | `WatchdogService` | Pluggable advisory framework: runs RollAdvisorModule, CloseAdvisorModule, BreachMonitorModule on configurable intervals. Surfaces most-severe suggestion per position in portfolio column. Module accessor: `init_watchdog_service()` / `get_watchdog_service()` / `reset_watchdog_service()` |
 
 ### Routes (`app/routes/`)
 
@@ -886,6 +887,7 @@ Every CLI command auto-detects a running daemon via HTTP health check. When daem
 | `import_routes.py` | `/import` | `POST /csv`, `POST /preview`, `GET /formats` |
 | `playbook.py` | `/playbook` | `POST /execute`, `POST /validate` |
 | `roll.py` | `/roll` | `GET /suggestions`, `POST /execute/{id}`, `POST /dismiss/{id}`, `POST /forward/{position_id}`, `POST /mirror/{position_id}`, `GET /config`, `POST /config` |
+| `watchdog.py` | `/watchdog` | `GET /suggestions`, `POST /dismiss/{id}`, `GET /config`, `POST /config`, `GET /status` |
 | `simulation.py` | `/sim` | `GET /status`, `POST /set-time`, `POST /reset`, `GET /timestamps`, `POST /auto-advance`, `POST /picks`, `POST /execute-picks`, `POST /sweep` |
 | `auth_routes.py` | `/auth` | `POST /token` |
 | `ws.py` | `/ws` | `WS /ws/orders`, `WS /ws/quotes` |
@@ -1038,12 +1040,66 @@ Suggestions include live option quote data: `estimated_credit` (new position), `
 | `GET /roll/config` | Current configuration |
 | `POST /roll/config` | Partial config update |
 
-## Testing
+## Portfolio Watchdog
 
-**1338 tests in `tests/test_utp.py`, all passing.** Tests use `tmp_path` for isolated persistence. The autouse `_setup_providers` fixture in `conftest.py` initializes and tears down ledger + position store per test.
+Pluggable advisory framework that runs during market hours (parent/IBKR process only) and generates typed suggestions per position. Runs in the background every 30 seconds. Suggestions appear in the `Watchdog` column in portfolio view.
+
+### Modules
+
+| Module | Triggers | Severity | Auto-action |
+|--------|----------|----------|-------------|
+| `roll_advisor` | Breach risk detected by RollService | info/warning/critical/urgent | Yes (if action_mode=True) |
+| `close_advisor` | Profit ≥ 50%, loss ≥ 2×, low ROI on exp day, EOD | warning/critical | Yes (if action_mode=True) |
+| `breach_monitor` | Same as roll but surfaces as alert only | info/warning/critical/urgent | Never |
+
+### Close Advisor Triggers
+
+| Reason | `suggestion_type` | Trigger |
+|--------|------------------|---------|
+| Stop loss | `close_stop_loss` | mark ≥ 2× entry credit |
+| Profit target | `close_profit` | captured ≥ 50% of premium |
+| EOD pre-expiry | `close_eod` | expiration day, within 15 min of 4pm ET |
+| Low ROI | `close_low_roi` | mark < 10% of entry, expiring today |
+
+### Quick Start
 
 ```bash
-python -m pytest tests/ -v                              # All 359 tests
+# View pending watchdog suggestions
+python utp.py watchdog
+python utp.py watchdog suggestions
+
+# Filter to one position
+python utp.py watchdog suggestions --position 2d9a
+
+# Dismiss a suggestion
+python utp.py watchdog dismiss abc123
+
+# View/change config
+python utp.py watchdog config
+python utp.py watchdog config --action-mode       # enable auto-execute
+python utp.py watchdog config --no-action-mode    # suggestion-only
+python utp.py watchdog config --interval 15       # change cycle to 15s
+
+# Status (module run times, suggestion counts)
+python utp.py watchdog status
+```
+
+### REST API
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /watchdog/suggestions` | All pending suggestions; `?position_id=X` to filter |
+| `POST /watchdog/dismiss/{id}` | Dismiss a pending suggestion by ID or prefix |
+| `GET /watchdog/config` | Current WatchdogConfig |
+| `POST /watchdog/config` | Partial config update (`action_mode`, `default_interval_seconds`, `module_overrides`) |
+| `GET /watchdog/status` | Module run times, suggestion counts, last cycle time |
+
+## Testing
+
+**1431 tests in `tests/test_utp.py`, all passing.** Tests use `tmp_path` for isolated persistence. The autouse `_setup_providers` fixture in `conftest.py` initializes and tears down ledger + position store per test.
+
+```bash
+python -m pytest tests/ -v                              # All 1431 tests
 python -m pytest tests/test_utp.py -v                   # Same (only file)
 python -m pytest tests/test_utp.py -k "TestLedger" -v   # Filter by class
 python -m pytest tests/test_utp.py -k "TestIBKR" -v     # IBKR tests only
@@ -1118,6 +1174,7 @@ python -m pytest tests/test_utp.py -k "TestIBKR" -v     # IBKR tests only
 | `TestSimLoadDate` | 5 | /sim/load-date hot-swap (invalid, not-sim, no-data, success) |
 | `TestAutoTraderEngine` | 32 | Auto-trader config, run-day, run-range, spread filters, DTE filtering, carry-over, CLI config, diversity, streaming, shadow, event bus |
 | `TestRollService` | 46 | RollConfig defaults/serialization, breach notifications (cooldown, escalation bypass), credit estimates from live quotes, forward/mirror suggestion building, config defaults (otm_pct/width/quantity/partial_close_pct), per-execute overrides (dte/otm_pct/width/quantity/close_quantity), force-build for safe positions, synthetic portfolio group ID resolution (forward + mirror), REST endpoints (forward, mirror, execute with overrides, config notify fields) |
+| `TestWatchdogService` | 49 | WatchdogConfig defaults/roundtrip, init/get/reset singletons, WatchdogSuggestion serialization/TTL, WatchdogModule is_due/mark_ran, run_cycle (empty/disabled), get_suggestions/get_latest_by_position severity ranking, dismiss (exact/prefix/not-found), update_config, get_status, CloseAdvisorModule triggers (stop_loss/profit/low_roi/no-mark/no-entry/mid-range), BreachMonitorModule (safe/critical/no-price), deduplication, REST endpoints (suggestions/dismiss/config/status), daemon wiring, alias_map, portfolio hint formatting |
 | `TestAccountSnapshot` | 5 | GET /account/snapshot: 503 before init, all fields, age_seconds computation, reset, daemon wiring |
 
 ## IBKR Live Provider

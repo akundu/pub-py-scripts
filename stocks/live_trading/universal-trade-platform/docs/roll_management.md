@@ -7,7 +7,7 @@ The roll management system monitors open credit spread positions for breach risk
 - **Forward Roll**: Close the current spread (or a partial quantity) and open the same-type spread at a further DTE with adjusted strikes
 - **Mirror Roll**: Keep the original spread and open an opposite-side spread at the current price to hedge
 
-The system runs as a background service within the UTP daemon, scanning positions every 30 seconds during market hours. Suggestions are generated automatically but require manual confirmation by default (`auto_execute: false`). Manual force-build commands work on any position regardless of severity.
+The roll scan runs as part of the **WatchdogService** (via `RollAdvisorModule`) within the UTP daemon parent process. The watchdog orchestrates it alongside CloseAdvisorModule and BreachMonitorModule on a shared 30-second cycle. Roll suggestions appear in both `GET /roll/suggestions` (roll-specific) and `GET /watchdog/suggestions` (all advisory types), and in the portfolio `Watchdog` column. Suggestions are generated automatically but require manual confirmation by default (`auto_execute: false`). Manual force-build commands work on any position regardless of severity.
 
 ---
 
