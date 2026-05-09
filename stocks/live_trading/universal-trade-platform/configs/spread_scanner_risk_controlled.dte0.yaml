@@ -44,6 +44,7 @@ widths:
   RUT: 25
 #otm_pcts: [0.75, 1.0, 1.5, 2.0]
 interval: 20
+ticker_interval: 10  # refresh just the price line every N seconds (< interval)
 top: 3
 
 # ── Provider re-verify freshness ─────────────────────────────────────────────
@@ -208,11 +209,13 @@ handlers:
       # dollar value above at runtime. Falls back to max_total_risk if the
       # snapshot is unavailable. Both DTE scanners share the same account,
       # so set the combined pct accordingly (e.g. 20 = 20% per scanner).
-      max_total_risk_pct: 40
+      max_total_risk_pct: 50
       min_reserve: 50000   # Keep $50k untouched when computing the pct cap.
       #   effective_cap = max(0, available_funds - min_reserve) × pct/100
       #   e.g. avail=$400k, pct=40, reserve=$50k → cap = $350k × 40% = $140k
+      #
       # max_per_ticker_risk: {SPX: 200000, NDX: 200000, RUT: 150000}
+      #
       # Dollar cap on RISK PER TRADE. The handler computes
       #   contracts = max(1, floor(max_risk_per_trade / per_contract_max_loss))
       # so a larger budget sizes up the trade instead of placing multiple
@@ -220,7 +223,7 @@ handlers:
       # is `spread.width * 100` (≈ 1 contract's worst-case loss).
       # One trade per ticker fires per scan cycle; `contracts` is the knob.
       max_risk_per_trade:
-        SPX: 12000        # ≈ 2-3 contracts (SPX width 25 → 2500/contract max loss)
+        SPX: 10000        # ≈ 2-3 contracts (SPX width 25 → 2500/contract max loss)
         NDX: 20000       # ≈ 2 contracts (NDX width 60 → 6000/contract)
         RUT: 8000        # ≈ 2 contracts (RUT width 25 → 2500/contract)
       require_prev_close: true
@@ -230,7 +233,7 @@ handlers:
       # are closer to ATM than the tier filter alone would catch.
       # DTE0 live data: p90 delta=0.055, max=0.062 — 0.10 is well above observed
       # range but catches genuine outliers on high-vol open prints.
-      max_short_delta: 0.06
+      max_short_delta: 0.05
       # MARKET: immediate fill at the prevailing NBBO credit.
       # LIMIT:  submit at the observed credit; may not fill.
       order_type: MARKET
@@ -249,7 +252,7 @@ handlers:
       # `per_cycle_cap`. Default 1 keeps the firing pace conservative
       # (one trade per cycle, the highest-ROI candidate). Set to 0 for
       # a kill switch.
-      max_trades_per_cycle: 2
+      max_trades_per_cycle: 1
       # min_minutes_between_trades: after a successful submit, no further
       # trade fires for this many minutes (across all tickers/sides);
       # candidates in cycles within that window are logged with reason
@@ -257,7 +260,7 @@ handlers:
       # which is the per-(ticker, side) version. Default 3.0 — comfortable
       # cushion that prevents the scanner from spamming the broker on a
       # rapidly-moving spread.
-      min_minutes_between_trades: 3
+      min_minutes_between_trades: 1
 
   # Live trading — uncomment to activate. Uses the SAME policy as simulate_trade
   # via the YAML anchor above.

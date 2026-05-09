@@ -47,6 +47,7 @@ widths:
   RUT: 25
 otm_pcts: [0.5, 1.0, 1.25, 1.5, 2.0, 2.5]
 interval: 30
+ticker_interval: 10  # refresh just the price line every N seconds (< interval)
 top: 5
 
 # ── Provider re-verify freshness ─────────────────────────────────────────────

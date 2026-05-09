@@ -99,6 +99,12 @@ _NORM_ROI_DECAY_END_PT:   dtime = dtime(13, 0)  # 01:00 PM PT (market close)
 DEFAULT_TICKERS = ["SPX", "RUT", "NDX"]
 DEFAULT_OTM_PCTS = [0.5, 1.0, 1.25, 1.5, 2.0, 2.5]
 DEFAULT_INTERVAL = 30
+# How often (seconds) to refresh just the ticker price line in-place,
+# independent of the full scan interval.
+DEFAULT_TICKER_INTERVAL = 10
+# Fixed terminal row of the price line inside the dashboard frame.
+# Header structure: separator(1) + title(2) + separator(3) + blank(4) + price(5)
+_PRICE_LINE_ROW = 5
 DEFAULT_DAEMON_URL = "http://localhost:8000"
 DEFAULT_DB_URL = "http://localhost:9102"
 # Percentile server: prefer the LAN-hosted `lin1.kundu.dev:9100` which is the
@@ -224,6 +230,9 @@ class ScannerConfig:
     types: list[str] = field(default_factory=lambda: ["put", "call", "iron-condor"])
     widths: dict[str, int] = field(default_factory=lambda: dict(DEFAULT_WIDTHS))
     interval: int = DEFAULT_INTERVAL
+    # How often (seconds) to refresh just the ticker price line in-place
+    # between full scans. Independent of `interval`. Default 10s.
+    ticker_interval: int = DEFAULT_TICKER_INTERVAL
     # URL endpoints. Each may be specified in the YAML as either:
     #   1) a scalar string  →  treated as the primary; no backup.
     #         daemon_url: http://lin1.kundu.dev:8000
@@ -400,6 +409,7 @@ class ScannerConfig:
         d["types"] = ",".join(self.types)
         d["widths_str"] = ",".join(f"{k}={v}" for k, v in self.widths.items())
         d["interval"] = self.interval
+        d["ticker_interval"] = self.ticker_interval
         d["daemon_url"] = self.daemon_url
         d["daemon_url_backup"] = self.daemon_url_backup
         d["db_url"] = self.db_url
@@ -5163,6 +5173,8 @@ async def _run_scan_cycle(
     prev_close_cache: "PrevCloseCache",
     handlers: list,
     tier_data_cache: "TierDataCache | None" = None,
+    *,
+    _quote_out: dict | None = None,
 ) -> tuple[str | None, str | None]:
     """Execute one scan cycle: fetch chains, verify, fire handlers, render.
 
@@ -5170,6 +5182,9 @@ async def _run_scan_cycle(
       * `output` is a fully-formed terminal frame (screen-clear prefix
         included) ready to print, or None on error.
       * `error` is a one-line error string when the cycle failed, else None.
+
+    When ``_quote_out`` is provided it is cleared and updated with the quotes
+    dict from the scan so the caller can seed the fast ticker-refresh path.
 
     Extracted from the body of `scan_loop` so that the loop can run this
     function concurrently with the per-second countdown ticker via
@@ -5187,6 +5202,12 @@ async def _run_scan_cycle(
             prev_close_cache=prev_close_cache,
             tier_data_cache=tier_data_cache,
         )
+
+        # Seed the caller's ticker-refresh cache with this scan's quotes
+        # so in-place price-line updates between scans start with valid data.
+        if _quote_out is not None:
+            _quote_out.clear()
+            _quote_out.update(data.get("quotes") or {})
 
         # Provider re-verify: before top-picks render AND before any
         # handler fires, re-fetch fresh quotes for the top candidates
@@ -5328,6 +5349,14 @@ async def scan_loop(args):
         # most recent dashboard paint. Used for absolute cursor positioning so
         # footer ticks are immune to cursor displacement from async prints.
         footer_row: int | None = None
+        # Ticker price refresh — independent of the full scan.
+        # _ticker_quotes is seeded by each full scan and refreshed every
+        # ticker_interval seconds via lightweight fetch_quote() calls.
+        # Mutable dict so inner closures (_do_scan_cycle, _tick_during_scan)
+        # can update it without nonlocal declarations.
+        _ticker_quotes: dict[str, dict] = {}
+        _ticker_refresh_ts: list[float] = [0.0]  # [last_refresh_time]
+        _ticker_interval: int = getattr(args, "ticker_interval", DEFAULT_TICKER_INTERVAL)
 
         while True:
             # Phase 1 — countdown wait. Skip on the very first iteration
@@ -5343,6 +5372,25 @@ async def scan_loop(args):
                     now = asyncio.get_event_loop().time()
                     if now >= kickoff_at:
                         break
+                    # Ticker price refresh (independent of full scan)
+                    if (footer_row is not None and _ticker_quotes
+                            and now - _ticker_refresh_ts[0] >= _ticker_interval):
+                        qcoros = [
+                            fetch_quote(client, args.daemon_url, sym)
+                            for sym in args.tickers
+                        ]
+                        fresh = await asyncio.gather(*qcoros, return_exceptions=True)
+                        for sym, q in zip(args.tickers, fresh):
+                            if isinstance(q, dict) and q.get("last"):
+                                _ticker_quotes[sym] = q
+                        pc = prev_close_cache.as_dict()
+                        print(
+                            f"\033[{_PRICE_LINE_ROW};1H\033[2K"
+                            f"{render_price_line(_ticker_quotes, pc)}",
+                            end="", flush=True,
+                        )
+                        _ticker_refresh_ts[0] = asyncio.get_event_loop().time()
+                        now = asyncio.get_event_loop().time()
                     paint_remaining = max(0, int(round(next_paint_at - now)))
                     if footer_row is not None:
                         print(
@@ -5363,6 +5411,7 @@ async def scan_loop(args):
                     return await _run_scan_cycle(
                         client, args, prev_close_cache, handlers,
                         tier_data_cache=tier_data_cache,
+                        _quote_out=_ticker_quotes,
                     )
                 finally:
                     scan_done.set()
@@ -5375,6 +5424,25 @@ async def scan_loop(args):
                     return
                 while not scan_done.is_set():
                     now = asyncio.get_event_loop().time()
+                    # Ticker price refresh during scan execution
+                    if (_ticker_quotes
+                            and now - _ticker_refresh_ts[0] >= _ticker_interval):
+                        qcoros = [
+                            fetch_quote(client, args.daemon_url, sym)
+                            for sym in args.tickers
+                        ]
+                        fresh = await asyncio.gather(*qcoros, return_exceptions=True)
+                        for sym, q in zip(args.tickers, fresh):
+                            if isinstance(q, dict) and q.get("last"):
+                                _ticker_quotes[sym] = q
+                        pc = prev_close_cache.as_dict()
+                        print(
+                            f"\033[{_PRICE_LINE_ROW};1H\033[2K"
+                            f"{render_price_line(_ticker_quotes, pc)}",
+                            end="", flush=True,
+                        )
+                        _ticker_refresh_ts[0] = asyncio.get_event_loop().time()
+                        now = asyncio.get_event_loop().time()
                     paint_remaining = max(0, int(round(next_paint_at - now)))
                     print(
                         f"\033[{footer_row};1H\033[2K"
@@ -5431,6 +5499,13 @@ async def scan_loop(args):
             # to the next future slot rather than instantly looping.
             while next_paint_at <= paint_at_now:
                 next_paint_at += args.interval
+            # If the scan finished early (inflated predicted_dur from a
+            # prior slow cycle started the scan too far ahead of the
+            # deadline), base is still in the future, pushing next_paint_at
+            # more than one interval out. Cap it so the displayed countdown
+            # never exceeds the configured interval.
+            if next_paint_at > paint_at_now + args.interval:
+                next_paint_at = paint_at_now + args.interval
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────────
@@ -5525,6 +5600,13 @@ Examples:
     parser.add_argument(
         "--interval", type=int, default=DEFAULT_INTERVAL,
         help=f"Refresh interval in seconds (default: {DEFAULT_INTERVAL})",
+    )
+    parser.add_argument(
+        "--ticker-interval", type=int, default=DEFAULT_TICKER_INTERVAL,
+        dest="ticker_interval",
+        help=f"How often (seconds) to refresh just the ticker price line "
+             f"between full scans (default: {DEFAULT_TICKER_INTERVAL}). "
+             f"Must be less than --interval to have any effect.",
     )
     parser.add_argument(
         "--daemon-url", default=DEFAULT_DAEMON_URL,

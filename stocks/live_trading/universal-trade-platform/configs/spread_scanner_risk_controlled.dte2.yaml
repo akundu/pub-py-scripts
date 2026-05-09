@@ -36,14 +36,15 @@ percentile_url:
 
 # ── Scanner screening ─────────────────────────────────────────────────────────
 tickers: [SPX, NDX, RUT]
-dte: [2,4]
+dte: [2]
 types: [put, call]
 widths:
   SPX: 30
   NDX: 60
-  RUT: 30
+  RUT: 25
 #otm_pcts: [0.75, 1.0, 1.5, 2.0]
-interval: 60
+interval: 30
+ticker_interval: 10  # refresh just the price line every N seconds (< interval)
 top: 3
 
 # ── Provider re-verify freshness ─────────────────────────────────────────────
@@ -54,7 +55,7 @@ top: 3
 # rejected at this gate (require_provider_source=True is enforced internally).
 # 1DTE: tolerates slightly older quotes than 0DTE — overnight gap risk is the
 # primary driver, intraday tick-by-tick price action matters less.
-verify_max_age_sec: 45
+verify_max_age_sec: 60
 verify_require_provider_source: true
 
 # ── Risk-tier filter (applies to top-picks + all handlers) ───────────────────
@@ -73,24 +74,25 @@ verify_require_provider_source: true
 #        Useful when you want finer control than the three named tiers.
 #
 # Distinction between the two fields:
-#   min_tier       — DTE-routed LIVE-INTRADAY model (anchored to live spot):
-#                      DTE 0 → `hourly` slots → today's close.
-#                      DTE 1 → `hourly_1dte` slots → next-day close.
-#                      DTE>1 (this config) → close-to-close window=DTE.
+#   min_tier       — DTE-routed LIVE-INTRADAY model:
+#                      DTE 0 → server's `hourly` slots (move from spot
+#                              to TODAY'S close; anchored to live spot).
+#                      DTE 1 → server's `hourly_1dte` slots (move from
+#                              spot to NEXT trading day's close; anchored
+#                              to live spot). Falls back to close-to-close
+#                              window=1 if the percentile server didn't
+#                              ship hourly_1dte for this symbol.
+#                      DTE>1 → close-to-close window=DTE (no intraday
+#                              model exists for those horizons yet).
 #                    Updates through the day as the slot rolls forward.
-#                    For DTE 2, no intraday model exists yet, so
-#                    `min_tier` falls back to c2c window=2 anchored to
-#                    prev_close — the same horizon `min_tier_close: p90`
-#                    targets, just usable via the named-tier shortcuts
-#                    too.
 #   min_tier_close — close-to-close historical model (anchored to prev
-#                    close). Independent of `min_tier`; for DTE>1 they
-#                    pick from the same distribution but the field name
-#                    is more honest about what's happening.
+#                    close). Independent of `min_tier`; setting both gives
+#                    layered safety (live intraday gate + historical
+#                    c2c gate).
 # Leaving them null = no tier filter.
 tiers: true
-min_tier: p95 #aggressive         # or a percentile e.g. p95, p75, p40
-#min_tier_close: p90          # close-to-close variant
+min_tier: mod         # or a percentile e.g. p95, p75, p40
+#min_tier_close: p92         # close-to-close variant
 
 # ── Tier-boundary buffer (additive cushion) ──────────────────────────────────
 # Layered ON TOP of the dynamic tier boundaries above. Units are
@@ -113,29 +115,29 @@ top_per_combo: 1
 # still expensive. Intraday tiers on calm days can sit around 1% OTM; these
 # floors prevent top-picks and trade handlers from acting on anything closer.
 # Effective floor per sym = max(min_otm, min_otm_per_ticker[sym]).
-min_otm: 2                   # baseline: no spread closer than 1.5% OTM
+#min_otm: 1.75                   # baseline: no spread closer than 1.5% OTM
 #min_otm_per_ticker:            # per-ticker overrides — higher wins
-#  NDX: 2.5                     # NDX's % moves ~2x SPX's → need more buffer
-#  RUT: 2.5
-#  SPX: 2.1
+#  NDX: 2.25                     # NDX's % moves ~2x SPX's → need more buffer
+#  RUT: 2.25
+#  SPX: 2
 
 # ── Action handlers ──────────────────────────────────────────────────────────
 handlers:
   # Always-on: append every scan's qualifying spreads to JSONL for replay/analysis.
   - type: log
-    min_norm_roi: 2
+    min_norm_roi: 0.5
     path: nROI.log.jsonl
 
   # Email on higher-threshold hits, gated to market hours.
   - type: notify
-    min_norm_roi: 3
+    min_norm_roi: 1
     email: anirbankundu@gmail.com
     gate_market_hours: true
     # Per-handler pre-fire price validation (default false). When true, the
     # handler re-fetches a fresh quote from the daemon for every candidate
     # immediately before sending the email; failed verifications are dropped.
     # Reuses the global `verify_max_age_sec` and `verify_require_provider_source`.
-    #validate_prices: false
+    validate_prices: true
 
   # Shadow-mode: margin-check every would-have-traded spread; never submits.
   # Same policy as the live `trade` handler so the two logs are directly
@@ -152,20 +154,23 @@ handlers:
     # (e.g. offline-replay scenarios). Leaving the line uncommented
     # makes the safer behavior explicit for future readers.
     validate_prices: true
-    # min_norm_roi removed — tier filter (min_tier: aggressive + min_buf) is
+    # min_norm_roi removed — tier filter (min_tier: moderate + min_buf) is
     # the primary quality gate; policy roi_pct/min_credit/min_otm_pct handle
     # the rest. Re-enable if sim log shows too many low-quality fires.
     #min_norm_roi: 2.0
     #min_norm_roi_per_ticker: {}
-    # ─── TRACKING SESSION — STARTED 2026-05-05 ─────────────────────────
-    log_file: trades_sim_dte2.tracking_2026-05-05.jsonl
+    # ─── TRACKING SESSION — STARTED 2026-05-06 ─────────────────────────
+    log_file: trades_sim_dte2.tracking.jsonl
     daemon_url: http://localhost:8000
     policy: &trade_policy
-      norm_roi: [0.75, 8]
-      min_otm_pct:  {SPX: 2, NDX: 2.5, RUT: 2.75}
-      min_credit:   {SPX: 0.15, NDX: 0.20, RUT: 0.15}
-      max_total_risk: 100000
-      max_per_ticker_risk: {SPX: 140000, NDX: 180000, RUT: 120000}
+      norm_roi: [1.4, 8]
+      min_otm_pct:  {SPX: 1.65, NDX: 2.1 , RUT: 2.5}
+      min_credit:   {SPX: 0.15, NDX: 0.30, RUT: 0.15}
+      # max_total_risk: 200000
+      max_total_risk_pct: 30   # optional: 15% of available_funds (overrides dollar above)
+      min_reserve: 50000   # Keep $50k untouched when computing the pct cap.
+      #   effective_cap = max(0, available_funds - min_reserve) × pct/100
+      # max_per_ticker_risk: {SPX: 200000, NDX: 200000, RUT: 150000}
       # Dollar cap on RISK PER TRADE. The handler computes
       #   contracts = max(1, floor(max_risk_per_trade / per_contract_max_loss))
       # so a larger budget sizes up the trade instead of placing multiple
@@ -173,35 +178,32 @@ handlers:
       # is `spread.width * 100` (≈ 1 contract's worst-case loss).
       # One trade per ticker fires per scan cycle; `contracts` is the knob.
       max_risk_per_trade:
-        SPX: 5000        # ≈ 2-3 contracts (SPX width 25 → 2500/contract max loss)
-        NDX: 12000       # ≈ 2 contracts (NDX width 60 → 6000/contract)
-        RUT: 5000        # ≈ 2 contracts (RUT width 25 → 2500/contract)
+        SPX: 10000        # ≈ 2-3 contracts (SPX width 25 → 2500/contract max loss)
+        NDX: 20000       # ≈ 2 contracts (NDX width 60 → 6000/contract)
+        RUT: 8000        # ≈ 2 contracts (RUT width 25 → 2500/contract)
       require_prev_close: true
       notify_email: anirbankundu@gmail.com
       # Block trades where abs(short_delta) > max_short_delta.
-      # DTE2 sim data: max observed delta=0.043 — 0.10 is a comfortable ceiling.
+      # DTE1 sim data: max observed delta=0.044 — 0.10 leaves headroom without
+      # affecting current trade flow; catches strikes that drift close to ATM.
       max_short_delta: 0.10
       # MARKET: immediate fill at the prevailing NBBO credit.
       # LIMIT:  submit at the observed credit; may not fill.
       order_type: MARKET
       stop_loss_multiplier: 2.0
-      # ── Per-cycle pacing — see dte0.yaml for full notes ──
-      max_trades_per_cycle: 1
-      min_minutes_between_trades: 3.0
       trading_window_pt:
         start: "06:31"
-        end:   "12:30"
+        end:   "12:40"
+      # ── Per-cycle pacing — see dte0.yaml for full notes ──
+      max_trades_per_cycle: 1
+      min_minutes_between_trades: 5
 
-  # Live trading — uncomment to activate. Uses the SAME policy as simulate_trade
+  # Live trading — active. Uses the SAME policy as simulate_trade
   # via the YAML anchor above.
-  # - type: trade
-  #   min_norm_roi: 1.5
-  #   log_file: trades_live.jsonl
-  #   daemon_url: http://localhost:8000
-  #   policy: *trade_policy
-  #   # Per-handler pre-fire price validation (default false). For LIVE trading,
-  #   # turning this on adds a final sanity check right before order submission:
-  #   # if the verify call fails (csv_source_rejected, non_monotonic, no_edge),
-  #   # the trade is silently skipped instead of submitted on stale data.
-  #   # Strongly recommended for live mode.
-  #   validate_prices: true
+  - type: trade
+    log_file: trades_live_dte2.jsonl
+    daemon_url: http://localhost:8000
+    policy: *trade_policy
+    # Pre-fire price re-verify: drops trades whose quotes went stale
+    # between screening and submission. Required for live.
+    validate_prices: true

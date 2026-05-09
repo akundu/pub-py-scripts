@@ -44,6 +44,7 @@ widths:
   RUT: 30
 #otm_pcts: [0.75, 1.0, 1.5, 2.0]
 interval: 30
+ticker_interval: 10  # refresh just the price line every N seconds (< interval)
 top: 3
 
 # ── Provider re-verify freshness ─────────────────────────────────────────────
@@ -199,10 +200,10 @@ handlers:
 
   # Live trading — active. Uses the SAME policy as simulate_trade
   # via the YAML anchor above.
-  - type: trade
-    log_file: trades_live_dte1.jsonl
-    daemon_url: http://localhost:8000
-    policy: *trade_policy
-    # Pre-fire price re-verify: drops trades whose quotes went stale
-    # between screening and submission. Required for live.
-    validate_prices: true
+  #  - type: trade
+  #  log_file: trades_live_dte1.jsonl
+  #  daemon_url: http://localhost:8000
+  #  policy: *trade_policy
+  #  # Pre-fire price re-verify: drops trades whose quotes went stale
+  #  # between screening and submission. Required for live.
+  #  validate_prices: true
