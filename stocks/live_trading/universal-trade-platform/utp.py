@@ -101,6 +101,22 @@ def _delta_color(breach_delta: float) -> str:
 
 _WATCHDOG_COL_WIDTH = 30  # visible chars (icon + space + title)
 
+# Portfolio table column widths (visible chars) and separator
+_PORT_SEP      = "  "   # 2-space separator between every column
+_PORT_ID_W     = 6
+_PORT_SYM_W    = 6
+_PORT_PRICE_W  = 10
+_PORT_STR_W    = 20     # strikes — wide enough for 4-leg iron condors
+_PORT_QTY_W    = 5
+_PORT_COST_W   = 12
+_PORT_VAL_W    = 12
+_PORT_PNL_W    = 12
+_PORT_RINFO_W  = 22     # Cr/ROI/MaxLoss
+_PORT_EXP_W    = 12
+_PORT_BREACH_W = 14     # breach severity + distance
+_PORT_DELTA_W  = 7
+_PORT_WD_W     = _WATCHDOG_COL_WIDTH
+
 
 def _format_watchdog_hint(hint: dict | None, width: int = _WATCHDOG_COL_WIDTH) -> str:
     """Format a watchdog suggestion as a fixed-width colored string.
@@ -3558,11 +3574,26 @@ async def _cmd_portfolio_http(args, server: str) -> int:
             has_marks = any(p.get("avg_cost") is not None for p in positions)
 
             # Watchdog column is always shown (fixed width = _WATCHDOG_COL_WIDTH)
-            _wd_hdr = f"{'Watchdog':<{_WATCHDOG_COL_WIDTH}}"
-            _wd_sep = "─" * _WATCHDOG_COL_WIDTH
+            _s = _PORT_SEP  # 2-space column separator shorthand
             if has_marks:
-                print(f"  {'ID':<6} {'Symbol':>6} {'Price':>10} {'Strikes':>16} {'Qty':>5} {'Cost':>12} {'Value':>12} {'P&L':>12} {'Cr/ROI/MaxLoss':>22} {'Exp':>12} {'Risk':>14} {'Δ':>7}  {_wd_hdr}")
-                print(f"  {'─'*6} {'─'*6} {'─'*10} {'─'*16} {'─'*5} {'─'*12} {'─'*12} {'─'*12} {'─'*22} {'─'*12} {'─'*14} {'─'*7}  {_wd_sep}")
+                print(
+                    f"  {'ID':<{_PORT_ID_W}}{_s}{'Symbol':>{_PORT_SYM_W}}{_s}"
+                    f"{'Price':>{_PORT_PRICE_W}}{_s}{'Strikes':>{_PORT_STR_W}}{_s}"
+                    f"{'Qty':>{_PORT_QTY_W}}{_s}{'Cost':>{_PORT_COST_W}}{_s}"
+                    f"{'Value':>{_PORT_VAL_W}}{_s}{'P&L':>{_PORT_PNL_W}}{_s}"
+                    f"{'Cr/ROI/MaxLoss':>{_PORT_RINFO_W}}{_s}{'Exp':>{_PORT_EXP_W}}{_s}"
+                    f"{'Risk':>{_PORT_BREACH_W}}{_s}{'Δ':>{_PORT_DELTA_W}}{_s}"
+                    f"{'Watchdog':<{_PORT_WD_W}}"
+                )
+                print(
+                    f"  {'─'*_PORT_ID_W}{_s}{'─'*_PORT_SYM_W}{_s}"
+                    f"{'─'*_PORT_PRICE_W}{_s}{'─'*_PORT_STR_W}{_s}"
+                    f"{'─'*_PORT_QTY_W}{_s}{'─'*_PORT_COST_W}{_s}"
+                    f"{'─'*_PORT_VAL_W}{_s}{'─'*_PORT_PNL_W}{_s}"
+                    f"{'─'*_PORT_RINFO_W}{_s}{'─'*_PORT_EXP_W}{_s}"
+                    f"{'─'*_PORT_BREACH_W}{_s}{'─'*_PORT_DELTA_W}{_s}"
+                    f"{'─'*_PORT_WD_W}"
+                )
                 total_upnl = 0.0
                 total_daily = 0.0
                 total_max_loss = 0.0
@@ -3596,6 +3627,9 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                                     pass
                         if not strikes_s:
                             strikes_s = "/".join(parts)
+                    # Truncate strikes string to column width
+                    if len(strikes_s) > _PORT_STR_W:
+                        strikes_s = strikes_s[:_PORT_STR_W - 1] + "…"
 
                     # Delta column: show the SHORT leg's delta (breach potential) for spreads.
                     # Short puts have negative raw delta; we flip the sign so a larger
@@ -3683,16 +3717,28 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                             risk_s = " " * 14
                         # Watchdog hint column — always shown, fixed width
                         wd_s = _format_watchdog_hint(p.get("watchdog_hint"))
-                        row = (f"  {pid:<6} {sym:>6} {price_s} {strikes_s:>16} {qty:>5.0f} "
-                               f"{cost_s} {value_s} {upnl_s} {risk_info:>22} {exp:>12} {risk_s} {delta_s}")
-                        print(f"{row}  {wd_s}")
+                        row = (
+                            f"  {pid:<{_PORT_ID_W}}{_s}{sym:>{_PORT_SYM_W}}{_s}"
+                            f"{price_s}{_s}{strikes_s:>{_PORT_STR_W}}{_s}"
+                            f"{qty:>{_PORT_QTY_W}.0f}{_s}"
+                            f"{cost_s}{_s}{value_s}{_s}{upnl_s}{_s}"
+                            f"{risk_info:>{_PORT_RINFO_W}}{_s}{exp:>{_PORT_EXP_W}}{_s}"
+                            f"{risk_s}{_s}{delta_s}"
+                        )
+                        print(f"{row}{_s}{wd_s}")
                     else:
                         cur_price = p.get("current_price", 0)
                         price_s = f"${cur_price:>9,.2f}" if cur_price else f"{'---':>10}"
                         wd_s = _format_watchdog_hint(p.get("watchdog_hint"))
-                        row = (f"  {pid:<6} {sym:>6} {price_s} {strikes_s:>16} {qty:>5.0f} "
-                               f"{'---':>12} {'---':>12} {'---':>12} {'':>22} {exp:>12} {' ' * 14} {delta_s}")
-                        print(f"{row}  {wd_s}")
+                        row = (
+                            f"  {pid:<{_PORT_ID_W}}{_s}{sym:>{_PORT_SYM_W}}{_s}"
+                            f"{price_s}{_s}{strikes_s:>{_PORT_STR_W}}{_s}"
+                            f"{qty:>{_PORT_QTY_W}.0f}{_s}"
+                            f"{'---':>{_PORT_COST_W}}{_s}{'---':>{_PORT_VAL_W}}{_s}{'---':>{_PORT_PNL_W}}{_s}"
+                            f"{'':>{_PORT_RINFO_W}}{_s}{exp:>{_PORT_EXP_W}}{_s}"
+                            f"{' ' * _PORT_BREACH_W}{_s}{delta_s}"
+                        )
+                        print(f"{row}{_s}{wd_s}")
 
                     # Per-leg greeks sub-row — short leg only (breach potential)
                     # Only shown when --verbose / -v is passed.
@@ -3733,21 +3779,26 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                 if total_max_loss > 0:
                     total_roi_pct = (total_credit / total_max_loss) * 100
                     total_risk_info = f"{total_credit:,.0f}/{total_roi_pct:+.1f}%/{total_max_loss:,.0f}"
-                print(f"  {'':>6} {'':>6} {'':>10} {'':>16} {'':>5} "
-                      f"${total_cost:>11,.2f} ${total_value:>11,.2f} "
-                      f"{_color(f'${total_upnl:>+11,.2f}', upnl_c)} {total_risk_info:>22}")
+                print(
+                    f"  {'':>{_PORT_ID_W}}{_s}{'':>{_PORT_SYM_W}}{_s}"
+                    f"{'':>{_PORT_PRICE_W}}{_s}{'':>{_PORT_STR_W}}{_s}{'':>{_PORT_QTY_W}}{_s}"
+                    f"${total_cost:>11,.2f}{_s}${total_value:>11,.2f}{_s}"
+                    f"{_color(f'${total_upnl:>+11,.2f}', upnl_c)}{_s}"
+                    f"{total_risk_info:>{_PORT_RINFO_W}}"
+                )
             else:
-                _wd_hdr2 = f"{'Watchdog':<{_WATCHDOG_COL_WIDTH}}"
-                _wd_sep2  = "─" * _WATCHDOG_COL_WIDTH
-                print(f"  {'Symbol':<10} {'Type':<10} {'Qty':>6} {'Entry':>10} {'P&L':>10} {'Status':<8}  {_wd_hdr2}")
-                print(f"  {'─'*10} {'─'*10} {'─'*6} {'─'*10} {'─'*10} {'─'*8}  {_wd_sep2}")
+                _s = _PORT_SEP
+                _wd_hdr2 = f"{'Watchdog':<{_PORT_WD_W}}"
+                _wd_sep2  = "─" * _PORT_WD_W
+                print(f"  {'Symbol':<10}{_s}{'Type':<10}{_s}{'Qty':>6}{_s}{'Entry':>10}{_s}{'P&L':>10}{_s}{'Status':<8}{_s}{_wd_hdr2}")
+                print(f"  {'─'*10}{_s}{'─'*10}{_s}{'─'*6}{_s}{'─'*10}{_s}{'─'*10}{_s}{'─'*8}{_s}{_wd_sep2}")
                 for p in positions:
                     pnl = p.get("unrealized_pnl") or 0
                     pnl_color = "92" if pnl >= 0 else "91"
                     wd_s = _format_watchdog_hint(p.get("watchdog_hint"))
-                    print(f"  {p.get('symbol',''):<10} {p.get('order_type',''):<10} "
-                          f"{p.get('quantity',0):>6} {p.get('entry_price',0):>10.2f} "
-                          f"{_color(f'${pnl:>8.2f}', pnl_color)} {p.get('status',''):<8}  {wd_s}")
+                    print(f"  {p.get('symbol',''):<10}{_s}{p.get('order_type',''):<10}{_s}"
+                          f"{p.get('quantity',0):>6}{_s}{p.get('entry_price',0):>10.2f}{_s}"
+                          f"{_color(f'${pnl:>8.2f}', pnl_color)}{_s}{p.get('status',''):<8}{_s}{wd_s}")
 
         # Recent closed trades
         recent_n = getattr(args, "recent", 0)
