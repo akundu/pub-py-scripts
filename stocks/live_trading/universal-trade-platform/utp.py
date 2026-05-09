@@ -99,6 +99,18 @@ def _delta_color(breach_delta: float) -> str:
     return "92"
 
 
+def _format_watchdog_hint(hint: dict | None) -> str:
+    """Format a watchdog suggestion for the portfolio Watchdog column."""
+    if not hint:
+        return _color("—", "2")
+    sev = hint.get("severity", "info")
+    title = hint.get("title", "?")
+    sev_colors = {"urgent": "91", "critical": "93", "warning": "93", "info": "36"}
+    sev_icons = {"urgent": "✖", "critical": "⚠", "warning": "⚠", "info": "ℹ"}
+    icon = sev_icons.get(sev, "•")
+    return _color(f"{icon} {title}", sev_colors.get(sev, "0"))
+
+
 def _print_header(title: str) -> None:
     print(f"\n{'=' * 70}")
     print(f"  {title}")
@@ -3532,9 +3544,15 @@ async def _cmd_portfolio_http(args, server: str) -> int:
             # Check if we have broker-enriched data
             has_marks = any(p.get("avg_cost") is not None for p in positions)
 
+            # Check if any position has a watchdog hint (determines if column is shown)
+            has_watchdog = any(p.get("watchdog_hint") for p in positions)
             if has_marks:
-                print(f"  {'ID':<6} {'Symbol':>6} {'Price':>10} {'Strikes':>16} {'Qty':>5} {'Cost':>12} {'Value':>12} {'P&L':>12} {'Cr/ROI/MaxLoss':>22} {'Exp':>12} {'Risk':>14} {'Δ':>7}")
-                print(f"  {'─'*6} {'─'*6} {'─'*10} {'─'*16} {'─'*5} {'─'*12} {'─'*12} {'─'*12} {'─'*22} {'─'*12} {'─'*14} {'─'*7}")
+                if has_watchdog:
+                    print(f"  {'ID':<6} {'Symbol':>6} {'Price':>10} {'Strikes':>16} {'Qty':>5} {'Cost':>12} {'Value':>12} {'P&L':>12} {'Cr/ROI/MaxLoss':>22} {'Exp':>12} {'Risk':>14} {'Δ':>7} {'Watchdog'}")
+                    print(f"  {'─'*6} {'─'*6} {'─'*10} {'─'*16} {'─'*5} {'─'*12} {'─'*12} {'─'*12} {'─'*22} {'─'*12} {'─'*14} {'─'*7} {'─'*26}")
+                else:
+                    print(f"  {'ID':<6} {'Symbol':>6} {'Price':>10} {'Strikes':>16} {'Qty':>5} {'Cost':>12} {'Value':>12} {'P&L':>12} {'Cr/ROI/MaxLoss':>22} {'Exp':>12} {'Risk':>14} {'Δ':>7}")
+                    print(f"  {'─'*6} {'─'*6} {'─'*10} {'─'*16} {'─'*5} {'─'*12} {'─'*12} {'─'*12} {'─'*22} {'─'*12} {'─'*14} {'─'*7}")
                 total_upnl = 0.0
                 total_daily = 0.0
                 total_max_loss = 0.0
@@ -3653,14 +3671,19 @@ async def _cmd_portfolio_http(args, server: str) -> int:
                             risk_s = _color(f"{sev} {dist:.1f}%".rjust(14), sev_colors.get(sev, "0"))
                         else:
                             risk_s = " " * 14
-                        print(f"  {pid:<6} {sym:>6} {price_s} {strikes_s:>16} {qty:>5.0f} "
-                              f"{cost_s} {value_s} {upnl_s} {risk_info:>22} {exp:>12} {risk_s} {delta_s}")
+                        # Watchdog hint column
+                        wd_s = _format_watchdog_hint(p.get("watchdog_hint")) if has_watchdog else ""
+                        row = (f"  {pid:<6} {sym:>6} {price_s} {strikes_s:>16} {qty:>5.0f} "
+                               f"{cost_s} {value_s} {upnl_s} {risk_info:>22} {exp:>12} {risk_s} {delta_s}")
+                        print(row + (f"  {wd_s}" if has_watchdog else ""))
                     else:
                         cur_price = p.get("current_price", 0)
                         price_s = f"${cur_price:>9,.2f}" if cur_price else f"{'---':>10}"
                         entry = p.get("entry_price", 0)
-                        print(f"  {pid:<6} {sym:>6} {price_s} {strikes_s:>16} {qty:>5.0f} "
-                              f"{'---':>12} {'---':>12} {'---':>12} {'':>22} {exp:>12} {' ' * 14} {delta_s}")
+                        wd_s = _format_watchdog_hint(p.get("watchdog_hint")) if has_watchdog else ""
+                        row = (f"  {pid:<6} {sym:>6} {price_s} {strikes_s:>16} {qty:>5.0f} "
+                               f"{'---':>12} {'---':>12} {'---':>12} {'':>22} {exp:>12} {' ' * 14} {delta_s}")
+                        print(row + (f"  {wd_s}" if has_watchdog else ""))
 
                     # Per-leg greeks sub-row — short leg only (breach potential)
                     # Only shown when --verbose / -v is passed.
@@ -8093,6 +8116,195 @@ def _print_roll_config(config: dict) -> None:
     print()
 
 
+async def _cmd_watchdog_http(args, server: str) -> int:
+    """Watchdog commands via HTTP daemon."""
+    import httpx
+
+    action = getattr(args, "watchdog_action", None)
+
+    async with httpx.AsyncClient(base_url=server, timeout=30.0) as client:
+        if action in ("suggestions", "suggest", "sg", None):
+            pos_id = getattr(args, "position_id", None)
+            url = "/watchdog/suggestions"
+            if pos_id:
+                url = f"{url}?position_id={pos_id}"
+            resp = await client.get(url)
+            if resp.status_code != 200:
+                print(f"  Error: {resp.status_code} {resp.text}")
+                return 1
+            suggestions = resp.json()
+            _print_watchdog_suggestions(suggestions)
+            return 0
+
+        elif action in ("dismiss", "dm"):
+            sid = getattr(args, "suggestion_id", "")
+            resp = await client.post(f"/watchdog/dismiss/{sid}")
+            if resp.status_code != 200:
+                print(f"  Error: {resp.status_code} {resp.text}")
+                return 1
+            print(f"  Suggestion {sid} dismissed")
+            return 0
+
+        elif action == "config":
+            updates: dict = {}
+            am = getattr(args, "action_mode", None)
+            no_am = getattr(args, "no_action_mode", None)
+            interval = getattr(args, "interval", None)
+            if am:
+                updates["action_mode"] = True
+            if no_am:
+                updates["action_mode"] = False
+            if interval is not None:
+                updates["default_interval_seconds"] = float(interval)
+
+            if updates:
+                resp = await client.post("/watchdog/config", json=updates)
+            else:
+                resp = await client.get("/watchdog/config")
+            if resp.status_code != 200:
+                print(f"  Error: {resp.status_code} {resp.text}")
+                return 1
+            _print_watchdog_config(resp.json())
+            return 0
+
+        elif action == "status":
+            resp = await client.get("/watchdog/status")
+            if resp.status_code != 200:
+                print(f"  Error: {resp.status_code} {resp.text}")
+                return 1
+            _print_watchdog_status(resp.json())
+            return 0
+
+        else:
+            print("  Unknown watchdog action. Use: suggestions, dismiss, config, status")
+            return 1
+
+
+def _print_watchdog_suggestions(suggestions: list) -> None:
+    """Print watchdog suggestions in a formatted table."""
+    if not suggestions:
+        print("  No pending watchdog suggestions.")
+        return
+
+    _print_header(f"Watchdog Suggestions ({len(suggestions)})")
+    sev_colors = {"urgent": "91", "critical": "93", "warning": "93", "info": "36"}
+    sev_icons = {"urgent": "✖", "critical": "⚠", "warning": "⚠", "info": "ℹ"}
+
+    for s in suggestions:
+        sev = s.get("severity", "info")
+        icon = sev_icons.get(sev, "•")
+        color = sev_colors.get(sev, "0")
+        sid = s.get("suggestion_id", "?")[:8]
+        sym = s.get("symbol", "?")
+        mod = s.get("module", "?")
+        title = s.get("title", "?")
+        desc = s.get("description", "")
+        created = s.get("created_at", "")[:19] if s.get("created_at") else ""
+        print(f"  {_color(f'{icon} {sid}', color)}  {sym:<6}  {title:<30}  [{mod}]")
+        if desc:
+            print(f"      {_color(desc, '2')}")
+        if created:
+            print(f"      created: {created}")
+    print()
+
+
+def _print_watchdog_config(config: dict) -> None:
+    """Print watchdog configuration."""
+    _print_header("Watchdog Configuration")
+    print(f"    Enabled:              {config.get('enabled', True)}")
+    print(f"    Action Mode:          {config.get('action_mode', False)}")
+    print(f"    Cycle Interval:       {config.get('default_interval_seconds', 30.0):.0f}s")
+    print(f"    Suggestion TTL:       {config.get('suggestion_ttl_seconds', 300.0):.0f}s")
+    overrides = config.get("module_overrides", {})
+    if overrides:
+        print(f"    Module Overrides:")
+        for mod, o in overrides.items():
+            print(f"      {mod}: {o}")
+    print()
+
+
+def _print_watchdog_status(status: dict) -> None:
+    """Print watchdog service status."""
+    _print_header("Watchdog Status")
+    print(f"    Enabled:              {status.get('enabled', False)}")
+    print(f"    Action Mode:          {status.get('action_mode', False)}")
+    print(f"    Cycle Interval:       {status.get('interval_seconds', 30):.0f}s")
+    last_cycle = status.get("last_cycle")
+    print(f"    Last Cycle:           {last_cycle[:19] if last_cycle else 'never'}")
+    counts = status.get("suggestion_counts", {})
+    print(f"    Suggestions:          pending={counts.get('pending', 0)}  "
+          f"executed={counts.get('executed', 0)}  "
+          f"dismissed={counts.get('dismissed', 0)}")
+    modules = status.get("modules", [])
+    if modules:
+        print(f"    Modules ({len(modules)}):")
+        for m in modules:
+            last_run = m.get("last_run")
+            last_str = last_run[:19] if last_run else "never"
+            enabled_str = "" if m.get("enabled", True) else " (disabled)"
+            print(f"      {m.get('name', '?'):<22}  interval={m.get('interval', 30):.0f}s  "
+                  f"last_run={last_str}{enabled_str}")
+    print()
+
+
+async def _cmd_watchdog(args) -> int:
+    """Watchdog advisory framework — suggestions, config, status."""
+    server = _detect_server(args)
+    if server:
+        rc = await _try_daemon(server, _cmd_watchdog_http, args)
+        if rc is not None:
+            return rc
+
+    # Direct mode (no daemon) — use service directly
+    from app.services.watchdog_service import get_watchdog_service, init_watchdog_service
+
+    svc = get_watchdog_service()
+    if not svc:
+        svc = init_watchdog_service()
+
+    action = getattr(args, "watchdog_action", None)
+
+    if action in ("suggestions", "suggest", "sg", None):
+        pos_id = getattr(args, "position_id", None)
+        suggestions = svc.get_suggestions(position_id=pos_id)
+        _print_watchdog_suggestions(suggestions)
+        return 0
+
+    elif action in ("dismiss", "dm"):
+        sid = getattr(args, "suggestion_id", "")
+        ok = svc.dismiss(sid)
+        if ok:
+            print(f"  Suggestion {sid} dismissed")
+        else:
+            print(f"  Suggestion {sid!r} not found or not pending")
+            return 1
+        return 0
+
+    elif action == "config":
+        updates: dict = {}
+        am = getattr(args, "action_mode", None)
+        no_am = getattr(args, "no_action_mode", None)
+        interval = getattr(args, "interval", None)
+        if am:
+            updates["action_mode"] = True
+        if no_am:
+            updates["action_mode"] = False
+        if interval is not None:
+            updates["default_interval_seconds"] = float(interval)
+        if updates:
+            svc.update_config(updates)
+        _print_watchdog_config(svc.config.to_dict())
+        return 0
+
+    elif action == "status":
+        _print_watchdog_status(svc.get_status())
+        return 0
+
+    else:
+        print("  Unknown watchdog action. Use: suggestions, dismiss, config, status")
+        return 1
+
+
 async def _cmd_roll(args) -> int:
     """Roll management — suggestions, execute, dismiss, forward, mirror, config."""
     server = _detect_server(args)
@@ -8564,9 +8776,11 @@ async def _cmd_daemon(args) -> int:
         _daemon_dashboard = DashboardService(_daemon_store)
         init_live_data_service(_daemon_store, _daemon_dashboard, live_provider)
 
-    # Initialize roll service (must be before background tasks so _roll_scan_loop can reference it)
+    # Initialize roll service and watchdog (watchdog's RollAdvisorModule uses roll_service)
     from app.services.roll_service import init_roll_service as _init_roll_svc
     _daemon_roll_svc = _init_roll_svc()
+    from app.services.watchdog_service import init_watchdog_service as _init_watchdog_svc, WatchdogConfig as _WatchdogConfig
+    _daemon_watchdog_svc = _init_watchdog_svc()
 
     # Set daemon mode flag to prevent lifespan from re-initializing
     import app.main
@@ -8657,31 +8871,35 @@ async def _cmd_daemon(args) -> int:
 
     bg_tasks.append(asyncio.create_task(_profit_monitor_bg()))
 
-    # Roll scan loop
-    async def _roll_scan_bg():
-        from datetime import UTC, datetime
-        _log = logging.getLogger("utp.roll_scan")
-        from app.services.roll_service import get_roll_service as _get_roll_svc
-        interval = _daemon_roll_svc.config.check_interval
-        while not shutdown_event.is_set():
-            await asyncio.sleep(interval)
-            if shutdown_event.is_set():
-                break
-            now = datetime.now(UTC)
-            if now.weekday() >= 5:
-                continue
-            hour_min = now.hour * 100 + now.minute
-            if hour_min < 1330 or hour_min > 2000:
-                continue
-            svc = _get_roll_svc()
-            if svc:
-                try:
-                    await svc.scan_positions()
-                except Exception as e:
-                    _log.error("Roll scan error: %s", e)
+    # Watchdog loop — parent/IBKR process only (not spawned uvicorn workers)
+    _is_worker = os.environ.get("_UTP_DAEMON_WORKER") == "1"
+    if not _is_worker:
+        async def _watchdog_bg():
+            from datetime import UTC, datetime
+            _log = logging.getLogger("utp.watchdog")
+            from app.services.watchdog_service import get_watchdog_service as _get_wd_svc
+            interval = _daemon_watchdog_svc.config.default_interval_seconds
+            while not shutdown_event.is_set():
+                await asyncio.sleep(interval)
+                if shutdown_event.is_set():
+                    break
+                now = datetime.now(UTC)
+                if now.weekday() >= 5:
+                    continue
+                hour_min = now.hour * 100 + now.minute
+                if hour_min < 1330 or hour_min > 2000:
+                    continue
+                svc = _get_wd_svc()
+                if svc:
+                    try:
+                        await svc.run_cycle()
+                    except Exception as e:
+                        _log.error("Watchdog cycle error: %s", e)
 
-    bg_tasks.append(asyncio.create_task(_roll_scan_bg()))
-    print(f"  Roll service: initialized (scan every {_daemon_roll_svc.config.check_interval:.0f}s)")
+        bg_tasks.append(asyncio.create_task(_watchdog_bg()))
+        print(f"  Watchdog: initialized (3 modules, cycle every {_daemon_watchdog_svc.config.default_interval_seconds:.0f}s)")
+    else:
+        print("  Watchdog: skipped (worker process)")
 
     # Account snapshot loop — fetches balances + P&L every N seconds during market hours.
     # Exposes the data at GET /account/snapshot for cash-deployment control.
@@ -9802,9 +10020,11 @@ def _run_daemon_with_restart(args) -> int:
             from app.services.market_data_streaming import reset_streaming_service
             from app.services.execution_store import reset_execution_store
             from app.services.option_quote_streaming import reset_option_quote_streaming
+            from app.services.watchdog_service import reset_watchdog_service
             reset_streaming_service()
             reset_execution_store()
             reset_option_quote_streaming()
+            reset_watchdog_service()
             import app.main
             app.main._daemon_mode = False
             os.environ.pop("_UTP_DAEMON_MODE", None)
@@ -11422,6 +11642,79 @@ Subcommand aliases: suggestions (suggest, sg), execute (ex), forward (fwd), mirr
     roll_config_p.add_argument("--notify-cooldown", type=int, default=None, dest="notify_cooldown",
                                 help="Minutes between repeat alerts per position (default: 15)")
 
+    # ── watchdog ──
+    p_watchdog = subparsers.add_parser("watchdog",
+                                        help="Portfolio watchdog — advisory suggestions and status",
+                                        aliases=["wd"],
+                                        description='''
+Portfolio watchdog framework that continuously monitors open positions for
+actionable events. Runs as part of the daemon (parent process only, not workers).
+
+Modules:
+  roll_advisor    — Breach risk → forward/mirror roll suggestions
+  close_advisor   — Profit target, stop loss, low ROI, EOD close suggestions
+  breach_monitor  — Delta/breach severity alerts (suggestion-only, no auto-action)
+
+Operating modes:
+  suggestion (default)  — Generate and surface suggestions; no auto-execution
+  action                — Auto-execute suggestions when generated
+                                        ''',
+                                        epilog='''
+Examples:
+  # ── View suggestions ─────────────────────────────────────────────
+  %(prog)s                            Show all pending watchdog suggestions
+  %(prog)s suggestions                Same as above
+  %(prog)s suggestions --position 2d9a  Suggestions for one position only
+
+  # ── Dismiss a suggestion ─────────────────────────────────────────
+  %(prog)s dismiss abc123             Dismiss suggestion by ID prefix
+
+  # ── View and change configuration ────────────────────────────────
+  %(prog)s config                     Show current watchdog configuration
+  %(prog)s config --action-mode       Enable action mode (auto-execute)
+  %(prog)s config --no-action-mode    Disable action mode (suggestion only)
+  %(prog)s config --interval 15       Change cycle interval to 15s
+
+  # ── View service status ───────────────────────────────────────────
+  %(prog)s status                     Show module run times, suggestion counts
+
+REST equivalents (for direct HTTP access):
+  GET  /watchdog/suggestions
+  POST /watchdog/dismiss/{id}
+  GET  /watchdog/config
+  POST /watchdog/config
+  GET  /watchdog/status
+
+Aliases: wd
+Subcommand aliases: suggestions (suggest, sg), dismiss (dm)
+                                        ''',
+                                        formatter_class=argparse.RawDescriptionHelpFormatter)
+    watchdog_sub = p_watchdog.add_subparsers(dest="watchdog_action")
+    _add_connection_args(p_watchdog)
+
+    # watchdog suggestions
+    wd_suggest_p = watchdog_sub.add_parser("suggestions", aliases=["suggest", "sg"],
+                                           help="Show pending watchdog suggestions")
+    wd_suggest_p.add_argument("--position", default=None, dest="position_id",
+                               help="Filter to a specific position ID")
+
+    # watchdog dismiss <suggestion-id>
+    wd_dismiss_p = watchdog_sub.add_parser("dismiss", aliases=["dm"],
+                                           help="Dismiss a pending suggestion")
+    wd_dismiss_p.add_argument("suggestion_id", help="Suggestion ID (or prefix)")
+
+    # watchdog config
+    wd_config_p = watchdog_sub.add_parser("config", help="View or update watchdog configuration")
+    wd_config_p.add_argument("--action-mode", action="store_true", default=None, dest="action_mode",
+                              help="Enable action mode (auto-execute suggestions)")
+    wd_config_p.add_argument("--no-action-mode", action="store_true", default=None, dest="no_action_mode",
+                              help="Disable action mode (suggestion-only)")
+    wd_config_p.add_argument("--interval", type=float, default=None,
+                              help="Cycle interval in seconds (default: 30)")
+
+    # watchdog status
+    watchdog_sub.add_parser("status", help="Show watchdog service status and module run times")
+
     # Parse
     args = parser.parse_args()
 
@@ -11454,6 +11747,7 @@ Subcommand aliases: suggestions (suggest, sg), execute (ex), forward (fwd), mirr
         "activity": "trades",
         "exec": "executions",
         "rl": "roll",
+        "wd": "watchdog",
         "latency": "latency-probe",
     }
     cmd = alias_map.get(cmd, cmd)
@@ -11528,6 +11822,8 @@ Subcommand aliases: suggestions (suggest, sg), execute (ex), forward (fwd), mirr
         rc = asyncio.run(_cmd_executions(args))
     elif cmd == "roll":
         rc = asyncio.run(_cmd_roll(args))
+    elif cmd == "watchdog":
+        rc = asyncio.run(_cmd_watchdog(args))
     elif cmd == "latency-probe":
         rc = asyncio.run(_cmd_latency_probe(args))
     elif cmd == "etrade-auth":

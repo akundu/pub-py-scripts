@@ -967,6 +967,19 @@ class LiveDataService:
             _prefill_prices_from_portfolio(grouped, portfolio_items)
             await _enrich_with_quotes_and_breach(grouped, self._ibkr)
 
+        # Annotate each position with its latest watchdog suggestion
+        try:
+            from app.services.watchdog_service import get_watchdog_service
+            wd_svc = get_watchdog_service()
+            if wd_svc:
+                hints = wd_svc.get_latest_by_position()
+                for p in grouped:
+                    pid = p.get("position_id", "")
+                    if pid in hints:
+                        p["watchdog_hint"] = hints[pid]
+        except Exception:
+            pass
+
         result["positions"] = grouped
 
         # Closed positions (recent 5)

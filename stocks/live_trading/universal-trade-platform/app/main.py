@@ -31,11 +31,13 @@ from app.routes import dashboard as dashboard_routes
 from app.routes import import_routes
 from app.routes import playbook as playbook_routes
 from app.routes import roll as roll_routes
+from app.routes import watchdog as watchdog_routes
 from app.services.dashboard_service import DashboardService
 from app.services.ledger import init_ledger, get_ledger
 from app.services.live_data_service import init_live_data_service, reset_live_data_service
 from app.services.position_store import init_position_store, get_position_store
-from app.services.roll_service import init_roll_service, get_roll_service, reset_roll_service
+from app.services.roll_service import init_roll_service, reset_roll_service
+from app.services.watchdog_service import init_watchdog_service, reset_watchdog_service
 from app.websocket import ws_manager
 
 _log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -70,14 +72,15 @@ async def _expiration_loop(interval: int) -> None:
             logger.error("Expiration loop error: %s", e)
 
 
-async def _roll_scan_loop(interval: float) -> None:
-    """Background loop: scan positions for roll suggestions during market hours."""
+async def _watchdog_loop(interval: float) -> None:
+    """Background loop: run watchdog advisory cycle during market hours."""
+    from app.services.watchdog_service import get_watchdog_service
     while True:
         await asyncio.sleep(interval)
-        svc = get_roll_service()
+        svc = get_watchdog_service()
         if not svc:
             continue
-        # Only scan during market hours (13:30-20:00 UTC, Mon-Fri)
+        # Only run during market hours (13:30-20:00 UTC, Mon-Fri)
         now = datetime.now(UTC)
         if now.weekday() >= 5:
             continue
@@ -85,9 +88,9 @@ async def _roll_scan_loop(interval: float) -> None:
         if hour_min < 1330 or hour_min > 2000:
             continue
         try:
-            await svc.scan_positions()
+            await svc.run_cycle()
         except Exception as e:
-            logger.error("Roll scan loop error: %s", e)
+            logger.error("Watchdog loop error: %s", e)
 
 
 async def _position_greeks_loop(interval: float = 90.0) -> None:
@@ -199,8 +202,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         ibkr_for_live = ibkr_provider if settings.ibkr_account_id else None
         init_live_data_service(store, dashboard_svc, ibkr_for_live)
 
-    # Initialize roll service
-    roll_svc = init_roll_service()
+    # Initialize roll service and watchdog (watchdog's RollAdvisorModule uses roll_service)
+    init_roll_service()
+    watchdog_svc = init_watchdog_service()
 
     # Start background tasks
     tasks: list[asyncio.Task] = []
@@ -212,7 +216,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             asyncio.create_task(_position_sync_loop(settings.position_sync_interval_seconds))
         )
     tasks.append(
-        asyncio.create_task(_roll_scan_loop(roll_svc.config.check_interval))
+        asyncio.create_task(_watchdog_loop(watchdog_svc.config.default_interval_seconds))
     )
     tasks.append(
         asyncio.create_task(_position_greeks_loop(interval=90.0))
@@ -233,6 +237,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     ProviderRegistry.clear()
     reset_live_data_service()
     reset_roll_service()
+    reset_watchdog_service()
 
 
 PRIVATE_NETWORKS = [
@@ -380,6 +385,7 @@ app.include_router(dashboard_routes.router)
 app.include_router(import_routes.router)
 app.include_router(playbook_routes.router)
 app.include_router(roll_routes.router)
+app.include_router(watchdog_routes.router)
 
 # Register simulation routes when in sim mode (set by daemon --sim-date)
 if os.environ.get("_UTP_SIM_MODE") == "1":
