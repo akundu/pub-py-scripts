@@ -1,0 +1,29 @@
+{
+  "config": {
+    "profit_target_pct": 30,
+    "stop_loss_pct": 9999,
+    "apply_dtes": [
+      0,
+      3
+    ],
+    "apply_tiers": [
+      "aggressive",
+      "conservative",
+      "moderate"
+    ],
+    "apply_sides": [
+      "put"
+    ]
+  },
+  "metrics": {
+    "annualized_sharpe": 11.4250764039448,
+    "annualized_roi_pct": 56380.26384785329,
+    "max_drawdown_pct": 0.0,
+    "win_day_pct": 100.0,
+    "n_days": 327,
+    "n_trades": 8067,
+    "score": 11.4250764039448,
+    "improvement_pct": 1.8290251789858838,
+    "hold_sharpe": 11.219862297476412
+  }
+}
