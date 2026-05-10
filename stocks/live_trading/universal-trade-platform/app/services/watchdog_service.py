@@ -9,11 +9,16 @@ Two operating modes:
 
 Modules (all run in the parent / IBKR process only):
   RollAdvisorModule   — wraps RollService.scan_positions(); replaces _roll_scan_bg
-  CloseAdvisorModule  — profit target, stop loss, low ROI, EOD close
-  BreachMonitorModule — severity alert (watch/warning/critical/breached); no auto-action
+  CloseAdvisorModule  — DTE-aware profit targets, distance-based stop-loss, EOD close
+  BreachMonitorModule — severity alert (warning+ by default); no auto-action
 
 Suggestion lifecycle: pending → executed | dismissed | expired (TTL)
 Deduplication: same position_id + suggestion_type is updated in-place.
+
+CloseAdvisorModule stop-loss rationale:
+  Empirical data shows 100% of spread-value drawdowns (−50% to −200%) recovered
+  to profitable expiry. Spread-value stops lock in real losses on phantom quotes.
+  The only valid stop is underlying proximity to the short strike (_calc_breach_status).
 """
 
 from __future__ import annotations
@@ -51,7 +56,22 @@ def reset_watchdog_service() -> None:
     _watchdog_service = None
 
 
-# ── config ───────────────────────────────────────────────────────────────────
+# ── ET time helper ────────────────────────────────────────────────────────────
+
+def _et_hhmm(now_utc: datetime) -> int:
+    """Return current US Eastern time as HHMM integer (e.g. 1530 = 3:30 PM ET).
+
+    DST: 2nd Sunday in March through 1st Sunday in November → UTC-4.
+    Standard: Nov–Mar → UTC-5.
+    """
+    m, d = now_utc.month, now_utc.day
+    is_dst = (m > 3 and m < 11) or (m == 3 and d >= 8) or (m == 11 and d < 7)
+    offset = -4 if is_dst else -5
+    et_hour = (now_utc.hour + offset) % 24
+    return et_hour * 100 + now_utc.minute
+
+
+# ── top-level config ──────────────────────────────────────────────────────────
 
 @dataclass
 class WatchdogConfig:
@@ -60,18 +80,86 @@ class WatchdogConfig:
     action_mode: bool = False
     default_interval_seconds: float = 30.0
     suggestion_ttl_seconds: float = 300.0
-    # Per-module overrides: {"roll_advisor": {"interval_seconds": 60, "enabled": True, ...}}
+    # Per-module overrides: {"close_advisor": {"pt_threshold_dte0": 0.75, ...}}
     module_overrides: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
-        d = asdict(self)
-        return d
+        return asdict(self)
 
     @classmethod
     def from_dict(cls, d: dict) -> "WatchdogConfig":
         known = {f.name for f in cls.__dataclass_fields__.values()}
-        filtered = {k: v for k, v in d.items() if k in known}
-        return cls(**filtered)
+        return cls(**{k: v for k, v in d.items() if k in known})
+
+
+# ── module-specific configs ───────────────────────────────────────────────────
+
+@dataclass
+class CloseAdvisorConfig:
+    """Configuration for CloseAdvisorModule. Loaded from module_overrides['close_advisor']."""
+
+    # ── scalper early exit (info, before 11 AM ET) ─────────────────────────
+    # Only for DTE0 and DTE3 where freeing capital has high reinvestment value.
+    scalper_threshold: float = 0.30            # pct_captured to trigger
+    scalper_cutoff_et: int = 1100              # before this HHMM ET; override in tests with 2359
+    scalper_enabled_dtes: list = field(default_factory=lambda: [0, 3])
+
+    # ── standard lock-in profit target (warning) ───────────────────────────
+    # Thresholds from empirical 8,501-trade dataset:
+    #   DTE0: hold to close default; 80% after noon ET
+    #   DTE1: 80% at D0 EOD 15:30 ET — bimodal distribution, lower PTs gain little
+    #   DTE2: 70% at D1 EOD 15:30 ET — more trades in 70-80% band
+    #   DTE3: 75% at D1 EOD 15:30 ET — large absolute dollars, don't leave credit cheaply
+    pt_threshold_dte0: float = 0.80
+    pt_check_et_dte0: int = 1200              # 12:00 ET (as HHMM int)
+    pt_threshold_dte1: float = 0.80
+    pt_check_et_dte1: int = 1530              # 15:30 ET
+    pt_threshold_dte2: float = 0.70
+    pt_threshold_dte3: float = 0.75
+    pt_check_et_multi: int = 1530             # 15:30 ET (for DTE2 and DTE3)
+
+    # ── distance-based stop-loss (DTE0 and DTE1 only) ─────────────────────
+    # DTE2+: RollAdvisorModule handles it (roll is better than close).
+    stop_threshold_dte0: float = 0.5          # % distance from spot to short strike
+    stop_check_et_dte0: int = 1100            # 11:00 ET — 3h remain, no time to recover
+    stop_threshold_dte1: float = 1.0
+    stop_check_et_dte1: int = 1500            # 15:00 ET (D0 EOD check)
+
+    # ── EOD pre-expiry (critical) ──────────────────────────────────────────
+    eod_close_minutes_before: int = 15        # warn N min before 20:00 UTC (4pm ET)
+
+    # ── low ROI (info, expiration day only) ───────────────────────────────
+    min_remaining_credit_pct: float = 0.10    # < 10% credit left → low ROI
+
+    # ── notifications ──────────────────────────────────────────────────────
+    notify_on_types: list = field(
+        default_factory=lambda: ["close_stop_loss", "close_profit", "close_eod"]
+    )
+    notify_channel: str = "email"
+    notify_cooldown_minutes: int = 15
+
+    @classmethod
+    def from_overrides(cls, overrides: dict) -> "CloseAdvisorConfig":
+        known = {f.name for f in cls.__dataclass_fields__.values()}
+        return cls(**{k: v for k, v in overrides.items() if k in known})
+
+
+@dataclass
+class BreachMonitorConfig:
+    """Configuration for BreachMonitorModule. Loaded from module_overrides['breach_monitor']."""
+    # Suggestion severity levels: info, warning, critical, urgent
+    # Breach severity mapping: watch→info, warning→warning, critical→critical, breached→urgent
+    # Default "warning" suppresses watch (2% OTM) breaches — too noisy for 0DTE.
+    # Set to "info" to allow watch-level (2% OTM) alerts through.
+    min_severity: str = "warning"
+    notify_on_severity: list = field(default_factory=lambda: ["critical", "urgent"])
+    notify_channel: str = "email"
+    notify_cooldown_minutes: int = 15
+
+    @classmethod
+    def from_overrides(cls, overrides: dict) -> "BreachMonitorConfig":
+        known = {f.name for f in cls.__dataclass_fields__.values()}
+        return cls(**{k: v for k, v in overrides.items() if k in known})
 
 
 # ── suggestion model ──────────────────────────────────────────────────────────
@@ -84,10 +172,10 @@ class WatchdogSuggestion:
     symbol: str
     module: str            # "roll_advisor" | "close_advisor" | "breach_monitor"
     suggestion_type: str   # "forward_roll" | "mirror_roll" | "close_profit" |
-                           #  "close_stop_loss" | "close_low_roi" | "close_eod" |
-                           #  "breach_alert"
+                           #  "close_profit_scalper" | "close_stop_loss" | "close_low_roi" |
+                           #  "close_eod" | "breach_alert"
     severity: str          # "info" | "warning" | "critical" | "urgent"
-    title: str             # short display text shown in portfolio column
+    title: str             # short display text shown in portfolio Watchdog column
     description: str       # human-readable reason
     action: dict           # execution parameters; module-specific
     created_at: datetime
@@ -100,8 +188,7 @@ class WatchdogSuggestion:
         return d
 
     def is_expired(self, ttl_seconds: float) -> bool:
-        age = (datetime.now(UTC) - self.created_at).total_seconds()
-        return age > ttl_seconds
+        return (datetime.now(UTC) - self.created_at).total_seconds() > ttl_seconds
 
 
 # ── module ABC ───────────────────────────────────────────────────────────────
@@ -119,8 +206,7 @@ class WatchdogModule(ABC):
         interval = interval_override if interval_override is not None else self.default_interval
         if self._last_run is None:
             return True
-        elapsed = (datetime.now(UTC) - self._last_run).total_seconds()
-        return elapsed >= interval
+        return (datetime.now(UTC) - self._last_run).total_seconds() >= interval
 
     def mark_ran(self) -> None:
         self._last_run = datetime.now(UTC)
@@ -130,6 +216,7 @@ class WatchdogModule(ABC):
         self,
         positions: list[dict],
         prices: dict[str, float],
+        overrides: dict | None = None,
     ) -> list[WatchdogSuggestion]:
         ...
 
@@ -194,12 +281,11 @@ class WatchdogService:
                 continue
 
             try:
-                suggestions = await module.run(multi_leg, prices)
+                suggestions = await module.run(multi_leg, prices, overrides)
                 module.mark_ran()
                 for s in suggestions:
                     existing = self._find_existing(s.position_id, s.suggestion_type)
                     if existing:
-                        # Update in-place (severity/title/description may have changed)
                         existing.severity = s.severity
                         existing.title = s.title
                         existing.description = s.description
@@ -220,12 +306,9 @@ class WatchdogService:
     # ── queries ──────────────────────────────────────────────────────────────
 
     def get_suggestions(self, position_id: Optional[str] = None) -> list[dict]:
-        """Return pending suggestions as dicts, optionally filtered by position_id."""
         self._expire_suggestions()
         results = [
-            s.to_dict()
-            for s in self._suggestions.values()
-            if s.status == "pending"
+            s.to_dict() for s in self._suggestions.values() if s.status == "pending"
         ]
         if position_id:
             results = [r for r in results if r["position_id"] == position_id]
@@ -247,7 +330,6 @@ class WatchdogService:
         return {pid: s.to_dict() for pid, s in best.items()}
 
     def get_status(self) -> dict:
-        """Return watchdog service status."""
         counts = {"pending": 0, "executed": 0, "dismissed": 0, "expired": 0}
         for s in self._suggestions.values():
             counts[s.status] = counts.get(s.status, 0) + 1
@@ -275,7 +357,6 @@ class WatchdogService:
         if s and s.status == "pending":
             s.status = "dismissed"
             return True
-        # Prefix match
         for sid, s in self._suggestions.items():
             if sid.startswith(suggestion_id) and s.status == "pending":
                 s.status = "dismissed"
@@ -290,9 +371,7 @@ class WatchdogService:
 
     # ── internals ────────────────────────────────────────────────────────────
 
-    def _find_existing(
-        self, position_id: str, suggestion_type: str
-    ) -> Optional[WatchdogSuggestion]:
+    def _find_existing(self, position_id: str, suggestion_type: str) -> Optional[WatchdogSuggestion]:
         for s in self._suggestions.values():
             if (
                 s.position_id == position_id
@@ -308,7 +387,6 @@ class WatchdogService:
                 s.status = "expired"
 
     async def _auto_execute(self, s: WatchdogSuggestion) -> None:
-        """Auto-execute a suggestion. Only called when action_mode=True."""
         try:
             atype = s.action.get("type")
 
@@ -384,7 +462,10 @@ class RollAdvisorModule(WatchdogModule):
     default_interval = 30.0
 
     async def run(
-        self, positions: list[dict], prices: dict[str, float]
+        self,
+        positions: list[dict],
+        prices: dict[str, float],
+        overrides: dict | None = None,
     ) -> list[WatchdogSuggestion]:
         from app.services.roll_service import get_roll_service
 
@@ -431,108 +512,205 @@ class RollAdvisorModule(WatchdogModule):
 # ── Module: CloseAdvisor ──────────────────────────────────────────────────────
 
 class CloseAdvisorModule(WatchdogModule):
-    """Suggest closing positions based on profit target, stop loss, low ROI, or EOD."""
+    """Suggest closing multi_leg positions using empirically-derived rules.
+
+    Profit target: DTE-specific thresholds (70–80%) with scheduled check times.
+    Stop-loss: underlying distance to short strike, NOT spread value.
+      - DTE0: close if within 0.5% after 11:00 ET (3h remain, no recovery time)
+      - DTE1: close if within 1.0% after 15:00 ET (D0 EOD check)
+      - DTE2+: let RollAdvisorModule suggest a roll instead
+    """
 
     name = "close_advisor"
     default_interval = 30.0
 
+    # Notification priority rank (higher = escalates notification)
+    _NOTIFY_RANK = {
+        "close_profit_scalper": 0,
+        "close_low_roi": 0,
+        "close_profit": 1,
+        "close_stop_loss": 2,
+        "close_eod": 3,
+    }
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._last_notified: dict[str, tuple[str, datetime]] = {}
+
     async def run(
-        self, positions: list[dict], prices: dict[str, float]
+        self,
+        positions: list[dict],
+        prices: dict[str, float],
+        overrides: dict | None = None,
     ) -> list[WatchdogSuggestion]:
-        results: list[WatchdogSuggestion] = []
+        cfg = CloseAdvisorConfig.from_overrides(overrides or {})
         now_utc = datetime.now(UTC)
         today_str = now_utc.strftime("%Y-%m-%d")
+        et_hhmm = _et_hhmm(now_utc)
 
+        results: list[WatchdogSuggestion] = []
         for pos in positions:
-            entry_price = abs(pos.get("entry_price") or 0)
-            if entry_price <= 0:
-                continue
-
-            # Use most reliable mark available: current_mark → market_price → skip
-            current_mark = pos.get("current_mark")
-            if current_mark is None:
-                current_mark = pos.get("market_price")
-            if current_mark is None:
-                continue
-            current_mark = abs(current_mark)
-
-            position_id = pos.get("position_id", "")
-            symbol = pos.get("symbol", "")
-            expiration = pos.get("expiration") or ""
-            qty = abs(pos.get("quantity") or 1)
-
-            suggestion = self._evaluate(
-                position_id, symbol, expiration, entry_price, current_mark, qty, today_str, now_utc
-            )
-            if suggestion:
-                results.append(suggestion)
-
+            results.extend(await self._evaluate(pos, prices, cfg, now_utc, today_str, et_hhmm))
         return results
 
-    def _evaluate(
+    # ── pct_captured ─────────────────────────────────────────────────────────
+
+    def _compute_pct_captured(self, pos: dict) -> Optional[float]:
+        """Fraction of premium captured (0.0–1.0+). None if data unavailable.
+
+        Priority:
+        1. broker_unrealized_pnl / spread_metrics.derived_credit  (live IBKR)
+        2. (entry_price - current_mark) / entry_price             (paper / fallback)
+        """
+        broker_pnl = pos.get("broker_unrealized_pnl")
+        derived_credit = (pos.get("spread_metrics") or {}).get("derived_credit")
+        if broker_pnl is not None and derived_credit and derived_credit > 0:
+            return broker_pnl / derived_credit
+
+        entry_price = abs(pos.get("entry_price") or 0)
+        mark = pos.get("current_mark")
+        if mark is None:
+            mark = pos.get("market_price")
+        if entry_price > 0 and mark is not None:
+            return (entry_price - abs(mark)) / entry_price
+
+        return None
+
+    # ── pt/stop rules ─────────────────────────────────────────────────────────
+
+    def _get_pt_rules(self, current_dte: int, cfg: CloseAdvisorConfig) -> tuple[float, Optional[int]]:
+        """(threshold_pct, check_after_et_hhmm) for standard lock-in exit."""
+        if current_dte == 0:
+            return cfg.pt_threshold_dte0, cfg.pt_check_et_dte0
+        elif current_dte == 1:
+            return cfg.pt_threshold_dte1, cfg.pt_check_et_dte1
+        elif current_dte == 2:
+            return cfg.pt_threshold_dte2, cfg.pt_check_et_multi
+        elif current_dte >= 3:
+            return cfg.pt_threshold_dte3, cfg.pt_check_et_multi
+        return 0.80, None
+
+    def _get_stop_rules(self, current_dte: int, cfg: CloseAdvisorConfig) -> tuple[Optional[int], float]:
+        """(check_after_et_hhmm, distance_pct_threshold) for distance-based stop."""
+        if current_dte == 0:
+            return cfg.stop_check_et_dte0, cfg.stop_threshold_dte0
+        elif current_dte == 1:
+            return cfg.stop_check_et_dte1, cfg.stop_threshold_dte1
+        return None, 0.0   # DTE2+ → RollAdvisor handles it
+
+    # ── main evaluation ───────────────────────────────────────────────────────
+
+    async def _evaluate(
         self,
-        position_id: str,
-        symbol: str,
-        expiration: str,
-        entry_price: float,
-        current_mark: float,
-        qty: float,
-        today_str: str,
+        pos: dict,
+        prices: dict[str, float],
+        cfg: CloseAdvisorConfig,
         now_utc: datetime,
-    ) -> Optional[WatchdogSuggestion]:
-        # Config pulled from WatchdogService module_overrides (passed via run call)
-        # Defaults encoded here; the service can override via module_overrides["close_advisor"]
-        profit_target_pct = 0.50
-        stop_loss_multiplier = 2.0
-        min_remaining_credit_pct = 0.10
-        eod_close_minutes = 15
+        today_str: str,
+        et_hhmm: int,
+    ) -> list[WatchdogSuggestion]:
+        entry_price = abs(pos.get("entry_price") or 0)
+        if entry_price <= 0:
+            return []
 
-        profit_captured = (entry_price - current_mark) / entry_price if entry_price > 0 else 0
+        position_id = pos.get("position_id", "")
+        symbol = pos.get("symbol", "")
+        expiration = pos.get("expiration") or ""
 
-        # Priority 1: stop loss (overrides profit target display)
-        if current_mark >= entry_price * stop_loss_multiplier:
-            mult = current_mark / entry_price
-            return WatchdogSuggestion(
-                suggestion_id=str(uuid.uuid4())[:8],
-                position_id=position_id,
-                symbol=symbol,
-                module=self.name,
-                suggestion_type="close_stop_loss",
-                severity="critical",
-                title=f"Stop Loss {mult:.1f}× credit",
-                description=(
-                    f"Mark ${current_mark:.2f} is {mult:.1f}× entry ${entry_price:.2f}; "
-                    f"stop at {stop_loss_multiplier:.0f}×"
-                ),
-                action={"type": "close", "position_id": position_id, "close_reason": "stop_loss"},
-                created_at=datetime.now(UTC),
-            )
+        # Compute current DTE from expiration date
+        try:
+            from datetime import date
+            exp_date = date.fromisoformat(expiration)
+            current_dte = (exp_date - date.today()).days
+        except (ValueError, TypeError, AttributeError):
+            return []
 
-        # Priority 2: profit target
-        if profit_captured >= profit_target_pct:
-            return WatchdogSuggestion(
-                suggestion_id=str(uuid.uuid4())[:8],
-                position_id=position_id,
-                symbol=symbol,
-                module=self.name,
-                suggestion_type="close_profit",
-                severity="warning",
-                title=f"Close {profit_captured * 100:.0f}% profit",
-                description=(
-                    f"Captured {profit_captured * 100:.1f}% of premium "
-                    f"(entry ${entry_price:.2f} → mark ${current_mark:.2f})"
-                ),
-                action={"type": "close", "position_id": position_id, "close_reason": "profit_target"},
-                created_at=datetime.now(UTC),
-            )
+        current_price = prices.get(symbol, 0.0)
+        pct_captured = self._compute_pct_captured(pos)
 
+        results: list[WatchdogSuggestion] = []
+
+        # ── Profit target ─────────────────────────────────────────────────────
+        if pct_captured is not None:
+            # Scalper early exit: DTE0/DTE3 before 11 AM ET at ≥30% captured.
+            # Freeing capital early lets you redeploy same day (DTE0) or get 3 DTE0s (DTE3).
+            if (
+                current_dte in cfg.scalper_enabled_dtes
+                and et_hhmm < cfg.scalper_cutoff_et
+                and pct_captured >= cfg.scalper_threshold
+            ):
+                results.append(WatchdogSuggestion(
+                    suggestion_id=str(uuid.uuid4())[:8],
+                    position_id=position_id,
+                    symbol=symbol,
+                    module=self.name,
+                    suggestion_type="close_profit_scalper",
+                    severity="info",
+                    title=f"30% profit — redeploy?",
+                    description=(
+                        f"Captured {pct_captured * 100:.0f}% by "
+                        f"{et_hhmm // 100:02d}:{et_hhmm % 100:02d} ET "
+                        f"(DTE{current_dte}); close to redeploy"
+                    ),
+                    action={"type": "close", "position_id": position_id, "close_reason": "profit_scalper"},
+                    created_at=datetime.now(UTC),
+                ))
+
+            # Standard lock-in: fire once check_time passes and threshold met.
+            pt_threshold, check_after = self._get_pt_rules(current_dte, cfg)
+            if check_after is not None and et_hhmm >= check_after and pct_captured >= pt_threshold:
+                results.append(WatchdogSuggestion(
+                    suggestion_id=str(uuid.uuid4())[:8],
+                    position_id=position_id,
+                    symbol=symbol,
+                    module=self.name,
+                    suggestion_type="close_profit",
+                    severity="warning",
+                    title=f"Close {pct_captured * 100:.0f}% profit (DTE{current_dte})",
+                    description=(
+                        f"Captured {pct_captured * 100:.1f}% ≥ {pt_threshold * 100:.0f}% target "
+                        f"at {et_hhmm // 100:02d}:{et_hhmm % 100:02d} ET"
+                    ),
+                    action={"type": "close", "position_id": position_id, "close_reason": "profit_target"},
+                    created_at=datetime.now(UTC),
+                ))
+                await self._maybe_notify(position_id, symbol, expiration, "close_profit", cfg)
+
+        # ── Distance-based stop-loss (DTE0 and DTE1 only) ─────────────────────
+        # DTE2+: RollAdvisorModule handles those. Don't generate close suggestions there.
+        if current_dte <= 1 and current_price:
+            from app.services.roll_service import _calc_breach_status
+            breach = _calc_breach_status(current_price, pos)
+            if breach and breach["severity"] != "safe":
+                distance_pct = breach.get("distance_pct", 999)
+                check_after, threshold = self._get_stop_rules(current_dte, cfg)
+                if check_after is not None and et_hhmm >= check_after and distance_pct <= threshold:
+                    sev = "critical" if current_dte == 0 else "warning"
+                    results.append(WatchdogSuggestion(
+                        suggestion_id=str(uuid.uuid4())[:8],
+                        position_id=position_id,
+                        symbol=symbol,
+                        module=self.name,
+                        suggestion_type="close_stop_loss",
+                        severity=sev,
+                        title=f"Stop {distance_pct:.1f}% from strike (DTE{current_dte})",
+                        description=(
+                            f"{breach['option_type']} short {breach['short_strike']:.0f} "
+                            f"is {distance_pct:.1f}% from spot {current_price:.0f}; "
+                            f"DTE{current_dte} stop threshold {threshold:.1f}%"
+                        ),
+                        action={"type": "close", "position_id": position_id, "close_reason": "stop_loss"},
+                        created_at=datetime.now(UTC),
+                    ))
+                    await self._maybe_notify(position_id, symbol, expiration, "close_stop_loss", cfg)
+
+        # ── EOD and low-ROI (expiration day only) ─────────────────────────────
         if expiration == today_str:
-            # Priority 3: EOD close (N min before market close)
             market_close_min = 20 * 60  # 20:00 UTC = 4pm ET
             current_min = now_utc.hour * 60 + now_utc.minute
             mins_to_close = market_close_min - current_min
-            if 0 <= mins_to_close <= eod_close_minutes:
-                return WatchdogSuggestion(
+            if 0 <= mins_to_close <= cfg.eod_close_minutes_before:
+                results.append(WatchdogSuggestion(
                     suggestion_id=str(uuid.uuid4())[:8],
                     position_id=position_id,
                     symbol=symbol,
@@ -540,38 +718,91 @@ class CloseAdvisorModule(WatchdogModule):
                     suggestion_type="close_eod",
                     severity="critical",
                     title=f"EOD close ({mins_to_close}min)",
-                    description=(
-                        f"Expires today; {mins_to_close} min to market close"
-                    ),
+                    description=f"Expires today; {mins_to_close} min to market close (4pm ET / 20:00 UTC)",
                     action={"type": "close", "position_id": position_id, "close_reason": "eod"},
                     created_at=datetime.now(UTC),
-                )
+                ))
+                await self._maybe_notify(position_id, symbol, expiration, "close_eod", cfg)
+            elif pct_captured is not None:
+                # Low ROI: tiny credit remains, not worth the overnight risk
+                remaining_frac = 1.0 - pct_captured
+                if remaining_frac < cfg.min_remaining_credit_pct:
+                    results.append(WatchdogSuggestion(
+                        suggestion_id=str(uuid.uuid4())[:8],
+                        position_id=position_id,
+                        symbol=symbol,
+                        module=self.name,
+                        suggestion_type="close_low_roi",
+                        severity="info",
+                        title="Low ROI (exp today)",
+                        description=(
+                            f"Only {remaining_frac * 100:.1f}% credit remaining "
+                            f"(< {cfg.min_remaining_credit_pct * 100:.0f}%); expiring today"
+                        ),
+                        action={"type": "close", "position_id": position_id, "close_reason": "low_roi"},
+                        created_at=datetime.now(UTC),
+                    ))
 
-            # Priority 4: low ROI continuation
-            if current_mark < entry_price * min_remaining_credit_pct:
-                return WatchdogSuggestion(
-                    suggestion_id=str(uuid.uuid4())[:8],
-                    position_id=position_id,
-                    symbol=symbol,
-                    module=self.name,
-                    suggestion_type="close_low_roi",
-                    severity="info",
-                    title="Low ROI (exp today)",
-                    description=(
-                        f"Only ${current_mark:.2f} remaining (< {min_remaining_credit_pct*100:.0f}% "
-                        f"of ${entry_price:.2f}); risk not worth holding"
-                    ),
-                    action={"type": "close", "position_id": position_id, "close_reason": "low_roi"},
-                    created_at=datetime.now(UTC),
-                )
+        return results
 
-        return None
+    # ── notifications ─────────────────────────────────────────────────────────
+
+    async def _maybe_notify(
+        self,
+        position_id: str,
+        symbol: str,
+        expiration: str,
+        stype: str,
+        cfg: CloseAdvisorConfig,
+    ) -> None:
+        if stype not in cfg.notify_on_types:
+            return
+        now = datetime.now(UTC)
+        last_entry = self._last_notified.get(position_id)
+        if last_entry is not None:
+            last_type, last_time = last_entry
+            elapsed_min = (now - last_time).total_seconds() / 60
+            has_escalated = (
+                self._NOTIFY_RANK.get(stype, 0) > self._NOTIFY_RANK.get(last_type, 0)
+            )
+            if elapsed_min < cfg.notify_cooldown_minutes and not has_escalated:
+                return
+        self._last_notified[position_id] = (stype, now)
+        label_map = {
+            "close_profit": "PROFIT TARGET",
+            "close_stop_loss": "STOP-LOSS",
+            "close_eod": "EOD CLOSE",
+        }
+        label = label_map.get(stype, stype.upper())
+        message = (
+            f"[UTP] {symbol} close advisory: {label}\n"
+            f"Expiration: {expiration}\n"
+            f"Run: python utp.py close {position_id[:8]} --live"
+        )
+        try:
+            import httpx
+            from app.config import settings
+            payload = {
+                "channel": cfg.notify_channel,
+                "message": message,
+                "subject": f"UTP Close Alert: {symbol} {label}",
+                "tag": "[UTP-ALERT]",
+            }
+            async with httpx.AsyncClient(timeout=5) as client:
+                await client.post(f"{settings.notify_url}/api/notify", json=payload)
+        except Exception as e:
+            logger.warning("Close advisor notification failed for %s: %s", position_id, e)
 
 
 # ── Module: BreachMonitor ─────────────────────────────────────────────────────
 
 class BreachMonitorModule(WatchdogModule):
-    """Surface breach severity for threatened positions. No auto-action."""
+    """Surface breach severity for threatened positions. No auto-action.
+
+    Default min_severity='warning' suppresses 'watch' (2% OTM) alerts —
+    too noisy for 0DTE; RollAdvisorModule already handles watch-level positions.
+    Notifications fire at critical/urgent only.
+    """
 
     name = "breach_monitor"
     default_interval = 30.0
@@ -583,10 +814,20 @@ class BreachMonitorModule(WatchdogModule):
         "breached": "urgent",
     }
 
+    def __init__(self) -> None:
+        super().__init__()
+        self._last_notified: dict[str, tuple[str, datetime]] = {}
+
     async def run(
-        self, positions: list[dict], prices: dict[str, float]
+        self,
+        positions: list[dict],
+        prices: dict[str, float],
+        overrides: dict | None = None,
     ) -> list[WatchdogSuggestion]:
-        from app.services.roll_service import _calc_breach_status
+        from app.services.roll_service import _calc_breach_status, SEVERITY_ORDER
+
+        cfg = BreachMonitorConfig.from_overrides(overrides or {})
+        min_rank = WATCHDOG_SEVERITY_RANK.get(cfg.min_severity, 2)
 
         results: list[WatchdogSuggestion] = []
         for pos in positions:
@@ -600,25 +841,80 @@ class BreachMonitorModule(WatchdogModule):
                 continue
 
             sev = self._BREACH_SEV_MAP.get(breach["severity"], "info")
+            if WATCHDOG_SEVERITY_RANK.get(sev, 0) < min_rank:
+                continue  # below configured minimum — suppress
+
             opt_type = breach.get("option_type", "")
             short_strike = breach.get("short_strike", 0)
             dist = breach.get("distance_pct", 0.0)
+            position_id = pos.get("position_id", "")
+            expiration = pos.get("expiration") or ""
 
-            results.append(
-                WatchdogSuggestion(
-                    suggestion_id=str(uuid.uuid4())[:8],
-                    position_id=pos.get("position_id", ""),
-                    symbol=symbol,
-                    module=self.name,
-                    suggestion_type="breach_alert",
-                    severity=sev,
-                    title=f"{breach['severity'].title()} {opt_type} {short_strike:.0f}",
-                    description=(
-                        f"{opt_type} short strike {short_strike:.0f} is "
-                        f"{dist:.1f}% from spot {current_price:.0f}"
-                    ),
-                    action={"type": "alert"},
-                    created_at=datetime.now(UTC),
-                )
-            )
+            results.append(WatchdogSuggestion(
+                suggestion_id=str(uuid.uuid4())[:8],
+                position_id=position_id,
+                symbol=symbol,
+                module=self.name,
+                suggestion_type="breach_alert",
+                severity=sev,
+                title=f"{breach['severity'].title()} {opt_type} {short_strike:.0f}",
+                description=(
+                    f"{opt_type} short strike {short_strike:.0f} is "
+                    f"{dist:.1f}% from spot {current_price:.0f}"
+                ),
+                action={"type": "alert"},
+                created_at=datetime.now(UTC),
+            ))
+
+            await self._maybe_notify(position_id, symbol, expiration, sev, breach, cfg, SEVERITY_ORDER)
+
         return results
+
+    async def _maybe_notify(
+        self,
+        position_id: str,
+        symbol: str,
+        expiration: str,
+        sev: str,
+        breach: dict,
+        cfg: BreachMonitorConfig,
+        severity_order: list,
+    ) -> None:
+        if sev not in cfg.notify_on_severity:
+            return
+        now = datetime.now(UTC)
+        last_entry = self._last_notified.get(position_id)
+        if last_entry is not None:
+            last_sev, last_time = last_entry
+            elapsed_min = (now - last_time).total_seconds() / 60
+            try:
+                has_escalated = (
+                    severity_order.index(breach["severity"])
+                    > severity_order.index(last_sev)
+                )
+            except ValueError:
+                has_escalated = False
+            if elapsed_min < cfg.notify_cooldown_minutes and not has_escalated:
+                return
+        self._last_notified[position_id] = (breach["severity"], now)
+        dist = breach.get("distance_pct", 0)
+        is_itm = breach.get("is_itm", False)
+        message = (
+            f"[UTP] {symbol} breach: {sev.upper()}\n"
+            f"Short strike {breach['short_strike']:.0f} | Distance: {dist:.1f}%"
+            f"{' (ITM!)' if is_itm else ''}\n"
+            f"Expiration: {expiration}"
+        )
+        try:
+            import httpx
+            from app.config import settings
+            payload = {
+                "channel": cfg.notify_channel,
+                "message": message,
+                "subject": f"UTP Breach: {symbol} {sev.upper()}",
+                "tag": "[UTP-ALERT]",
+            }
+            async with httpx.AsyncClient(timeout=5) as client:
+                await client.post(f"{settings.notify_url}/api/notify", json=payload)
+        except Exception as e:
+            logger.warning("Breach monitor notification failed for %s: %s", position_id, e)

@@ -29171,62 +29171,98 @@ class TestWatchdogService:
     # ── CloseAdvisorModule ────────────────────────────────────────────────────
 
     async def test_close_advisor_stop_loss(self):
-        """Stop loss fires when mark >= 2× entry credit."""
+        """Stop loss fires when underlying is within 0.5% of short PUT strike (DTE0)."""
         from app.services.watchdog_service import CloseAdvisorModule
         mod = CloseAdvisorModule()
         today = datetime.now(UTC).strftime("%Y-%m-%d")
         pos = self._make_multi_leg_pos(
+            short_strike=5600.0,
+            long_strike=5575.0,
+            option_type="PUT",
             entry_price=2.00,
-            current_mark=4.50,  # 2.25× entry → stop loss
-            expiration=today,
+            expiration=today,  # DTE0
         )
-        results = await mod.run([pos], {})
-        assert len(results) == 1
-        assert results[0].suggestion_type == "close_stop_loss"
-        assert results[0].severity == "critical"
+        # price=5615: distance = (5615-5600)/5615 * 100 = 0.27% < 0.5% threshold
+        # bypass 11:00 ET time gate via override
+        overrides = {"stop_check_et_dte0": 0}
+        results = await mod.run([pos], {"SPX": 5615.0}, overrides)
+        assert any(r.suggestion_type == "close_stop_loss" for r in results)
+        stop = next(r for r in results if r.suggestion_type == "close_stop_loss")
+        assert stop.severity == "critical"
+
+    async def test_close_advisor_stop_loss_dte2_no_suggestion(self):
+        """CloseAdvisor never generates stop-loss for DTE2+ (RollAdvisor handles those)."""
+        from app.services.watchdog_service import CloseAdvisorModule
+        mod = CloseAdvisorModule()
+        future2 = (datetime.now(UTC) + timedelta(days=2)).strftime("%Y-%m-%d")
+        pos = self._make_multi_leg_pos(
+            short_strike=5600.0,
+            option_type="PUT",
+            entry_price=2.00,
+            expiration=future2,  # DTE2
+        )
+        # Even with price right at strike (breached) and time gate bypassed — no stop for DTE2+
+        overrides = {"stop_check_et_dte0": 0, "stop_check_et_dte1": 0}
+        results = await mod.run([pos], {"SPX": 5600.0}, overrides)
+        assert all(r.suggestion_type != "close_stop_loss" for r in results)
 
     async def test_close_advisor_profit_target(self):
-        """Profit target fires when mark <= 50% of entry credit."""
+        """Profit target fires when ≥80% of credit is captured (DTE0, after 12:00 ET)."""
         from app.services.watchdog_service import CloseAdvisorModule
         mod = CloseAdvisorModule()
         today = datetime.now(UTC).strftime("%Y-%m-%d")
         pos = self._make_multi_leg_pos(
             entry_price=2.00,
-            current_mark=0.90,  # captured > 50%
+            current_mark=0.30,  # captured = (2.00-0.30)/2.00 = 85% ≥ 80%
             expiration=today,
         )
-        results = await mod.run([pos], {})
-        assert len(results) == 1
-        assert results[0].suggestion_type == "close_profit"
-        assert results[0].severity == "warning"
+        # bypass 12:00 ET time gate via override
+        overrides = {"pt_check_et_dte0": 0}
+        results = await mod.run([pos], {}, overrides)
+        assert any(r.suggestion_type == "close_profit" for r in results)
+        pt = next(r for r in results if r.suggestion_type == "close_profit")
+        assert pt.severity == "warning"
+
+    async def test_close_advisor_scalper_exit(self):
+        """Scalper exit fires for DTE0 when 30%+ captured before cutoff time."""
+        from app.services.watchdog_service import CloseAdvisorModule
+        mod = CloseAdvisorModule()
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        pos = self._make_multi_leg_pos(
+            entry_price=2.00,
+            current_mark=1.35,  # captured = (2.00-1.35)/2.00 = 32.5% ≥ 30%
+            expiration=today,
+        )
+        # scalper_cutoff_et=2359 makes the 'before cutoff' check always pass
+        overrides = {"scalper_cutoff_et": 2359}
+        results = await mod.run([pos], {}, overrides)
+        assert any(r.suggestion_type == "close_profit_scalper" for r in results)
+        scalper = next(r for r in results if r.suggestion_type == "close_profit_scalper")
+        assert scalper.severity == "info"
 
     async def test_close_advisor_low_roi_on_expiry_day(self):
-        """Low ROI fires when mark < 10% of entry and expiring today."""
+        """Low ROI fires when < 10% credit remains and position expires today."""
         from app.services.watchdog_service import CloseAdvisorModule
         mod = CloseAdvisorModule()
         today = datetime.now(UTC).strftime("%Y-%m-%d")
         pos = self._make_multi_leg_pos(
             entry_price=2.00,
-            current_mark=0.05,  # 2.5% remaining
+            current_mark=0.05,  # 2.5% remaining → low ROI
             expiration=today,
         )
-        # Patch now_utc so we're early enough that EOD isn't triggered
-        with patch("app.services.watchdog_service.datetime") as mock_dt:
-            mock_dt.now.return_value = datetime(2026, 5, 9, 10, 0, 0, tzinfo=UTC)
-            mock_dt.now.side_effect = None
-            # Re-run to get the actual behavior without patching
-            pass
-        # Run directly since we can't easily patch the internal datetime
         results = await mod.run([pos], {})
-        # Should get either low_roi or eod depending on time, but since mark < 10% of entry
-        assert len(results) == 1
-        assert results[0].suggestion_type in ("close_low_roi", "close_eod", "close_stop_loss", "close_profit")
+        # low_roi, close_profit, or close_eod may all fire depending on time of day
+        assert len(results) >= 1
+        types = {r.suggestion_type for r in results}
+        assert types & {"close_low_roi", "close_eod", "close_profit"}
 
     async def test_close_advisor_no_trigger_when_no_mark(self):
-        """CloseAdvisor skips positions without current_mark or market_price."""
+        """CloseAdvisor generates no PT/stop suggestions without mark data."""
         from app.services.watchdog_service import CloseAdvisorModule
         mod = CloseAdvisorModule()
-        pos = self._make_multi_leg_pos(entry_price=2.00, current_mark=None)
+        # Use a future expiration so EOD logic doesn't run
+        future = (datetime.now(UTC) + timedelta(days=5)).strftime("%Y-%m-%d")
+        pos = self._make_multi_leg_pos(entry_price=2.00, current_mark=None, expiration=future)
         pos["market_price"] = None
         results = await mod.run([pos], {})
         assert results == []
@@ -29240,13 +29276,13 @@ class TestWatchdogService:
         assert results == []
 
     async def test_close_advisor_no_trigger_mid_range(self):
-        """No suggestion when mark is in normal range (no breach)."""
+        """No suggestion when only 25% captured (below any PT threshold) and DTE5."""
         from app.services.watchdog_service import CloseAdvisorModule
         mod = CloseAdvisorModule()
         future = (datetime.now(UTC) + timedelta(days=5)).strftime("%Y-%m-%d")
         pos = self._make_multi_leg_pos(
             entry_price=2.00,
-            current_mark=1.50,  # 25% captured, not yet 50%, not stop loss
+            current_mark=1.50,  # 25% captured: below DTE3 75% threshold; no stop (DTE5>1)
             expiration=future,
         )
         results = await mod.run([pos], {})
@@ -29294,6 +29330,64 @@ class TestWatchdogService:
         pos = self._make_multi_leg_pos(expiration=today)
         results = await mod.run([pos], {"SPX": 0.0})
         assert results == []
+
+    async def test_breach_monitor_min_severity_suppresses_watch(self):
+        """BreachMonitor suppresses 'watch' (2% OTM) when min_severity='warning' (default)."""
+        from app.services.watchdog_service import BreachMonitorModule
+        mod = BreachMonitorModule()
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        pos = self._make_multi_leg_pos(
+            short_strike=5500.0,  # short PUT at 5500
+            long_strike=5475.0,
+            option_type="PUT",
+            expiration=today,
+        )
+        # price=5610: distance = (5610-5500)/5610 * 100 = 1.96% → 'watch' severity
+        prices = {"SPX": 5610.0}
+        results = await mod.run([pos], prices)
+        # default min_severity='warning' suppresses watch-level alerts
+        assert results == []
+
+    async def test_breach_monitor_min_severity_info_allows_watch_breach(self):
+        """BreachMonitor surfaces watch-level breach when min_severity='info'.
+
+        watch breaches map to suggestion severity 'info'.
+        Setting min_severity='info' allows info-level suggestions through.
+        """
+        from app.services.watchdog_service import BreachMonitorModule
+        mod = BreachMonitorModule()
+        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        pos = self._make_multi_leg_pos(
+            short_strike=5500.0,
+            long_strike=5475.0,
+            option_type="PUT",
+            expiration=today,
+        )
+        prices = {"SPX": 5610.0}  # 1.96% away → breach 'watch' → suggestion 'info'
+        overrides = {"min_severity": "info"}  # allow info-level suggestions through
+        results = await mod.run([pos], prices, overrides)
+        assert len(results) == 1
+        assert results[0].suggestion_type == "breach_alert"
+        assert results[0].severity == "info"
+
+    def test_close_advisor_config_from_overrides(self):
+        """CloseAdvisorConfig loads known fields from overrides dict."""
+        from app.services.watchdog_service import CloseAdvisorConfig
+        overrides = {
+            "pt_threshold_dte0": 0.70,
+            "pt_check_et_dte0": 1100,
+            "stop_threshold_dte0": 1.0,
+            "stop_check_et_dte0": 900,
+            "unknown_field": "ignored",
+        }
+        cfg = CloseAdvisorConfig.from_overrides(overrides)
+        assert cfg.pt_threshold_dte0 == 0.70
+        assert cfg.pt_check_et_dte0 == 1100
+        assert cfg.stop_threshold_dte0 == 1.0
+        assert cfg.stop_check_et_dte0 == 900
+        # Defaults unchanged for fields not in overrides
+        assert cfg.pt_threshold_dte1 == 0.80
+        assert cfg.eod_close_minutes_before == 15
 
     # ── deduplication ─────────────────────────────────────────────────────────
 
