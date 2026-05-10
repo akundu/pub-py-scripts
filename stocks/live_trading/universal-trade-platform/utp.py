@@ -8318,54 +8318,11 @@ async def _cmd_watchdog(args) -> int:
         if rc is not None:
             return rc
 
-    # Direct mode (no daemon) — use service directly
-    from app.services.watchdog_service import get_watchdog_service, init_watchdog_service
-
-    svc = get_watchdog_service()
-    if not svc:
-        svc = init_watchdog_service()
-
-    action = getattr(args, "watchdog_action", None)
-
-    if action in ("suggestions", "suggest", "sg", None):
-        pos_id = getattr(args, "position_id", None)
-        suggestions = svc.get_suggestions(position_id=pos_id)
-        _print_watchdog_suggestions(suggestions)
-        return 0
-
-    elif action in ("dismiss", "dm"):
-        sid = getattr(args, "suggestion_id", "")
-        ok = svc.dismiss(sid)
-        if ok:
-            print(f"  Suggestion {sid} dismissed")
-        else:
-            print(f"  Suggestion {sid!r} not found or not pending")
-            return 1
-        return 0
-
-    elif action == "config":
-        updates: dict = {}
-        am = getattr(args, "action_mode", None)
-        no_am = getattr(args, "no_action_mode", None)
-        interval = getattr(args, "interval", None)
-        if am:
-            updates["action_mode"] = True
-        if no_am:
-            updates["action_mode"] = False
-        if interval is not None:
-            updates["default_interval_seconds"] = float(interval)
-        if updates:
-            svc.update_config(updates)
-        _print_watchdog_config(svc.config.to_dict())
-        return 0
-
-    elif action == "status":
-        _print_watchdog_status(svc.get_status())
-        return 0
-
-    else:
-        print("  Unknown watchdog action. Use: suggestions, dismiss, config, status")
-        return 1
+    # Watchdog only runs inside the daemon — no local fallback.
+    print("  Watchdog requires the daemon to be running.")
+    print("  Start with:  python utp.py daemon --live --config configs/daemon_default.yaml")
+    print("  Then retry:  python utp.py watchdog suggestions")
+    return 1
 
 
 async def _cmd_roll(args) -> int:
@@ -8843,7 +8800,19 @@ async def _cmd_daemon(args) -> int:
     from app.services.roll_service import init_roll_service as _init_roll_svc
     _daemon_roll_svc = _init_roll_svc()
     from app.services.watchdog_service import init_watchdog_service as _init_watchdog_svc, WatchdogConfig as _WatchdogConfig
-    _daemon_watchdog_svc = _init_watchdog_svc()
+    _wd_config = _WatchdogConfig()  # start with defaults
+    _daemon_config_path = getattr(args, "config", None) or getattr(args, "streaming_config", None)
+    if _daemon_config_path:
+        try:
+            import yaml as _yaml
+            with open(_daemon_config_path) as _f:
+                _raw_yaml = _yaml.safe_load(_f)
+            if isinstance(_raw_yaml, dict) and "watchdog" in _raw_yaml:
+                _wd_config = _WatchdogConfig.from_dict(_raw_yaml["watchdog"])
+                logger.info("Watchdog config loaded from %s", _daemon_config_path)
+        except Exception as _e:
+            logger.warning("Watchdog config load failed: %s — using defaults", _e)
+    _daemon_watchdog_svc = _init_watchdog_svc(_wd_config)
 
     # Set daemon mode flag to prevent lifespan from re-initializing
     import app.main
@@ -8960,7 +8929,8 @@ async def _cmd_daemon(args) -> int:
                         _log.error("Watchdog cycle error: %s", e)
 
         bg_tasks.append(asyncio.create_task(_watchdog_bg()))
-        print(f"  Watchdog: initialized (3 modules, cycle every {_daemon_watchdog_svc.config.default_interval_seconds:.0f}s)")
+        _wd_src = f"from {_daemon_config_path}" if (_daemon_config_path and isinstance(getattr(_wd_config, 'module_overrides', None), dict) and _wd_config != _WatchdogConfig()) else "defaults"
+        print(f"  Watchdog: 3 modules, {_daemon_watchdog_svc.config.default_interval_seconds:.0f}s cycle ({_wd_src})")
     else:
         print("  Watchdog: skipped (worker process)")
 

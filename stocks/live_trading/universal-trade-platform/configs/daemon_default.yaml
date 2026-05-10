@@ -235,3 +235,99 @@ option_quotes_csv_max_age_market_sec: 300   # 5 min
 # regular hours; raise to 30 for early-pre-market warm-up.
 option_quotes_premarket_minutes: 10
 option_quotes_postmarket_minutes: 10
+
+# ── Watchdog advisory framework ───────────────────────────────────────────────
+# Runs 3 modules every `default_interval_seconds` during market hours
+# (13:30–20:00 UTC Mon–Fri, parent/IBKR process only).
+#
+# CLI:  python utp.py watchdog [suggestions|dismiss|config|status]
+# REST: GET/POST /watchdog/config   GET /watchdog/suggestions   GET /watchdog/status
+#
+# All times below are HHMM integers in US Eastern time (e.g. 1530 = 3:30 PM ET).
+# DST is handled automatically; no separate UTC conversion needed.
+#
+# After changing this file, restart the daemon to pick up new values.
+# In-session edits: POST /watchdog/config (resets on next restart).
+
+watchdog:
+  enabled: true
+  action_mode: false               # true = auto-execute suggestions (close/roll)
+  default_interval_seconds: 30     # watchdog cycle cadence
+  suggestion_ttl_seconds: 300      # suggestions expire after 5 min
+
+  module_overrides:
+
+    # ── CloseAdvisorModule ──────────────────────────────────────────────────
+    # Empirically-derived from 8,501-trade dataset.
+    # Spread-value stop-losses intentionally ABSENT (100% recovery rate observed).
+    # Stop-loss is distance-based (underlying proximity to short strike only).
+    close_advisor:
+      # --- Scalper early exit (info — user decides, no auto-execute) ---
+      # Fire when ≥30% captured before 11:00 ET for DTE0/DTE3 only.
+      # Frees capital to redeploy: DTE0 = same-day re-entry; DTE3 = 3 more DTE0s.
+      scalper_threshold: 0.30           # fraction of premium captured
+      scalper_cutoff_et: 1100           # only before 11:00 ET (HHMM)
+      scalper_enabled_dtes: [0, 3]      # DTE0 and DTE3 only
+
+      # --- Standard profit target (warning) ---
+      # DTE0: 80% captured after 12:00 ET (midday — let morning vol settle)
+      pt_threshold_dte0: 0.80
+      pt_check_et_dte0: 1200
+
+      # DTE1: 80% captured after 15:30 ET (D0 EOD check — bimodal, lower PTs gain little)
+      pt_threshold_dte1: 0.80
+      pt_check_et_dte1: 1530
+
+      # DTE2: 70% captured after 15:30 ET (more trades in 70–80% band)
+      pt_threshold_dte2: 0.70
+
+      # DTE3: 75% captured after 15:30 ET (large abs dollars, don't leave cheaply)
+      pt_threshold_dte3: 0.75
+      pt_check_et_multi: 1530           # shared check time for DTE2 and DTE3
+
+      # --- Distance-based stop-loss ---
+      # DTE2+: suppressed — RollAdvisorModule owns those (roll > close for DTE2+).
+      # DTE0: close if spot within 0.5% of short strike after 11:00 ET
+      stop_threshold_dte0: 0.5          # % OTM distance threshold
+      stop_check_et_dte0: 1100          # don't fire before 11:00 ET (3h left)
+
+      # DTE1: close if within 1.0% after 15:00 ET (D0 EOD window)
+      stop_threshold_dte1: 1.0
+      stop_check_et_dte1: 1500
+
+      # --- EOD and low-ROI ---
+      eod_close_minutes_before: 15      # warn within 15 min of 20:00 UTC (4pm ET)
+      min_remaining_credit_pct: 0.10    # low-ROI fires if <10% credit remains
+
+      # --- Notifications ---
+      notify_on_types:
+        - close_stop_loss
+        - close_profit
+        - close_eod
+      notify_channel: email             # email | sms | both
+      notify_cooldown_minutes: 15       # minimum gap between alerts per position
+
+    # ── BreachMonitorModule ─────────────────────────────────────────────────
+    # Surfaces breach severity as a watchdog alert. Never auto-executes.
+    # Severity levels (suggestion): info | warning | critical | urgent
+    # Breach → suggestion mapping: watch→info, warning→warning, critical→critical, breached→urgent
+    breach_monitor:
+      # Suppress suggestions below this suggestion severity.
+      # "warning" (default) = suppress 2% OTM "watch" alerts (too noisy for 0DTE).
+      # "info"    = surface all breach alerts including 2% OTM watch.
+      # "critical" = only near-strike and ITM alerts.
+      min_severity: warning
+
+      notify_on_severity:
+        - critical
+        - urgent
+      notify_channel: email
+      notify_cooldown_minutes: 15
+
+    # ── RollAdvisorModule ───────────────────────────────────────────────────
+    # Delegates entirely to RollService.scan_positions().
+    # Roll thresholds, credit estimates, and roll-specific notifications
+    # are configured in the roll section (python utp.py roll config).
+    roll_advisor:
+      enabled: true
+      interval_seconds: 30
