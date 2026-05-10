@@ -16291,6 +16291,21 @@ async def handle_chart_html(request: web.Request) -> web.Response:
 
     interval = (request.query.get("interval") or "auto").strip()
 
+    # Display timezone for tick labels and the crosshair tooltip.
+    # Default is the empty string so the client falls back to the
+    # browser's local zone via localStorage > "local". Passing
+    # `?tz=et` (or `america/new_york`) forces ET — the previous
+    # hardcoded behavior — and `?tz=local` explicitly chooses the
+    # browser zone (matches the new default; useful for clearing a
+    # localStorage stick). Anything else falls through to the default.
+    tz_raw = (request.query.get("tz") or "").strip().lower()
+    if tz_raw in ("et", "america/new_york"):
+        tz_initial = "America/New_York"
+    elif tz_raw in ("local", "browser", ""):
+        tz_initial = "" if tz_raw == "" else "local"
+    else:
+        tz_initial = ""  # unrecognized — let the client default kick in
+
     template_path = (
         Path(__file__).parent / "common" / "web" / "chart" / "template.html"
     )
@@ -16310,6 +16325,7 @@ async def handle_chart_html(request: web.Request) -> web.Response:
         .replace("{{END_DATE}}", end_date)
         .replace("{{SYMBOL_JSON}}", json.dumps(display_symbol))
         .replace("{{INTERVAL_JSON}}", json.dumps(interval))
+        .replace("{{TZ_INITIAL_JSON}}", json.dumps(tz_initial))
     )
     return web.Response(text=html, content_type="text/html")
 

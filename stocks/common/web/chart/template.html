@@ -418,6 +418,8 @@
   <label for="rsi-window">RSI</label>
   <input type="number" id="rsi-window" min="2" max="100" value="14" style="width:60px">
   <button class="apply" id="apply-btn">Apply</button>
+  <button type="button" id="tz-toggle" class="apply" style="background: transparent; border: 1px solid var(--border); color: var(--muted);" title="Toggle x-axis / tooltip timezone between your local zone and ET (NYSE)">TZ</button>
+  <button type="button" id="candles-toggle" class="apply" style="background: transparent; border: 1px solid var(--border); color: var(--muted);" title="Show or hide the OHLC candlestick series. The line/close series stays visible either way.">Candles</button>
   <span id="source-pill" style="color: var(--muted); font-size: 11px;"></span>
 </div>
 <div class="stats-row" id="stats-row"></div>
@@ -510,12 +512,12 @@
       tickMarkFormatter: (time, tickMarkType) => {
         const d = new Date(time * 1000);
         const fmtDate = (withYear) => d.toLocaleDateString("en-US", {
-          timeZone: "America/New_York",
+          timeZone: tzForFormat(),
           month: "short", day: "numeric",
           year: withYear ? "numeric" : undefined,
         });
         const fmtTime = () => d.toLocaleTimeString("en-US", {
-          timeZone: "America/New_York",
+          timeZone: tzForFormat(),
           hour: "2-digit", minute: "2-digit", hour12: false,
         });
         // Year boundaries (and >1y spans) include the year for context.
@@ -611,6 +613,51 @@
   let currentInterval = {{INTERVAL_JSON}};
   let lastSpan = 1;
 
+  // ── Display timezone ────────────────────────────────────────────────
+  // What zone the x-axis tick labels and the crosshair tooltip render
+  // in. Defaults to the user's browser local zone. Internal logic
+  // (date keying for `dayOpenByDate` / `prevCloseByDate`, market-
+  // session detection, after-hours pill) intentionally stays in ET so
+  // session boundaries align with NYSE regardless of the viewer.
+  //
+  // Resolution order (first match wins): ?tz= query param → server
+  // already normalized → empty string for local; otherwise the IANA
+  // name. Falls back to localStorage so a click on the "TZ" toggle
+  // sticks across reloads. Default is "local" (= browser zone).
+  const TZ_STORAGE_KEY = "chart.displayTZ";
+  const TZ_INITIAL = {{TZ_INITIAL_JSON}};
+  let displayTZ = (() => {
+    if (TZ_INITIAL === "America/New_York") return "America/New_York";
+    if (TZ_INITIAL === "local") return "local";
+    // No explicit query param — try localStorage.
+    try {
+      const v = localStorage.getItem(TZ_STORAGE_KEY);
+      if (v === "America/New_York" || v === "local") return v;
+    } catch (e) { /* private mode etc. — ignore */ }
+    return "local";
+  })();
+  // Returns the IANA TZ string for Intl.DateTimeFormat, or undefined
+  // for browser-local. Pass directly into `{ timeZone: tzForFormat() }`.
+  function tzForFormat() {
+    return displayTZ === "local" ? undefined : displayTZ;
+  }
+  // Short TZ label for the tooltip ("EDT", "PDT", "JST"…). When
+  // browser-local is in effect this naturally yields the viewer's
+  // own zone abbreviation. Returns "" if Intl can't resolve it
+  // (extremely rare — degenerate browsers).
+  function tzAbbrev(date) {
+    try {
+      const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: tzForFormat(),
+        timeZoneName: "short",
+      }).formatToParts(date);
+      const tzn = parts.find(p => p.type === "timeZoneName");
+      return tzn ? tzn.value : "";
+    } catch (e) {
+      return "";
+    }
+  }
+
   const fmtNum = (v, d = 2) =>
     v == null || Number.isNaN(v) ? "—" : Number(v).toFixed(d);
   const fmtPct = (v) =>
@@ -688,11 +735,12 @@
       ? (c.close - prev) / prev * 100 : null;
     const d = new Date(param.time * 1000);
     const tsFmt = currentInterval === "D"
-      ? d.toLocaleDateString("en-US", { timeZone: "America/New_York",
+      ? d.toLocaleDateString("en-US", { timeZone: tzForFormat(),
           year: "numeric", month: "short", day: "numeric" })
-      : d.toLocaleString("en-US", { timeZone: "America/New_York",
+      : d.toLocaleString("en-US", { timeZone: tzForFormat(),
           month: "short", day: "numeric", hour: "2-digit",
-          minute: "2-digit", hour12: false }) + " ET";
+          minute: "2-digit", hour12: false }) +
+          (tzAbbrev(d) ? " " + tzAbbrev(d) : "");
     tooltip.innerHTML =
       `<div class="tt-time">${tsFmt}</div>` +
       `<div class="tt-row"><span class="tt-label">Open</span><span>${fmtNum(c.open)}</span></div>` +
@@ -751,11 +799,17 @@
     return cleaned;
   }
   function syncUrl(params) {
-    const qs = buildShareUrlParams(params);
+    // Preserve the display-timezone toggle across data-refresh
+    // updates. `?tz=et` is only emitted when the user has explicitly
+    // chosen ET — Local is the default, so omitting the param keeps
+    // the URL clean for the common case.
+    const merged = { ...params };
+    if (displayTZ === "America/New_York" && !merged.tz) merged.tz = "et";
+    const qs = buildShareUrlParams(merged);
     const newPath = `/chart/${encodeURIComponent(SYMBOL)}` +
       (qs.toString() ? `?${qs.toString()}` : "");
     if (newPath !== location.pathname + location.search) {
-      history.replaceState({chartParams: params}, "", newPath);
+      history.replaceState({chartParams: merged}, "", newPath);
     }
   }
   // Restore form state from URL on first load + on browser back/forward.
@@ -958,6 +1012,88 @@
   // events here. The interval / RSI inputs are still vanilla HTML.
   $("interval-input").addEventListener("change", loadFromManualRange);
   $("rsi-window").addEventListener("change", loadFromManualRange);
+
+  // ── Display timezone toggle ─────────────────────────────────────────
+  // Click cycles between the user's local browser zone and ET.
+  // Persists choice to localStorage and reflects it in the URL via the
+  // `?tz=` query param so a refresh / share-link preserves the view.
+  // The tickMarkFormatter and tooltip already read `tzForFormat()`
+  // dynamically; we just need to nudge Lightweight Charts to invalidate
+  // its cached tick labels by re-applying the formatter with a fresh
+  // function identity. Tooltip refreshes naturally on next hover.
+  function refreshTimeAxisLabels() {
+    // Wrap the existing formatter — same behavior, new identity. The
+    // chart treats this as an option change and re-runs labels.
+    const cur = priceChart.timeScale().options().tickMarkFormatter;
+    if (typeof cur === "function") {
+      priceChart.applyOptions({
+        timeScale: { tickMarkFormatter: (t, tt) => cur(t, tt) },
+      });
+    }
+  }
+  function updateTzButtonLabel() {
+    const btn = $("tz-toggle");
+    if (!btn) return;
+    btn.textContent = displayTZ === "America/New_York" ? "TZ: ET" : "TZ: Local";
+  }
+  function setDisplayTZ(value) {
+    if (value !== "America/New_York" && value !== "local") return;
+    displayTZ = value;
+    try { localStorage.setItem(TZ_STORAGE_KEY, value); } catch (e) {}
+    // URL sync — keep `?tz=et` only when ET is active. Local is the
+    // default so omitting the param keeps the URL clean.
+    const u = new URL(location.href);
+    if (value === "America/New_York") u.searchParams.set("tz", "et");
+    else u.searchParams.delete("tz");
+    history.replaceState(history.state, "", u);
+    updateTzButtonLabel();
+    refreshTimeAxisLabels();
+  }
+  updateTzButtonLabel();
+  $("tz-toggle").addEventListener("click", () => {
+    setDisplayTZ(displayTZ === "America/New_York" ? "local" : "America/New_York");
+  });
+
+  // ── Candles visibility toggle ───────────────────────────────────────
+  // Click hides/shows the OHLC candlestick series. The line series
+  // (which traces close prices) stays visible either way — the comment
+  // at the original `addLineSeries` call notes the line is always-on
+  // so price moves are still readable when candles degenerate (static
+  // index quotes that render as flat-line dashes). Volume bars track
+  // the candles' visibility — a bar chart without its OHLC context
+  // is rarely useful, so they hide together.
+  const CANDLES_STORAGE_KEY = "chart.candlesVisible";
+  let candlesVisible = (() => {
+    try {
+      const v = localStorage.getItem(CANDLES_STORAGE_KEY);
+      if (v === "0") return false;
+      if (v === "1") return true;
+    } catch (e) {}
+    return true;  // default: show candles
+  })();
+  function updateCandlesButtonLabel() {
+    const btn = $("candles-toggle");
+    if (!btn) return;
+    btn.textContent = candlesVisible ? "Candles: On" : "Candles: Off";
+  }
+  function applyCandlesVisibility() {
+    candleSeries.applyOptions({ visible: candlesVisible });
+    volumeSeries.applyOptions({ visible: candlesVisible });
+  }
+  function setCandlesVisible(v) {
+    candlesVisible = !!v;
+    try { localStorage.setItem(CANDLES_STORAGE_KEY, candlesVisible ? "1" : "0"); } catch (e) {}
+    applyCandlesVisibility();
+    updateCandlesButtonLabel();
+  }
+  // Apply the saved preference on first paint so the toggle UI matches
+  // the stored state. Lightweight Charts honors `visible: false` on
+  // series-options before any data is set.
+  applyCandlesVisibility();
+  updateCandlesButtonLabel();
+  $("candles-toggle").addEventListener("click", () => {
+    setCandlesVisible(!candlesVisible);
+  });
 
   // ── Calendar-dropdown date pickers (flatpickr) ──────────────────────
   // flatpickr replaces the native date input with a polished, dark-themed

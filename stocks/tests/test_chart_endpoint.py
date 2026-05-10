@@ -245,6 +245,124 @@ def test_html_chart_missing_symbol_returns_400(chart_fixtures):
     assert resp.status == 400
 
 
+# ──────────────────────────────────────────────────────────────────────
+# /chart/{symbol}  display-timezone wiring
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_html_chart_default_tz_is_browser_local(chart_fixtures):
+    """Default behavior: no `?tz=` param → server emits an empty
+    string for TZ_INITIAL_JSON, which the client resolves as
+    "use browser local". Locks in the new default — historically the
+    chart hardcoded America/New_York."""
+    req = _MockRequest("NDX", query={"date": "2026-04-29"})
+    body = _run(handle_chart_html(req)).body.decode()
+    # The placeholder is substituted with `""` (JSON-encoded empty
+    # string) when no tz is specified — i.e. the client's
+    # localStorage / "local" fallback drives.
+    assert "{{TZ_INITIAL_JSON}}" not in body
+    # The wired-in initializer should be the empty-string sentinel.
+    assert 'const TZ_INITIAL = "";' in body
+
+
+def test_html_chart_tz_et_param_pins_eastern(chart_fixtures):
+    """`?tz=et` → server bakes "America/New_York" into TZ_INITIAL_JSON
+    so the page comes up in ET regardless of the browser's locale or
+    any localStorage that might say otherwise. Useful for share links
+    that need to be reproducible across viewers."""
+    req = _MockRequest("NDX", query={"date": "2026-04-29", "tz": "et"})
+    body = _run(handle_chart_html(req)).body.decode()
+    assert 'const TZ_INITIAL = "America/New_York";' in body
+
+
+def test_html_chart_tz_et_accepts_full_iana_name(chart_fixtures):
+    """Allow `?tz=America/New_York` (case-insensitive) as a synonym for
+    `?tz=et` — share-links generated from the JS side may carry the
+    full IANA name."""
+    req = _MockRequest("NDX", query={"date": "2026-04-29", "tz": "America/New_York"})
+    body = _run(handle_chart_html(req)).body.decode()
+    assert 'const TZ_INITIAL = "America/New_York";' in body
+
+
+def test_html_chart_tz_local_param_explicitly_chooses_browser_zone(chart_fixtures):
+    """`?tz=local` is the explicit version of the default. Useful for
+    URLs that need to *clear* a previously-stuck localStorage choice
+    of ET — bake "local" so the client overrides any saved
+    America/New_York preference."""
+    req = _MockRequest("NDX", query={"date": "2026-04-29", "tz": "local"})
+    body = _run(handle_chart_html(req)).body.decode()
+    assert 'const TZ_INITIAL = "local";' in body
+
+
+def test_html_chart_tz_unknown_value_falls_through_to_default(chart_fixtures):
+    """Garbage `?tz=foo` shouldn't 500 or hardcode something weird —
+    fall through to the empty-string default, which lets the client
+    resolve via localStorage > local."""
+    req = _MockRequest("NDX", query={"date": "2026-04-29", "tz": "Mars/Olympus_Mons"})
+    body = _run(handle_chart_html(req)).body.decode()
+    assert 'const TZ_INITIAL = "";' in body
+
+
+def test_html_chart_emits_tz_toggle_button_and_helpers(chart_fixtures):
+    """The page must include the TZ-toggle UI and the helper functions
+    that read displayTZ at format time. Smoke test only — full DOM
+    behavior is browser-side."""
+    req = _MockRequest("NDX", query={"date": "2026-04-29"})
+    body = _run(handle_chart_html(req)).body.decode()
+    # The toggle button is in the controls row.
+    assert 'id="tz-toggle"' in body
+    # Display helpers — the formatters call these dynamically.
+    assert "function tzForFormat()" in body
+    assert "function tzAbbrev(" in body
+    # Persistence sentinel.
+    assert 'TZ_STORAGE_KEY = "chart.displayTZ"' in body
+
+
+def test_html_chart_tickmark_and_tooltip_use_dynamic_tz(chart_fixtures):
+    """The two display sites — x-axis tick labels and the hover
+    tooltip — must call `tzForFormat()` rather than the old hardcoded
+    "America/New_York" literal. Regression guard against accidentally
+    pinning ET back into either path."""
+    req = _MockRequest("NDX", query={"date": "2026-04-29"})
+    body = _run(handle_chart_html(req)).body.decode()
+    # tickMarkFormatter — both fmtDate and fmtTime closures.
+    assert "timeZone: tzForFormat()" in body
+    # The crosshair tooltip suffix is the resolved abbreviation, not
+    # a hardcoded " ET" string.
+    assert '+ " ET";' not in body
+    assert "tzAbbrev(d)" in body
+
+
+# ──────────────────────────────────────────────────────────────────────
+# /chart/{symbol}  candle visibility toggle
+# ──────────────────────────────────────────────────────────────────────
+
+
+def test_html_chart_emits_candles_toggle_button(chart_fixtures):
+    """The Candles toggle button is in the controls row next to TZ.
+    Smoke test only — full DOM behavior is browser-side."""
+    req = _MockRequest("NDX", query={"date": "2026-04-29"})
+    body = _run(handle_chart_html(req)).body.decode()
+    assert 'id="candles-toggle"' in body
+    # Storage key locks in localStorage persistence for the toggle.
+    assert 'CANDLES_STORAGE_KEY = "chart.candlesVisible"' in body
+
+
+def test_html_chart_candles_toggle_hides_candles_and_volume(chart_fixtures):
+    """The hide path must apply `visible: false` to BOTH candle and
+    volume series — a volume bar without its OHLC context is rarely
+    useful, so they hide together. The line series stays untouched
+    (always-on per the existing always-on-line-series comment)."""
+    req = _MockRequest("NDX", query={"date": "2026-04-29"})
+    body = _run(handle_chart_html(req)).body.decode()
+    # The applyCandlesVisibility helper drives both series.
+    assert "candleSeries.applyOptions({ visible: candlesVisible })" in body
+    assert "volumeSeries.applyOptions({ visible: candlesVisible })" in body
+    # Negative guard — make sure we don't accidentally toggle the line
+    # series too.
+    assert "lineSeries.applyOptions({ visible:" not in body
+
+
 def test_api_chart_accepts_explicit_start_end(chart_fixtures):
     """Canonical range form: explicit `start` + `end` win over presets."""
     req = _MockRequest("NDX", query={
