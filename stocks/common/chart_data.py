@@ -565,21 +565,65 @@ async def load_bars_with_db_fallback(
             # Surface the CSV slice anyway on DB error.
             db_df = pd.DataFrame()
 
-    # ── Realtime-tick supplement for today ──────────────────────────
-    # Today's per-trading-date CSV doesn't exist yet (the cron writes
-    # it after market close), and hourly_prices typically lags by
-    # ~1 hour during the session. realtime_data carries the freshest
-    # tick stream for the live session — resample it to the chart's
-    # requested interval and treat it as authoritative for today.
-    # Outside today's session the realtime path returns nothing useful;
-    # fall back silently to whatever CSV / hourly we already have.
+    # ── Realtime-tick supplement ────────────────────────────────────
+    # Two cases this branch covers:
+    #
+    #   1. Today is in the requested range. The CSV cron hasn't written
+    #      today's file yet (runs after close) and hourly_prices lags
+    #      ~1h during the session, so realtime_data is the freshest
+    #      source. Realtime owns today's date — we drop CSV/hourly rows
+    #      for it to avoid mixing freshness levels.
+    #
+    #   2. Today is OUTSIDE the range BUT the request's end_date is the
+    #      most recent trading day, AND the CSV for end_date appears
+    #      truncated (last bar before the regular-hours close). This
+    #      catches the case where Polygon delivered partial data — the
+    #      cron wrote a short CSV and the chart would otherwise stop
+    #      ~1h before close. realtime_data may still have ticks for
+    #      that date if the rolling-retention window covers it; if it
+    #      doesn't, we fall through cleanly. Here CSV wins on overlap
+    #      (more reliable historical), realtime only fills the tail
+    #      gap.
+    #
+    # Outside both cases, the realtime path returns nothing useful and
+    # we fall back silently to whatever CSV / hourly we already have.
     realtime_df = pd.DataFrame()
     # ET-anchored "today" so the late-session window (after 8 PM ET, when
     # UTC has already rolled to the next calendar day) still matches a
     # chart range that the user thinks of as today.
     from zoneinfo import ZoneInfo as _ZI
     today_str = datetime.now(_ZI("America/New_York")).strftime("%Y-%m-%d")
-    if db_instance is not None and start_date <= today_str <= end_date:
+
+    today_in_range = start_date <= today_str <= end_date
+    rt_target_date: str | None = None
+    rt_owns_date = False  # True for today (case 1), False for backfill (case 2)
+    if today_in_range:
+        rt_target_date = today_str
+        rt_owns_date = True
+    else:
+        # Case 2 — was end_date's CSV truncated? Last regular-session
+        # 5-min bar starts at 19:55 UTC (15:55 ET, ending at 16:00 close).
+        # If the last CSV bar for end_date is *before* 19:50 UTC, treat
+        # the day as partial and ask realtime to backfill. The 19:50
+        # threshold (vs strictly 19:55) gives 5 minutes of slack so a
+        # session that genuinely ends at 19:55 doesn't false-positive.
+        # Half-day sessions (close 13:00 ET = 17:00 UTC) will trigger
+        # this — that's fine; realtime will return empty for those days
+        # and we'll fall through.
+        if not csv_df.empty:
+            try:
+                end_mask = csv_df.index.strftime("%Y-%m-%d") == end_date
+                end_bars = csv_df[end_mask]
+                if not end_bars.empty:
+                    last_utc = end_bars.index[-1]
+                    threshold = pd.Timestamp(f"{end_date} 19:50:00", tz="UTC")
+                    if last_utc < threshold:
+                        rt_target_date = end_date
+                        rt_owns_date = False
+            except Exception:
+                pass
+
+    if db_instance is not None and rt_target_date is not None:
         # `data_type='trade'` carries the actual moving prices for both
         # tradable instruments (SPY/QQQ → real transaction prints) and
         # indices (SPX/NDX → computed values that update with the
@@ -592,26 +636,27 @@ async def load_bars_with_db_fallback(
         try:
             ticks = await db_instance.get_realtime_data(
                 symbol,
-                start_datetime=f"{today_str} 00:00:00",
-                end_datetime=f"{today_str} 23:59:59",
+                start_datetime=f"{rt_target_date} 00:00:00",
+                end_datetime=f"{rt_target_date} 23:59:59",
                 data_type="trade",
             )
             if ticks is None or ticks.empty:
                 ticks = await db_instance.get_realtime_data(
                     symbol,
-                    start_datetime=f"{today_str} 00:00:00",
-                    end_datetime=f"{today_str} 23:59:59",
+                    start_datetime=f"{rt_target_date} 00:00:00",
+                    end_datetime=f"{rt_target_date} 23:59:59",
                     data_type="quote",
                 )
             realtime_df = _resample_ticks_to_ohlc(ticks, interval)
         except Exception:
             realtime_df = pd.DataFrame()
 
-    # If realtime gave us data for today, drop today's rows from CSV /
-    # hourly so we're not mixing freshness levels. Stale hourly bars
-    # at 13:00, 14:00 next to live realtime bars at 13:30, 13:35 etc.
-    # would look wrong; realtime wins outright.
-    if not realtime_df.empty:
+    # Today-supplement case: realtime owns the date, drop CSV/hourly
+    # rows for it. Backfill case: do NOT drop — let the timestamp-level
+    # dedup at the merge step prefer CSV bars on overlap (CSV is first
+    # in the parts list), with realtime only contributing the tail
+    # bars CSV is missing.
+    if not realtime_df.empty and rt_owns_date:
         rt_dates = {ts.strftime("%Y-%m-%d") for ts in realtime_df.index}
         def _drop_dates(df: pd.DataFrame) -> pd.DataFrame:
             if df.empty:

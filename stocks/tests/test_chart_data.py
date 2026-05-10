@@ -789,3 +789,127 @@ def test_realtime_resampler_keeps_short_flat_runs():
     )
     out = _resample_ticks_to_ohlc(ticks, "5m")
     assert not out.empty
+
+
+# ── Partial-CSV backfill (end_date short of market close) ──────────
+
+
+def _five_min_rows_truncated(last_ut_hh: int, last_ut_mm: int) -> list:
+    """Build 5-min OHLC rows from 13:30 UTC up to (and including) the
+    given hh:mm UTC timestamp. Used to simulate a CSV that the cron
+    wrote with the last hour missing."""
+    out = []
+    cur_h, cur_m = 13, 30
+    base = 7000.0
+    i = 0
+    while (cur_h, cur_m) <= (last_ut_hh, last_ut_mm):
+        out.append((f"{cur_h:02d}:{cur_m:02d}:00",
+                    base + i, base + i + 0.5, base + i - 0.5,
+                    base + i + 0.25, 100.0 + i))
+        i += 1
+        cur_m += 5
+        if cur_m >= 60:
+            cur_m = 0
+            cur_h += 1
+    return out
+
+
+def test_partial_end_date_csv_supplemented_by_realtime(tmp_path: Path):
+    """The bug scenario: CSV for the most recent trading day is
+    truncated (Polygon delivered short data, network hiccup mid-fetch,
+    etc.) so the chart cuts ~1h before market close. Today is NOT in
+    the requested range — but the loader should still query
+    realtime_data for end_date and merge in the missing tail. CSV
+    wins on overlapping timestamps; realtime fills only the gap.
+    Past-day fixture (2025-05-08) so today_str is never in range
+    regardless of when this test runs."""
+    # CSV ends at 19:00 UTC (= 15:00 ET, 1h before close). User would
+    # otherwise see the chart end at 12:00 PT.
+    rows = _five_min_rows_truncated(19, 0)  # 13:30 → 19:00 inclusive
+    _write_5min_csv(tmp_path, "I:SPX", "2025-05-08", rows, ticker="I:SPX")
+
+    # realtime_data has full session ticks (one per minute, prices
+    # clearly distinguishable from CSV's `7000+` series so we can tell
+    # which source painted which bar).
+    rt_ticks = pd.DataFrame(
+        {"price": [9000.0 + i * 0.1 for i in range(60 * 7)]},  # 7h of 1-min ticks
+        index=pd.date_range("2025-05-08 13:30:00", periods=60 * 7, freq="1min", tz="UTC"),
+    )
+    fake = _FakeDBWithTicks(ticks=rt_ticks)
+
+    out, src = _run(load_bars_with_db_fallback(
+        "SPX", "2025-05-08", "2025-05-08", interval="5m",
+        db_instance=fake, equities_dir=tmp_path,
+    ))
+
+    assert not out.empty
+    assert "rt" in src, f"Expected RT supplement in source label, got {src!r}"
+    # CSV wins on its 13:30 bar — its high should be the CSV value
+    # (~7000 series), not the RT value (9000 series).
+    first = out.iloc[0]
+    assert first["high"] < 8000, (
+        f"CSV bar at 13:30 must win over realtime; got high={first['high']} "
+        f"(was the dedup ordering accidentally flipped?)"
+    )
+    # Tail bars (19:05+) come from RT — none in CSV.
+    tail_indexes = [ts for ts in out.index if ts >= pd.Timestamp("2025-05-08 19:05:00", tz="UTC")]
+    assert len(tail_indexes) >= 5, (
+        f"Expected RT to fill ~10 tail bars (19:05–19:55); got {len(tail_indexes)} "
+        f"in {out.index.tolist()[-15:]}"
+    )
+    # And those tail bars should carry the RT price band (>8000).
+    tail_highs = out.loc[tail_indexes, "high"]
+    assert (tail_highs > 8000).all(), (
+        f"Tail bars should be RT-sourced (>8000); got highs={tail_highs.tolist()}"
+    )
+
+
+def test_complete_end_date_csv_does_not_trigger_backfill(tmp_path: Path):
+    """A CSV that extends through the regular-session close (last bar
+    starts ≥ 19:50 UTC) is considered complete — no realtime query for
+    a past-only date range. Avoids spurious DB load on the common
+    happy path."""
+    # Full session — last bar at 19:55 UTC, the start of the closing
+    # 5-min window.
+    rows = _five_min_rows_truncated(19, 55)
+    _write_5min_csv(tmp_path, "I:SPX", "2025-05-08", rows, ticker="I:SPX")
+
+    queried = {"realtime": False}
+    class _ProbeDB:
+        async def get_stock_data(self, *a, **kw):
+            return pd.DataFrame()
+        async def get_realtime_data(self, *a, **kw):
+            queried["realtime"] = True
+            return pd.DataFrame()
+
+    out, src = _run(load_bars_with_db_fallback(
+        "SPX", "2025-05-08", "2025-05-08", interval="5m",
+        db_instance=_ProbeDB(), equities_dir=tmp_path,
+    ))
+    assert not out.empty
+    assert src == "csv"
+    assert queried["realtime"] is False, (
+        "Complete CSV (last bar at/after 19:50 UTC) must NOT trigger a "
+        "realtime backfill query — the data is already there."
+    )
+
+
+def test_partial_end_date_falls_through_when_realtime_empty(tmp_path: Path):
+    """If realtime_data has nothing for the partial date (rolling
+    window already aged it out), the loader gracefully returns the
+    truncated CSV — no errors, no empty payload. The user sees a
+    short chart instead of a blank one."""
+    rows = _five_min_rows_truncated(19, 0)  # truncated
+    _write_5min_csv(tmp_path, "I:SPX", "2025-05-08", rows, ticker="I:SPX")
+
+    fake = _FakeDBWithTicks(ticks=pd.DataFrame())  # empty RT response
+
+    out, src = _run(load_bars_with_db_fallback(
+        "SPX", "2025-05-08", "2025-05-08", interval="5m",
+        db_instance=fake, equities_dir=tmp_path,
+    ))
+    # CSV-only fallback — same as if no DB had been provided at all.
+    assert not out.empty
+    assert src == "csv"
+    # Bars only go up to 19:00 UTC (truncated CSV).
+    assert out.index[-1] == pd.Timestamp("2025-05-08 19:00:00", tz="UTC")
