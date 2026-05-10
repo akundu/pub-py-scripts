@@ -223,11 +223,14 @@ def test_cache_decode_error_returns_none(_reset_module_state):
 
 
 def test_cache_ttl_seconds_returns_positive_int():
-    """Sanity check — positive integer in the typical range. Exact
-    value is wall-clock dependent so we only check the bounds."""
+    """Sanity check — positive integer within the documented cap.
+    Exact value is wall-clock dependent (depends on day-of-week and
+    holiday calendar), so we only check the bounds. Cap matches the
+    96h ceiling in `cache_ttl_seconds` — tall enough to span a
+    Memorial-Day-style 4-day weekend."""
     n = cache_ttl_seconds()
     assert isinstance(n, int)
-    assert 0 < n <= 36 * 3600
+    assert 0 < n <= 96 * 3600
 
 
 def test_seconds_until_next_market_open_alias_still_works():
