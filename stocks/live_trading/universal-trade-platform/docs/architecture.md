@@ -345,9 +345,31 @@ OptionQuoteStreamingService (background)
 
 **Safety:** All IBKR limits are enforced with a 50% buffer -- max 50 subscriptions (IBKR allows ~100) and 22 msg/sec (IBKR allows 50).
 
+### Watchdog Loop
+
+Runs every `WatchdogConfig.default_interval_seconds` (default 30s), **market hours only** (13:30–20:00 UTC, Mon–Fri), **parent/IBKR process only** (skipped in uvicorn worker processes identified by `_UTP_DAEMON_WORKER=1`):
+
+1. Calls `get_open_positions()` from position store
+2. Batch-fetches current prices via `get_quote()` for distinct symbols
+3. Runs each registered `WatchdogModule` if `module.is_due()`:
+   - **`RollAdvisorModule`** — delegates to `RollService.scan_positions()`, wraps each `RollSuggestion` as a `WatchdogSuggestion` with type `forward_roll` / `mirror_roll`
+   - **`CloseAdvisorModule`** — checks open `multi_leg` positions for profit target (≥50% premium captured), stop loss (≥2× credit), EOD pre-expiry (within 15 min of 4 PM ET on expiration day), or low ROI (mark <10% of entry with same-day expiry)
+   - **`BreachMonitorModule`** — reads breach severity from `_calc_breach_status()` in `roll_service.py`, emits `breach_alert` suggestions; never auto-executes regardless of `action_mode`
+4. Deduplicates new suggestions against existing pending ones (same `position_id` + `suggestion_type`)
+5. If `action_mode=True`, auto-executes qualifying suggestions and marks `auto_executed=True`
+6. Expires stale suggestions older than `suggestion_ttl_seconds` (default 300s)
+
+Suggestions are stored in-memory in `WatchdogService._suggestions` (keyed by `suggestion_id`). `get_latest_by_position()` returns the most-severe pending suggestion per position — these are attached to each position dict by `LiveDataService.get_portfolio()` as `watchdog_hint` and rendered in the portfolio `Watchdog` column (fixed 30-char width, ANSI-colored by severity).
+
+**Severity levels**: `info` (dim cyan) → `warning` (yellow) → `critical` (yellow) → `urgent` (red)
+
+**REST API**: `GET /watchdog/suggestions`, `POST /watchdog/dismiss/{id}`, `GET/POST /watchdog/config`, `GET /watchdog/status`
+
+**CLI**: `python utp.py watchdog [suggestions|dismiss|config|status]` (alias `wd`)
+
 ### Task Lifecycle
 
-Both tasks are created as `asyncio.Task` objects during the lifespan startup and cancelled during shutdown:
+All background tasks are created as `asyncio.Task` objects during the lifespan startup and cancelled during shutdown:
 
 ```python
 async def lifespan(app):
@@ -355,6 +377,8 @@ async def lifespan(app):
     tasks = [
         asyncio.create_task(_expiration_loop(interval)),
         asyncio.create_task(_position_sync_loop(interval)),
+        asyncio.create_task(_watchdog_loop(watchdog_svc.config.default_interval_seconds)),
+        asyncio.create_task(_position_greeks_loop(interval=90.0)),
     ]
     yield
     for t in tasks:

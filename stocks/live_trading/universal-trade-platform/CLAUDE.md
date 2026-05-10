@@ -11,7 +11,7 @@ A unified multi-broker trading API (FastAPI) supporting Robinhood, E\*TRADE, and
 | File | Purpose |
 |------|---------|
 | `utp.py` | ALL CLI operations + API server |
-| `tests/test_utp.py` | ALL tests (1431 tests) |
+| `tests/test_utp.py` | ALL tests (1434 tests) |
 | `spread_scanner.py` | Live spread ROI scanner dashboard (standalone tool) |
 | `sim_trader.py` | Auto-trader CLI client (standalone tool) |
 
@@ -1096,10 +1096,10 @@ python utp.py watchdog status
 
 ## Testing
 
-**1431 tests in `tests/test_utp.py`, all passing.** Tests use `tmp_path` for isolated persistence. The autouse `_setup_providers` fixture in `conftest.py` initializes and tears down ledger + position store per test.
+**1434 tests in `tests/test_utp.py`, all passing.** Tests use `tmp_path` for isolated persistence. The autouse `_setup_providers` fixture in `conftest.py` initializes and tears down ledger + position store per test.
 
 ```bash
-python -m pytest tests/ -v                              # All 1431 tests
+python -m pytest tests/ -v                              # All 1434 tests
 python -m pytest tests/test_utp.py -v                   # Same (only file)
 python -m pytest tests/test_utp.py -k "TestLedger" -v   # Filter by class
 python -m pytest tests/test_utp.py -k "TestIBKR" -v     # IBKR tests only
@@ -1174,7 +1174,7 @@ python -m pytest tests/test_utp.py -k "TestIBKR" -v     # IBKR tests only
 | `TestSimLoadDate` | 5 | /sim/load-date hot-swap (invalid, not-sim, no-data, success) |
 | `TestAutoTraderEngine` | 32 | Auto-trader config, run-day, run-range, spread filters, DTE filtering, carry-over, CLI config, diversity, streaming, shadow, event bus |
 | `TestRollService` | 46 | RollConfig defaults/serialization, breach notifications (cooldown, escalation bypass), credit estimates from live quotes, forward/mirror suggestion building, config defaults (otm_pct/width/quantity/partial_close_pct), per-execute overrides (dte/otm_pct/width/quantity/close_quantity), force-build for safe positions, synthetic portfolio group ID resolution (forward + mirror), REST endpoints (forward, mirror, execute with overrides, config notify fields) |
-| `TestWatchdogService` | 49 | WatchdogConfig defaults/roundtrip, init/get/reset singletons, WatchdogSuggestion serialization/TTL, WatchdogModule is_due/mark_ran, run_cycle (empty/disabled), get_suggestions/get_latest_by_position severity ranking, dismiss (exact/prefix/not-found), update_config, get_status, CloseAdvisorModule triggers (stop_loss/profit/low_roi/no-mark/no-entry/mid-range), BreachMonitorModule (safe/critical/no-price), deduplication, REST endpoints (suggestions/dismiss/config/status), daemon wiring, alias_map, portfolio hint formatting |
+| `TestWatchdogService` | 52 | WatchdogConfig defaults/roundtrip, init/get/reset singletons, WatchdogSuggestion serialization/TTL, WatchdogModule is_due/mark_ran, run_cycle (empty/disabled), get_suggestions/get_latest_by_position severity ranking, dismiss (exact/prefix/not-found), update_config, get_status, CloseAdvisorModule triggers (stop_loss/profit/low_roi/no-mark/no-entry/mid-range), BreachMonitorModule (safe/critical/no-price), deduplication, REST endpoints (suggestions/dismiss/config/status), daemon wiring, alias_map, portfolio hint formatting, _format_watchdog_hint fixed-width (none/short/long) |
 | `TestAccountSnapshot` | 5 | GET /account/snapshot: 503 before init, all fields, age_seconds computation, reset, daemon wiring |
 
 ## IBKR Live Provider
