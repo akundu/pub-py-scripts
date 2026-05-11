@@ -8930,9 +8930,9 @@ async def _cmd_daemon(args) -> int:
                 _raw_yaml = _yaml.safe_load(_f)
             if isinstance(_raw_yaml, dict) and "watchdog" in _raw_yaml:
                 _wd_config = _WatchdogConfig.from_dict(_raw_yaml["watchdog"])
-                logger.info("Watchdog config loaded from %s", _daemon_config_path)
+                _logging.getLogger(__name__).info("Watchdog config loaded from %s", _daemon_config_path)
         except Exception as _e:
-            logger.warning("Watchdog config load failed: %s — using defaults", _e)
+            _logging.getLogger(__name__).warning("Watchdog config load failed: %s — using defaults", _e)
     _daemon_watchdog_svc = _init_watchdog_svc(_wd_config)
 
     # Set daemon mode flag to prevent lifespan from re-initializing
