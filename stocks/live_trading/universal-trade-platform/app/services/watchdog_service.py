@@ -98,6 +98,11 @@ class WatchdogConfig:
 class CloseAdvisorConfig:
     """Configuration for CloseAdvisorModule. Loaded from module_overrides['close_advisor']."""
 
+    # ── per-module action_mode ─────────────────────────────────────────────
+    # True = auto-execute close suggestions. Overrides the global WatchdogConfig.action_mode.
+    # None (or absent from overrides) = fall back to global action_mode.
+    action_mode: Optional[bool] = None
+
     # ── scalper early exit (info, before 11 AM ET) ─────────────────────────
     # Only for DTE0 and DTE3 where freeing capital has high reinvestment value.
     scalper_threshold: float = 0.30            # pct_captured to trigger
@@ -147,6 +152,9 @@ class CloseAdvisorConfig:
 @dataclass
 class BreachMonitorConfig:
     """Configuration for BreachMonitorModule. Loaded from module_overrides['breach_monitor']."""
+    # BreachMonitor never auto-executes — action_mode is recorded for status reporting only.
+    action_mode: Optional[bool] = None
+
     # Suggestion severity levels: info, warning, critical, urgent
     # Breach severity mapping: watch→info, warning→warning, critical→critical, breached→urgent
     # Default "warning" suppresses watch (2% OTM) breaches — too noisy for 0DTE.
@@ -294,7 +302,11 @@ class WatchdogService:
                         self._suggestions[s.suggestion_id] = s
                         new_suggestions.append(s)
 
-                        if self._config.action_mode and module.name != "breach_monitor":
+                        # Per-module action_mode overrides global (None = inherit global).
+                        module_action_mode = overrides.get("action_mode")
+                        if module_action_mode is None:
+                            module_action_mode = self._config.action_mode
+                        if module_action_mode and module.name != "breach_monitor":
                             await self._auto_execute(s)
             except Exception as e:
                 logger.error("Watchdog module %s error: %s", module.name, e)
@@ -346,11 +358,113 @@ class WatchdogService:
                         "interval_seconds", m.default_interval
                     ),
                     "enabled": self._config.module_overrides.get(m.name, {}).get("enabled", True),
+                    "action_mode": (
+                        False if m.name == "breach_monitor"
+                        else self._config.module_overrides.get(m.name, {}).get(
+                            "action_mode", self._config.action_mode
+                        )
+                    ),
                 }
                 for m in self._modules
             ],
             "suggestion_counts": counts,
         }
+
+    async def get_close_eligible(
+        self,
+        min_pct: float = 0.50,
+        dte: Optional[int] = None,
+        min_dollars: Optional[float] = None,
+    ) -> list[dict]:
+        """Return open multi_leg positions that have met the profit capture threshold.
+
+        Args:
+            min_pct:      Minimum fraction of premium captured (0.0–1.0). Default 50%.
+            dte:          If set, only include positions expiring in exactly this many days.
+            min_dollars:  If set, only include positions where closing frees ≥ this much margin.
+
+        Returns sorted by pct_captured descending, each entry includes:
+            pct_captured, dollars_freed, current_dte, plus all position fields.
+        """
+        from app.services.position_store import get_position_store
+        from datetime import date
+
+        store = get_position_store()
+        if not store:
+            return []
+
+        positions = store.get_open_positions()
+        multi_leg = [p for p in positions if p.get("order_type") == "multi_leg" and p.get("legs")]
+
+        advisor = CloseAdvisorModule()
+        results: list[dict] = []
+
+        for pos in multi_leg:
+            exp = pos.get("expiration", "")
+            try:
+                exp_date = date.fromisoformat(exp)
+                current_dte = (exp_date - date.today()).days
+            except (ValueError, TypeError):
+                continue
+
+            if dte is not None and current_dte != dte:
+                continue
+
+            pct_captured = advisor._compute_pct_captured(pos)
+            if pct_captured is None or pct_captured < min_pct:
+                continue
+
+            qty = abs(pos.get("quantity") or 1)
+            spread_metrics = pos.get("spread_metrics") or {}
+            max_loss = spread_metrics.get("max_loss")
+            if max_loss:
+                dollars_freed = abs(max_loss) * qty
+            else:
+                entry = abs(pos.get("entry_price") or 0)
+                dollars_freed = entry * qty * 100
+
+            if min_dollars is not None and dollars_freed < min_dollars:
+                continue
+
+            results.append({
+                **pos,
+                "pct_captured": round(pct_captured, 4),
+                "dollars_freed": round(dollars_freed, 2),
+                "current_dte": current_dte,
+            })
+
+        return sorted(results, key=lambda p: p["pct_captured"], reverse=True)
+
+    async def execute_suggestion(self, suggestion_id: str, qty: Optional[int] = None) -> dict:
+        """Execute a pending watchdog suggestion (close or roll).
+
+        For close suggestions: submits a closing MARKET order.
+        For roll suggestions: delegates to RollService.execute_roll().
+        Breach alert suggestions ('alert' type) cannot be executed.
+
+        Args:
+            suggestion_id: Suggestion ID or prefix (matched against pending suggestions).
+            qty:           Contracts to close/roll. None = full position quantity.
+        """
+        s = self._suggestions.get(suggestion_id)
+        if s is None:
+            for sid, sg in self._suggestions.items():
+                if sid.startswith(suggestion_id) and sg.status == "pending":
+                    s = sg
+                    break
+        if s is None:
+            return {"error": f"Suggestion {suggestion_id!r} not found"}
+        if s.status != "pending":
+            return {"error": f"Suggestion is {s.status!r}, not pending"}
+
+        atype = s.action.get("type")
+        if atype == "alert":
+            return {"error": "Breach alert suggestions have no executable action — monitor only"}
+
+        await self._auto_execute(s, qty=qty)
+        if s.status == "executed":
+            return {"status": "executed", "suggestion_id": s.suggestion_id, "auto_executed": True, "qty": qty}
+        return {"error": "Execution failed — check daemon logs", "suggestion_id": s.suggestion_id}
 
     def dismiss(self, suggestion_id: str) -> bool:
         s = self._suggestions.get(suggestion_id)
@@ -386,7 +500,8 @@ class WatchdogService:
             if s.status == "pending" and s.is_expired(self._config.suggestion_ttl_seconds):
                 s.status = "expired"
 
-    async def _auto_execute(self, s: WatchdogSuggestion) -> None:
+    async def _auto_execute(self, s: WatchdogSuggestion, qty: Optional[int] = None) -> None:
+        """Execute a suggestion.  qty=None means full position quantity."""
         try:
             atype = s.action.get("type")
 
@@ -394,11 +509,18 @@ class WatchdogService:
                 from app.services.roll_service import get_roll_service
                 svc = get_roll_service()
                 if svc:
-                    result = await svc.execute_roll(s.action["suggestion_id"])
+                    overrides: dict = {}
+                    if qty is not None:
+                        overrides["close_quantity"] = qty
+                        overrides["quantity"] = qty
+                    result = await svc.execute_roll(
+                        s.action["suggestion_id"],
+                        overrides=overrides or None,
+                    )
                     if not result.get("error"):
                         s.status = "executed"
                         s.auto_executed = True
-                        logger.info("Watchdog auto-executed roll for %s", s.position_id)
+                        logger.info("Watchdog auto-executed roll for %s (qty=%s)", s.position_id, qty)
 
             elif atype == "close":
                 from app.services.position_store import get_position_store
@@ -407,6 +529,7 @@ class WatchdogService:
                     TradeRequest, MultiLegOrder, OptionLeg,
                     OrderType, OptionAction, Broker, OptionType,
                 )
+                # Note: TradeRequest uses multi_leg_order= not order= field.
                 store = get_position_store()
                 if not store:
                     return
@@ -417,6 +540,9 @@ class WatchdogService:
                 legs_data = pos.get("legs") or []
                 if not legs_data:
                     return
+                # Partial close: cap at the number of open contracts if qty specified.
+                full_qty = int(abs(pos.get("quantity") or 1))
+                close_qty = min(qty, full_qty) if qty is not None else full_qty
                 closing_legs = []
                 for leg in legs_data:
                     leg_action = leg.get("action", "")
@@ -433,21 +559,26 @@ class WatchdogService:
                         strike=float(leg.get("strike", 0)),
                         option_type=opt_type,
                         action=close_action,
-                        quantity=int(abs(pos.get("quantity", 1))),
+                        quantity=close_qty,
                     ))
-                req = TradeRequest(
+                order = MultiLegOrder(
                     broker=Broker.IBKR,
-                    order=MultiLegOrder(legs=closing_legs, order_type=OrderType.MARKET),
-                    dry_run=False,
-                    position_id=s.action["position_id"],
+                    legs=closing_legs,
+                    order_type=OrderType.MARKET,
+                    quantity=close_qty,
+                )
+                req = TradeRequest(
+                    multi_leg_order=order,
+                    closing_position_id=s.action["position_id"],
+                    closing_quantity=close_qty,
                 )
                 result = await execute_trade(req)
                 if result.status.value not in ("FAILED", "REJECTED"):
                     s.status = "executed"
                     s.auto_executed = True
                     logger.info(
-                        "Watchdog auto-closed %s (reason: %s)",
-                        s.position_id, s.action.get("close_reason"),
+                        "Watchdog auto-closed %s qty=%s (reason: %s)",
+                        s.position_id, close_qty, s.action.get("close_reason"),
                     )
         except Exception as e:
             logger.error("Watchdog auto-execute failed for %s: %s", s.suggestion_id, e)
@@ -456,10 +587,28 @@ class WatchdogService:
 # ── Module: RollAdvisor ───────────────────────────────────────────────────────
 
 class RollAdvisorModule(WatchdogModule):
-    """Wraps RollService.scan_positions() — replaces the old _roll_scan_bg task."""
+    """Wraps RollService.scan_positions() — replaces the old _roll_scan_bg task.
+
+    Notification config (in module_overrides['roll_advisor']):
+      notify_on_severity: [warning, critical, urgent]   — which severities trigger alerts
+      notify_channel:     email | sms | both             — delivery channel
+      notify_cooldown_minutes: 15                        — minimum gap per position
+    """
 
     name = "roll_advisor"
     default_interval = 30.0
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._last_notified: dict[str, tuple[str, datetime]] = {}
+
+    _SEV_MAP = {
+        "breached": "urgent",
+        "critical": "critical",
+        "warning": "warning",
+        "watch": "info",
+        "safe": "info",
+    }
 
     async def run(
         self,
@@ -474,19 +623,11 @@ class RollAdvisorModule(WatchdogModule):
             return []
 
         roll_suggestions = await svc.scan_positions()
-
-        _sev_map = {
-            "breached": "urgent",
-            "critical": "critical",
-            "warning": "warning",
-            "watch": "info",
-            "safe": "info",
-        }
-
+        ov = overrides or {}
         results = []
         for rs in roll_suggestions:
             stype = "forward_roll" if rs.roll_type == "forward" else "mirror_roll"
-            sev = _sev_map.get(rs.severity, "warning")
+            sev = self._SEV_MAP.get(rs.severity, "warning")
             verb = "Forward" if rs.roll_type == "forward" else "Mirror"
             results.append(
                 WatchdogSuggestion(
@@ -506,7 +647,50 @@ class RollAdvisorModule(WatchdogModule):
                     created_at=datetime.now(UTC),
                 )
             )
+            await self._maybe_notify(rs.position_id, rs.symbol, sev, rs.reason, ov)
         return results
+
+    async def _maybe_notify(
+        self,
+        position_id: str,
+        symbol: str,
+        sev: str,
+        reason: str,
+        overrides: dict,
+    ) -> None:
+        notify_severities = overrides.get("notify_on_severity", [])
+        if not notify_severities or sev not in notify_severities:
+            return
+        cooldown = overrides.get("notify_cooldown_minutes", 15)
+        now = datetime.now(UTC)
+        last_entry = self._last_notified.get(position_id)
+        if last_entry is not None:
+            last_sev, last_time = last_entry
+            elapsed_min = (now - last_time).total_seconds() / 60
+            sev_rank = WATCHDOG_SEVERITY_RANK
+            has_escalated = sev_rank.get(sev, 0) > sev_rank.get(last_sev, 0)
+            if elapsed_min < cooldown and not has_escalated:
+                return
+        self._last_notified[position_id] = (sev, now)
+        channel = overrides.get("notify_channel", "email")
+        message = (
+            f"[UTP] {symbol} roll advisory: {sev.upper()}\n"
+            f"{reason}\n"
+            f"Run: python utp.py roll suggestions"
+        )
+        try:
+            import httpx
+            from app.config import settings
+            payload = {
+                "channel": channel,
+                "message": message,
+                "subject": f"UTP Roll Alert: {symbol} {sev.upper()}",
+                "tag": "[UTP-ALERT]",
+            }
+            async with httpx.AsyncClient(timeout=5) as client:
+                await client.post(f"{settings.notify_url}/api/notify", json=payload)
+        except Exception as e:
+            logger.warning("Roll advisor notification failed for %s: %s", position_id, e)
 
 
 # ── Module: CloseAdvisor ──────────────────────────────────────────────────────

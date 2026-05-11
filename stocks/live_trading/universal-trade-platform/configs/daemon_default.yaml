@@ -30,7 +30,7 @@ trade_defaults:
   # VIX / VIX1D circuit-breaker thresholds.
   # Surfaced via GET /trade/defaults so the CLI reads these from the daemon
   # rather than having hardcoded values. Tune here; all trade commands pick it up.
-  vix_limit: 25.0          # block if VIX or VIX1D absolute level exceeds this
+  vix_limit: 22.0          # block if VIX or VIX1D absolute level exceeds this
   vix_spike_v5: 2.0        # block if VIX/VIX1D rose > N pts in the last 5 min
   vix_spike_v15: 3.0       # block if VIX/VIX1D rose > N pts in the last 15 min
   vix_accel_limit: 1.0     # block if velocity increased > N pts/5-min interval (acceleration)
@@ -262,33 +262,37 @@ watchdog:
     # Spread-value stop-losses intentionally ABSENT (100% recovery rate observed).
     # Stop-loss is distance-based (underlying proximity to short strike only).
     close_advisor:
+      # Per-module auto-execution. Overrides the global action_mode above.
+      # null (omit key) = inherit global action_mode.
+      # true  = auto-close when triggered (stop-loss, profit target, EOD)
+      # false = suggestion-only for this module regardless of global setting
+      action_mode: false
       # --- Scalper early exit (info — user decides, no auto-execute) ---
       # Fire when ≥30% captured before 11:00 ET for DTE0/DTE3 only.
       # Frees capital to redeploy: DTE0 = same-day re-entry; DTE3 = 3 more DTE0s.
-      scalper_threshold: 0.30           # fraction of premium captured
-      scalper_cutoff_et: 1100           # only before 11:00 ET (HHMM)
-      scalper_enabled_dtes: [0, 3]      # DTE0 and DTE3 only
+      #scalper_threshold: 0.30           # fraction of premium captured
+      #scalper_cutoff_et: 1100           # only before 11:00 ET (HHMM)
+      #scalper_enabled_dtes: [0, 3]      # DTE0 and DTE3 only
 
       # --- Standard profit target (warning) ---
       # DTE0: 80% captured after 12:00 ET (midday — let morning vol settle)
-      pt_threshold_dte0: 0.80
-      pt_check_et_dte0: 1200
+      #pt_threshold_dte0: 0.80
+      #pt_check_et_dte0: 1200
 
-      # DTE1: 80% captured after 15:30 ET (D0 EOD check — bimodal, lower PTs gain little)
+      # DTE1: 80% captured after 10:00 ET (D0 EOD check — bimodal, lower PTs gain little)
       pt_threshold_dte1: 0.80
-      pt_check_et_dte1: 1530
+      pt_check_et_dte1: 1000
 
-      # DTE2: 70% captured after 15:30 ET (more trades in 70–80% band)
+      # DTE2: 70% captured after 10:00 ET (more trades in 70–80% band)
       pt_threshold_dte2: 0.70
-
-      # DTE3: 75% captured after 15:30 ET (large abs dollars, don't leave cheaply)
+      # DTE3: 75% captured after 10:00 ET (large abs dollars, don't leave cheaply)
       pt_threshold_dte3: 0.75
-      pt_check_et_multi: 1530           # shared check time for DTE2 and DTE3
+      pt_check_et_multi: 1000           # shared check time for DTE2 and DTE3
 
       # --- Distance-based stop-loss ---
       # DTE2+: suppressed — RollAdvisorModule owns those (roll > close for DTE2+).
       # DTE0: close if spot within 0.5% of short strike after 11:00 ET
-      stop_threshold_dte0: 0.5          # % OTM distance threshold
+      stop_threshold_dte0: 0.35          # % OTM distance threshold
       stop_check_et_dte0: 1100          # don't fire before 11:00 ET (3h left)
 
       # DTE1: close if within 1.0% after 15:00 ET (D0 EOD window)
@@ -312,6 +316,9 @@ watchdog:
     # Severity levels (suggestion): info | warning | critical | urgent
     # Breach → suggestion mapping: watch→info, warning→warning, critical→critical, breached→urgent
     breach_monitor:
+      # BreachMonitor structurally never auto-executes. This field is ignored
+      # at runtime but shown in watchdog status for transparency.
+      action_mode: false
       # Suppress suggestions below this suggestion severity.
       # "warning" (default) = suppress 2% OTM "watch" alerts (too noisy for 0DTE).
       # "info"    = surface all breach alerts including 2% OTM watch.
@@ -331,3 +338,23 @@ watchdog:
     roll_advisor:
       enabled: true
       interval_seconds: 30
+      # Per-module auto-execution. Overrides the global action_mode above.
+      # null (omit key) = inherit global action_mode.
+      # true  = auto-execute rolls when triggered
+      # false = suggestion-only for this module regardless of global setting
+      action_mode: false
+
+      # ── Roll advisor notifications ───────────────────────────────────────
+      # Fire when a roll suggestion is generated at or above the listed severity.
+      # Severity levels: info | warning | critical | urgent
+      #   warning  = 1% OTM — getting close; worth monitoring
+      #   critical = 0.5% OTM — near the strike; act soon
+      #   urgent   = ITM — roll now
+      #
+      # Default: notify at critical and urgent (not warning, too noisy during normal trading).
+      # Set to [] to disable roll advisor notifications entirely.
+      notify_on_severity:
+        - critical
+        - urgent
+      notify_channel: email             # email | sms | both
+      notify_cooldown_minutes: 15       # minimum gap between alerts per position

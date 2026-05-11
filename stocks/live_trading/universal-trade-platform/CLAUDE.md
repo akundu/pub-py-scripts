@@ -95,6 +95,7 @@ The bottom panel shows the last N (default 3; `--recent-actions N`) trade / simu
 3. **Do not create new files** for scripts or tests. Add to `utp.py` and `tests/test_utp.py` respectively.
 4. **All market data access MUST go through `app/services/market_data.py`.** Never call `provider.get_quote()` or `provider.get_option_quotes()` directly from routes, CLI, or any other code. Always use `from app.services.market_data import get_quote, get_option_quotes`. This module enforces a consistent cache → stale → provider fallback pattern that prevents slow 10-18s IBKR round-trips. Direct provider calls bypass the streaming cache and cause severe performance regressions.
 5. **Provider data output must follow the normalized contract.** All providers (TWS, CPG, future) must return the same data shape. The centralized layer normalizes output via `_normalize_option_quotes()`. If adding a new provider, ensure it returns: `strike, bid, ask, last, volume, open_interest` for option quotes, and `greeks: {delta, gamma, theta, vega, iv}` (iv as ratio, e.g., 0.25 = 25%). The freshness monitor (`check_data_freshness()`) runs every 2 min and logs warnings for stale data.
+6. **Load subsystem docs before working on major components.** When working on `utp_voice.py` read `docs/utp_voice.md` first. When working on `spread_scanner.py` read `docs/spread_scanner.md` first. When working on watchdog/roll/close advisory logic read `app/services/watchdog_service.py` header comments and `CLAUDE.md` watchdog section before changing thresholds or config fields.
 
 ## Market Data Architecture
 
@@ -399,6 +400,54 @@ python run_full_sweep.py --quick \
 **Risk bounds:** Max $50K/trade, max $500K/day. Combos exceeding per-trade limit are auto-skipped.
 
 **Output:** `results/full_sweep/sweep_{ts}.json` + `summary_{ts}.csv` (ranked by val_score, with diversity comparison and failure analysis).
+
+### UTP Voice — Mobile NL Trading Interface
+
+> **Read `docs/utp_voice.md` before making non-trivial changes to `utp_voice.py`.** It covers all 40+ endpoints, Redis TTL table, auto-trader engine mechanics, two separate auto-trade systems, and WebSocket relay — none of which are obvious from reading the 5,329-line file cold.
+
+`utp_voice.py` (5,329 lines) is a mobile-first web app that sits in front of the UTP daemon. It provides four tabs: **Options chain**, **Picks** (spread scanner), **Portfolio**, and **Chat** (NL via Claude agent).
+
+```bash
+# Setup
+python utp_voice.py add-user myuser
+export ANTHROPIC_API_KEY="sk-ant-..."
+export UTP_VOICE_JWT_SECRET="any-random-string"
+
+# Start (daemon must already be running on port 8000)
+python utp_voice.py serve                    # Default port 8800
+python utp_voice.py serve --public           # Anonymous access to options/picks
+python utp_voice.py serve --cache            # Enable Redis cache layer
+python utp_voice.py serve --workers 4        # Multi-process
+python utp_voice.py serve --max-open-positions 20  # Position cap (default 10)
+```
+
+**Key env vars:**
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `UTP_DAEMON_URL` | `http://localhost:8000` | UTP daemon address |
+| `UTP_VOICE_PORT` | `8800` | Web server port |
+| `ANTHROPIC_API_KEY` | (required for chat) | Claude API key |
+| `UTP_VOICE_JWT_SECRET` | (required) | JWT signing key |
+| `UTP_VOICE_JWT_EXPIRE_MINUTES` | `10080` | Session TTL (7 days) |
+| `UTP_VOICE_MODEL` | `claude-sonnet-4-20250514` | Claude model for agent |
+| `DB_SERVER_URL` | `http://localhost:9102` | QuestDB for prev-closes |
+| `DB_SERVER_WS_URL` | derived from DB_SERVER_URL | db_server WebSocket for price relay |
+| `PERCENTILE_SERVER_URL` | `http://lin1.kundu.dev:9100` | Percentile/prediction server |
+
+**Chat agent:** 10 tools, max 10 iterations. READ tools (`get_portfolio`, `get_quote`, `get_options`, `get_trades`, `get_orders`, `get_performance`) execute immediately. WRITE tools (`execute_trade`, `close_position`, `cancel_order`, `reconcile_flush`) create a 5-min pending confirmation shown to the user before execution. Redis-backed via `utp:voice:confirm:` prefix.
+
+**Redis cache** (enabled via `--cache`): quote 10s/60s, option chains 90s/3600s, pending confirmations 300s. Default is no-cache (pure proxy).
+
+**WebSocket relay** at `/ws/prices`: connects to db_server per-ticker (`DB_SERVER_WS_URL`), relays realtime price ticks to all browser clients.
+
+**Trade logging:** every real fill → `data/utp_voice/trades.csv` (28 fields). Download: `GET /api/trades/export`.
+
+**Auth:** bcrypt passwords in `data/utp_voice/credentials.json`, JWT httponly cookies. `--public` flag allows anonymous access to options/picks/percentiles; portfolio/chat/trading always require login.
+
+**Auto-restart:** max 50 restarts, backoff 2s→30s; Ctrl-C exits cleanly.
+
+**Full docs:** `docs/utp_voice.md` — covers all 40+ API endpoints, Redis cache TTL table, data sources, persistence files, and auto-trade system details.
 
 ### Python Client Library
 

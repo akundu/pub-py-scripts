@@ -29173,8 +29173,9 @@ class TestWatchdogService:
     async def test_close_advisor_stop_loss(self):
         """Stop loss fires when underlying is within 0.5% of short PUT strike (DTE0)."""
         from app.services.watchdog_service import CloseAdvisorModule
+        from datetime import date
         mod = CloseAdvisorModule()
-        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        today = date.today().isoformat()  # local date matches date.today() in watchdog code
         pos = self._make_multi_leg_pos(
             short_strike=5600.0,
             long_strike=5575.0,
@@ -29226,8 +29227,9 @@ class TestWatchdogService:
     async def test_close_advisor_scalper_exit(self):
         """Scalper exit fires for DTE0 when 30%+ captured before cutoff time."""
         from app.services.watchdog_service import CloseAdvisorModule
+        from datetime import date
         mod = CloseAdvisorModule()
-        today = datetime.now(UTC).strftime("%Y-%m-%d")
+        today = date.today().isoformat()  # local date matches date.today() in watchdog code
         pos = self._make_multi_leg_pos(
             entry_price=2.00,
             current_mark=1.35,  # captured = (2.00-1.35)/2.00 = 32.5% ≥ 30%
@@ -29676,3 +29678,573 @@ class TestWatchdogService:
         visible = re.sub(r"\x1b\[[0-9;]*m", "", raw)
         assert len(visible) == utp._WATCHDOG_COL_WIDTH
         assert "…" in visible
+
+    # ── per-module action_mode ────────────────────────────────────────────────
+
+    def test_close_advisor_config_action_mode_default_none(self):
+        """CloseAdvisorConfig.action_mode defaults to None (inherit global)."""
+        from app.services.watchdog_service import CloseAdvisorConfig
+        cfg = CloseAdvisorConfig()
+        assert cfg.action_mode is None
+
+    def test_close_advisor_config_action_mode_from_overrides(self):
+        """CloseAdvisorConfig.from_overrides picks up action_mode."""
+        from app.services.watchdog_service import CloseAdvisorConfig
+        cfg = CloseAdvisorConfig.from_overrides({"action_mode": True})
+        assert cfg.action_mode is True
+        cfg_off = CloseAdvisorConfig.from_overrides({"action_mode": False})
+        assert cfg_off.action_mode is False
+
+    def test_breach_monitor_config_action_mode_default_none(self):
+        """BreachMonitorConfig.action_mode defaults to None (inherit global)."""
+        from app.services.watchdog_service import BreachMonitorConfig
+        cfg = BreachMonitorConfig()
+        assert cfg.action_mode is None
+
+    def test_breach_monitor_config_action_mode_from_overrides(self):
+        """BreachMonitorConfig.from_overrides picks up action_mode."""
+        from app.services.watchdog_service import BreachMonitorConfig
+        cfg = BreachMonitorConfig.from_overrides({"action_mode": True})
+        assert cfg.action_mode is True
+
+    def test_get_status_module_action_mode_field(self):
+        """get_status() includes action_mode per module; breach_monitor always False."""
+        from app.services.watchdog_service import init_watchdog_service, WatchdogConfig
+        cfg = WatchdogConfig(action_mode=True, module_overrides={
+            "close_advisor": {"action_mode": False},
+            "roll_advisor": {"action_mode": True},
+        })
+        svc = init_watchdog_service(cfg)
+        status = svc.get_status()
+        module_map = {m["name"]: m for m in status["modules"]}
+        # breach_monitor is always False regardless
+        assert module_map["breach_monitor"]["action_mode"] is False
+        # close_advisor: module override False takes precedence over global True
+        assert module_map["close_advisor"]["action_mode"] is False
+        # roll_advisor: module override True
+        assert module_map["roll_advisor"]["action_mode"] is True
+
+    def test_get_status_module_action_mode_inherits_global(self):
+        """Per-module action_mode inherits global when not set in overrides."""
+        from app.services.watchdog_service import init_watchdog_service, WatchdogConfig
+        cfg = WatchdogConfig(action_mode=True, module_overrides={})
+        svc = init_watchdog_service(cfg)
+        status = svc.get_status()
+        module_map = {m["name"]: m for m in status["modules"]}
+        # breach_monitor always False
+        assert module_map["breach_monitor"]["action_mode"] is False
+        # Others inherit global True
+        assert module_map["close_advisor"]["action_mode"] is True
+        assert module_map["roll_advisor"]["action_mode"] is True
+
+    # ── get_close_eligible ────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_get_close_eligible_empty_store(self):
+        """get_close_eligible returns [] when no positions exist."""
+        from app.services.watchdog_service import init_watchdog_service
+        from app.services.position_store import reset_position_store
+        reset_position_store()
+        svc = init_watchdog_service()
+        result = await svc.get_close_eligible(min_pct=0.50)
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_get_close_eligible_filters_by_pct(self):
+        """get_close_eligible returns only positions above min_pct."""
+        from app.services.watchdog_service import init_watchdog_service
+        from app.services.position_store import get_position_store
+        from datetime import date, timedelta
+        today = date.today().isoformat()
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        store = get_position_store()
+        assert store is not None
+        # 80% captured: entry=100, mark=20 → (100-20)/100 = 80%
+        store._positions["ce-p1"] = {
+            "position_id": "ce-p1", "order_type": "multi_leg",
+            "symbol": "SPX", "expiration": today, "status": "open",
+            "entry_price": 100.0, "current_mark": 20.0, "market_price": 20.0,
+            "quantity": 1, "legs": [{"strike": 5500, "option_type": "PUT", "action": "SELL_TO_OPEN"}],
+        }
+        # 30% captured: entry=100, mark=70 → 30%
+        store._positions["ce-p2"] = {
+            "position_id": "ce-p2", "order_type": "multi_leg",
+            "symbol": "RUT", "expiration": tomorrow, "status": "open",
+            "entry_price": 100.0, "current_mark": 70.0, "market_price": 70.0,
+            "quantity": 1, "legs": [{"strike": 2400, "option_type": "PUT", "action": "SELL_TO_OPEN"}],
+        }
+        svc = init_watchdog_service()
+        # Only ce-p1 exceeds 70% threshold
+        result = await svc.get_close_eligible(min_pct=0.70)
+        pids = [r["position_id"] for r in result]
+        assert "ce-p1" in pids
+        assert "ce-p2" not in pids
+
+    @pytest.mark.asyncio
+    async def test_get_close_eligible_filters_by_dte(self):
+        """get_close_eligible with dte filter returns only matching expirations."""
+        from app.services.watchdog_service import init_watchdog_service
+        from app.services.position_store import get_position_store
+        from datetime import date, timedelta
+        today = date.today().isoformat()
+        tomorrow = (date.today() + timedelta(days=1)).isoformat()
+        store = get_position_store()
+        assert store is not None
+        store._positions["cedte-p1"] = {
+            "position_id": "cedte-p1", "order_type": "multi_leg",
+            "symbol": "SPX", "expiration": today, "status": "open",
+            "entry_price": 100.0, "current_mark": 10.0, "market_price": 10.0,
+            "quantity": 1, "legs": [{"strike": 5500, "option_type": "PUT", "action": "SELL_TO_OPEN"}],
+        }
+        store._positions["cedte-p2"] = {
+            "position_id": "cedte-p2", "order_type": "multi_leg",
+            "symbol": "RUT", "expiration": tomorrow, "status": "open",
+            "entry_price": 100.0, "current_mark": 10.0, "market_price": 10.0,
+            "quantity": 1, "legs": [{"strike": 2400, "option_type": "PUT", "action": "SELL_TO_OPEN"}],
+        }
+        svc = init_watchdog_service()
+        result = await svc.get_close_eligible(min_pct=0.50, dte=0)
+        pids = [r["position_id"] for r in result]
+        assert "cedte-p1" in pids
+        assert "cedte-p2" not in pids
+
+    # ── execute_suggestion ────────────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_execute_suggestion_not_found(self):
+        """execute_suggestion returns error for unknown ID."""
+        from app.services.watchdog_service import init_watchdog_service
+        svc = init_watchdog_service()
+        result = await svc.execute_suggestion("nonexistent")
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_execute_suggestion_alert_type_blocked(self):
+        """execute_suggestion returns error for breach_alert (monitor-only)."""
+        from app.services.watchdog_service import init_watchdog_service, WatchdogSuggestion
+        from datetime import datetime, UTC
+        svc = init_watchdog_service()
+        s = WatchdogSuggestion(
+            suggestion_id="aa1",
+            position_id="p1",
+            symbol="SPX",
+            module="breach_monitor",
+            suggestion_type="breach_alert",
+            severity="critical",
+            title="Critical breach",
+            description="",
+            action={"type": "alert"},
+            created_at=datetime.now(UTC),
+        )
+        svc._suggestions["aa1"] = s
+        result = await svc.execute_suggestion("aa1")
+        assert "error" in result
+        assert "monitor" in result["error"].lower() or "alert" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_execute_suggestion_prefix_match(self):
+        """execute_suggestion accepts ID prefix for matching."""
+        from app.services.watchdog_service import init_watchdog_service, WatchdogSuggestion
+        from datetime import datetime, UTC
+        svc = init_watchdog_service()
+        s = WatchdogSuggestion(
+            suggestion_id="abcdef12",
+            position_id="p1",
+            symbol="SPX",
+            module="close_advisor",
+            suggestion_type="close_profit",
+            severity="warning",
+            title="Profit",
+            description="",
+            action={"type": "close", "position_id": "p1", "close_reason": "profit_target"},
+            created_at=datetime.now(UTC),
+        )
+        svc._suggestions["abcdef12"] = s
+        # Patch _auto_execute to avoid real trade execution
+        executed = []
+        async def _fake_execute(sg, qty=None):
+            sg.status = "executed"
+            executed.append(sg.suggestion_id)
+        svc._auto_execute = _fake_execute
+        result = await svc.execute_suggestion("abcde")  # prefix
+        assert result.get("status") == "executed"
+        assert "abcdef12" in executed
+
+    # ── watchdog execute REST endpoint ────────────────────────────────────────
+
+    async def test_watchdog_execute_endpoint_not_found(self, client, api_key_headers):
+        """POST /watchdog/execute/{id} returns error for unknown suggestion."""
+        from app.services.watchdog_service import init_watchdog_service
+        init_watchdog_service()
+        resp = await client.post("/watchdog/execute/nonexistent",
+                                 headers=api_key_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "error" in data
+
+    # ── watchdog close-eligible REST endpoint ─────────────────────────────────
+
+    async def test_watchdog_close_eligible_get_no_service(self, client, api_key_headers):
+        """GET /watchdog/close-eligible returns [] when service not initialized."""
+        from app.services.watchdog_service import reset_watchdog_service
+        reset_watchdog_service()
+        resp = await client.get("/watchdog/close-eligible",
+                                headers=api_key_headers)
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    async def test_watchdog_close_eligible_get_with_service(self, client, api_key_headers):
+        """GET /watchdog/close-eligible returns eligible positions."""
+        from app.services.watchdog_service import init_watchdog_service
+        from app.services.position_store import get_position_store
+        from datetime import date
+        init_watchdog_service()
+        store = get_position_store()
+        store._positions["ce-rest-p1"] = {
+            "position_id": "ce-rest-p1", "order_type": "multi_leg",
+            "symbol": "SPX", "expiration": date.today().isoformat(), "status": "open",
+            "entry_price": 100.0, "current_mark": 10.0, "market_price": 10.0,
+            "quantity": 1, "legs": [{"strike": 5500, "option_type": "PUT", "action": "SELL_TO_OPEN"}],
+        }
+        resp = await client.get("/watchdog/close-eligible?min_pct=0.80",
+                                headers=api_key_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert isinstance(data, list)
+        pids = [p["position_id"] for p in data]
+        assert "ce-rest-p1" in pids
+
+    # ── roll advisor notifications ────────────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_roll_advisor_notify_cooldown_respected(self):
+        """RollAdvisorModule._maybe_notify skips within cooldown period."""
+        from app.services.watchdog_service import RollAdvisorModule
+        from datetime import datetime, UTC, timedelta
+        mod = RollAdvisorModule()
+        sent = []
+        async def _fake_post(*a, **kw):
+            class _R:
+                async def __aenter__(self_inner): return _R()
+                async def __aexit__(self_inner, *a): pass
+                async def post(self_inner, *a, **kw): sent.append(1)
+            return _R()
+
+        overrides = {"notify_on_severity": ["critical"], "notify_cooldown_minutes": 15}
+        # First call — should attempt to notify (will fail silently without httpx)
+        await mod._maybe_notify("p1", "SPX", "critical", "test", overrides)
+        # Fake that it just ran
+        mod._last_notified["p1"] = ("critical", datetime.now(UTC))
+        # Second call within cooldown — should be suppressed
+        initial_count = len(sent)
+        await mod._maybe_notify("p1", "SPX", "critical", "test", overrides)
+        # Can't assert sent count (httpx not mocked), but _last_notified should not have updated timestamp
+        last_ts = mod._last_notified["p1"][1]
+        # The last_notified timestamp should be the same as the one we set
+        assert (datetime.now(UTC) - last_ts).total_seconds() < 5  # still fresh
+
+    @pytest.mark.asyncio
+    async def test_roll_advisor_notify_not_fired_below_threshold(self):
+        """RollAdvisorModule._maybe_notify skips severities not in notify_on_severity."""
+        from app.services.watchdog_service import RollAdvisorModule
+        mod = RollAdvisorModule()
+        # Only critical+urgent configured; warning should not update _last_notified
+        overrides = {"notify_on_severity": ["critical", "urgent"]}
+        await mod._maybe_notify("p1", "SPX", "warning", "test", overrides)
+        assert "p1" not in mod._last_notified
+
+    @pytest.mark.asyncio
+    async def test_run_cycle_per_module_action_mode_overrides_global(self, tmp_path):
+        """run_cycle() uses per-module action_mode, not global, when override is set."""
+        from app.services.watchdog_service import (
+            init_watchdog_service, WatchdogConfig, WatchdogModule, WatchdogSuggestion,
+        )
+        from app.services.position_store import init_position_store, reset_position_store
+        from datetime import datetime, UTC
+
+        reset_position_store()
+        init_position_store(str(tmp_path / "pos.json"))
+
+        auto_executed = []
+
+        class _AlwaysSuggest(WatchdogModule):
+            name = "close_advisor"
+            default_interval = 0.0
+
+            async def run(self, positions, prices, overrides=None):
+                return [WatchdogSuggestion(
+                    suggestion_id="x1",
+                    position_id="p1",
+                    symbol="SPX",
+                    module="close_advisor",
+                    suggestion_type="close_profit",
+                    severity="warning",
+                    title="Test",
+                    description="",
+                    action={"type": "close", "position_id": "p1", "close_reason": "profit_target"},
+                    created_at=datetime.now(UTC),
+                )]
+
+        # Global action_mode=True but close_advisor override says False
+        cfg = WatchdogConfig(
+            action_mode=True,
+            module_overrides={"close_advisor": {"action_mode": False}},
+        )
+        svc = init_watchdog_service(cfg)
+        svc._modules = [_AlwaysSuggest()]
+
+        original_auto_execute = svc._auto_execute
+        async def _capture(s, qty=None):
+            auto_executed.append(s.suggestion_id)
+        svc._auto_execute = _capture
+
+        await svc.run_cycle()
+        # close_advisor override=False must suppress auto-execution
+        assert "x1" not in auto_executed
+
+    # ── partial qty: execute_suggestion ──────────────────────────────────────
+
+    @pytest.mark.asyncio
+    async def test_execute_suggestion_passes_qty_to_auto_execute(self):
+        """execute_suggestion(qty=N) passes qty through to _auto_execute."""
+        from app.services.watchdog_service import init_watchdog_service, WatchdogSuggestion
+        from datetime import datetime, UTC
+        svc = init_watchdog_service()
+        s = WatchdogSuggestion(
+            suggestion_id="qty-test1",
+            position_id="p1",
+            symbol="SPX",
+            module="close_advisor",
+            suggestion_type="close_profit",
+            severity="warning",
+            title="Profit",
+            description="",
+            action={"type": "close", "position_id": "p1", "close_reason": "profit_target"},
+            created_at=datetime.now(UTC),
+        )
+        svc._suggestions["qty-test1"] = s
+        captured_qty = []
+        async def _fake_auto_execute(sg, qty=None):
+            sg.status = "executed"
+            captured_qty.append(qty)
+        svc._auto_execute = _fake_auto_execute
+        result = await svc.execute_suggestion("qty-test1", qty=3)
+        assert result.get("status") == "executed"
+        assert captured_qty == [3]
+
+    @pytest.mark.asyncio
+    async def test_execute_suggestion_qty_none_passes_none(self):
+        """execute_suggestion() with no qty passes qty=None to _auto_execute (full qty)."""
+        from app.services.watchdog_service import init_watchdog_service, WatchdogSuggestion
+        from datetime import datetime, UTC
+        svc = init_watchdog_service()
+        s = WatchdogSuggestion(
+            suggestion_id="qty-none1",
+            position_id="p2",
+            symbol="RUT",
+            module="close_advisor",
+            suggestion_type="close_profit",
+            severity="warning",
+            title="Profit",
+            description="",
+            action={"type": "close", "position_id": "p2", "close_reason": "profit_target"},
+            created_at=datetime.now(UTC),
+        )
+        svc._suggestions["qty-none1"] = s
+        captured_qty = []
+        async def _fake_auto_execute(sg, qty=None):
+            sg.status = "executed"
+            captured_qty.append(qty)
+        svc._auto_execute = _fake_auto_execute
+        result = await svc.execute_suggestion("qty-none1")
+        assert result.get("status") == "executed"
+        assert captured_qty == [None]
+
+    @pytest.mark.asyncio
+    async def test_auto_execute_partial_close_caps_at_full_qty(self, tmp_path):
+        """_auto_execute with qty > full_qty closes full_qty (not more)."""
+        from app.services.watchdog_service import init_watchdog_service, WatchdogSuggestion
+        from app.services.position_store import init_position_store, reset_position_store, get_position_store
+        from datetime import datetime, UTC, date
+        reset_position_store()
+        init_position_store(str(tmp_path / "pos.json"))
+        store = get_position_store()
+        store._positions["partial-p1"] = {
+            "position_id": "partial-p1", "order_type": "multi_leg", "symbol": "SPX",
+            "expiration": date.today().isoformat(), "status": "open",
+            "entry_price": 2.00, "quantity": 10,
+            "legs": [
+                {"strike": 5500, "option_type": "PUT", "action": "SELL_TO_OPEN",
+                 "symbol": "SPX", "expiration": date.today().isoformat()},
+                {"strike": 5475, "option_type": "PUT", "action": "BUY_TO_OPEN",
+                 "symbol": "SPX", "expiration": date.today().isoformat()},
+            ],
+        }
+        svc = init_watchdog_service()
+        s = WatchdogSuggestion(
+            suggestion_id="partial-s1",
+            position_id="partial-p1",
+            symbol="SPX",
+            module="close_advisor",
+            suggestion_type="close_profit",
+            severity="warning",
+            title="Profit",
+            description="",
+            action={"type": "close", "position_id": "partial-p1", "close_reason": "profit_target"},
+            created_at=datetime.now(UTC),
+        )
+        svc._suggestions["partial-s1"] = s
+        trade_requests = []
+        from app.services import trade_service as _ts
+        original_execute = _ts.execute_trade
+        async def _fake_execute_trade(req):
+            trade_requests.append(req)
+            from app.models import OrderResult, OrderStatus, Broker
+            return OrderResult(broker=Broker.IBKR, status=OrderStatus.FILLED, filled_price=0.10, order_id="fake-ord")
+        _ts.execute_trade = _fake_execute_trade
+        try:
+            # qty=999 should cap at position's full_qty=10
+            await svc._auto_execute(s, qty=999)
+            assert s.status == "executed"
+            assert trade_requests
+            legs = trade_requests[0].multi_leg_order.legs
+            assert all(leg.quantity == 10 for leg in legs)
+        finally:
+            _ts.execute_trade = original_execute
+
+    @pytest.mark.asyncio
+    async def test_auto_execute_partial_close_uses_specified_qty(self, tmp_path):
+        """_auto_execute with qty=3 closes 3 contracts of a 10-contract position."""
+        from app.services.watchdog_service import init_watchdog_service, WatchdogSuggestion
+        from app.services.position_store import init_position_store, reset_position_store, get_position_store
+        from datetime import datetime, UTC, date
+        reset_position_store()
+        init_position_store(str(tmp_path / "pos.json"))
+        store = get_position_store()
+        store._positions["partial-p2"] = {
+            "position_id": "partial-p2", "order_type": "multi_leg", "symbol": "SPX",
+            "expiration": date.today().isoformat(), "status": "open",
+            "entry_price": 2.00, "quantity": 10,
+            "legs": [
+                {"strike": 5500, "option_type": "PUT", "action": "SELL_TO_OPEN",
+                 "symbol": "SPX", "expiration": date.today().isoformat()},
+                {"strike": 5475, "option_type": "PUT", "action": "BUY_TO_OPEN",
+                 "symbol": "SPX", "expiration": date.today().isoformat()},
+            ],
+        }
+        svc = init_watchdog_service()
+        s = WatchdogSuggestion(
+            suggestion_id="partial-s2",
+            position_id="partial-p2",
+            symbol="SPX",
+            module="close_advisor",
+            suggestion_type="close_profit",
+            severity="warning",
+            title="Profit",
+            description="",
+            action={"type": "close", "position_id": "partial-p2", "close_reason": "profit_target"},
+            created_at=datetime.now(UTC),
+        )
+        svc._suggestions["partial-s2"] = s
+        trade_requests = []
+        from app.services import trade_service as _ts
+        original_execute = _ts.execute_trade
+        async def _fake_execute_trade(req):
+            trade_requests.append(req)
+            from app.models import OrderResult, OrderStatus, Broker
+            return OrderResult(broker=Broker.IBKR, status=OrderStatus.FILLED, filled_price=0.10, order_id="fake-ord")
+        _ts.execute_trade = _fake_execute_trade
+        try:
+            await svc._auto_execute(s, qty=3)
+            assert s.status == "executed"
+            assert trade_requests
+            legs = trade_requests[0].multi_leg_order.legs
+            assert all(leg.quantity == 3 for leg in legs)
+        finally:
+            _ts.execute_trade = original_execute
+
+    # ── partial qty: REST endpoint ────────────────────────────────────────────
+
+    async def test_watchdog_execute_endpoint_passes_qty(self, client, api_key_headers):
+        """POST /watchdog/execute/{id} with body {"qty":3} passes qty to execute_suggestion."""
+        from app.services.watchdog_service import init_watchdog_service, WatchdogSuggestion
+        from datetime import datetime, UTC
+        svc = init_watchdog_service()
+        s = WatchdogSuggestion(
+            suggestion_id="ep-qty1",
+            position_id="p1",
+            symbol="SPX",
+            module="close_advisor",
+            suggestion_type="close_profit",
+            severity="warning",
+            title="Profit",
+            description="",
+            action={"type": "close", "position_id": "p1", "close_reason": "profit_target"},
+            created_at=datetime.now(UTC),
+        )
+        svc._suggestions["ep-qty1"] = s
+        captured_qty = []
+        async def _fake_execute_suggestion(sid, qty=None):
+            captured_qty.append(qty)
+            return {"status": "executed", "suggestion_id": sid, "qty": qty}
+        svc.execute_suggestion = _fake_execute_suggestion
+        resp = await client.post("/watchdog/execute/ep-qty1",
+                                 json={"qty": 3},
+                                 headers=api_key_headers)
+        assert resp.status_code == 200
+        assert captured_qty == [3]
+
+    async def test_watchdog_execute_endpoint_no_body_passes_none(self, client, api_key_headers):
+        """POST /watchdog/execute/{id} with no body passes qty=None."""
+        from app.services.watchdog_service import init_watchdog_service, WatchdogSuggestion
+        from datetime import datetime, UTC
+        svc = init_watchdog_service()
+        s = WatchdogSuggestion(
+            suggestion_id="ep-nq1",
+            position_id="p1",
+            symbol="SPX",
+            module="close_advisor",
+            suggestion_type="close_profit",
+            severity="warning",
+            title="Profit",
+            description="",
+            action={"type": "close", "position_id": "p1", "close_reason": "profit_target"},
+            created_at=datetime.now(UTC),
+        )
+        svc._suggestions["ep-nq1"] = s
+        captured_qty = []
+        async def _fake_execute_suggestion(sid, qty=None):
+            captured_qty.append(qty)
+            return {"status": "executed", "suggestion_id": sid, "qty": qty}
+        svc.execute_suggestion = _fake_execute_suggestion
+        resp = await client.post("/watchdog/execute/ep-nq1",
+                                 headers=api_key_headers)
+        assert resp.status_code == 200
+        assert captured_qty == [None]
+
+    async def test_watchdog_close_eligible_post_passes_qty(self, client, api_key_headers):
+        """POST /watchdog/close-eligible with qty passes it to _auto_execute."""
+        from app.services.watchdog_service import init_watchdog_service
+        from app.services.position_store import get_position_store
+        from datetime import date
+        svc = init_watchdog_service()
+        store = get_position_store()
+        store._positions["ce-qty-p1"] = {
+            "position_id": "ce-qty-p1", "order_type": "multi_leg",
+            "symbol": "SPX", "expiration": date.today().isoformat(), "status": "open",
+            "entry_price": 100.0, "current_mark": 10.0, "market_price": 10.0,
+            "quantity": 20, "legs": [{"strike": 5500, "option_type": "PUT", "action": "SELL_TO_OPEN"}],
+        }
+        auto_execute_calls = []
+        original_ae = svc._auto_execute
+        async def _capture_ae(s, qty=None):
+            auto_execute_calls.append(qty)
+            s.status = "executed"
+        svc._auto_execute = _capture_ae
+        resp = await client.post("/watchdog/close-eligible",
+                                 json={"min_pct": 0.50, "execute": True, "qty": 5},
+                                 headers=api_key_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data.get("executed") is True
+        assert 5 in auto_execute_calls

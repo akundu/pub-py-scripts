@@ -123,6 +123,9 @@ def _format_watchdog_hint(hint: dict | None, width: int = _WATCHDOG_COL_WIDTH) -
 
     Always returns exactly `width` visible characters so the column
     stays aligned regardless of whether ANSI codes are present.
+
+    When a suggestion_id is present the first 6 chars are shown before the
+    title so the user can copy-paste it into  'wd execute <id> --confirm'.
     """
     sev_colors = {"urgent": "91", "critical": "93", "warning": "93", "info": "36"}
     sev_icons  = {"urgent": "✖", "critical": "⚠", "warning": "⚠", "info": "ℹ"}
@@ -132,8 +135,13 @@ def _format_watchdog_hint(hint: dict | None, width: int = _WATCHDOG_COL_WIDTH) -
     sev   = hint.get("severity", "info")
     title = hint.get("title", "?")
     icon  = sev_icons.get(sev, "•")
-    # Build plain text, cap at width, left-pad to width
-    raw   = f"{icon} {title}"
+    sid   = (hint.get("suggestion_id") or "")[:6]
+    # When suggestion_id available: "{icon} {sid:6} {title}" — still caps at width.
+    # Without it:                   "{icon} {title}"          — same as before.
+    if sid:
+        raw = f"{icon} {sid} {title}"
+    else:
+        raw = f"{icon} {title}"
     if len(raw) > width:
         raw = raw[: width - 1] + "…"
     plain = raw.ljust(width)
@@ -8208,6 +8216,88 @@ async def _cmd_watchdog_http(args, server: str) -> int:
             print(f"  Suggestion {sid} dismissed")
             return 0
 
+        elif action in ("execute", "ex"):
+            sid = getattr(args, "suggestion_id", "")
+            confirm = getattr(args, "confirm", False)
+            qty = getattr(args, "qty", None)
+            if not confirm:
+                # Show the suggestion details first
+                resp = await client.get("/watchdog/suggestions")
+                if resp.status_code == 200:
+                    all_s = resp.json()
+                    match = next((s for s in all_s if s.get("suggestion_id", "").startswith(sid)), None)
+                    if match:
+                        print()
+                        _print_watchdog_suggestions([match])
+                    else:
+                        print(f"  Suggestion {sid!r} not found in pending suggestions.")
+                        return 1
+                qty_note = f" (qty={qty})" if qty is not None else ""
+                print(f"  Add --confirm to execute this suggestion{qty_note}.")
+                return 0
+            body: dict = {}
+            if qty is not None:
+                body["qty"] = qty
+            resp = await client.post(f"/watchdog/execute/{sid}", json=body)
+            if resp.status_code != 200:
+                print(f"  Error: {resp.status_code} {resp.text}")
+                return 1
+            result = resp.json()
+            if "error" in result:
+                print(f"  {_color('Error', '91')}: {result['error']}")
+                return 1
+            qty_str = f" qty={result.get('qty')}" if result.get("qty") is not None else ""
+            print(f"  {_color('Executed', '92')} suggestion {result.get('suggestion_id', sid)}{qty_str}")
+            return 0
+
+        elif action in ("close-eligible", "eligible", "ce"):
+            min_pct = getattr(args, "min_pct", 0.50)
+            dte_filter = getattr(args, "dte", None)
+            min_dollars = getattr(args, "min_dollars", None)
+            qty = getattr(args, "qty", None)
+            confirm = getattr(args, "confirm", False)
+
+            params = f"?min_pct={min_pct}"
+            if dte_filter is not None:
+                params += f"&dte={dte_filter}"
+            if min_dollars is not None:
+                params += f"&min_dollars={min_dollars}"
+
+            resp = await client.get(f"/watchdog/close-eligible{params}")
+            if resp.status_code != 200:
+                print(f"  Error: {resp.status_code} {resp.text}")
+                return 1
+            eligible = resp.json()
+            _print_close_eligible(eligible, min_pct, dte_filter)
+            if not eligible:
+                return 0
+            if not confirm:
+                qty_note = f" ({qty} contracts each)" if qty is not None else ""
+                print(f"  Add --confirm to close all {len(eligible)} eligible position(s){qty_note}.")
+                return 0
+            body = {"min_pct": min_pct, "execute": True}
+            if dte_filter is not None:
+                body["dte"] = dte_filter
+            if min_dollars is not None:
+                body["min_dollars"] = min_dollars
+            if qty is not None:
+                body["qty"] = qty
+            resp = await client.post("/watchdog/close-eligible", json=body)
+            if resp.status_code != 200:
+                print(f"  Error: {resp.status_code} {resp.text}")
+                return 1
+            result = resp.json()
+            closed = result.get("results", [])
+            for r in closed:
+                status_color = "92" if r.get("status") == "executed" else "91"
+                qty_str = f"  qty={r['qty']}" if r.get("qty") is not None else ""
+                print(f"  {_color(r.get('status', '?').upper(), status_color)}  "
+                      f"{r.get('symbol', '?'):<6}  "
+                      f"{r.get('pct_captured', 0) * 100:.0f}% captured{qty_str}  "
+                      f"id={r.get('position_id', '?')[:8]}")
+            print(f"\n  Closed {sum(1 for r in closed if r.get('status') == 'executed')} / {len(closed)} positions.")
+            return 0
+
         elif action == "config":
             updates: dict = {}
             am = getattr(args, "action_mode", None)
@@ -8263,11 +8353,40 @@ def _print_watchdog_suggestions(suggestions: list) -> None:
         title = s.get("title", "?")
         desc = s.get("description", "")
         created = s.get("created_at", "")[:19] if s.get("created_at") else ""
+        atype = (s.get("action") or {}).get("type", "?")
+        executable = atype in ("close", "roll")
+        exec_hint = f"  → wd execute {sid} --confirm" if executable else "  → monitor only"
         print(f"  {_color(f'{icon} {sid}', color)}  {sym:<6}  {title:<30}  [{mod}]")
         if desc:
             print(f"      {_color(desc, '2')}")
         if created:
-            print(f"      created: {created}")
+            print(f"      created: {created}{_color(exec_hint, '2')}")
+        else:
+            print(f"      {_color(exec_hint.strip(), '2')}")
+    print()
+
+
+def _print_close_eligible(eligible: list, min_pct: float, dte_filter) -> None:
+    """Print positions eligible for batch closing."""
+    dte_str = f" DTE{dte_filter}" if dte_filter is not None else ""
+    _print_header(f"Close-Eligible Positions (≥{min_pct * 100:.0f}% captured{dte_str})")
+    if not eligible:
+        print(f"  No positions have captured ≥{min_pct * 100:.0f}% yet.")
+        return
+    print(f"  {'ID':<8}  {'Sym':<6}  {'DTE':>3}  {'Captured':>8}  {'$Freed':>10}  Strikes")
+    print(f"  {'─' * 8}  {'─' * 6}  {'─' * 3}  {'─' * 8}  {'─' * 10}  {'─' * 20}")
+    for pos in eligible:
+        pid = pos.get("position_id", "?")[:8]
+        sym = pos.get("symbol", "?")
+        dte_v = pos.get("current_dte", "?")
+        pct = pos.get("pct_captured", 0) * 100
+        freed = pos.get("dollars_freed", 0)
+        legs = pos.get("legs", [])
+        strikes = "/".join(f"{l.get('strike', '?'):.0f}" for l in legs[:2]) if legs else "?"
+        pct_color = "92" if pct >= 80 else "93" if pct >= 60 else "0"
+        print(f"  {pid:<8}  {sym:<6}  {dte_v:>3}  "
+              f"{_color(f'{pct:>7.1f}%', pct_color)}  "
+              f"${freed:>9,.0f}  {strikes}")
     print()
 
 
@@ -8305,8 +8424,10 @@ def _print_watchdog_status(status: dict) -> None:
             last_run = m.get("last_run")
             last_str = last_run[:19] if last_run else "never"
             enabled_str = "" if m.get("enabled", True) else " (disabled)"
+            am = m.get("action_mode", False)
+            am_str = _color("auto-exec", "92") if am else _color("suggest-only", "2")
             print(f"      {m.get('name', '?'):<22}  interval={m.get('interval', 30):.0f}s  "
-                  f"last_run={last_str}{enabled_str}")
+                  f"{am_str}  last_run={last_str}{enabled_str}")
     print()
 
 
@@ -11680,46 +11801,127 @@ Subcommand aliases: suggestions (suggest, sg), execute (ex), forward (fwd), mirr
                                         help="Portfolio watchdog — advisory suggestions and status",
                                         aliases=["wd"],
                                         description='''
-Portfolio watchdog framework that continuously monitors open positions for
-actionable events. Runs as part of the daemon (parent process only, not workers).
+Portfolio watchdog — continuously monitors open credit spread positions for
+actionable events. Runs in the daemon (parent process only). Generates typed
+suggestions that appear in the portfolio Watchdog column and are queryable
+via REST or CLI. Each suggestion has an 8-character ID (shown in portfolio).
 
-Modules:
-  roll_advisor    — Breach risk → forward/mirror roll suggestions
-  close_advisor   — Profit target, stop loss, low ROI, EOD close suggestions
-  breach_monitor  — Delta/breach severity alerts (suggestion-only, no auto-action)
+━━━ MODULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  roll_advisor     Breach risk → forward / mirror roll suggestions.
+                   Uses RollService thresholds (OTM%, DTE, severity).
+                   Fires notification at warning / critical / urgent.
 
-Operating modes:
-  suggestion (default)  — Generate and surface suggestions; no auto-execution
-  action                — Auto-execute suggestions when generated
+  close_advisor    Profit target, stop-loss, low-ROI, and EOD close.
+                   Triggers (DTE-aware, empirically derived):
+                     close_profit_scalper  30% captured before 11 AM ET (DTE0/DTE3)
+                     close_profit          80% (DTE0 after noon), 80% (DTE1/2 after 15:30)
+                                           70% (DTE2 after 15:30), 75% (DTE3 after 15:30)
+                     close_stop_loss       Short strike proximity < 0.5% (DTE0), < 1.0% (DTE1)
+                     close_eod             15 min before 4 PM ET on expiration day
+                     close_low_roi         < 10% credit remaining on expiration day
+
+  breach_monitor   Underlying proximity alerts (monitor-only, never auto-executes).
+                   Default min_severity: warning (suppresses noisy 2% OTM watch alerts).
+
+━━━ OPERATING MODES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  suggestion_only  Default. Surfaces suggestions; user decides when to act.
+  action_mode      Auto-executes suggestions when generated. Per-module:
+                     close_advisor: auto-close positions
+                     roll_advisor:  auto-execute rolls
+                     breach_monitor: ALWAYS suggestion-only (no auto-action)
+
+━━━ SUBCOMMANDS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  suggestions [--position POS_ID]
+      List all pending suggestions. Optionally filter to one position.
+      Aliases: suggest, sg
+
+  execute SUGGESTION_ID [--qty N] [--confirm]
+      Execute a specific suggestion by its 8-char ID (or prefix).
+      For close suggestions: submits a MARKET closing order.
+      For roll suggestions: delegates to RollService.
+      Breach alerts cannot be executed (monitor-only).
+      --qty N    Only close/roll N contracts (default: full position qty).
+      --confirm  Actually execute (default shows preview only).
+      Alias: ex
+
+  dismiss SUGGESTION_ID
+      Dismiss a pending suggestion (removes it from the active list).
+      Alias: dm
+
+  close-eligible [--min-pct P] [--dte D] [--min-dollars $] [--qty N] [--confirm]
+      List or batch-close positions that have captured ≥ min_pct of premium.
+      --min-pct P    Min fraction captured, 0.0–1.0 (default: 0.50 = 50%).
+      --dte D        Only positions expiring in exactly D days.
+      --min-dollars  Only positions freeing ≥ $X of margin when closed.
+      --qty N        Close only N contracts per position (default: all).
+      --confirm      Close all eligible positions (default: preview only).
+      Aliases: eligible, ce
+
+  config [--action-mode | --no-action-mode] [--interval SEC]
+      View current watchdog configuration, or apply updates.
+      --action-mode      Enable global auto-execute for all action modules.
+      --no-action-mode   Disable auto-execute (suggestion-only).
+      --interval SEC     Change cycle interval in seconds (default: 30).
+      Per-module action_mode and other thresholds are set in the daemon
+      YAML config under watchdog.module_overrides.<module_name>.
+
+  status
+      Show per-module last-run times, enabled state, action_mode, and
+      suggestion counts broken down by status (pending/executed/dismissed).
                                         ''',
                                         epilog='''
-Examples:
-  # ── View suggestions ─────────────────────────────────────────────
-  %(prog)s                            Show all pending watchdog suggestions
-  %(prog)s suggestions                Same as above
-  %(prog)s suggestions --position 2d9a  Suggestions for one position only
+━━━ EXAMPLES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  # ── Dismiss a suggestion ─────────────────────────────────────────
-  %(prog)s dismiss abc123             Dismiss suggestion by ID prefix
+  # View suggestions
+  %(prog)s                                Show all pending suggestions
+  %(prog)s suggestions                    Same as above
+  %(prog)s suggestions --position 2d9a   Filter to one position
 
-  # ── View and change configuration ────────────────────────────────
-  %(prog)s config                     Show current watchdog configuration
-  %(prog)s config --action-mode       Enable action mode (auto-execute)
-  %(prog)s config --no-action-mode    Disable action mode (suggestion only)
-  %(prog)s config --interval 15       Change cycle interval to 15s
+  # Execute a suggestion (ID prefix from portfolio Watchdog column)
+  %(prog)s execute abc123                 Preview what will happen
+  %(prog)s execute abc123 --confirm       Execute (full quantity)
+  %(prog)s execute abc123 --qty 5 --confirm  Partial: close/roll 5 contracts only
 
-  # ── View service status ───────────────────────────────────────────
-  %(prog)s status                     Show module run times, suggestion counts
+  # Dismiss a suggestion
+  %(prog)s dismiss abc123                 Remove from active list
 
-REST equivalents (for direct HTTP access):
-  GET  /watchdog/suggestions
+  # Batch close by profit threshold (no --confirm = safe preview)
+  %(prog)s close-eligible                 Show positions ≥50% captured
+  %(prog)s close-eligible --min-pct 0.80 --dte 0
+                                          DTE0 positions at ≥80%
+  %(prog)s close-eligible --min-pct 0.70 --confirm
+                                          Close all ≥70% positions (full qty)
+  %(prog)s close-eligible --min-dollars 1000 --confirm
+                                          Close only if ≥$1k margin freed
+  %(prog)s close-eligible --dte 0 --qty 5 --confirm
+                                          Partial: close 5 contracts per DTE0 position
+
+  # View / change configuration
+  %(prog)s config                         Show full config (all modules)
+  %(prog)s config --action-mode           Enable auto-execute globally
+  %(prog)s config --no-action-mode        Disable auto-execute (suggestion-only)
+  %(prog)s config --interval 15           Change cycle to every 15s
+
+  # View status
+  %(prog)s status                         Module run times + suggestion counts
+
+━━━ REST EQUIVALENTS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  GET  /watchdog/suggestions?position_id=2d9a
   POST /watchdog/dismiss/{id}
+  POST /watchdog/execute/{id}             body (optional): {"qty": 5}
+  GET  /watchdog/close-eligible?min_pct=0.80&dte=0&min_dollars=1000
+  POST /watchdog/close-eligible           body: {"min_pct":0.7,"execute":true,"qty":5}
   GET  /watchdog/config
-  POST /watchdog/config
+  POST /watchdog/config                   body: {"action_mode":true,"default_interval_seconds":15}
   GET  /watchdog/status
 
-Aliases: wd
-Subcommand aliases: suggestions (suggest, sg), dismiss (dm)
+━━━ ALIASES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  watchdog → wd
+  suggestions → suggest, sg
+  execute → ex
+  dismiss → dm
+  close-eligible → eligible, ce
                                         ''',
                                         formatter_class=argparse.RawDescriptionHelpFormatter)
     watchdog_sub = p_watchdog.add_subparsers(dest="watchdog_action")
@@ -11731,10 +11933,33 @@ Subcommand aliases: suggestions (suggest, sg), dismiss (dm)
     wd_suggest_p.add_argument("--position", default=None, dest="position_id",
                                help="Filter to a specific position ID")
 
+    # watchdog execute <suggestion-id>
+    wd_exec_p = watchdog_sub.add_parser("execute", aliases=["ex"],
+                                        help="Execute a pending suggestion (close or roll)")
+    wd_exec_p.add_argument("suggestion_id", help="Suggestion ID (or prefix) shown in portfolio Watchdog column")
+    wd_exec_p.add_argument("--qty", type=int, default=None, metavar="N",
+                            help="Contracts to close/roll (default: full position quantity)")
+    wd_exec_p.add_argument("--confirm", action="store_true", default=False,
+                            help="Actually execute (default: preview only)")
+
     # watchdog dismiss <suggestion-id>
     wd_dismiss_p = watchdog_sub.add_parser("dismiss", aliases=["dm"],
                                            help="Dismiss a pending suggestion")
     wd_dismiss_p.add_argument("suggestion_id", help="Suggestion ID (or prefix)")
+
+    # watchdog close-eligible
+    wd_ce_p = watchdog_sub.add_parser("close-eligible", aliases=["eligible", "ce"],
+                                       help="Show/close positions that have met profit threshold")
+    wd_ce_p.add_argument("--min-pct", type=float, default=0.50, dest="min_pct",
+                          help="Minimum fraction captured (0.0–1.0, default 0.50 = 50%%)")
+    wd_ce_p.add_argument("--dte", type=int, default=None,
+                          help="Filter to positions expiring in exactly N days")
+    wd_ce_p.add_argument("--min-dollars", type=float, default=None, dest="min_dollars",
+                          help="Only include positions that free ≥ this much margin when closed")
+    wd_ce_p.add_argument("--qty", type=int, default=None, metavar="N",
+                          help="Contracts to close per position (default: full position quantity)")
+    wd_ce_p.add_argument("--confirm", action="store_true", default=False,
+                          help="Close all eligible positions (default: preview only)")
 
     # watchdog config
     wd_config_p = watchdog_sub.add_parser("config", help="View or update watchdog configuration")
