@@ -43,7 +43,7 @@ widths:
   NDX: 60
   RUT: 25
 #otm_pcts: [0.75, 1.0, 1.5, 2.0]
-interval: 20
+interval: 30
 ticker_interval: 10  # refresh just the price line every N seconds (< interval)
 top: 3
 
@@ -209,8 +209,8 @@ handlers:
       # dollar value above at runtime. Falls back to max_total_risk if the
       # snapshot is unavailable. Both DTE scanners share the same account,
       # so set the combined pct accordingly (e.g. 20 = 20% per scanner).
-      max_total_risk_pct: 50
-      min_reserve: 50000   # Keep $50k untouched when computing the pct cap.
+      max_total_risk_pct: 30
+      min_reserve: 75000   # Keep $50k untouched when computing the pct cap.
       #   effective_cap = max(0, available_funds - min_reserve) × pct/100
       #   e.g. avail=$400k, pct=40, reserve=$50k → cap = $350k × 40% = $140k
       #
@@ -233,7 +233,7 @@ handlers:
       # are closer to ATM than the tier filter alone would catch.
       # DTE0 live data: p90 delta=0.055, max=0.062 — 0.10 is well above observed
       # range but catches genuine outliers on high-vol open prints.
-      max_short_delta: 0.05
+      max_short_delta: 0.06
       # MARKET: immediate fill at the prevailing NBBO credit.
       # LIMIT:  submit at the observed credit; may not fill.
       order_type: MARKET
