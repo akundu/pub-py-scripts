@@ -11808,20 +11808,20 @@ via REST or CLI. Each suggestion has an 8-character ID (shown in portfolio).
 
 ━━━ MODULES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   roll_advisor     Breach risk → forward / mirror roll suggestions.
-                   Uses RollService thresholds (OTM%, DTE, severity).
+                   Uses RollService thresholds (OTM%%, DTE, severity).
                    Fires notification at warning / critical / urgent.
 
   close_advisor    Profit target, stop-loss, low-ROI, and EOD close.
                    Triggers (DTE-aware, empirically derived):
-                     close_profit_scalper  30% captured before 11 AM ET (DTE0/DTE3)
-                     close_profit          80% (DTE0 after noon), 80% (DTE1/2 after 15:30)
-                                           70% (DTE2 after 15:30), 75% (DTE3 after 15:30)
-                     close_stop_loss       Short strike proximity < 0.5% (DTE0), < 1.0% (DTE1)
+                     close_profit_scalper  30%% captured before 11 AM ET (DTE0/DTE3)
+                     close_profit          80%% (DTE0 after noon), 80%% (DTE1/2 after 15:30)
+                                           70%% (DTE2 after 15:30), 75%% (DTE3 after 15:30)
+                     close_stop_loss       Short strike proximity < 0.5%% (DTE0), < 1.0%% (DTE1)
                      close_eod             15 min before 4 PM ET on expiration day
-                     close_low_roi         < 10% credit remaining on expiration day
+                     close_low_roi         < 10%% credit remaining on expiration day
 
   breach_monitor   Underlying proximity alerts (monitor-only, never auto-executes).
-                   Default min_severity: warning (suppresses noisy 2% OTM watch alerts).
+                   Default min_severity: warning (suppresses noisy 2%% OTM watch alerts).
 
 ━━━ OPERATING MODES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   suggestion_only  Default. Surfaces suggestions; user decides when to act.
@@ -11850,7 +11850,7 @@ via REST or CLI. Each suggestion has an 8-character ID (shown in portfolio).
 
   close-eligible [--min-pct P] [--dte D] [--min-dollars $] [--qty N] [--confirm]
       List or batch-close positions that have captured ≥ min_pct of premium.
-      --min-pct P    Min fraction captured, 0.0–1.0 (default: 0.50 = 50%).
+      --min-pct P    Min fraction captured, 0.0–1.0 (default: 0.50 = 50%%).
       --dte D        Only positions expiring in exactly D days.
       --min-dollars  Only positions freeing ≥ $X of margin when closed.
       --qty N        Close only N contracts per position (default: all).
@@ -11886,11 +11886,11 @@ via REST or CLI. Each suggestion has an 8-character ID (shown in portfolio).
   %(prog)s dismiss abc123                 Remove from active list
 
   # Batch close by profit threshold (no --confirm = safe preview)
-  %(prog)s close-eligible                 Show positions ≥50% captured
+  %(prog)s close-eligible                 Show positions >=50%% captured
   %(prog)s close-eligible --min-pct 0.80 --dte 0
-                                          DTE0 positions at ≥80%
+                                          DTE0 positions at >=80%%
   %(prog)s close-eligible --min-pct 0.70 --confirm
-                                          Close all ≥70% positions (full qty)
+                                          Close all >=70%% positions (full qty)
   %(prog)s close-eligible --min-dollars 1000 --confirm
                                           Close only if ≥$1k margin freed
   %(prog)s close-eligible --dte 0 --qty 5 --confirm
