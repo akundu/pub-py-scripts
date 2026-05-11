@@ -660,7 +660,12 @@ def test_realtime_ticks_supplement_today_when_csv_missing(tmp_path: Path):
     the ticks into OHLC bars at the requested interval. Bars come back
     with source label including `rt`."""
     from datetime import datetime as _dt
-    today = _dt.utcnow().strftime("%Y-%m-%d")
+    # Use ET-anchored "today" to match the loader's `today_str` calc.
+    # If we used UTC instead, the window around 00:00–04:00 UTC (~ET
+    # midnight transition) would drift the test's `today` away from
+    # the loader's and the realtime path wouldn't trigger.
+    from zoneinfo import ZoneInfo as _ZI
+    today = _dt.now(_ZI("America/New_York")).strftime("%Y-%m-%d")
     # 12 ticks starting at 13:30 UTC (= market open ET in winter), one
     # per minute, climbing prices.
     ts = pd.date_range(f"{today} 13:30:00", periods=12, freq="1min", tz="UTC")
@@ -685,7 +690,12 @@ def test_realtime_overrides_hourly_for_today(tmp_path: Path):
     chart would mix coarse hourly bars (13:00, 14:00) with finer
     realtime bars (13:30, 13:35, …) — visually wrong."""
     from datetime import datetime as _dt
-    today = _dt.utcnow().strftime("%Y-%m-%d")
+    # Use ET-anchored "today" to match the loader's `today_str` calc.
+    # If we used UTC instead, the window around 00:00–04:00 UTC (~ET
+    # midnight transition) would drift the test's `today` away from
+    # the loader's and the realtime path wouldn't trigger.
+    from zoneinfo import ZoneInfo as _ZI
+    today = _dt.now(_ZI("America/New_York")).strftime("%Y-%m-%d")
 
     # Realtime ticks: 5 ticks during the 13:30 5-min window.
     rt_ts = pd.date_range(f"{today} 13:30:00", periods=5, freq="1min", tz="UTC")

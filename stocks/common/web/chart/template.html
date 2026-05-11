@@ -581,19 +581,36 @@
                                 lineStyle: 2, axisLabelVisible: true,
                                 title: "30" });
 
-  // Sync time range between price and RSI panes — drag/zoom on either
-  // mirrors to the other.
+  // Sync visible range between price and RSI panes — drag/zoom on
+  // either mirrors to the other.
+  //
+  // CRITICAL: we sync the *time* range (unix seconds), NOT the *logical*
+  // range (bar indices). The RSI series skips warm-up bars where the
+  // indicator is NaN (typically the first `window` bars — 14 by
+  // default in this chart), so price and RSI end up with different
+  // bar counts even though they cover the same time span. Syncing
+  // logical ranges across two charts with different bar counts would
+  // clip the larger chart to the smaller's count: when fitContent()
+  // runs on the RSI chart after a fetch and RSI's logical range
+  // settles at {0, 64} (65 bars), syncing that logical range back to
+  // price clips price to its first 65 bars — which means the last
+  // ~14 bars of a 1-day intraday view disappear (the "last hour
+  // missing" symptom). Time ranges are absolute and immune to this.
   let syncing = false;
-  priceChart.timeScale().subscribeVisibleLogicalRangeChange((r) => {
+  priceChart.timeScale().subscribeVisibleTimeRangeChange((r) => {
     if (syncing || !r) return;
     syncing = true;
-    rsiChart.timeScale().setVisibleLogicalRange(r);
+    // Wrap in try/finally so a thrown error inside setVisibleRange
+    // (e.g. before the target chart has any data, or an out-of-range
+    // timestamp on edge cases) can't leave `syncing` stuck at true
+    // and silently freeze all subsequent sync attempts.
+    try { rsiChart.timeScale().setVisibleRange(r); } catch (e) {}
     syncing = false;
   });
-  rsiChart.timeScale().subscribeVisibleLogicalRangeChange((r) => {
+  rsiChart.timeScale().subscribeVisibleTimeRangeChange((r) => {
     if (syncing || !r) return;
     syncing = true;
-    priceChart.timeScale().setVisibleLogicalRange(r);
+    try { priceChart.timeScale().setVisibleRange(r); } catch (e) {}
     syncing = false;
   });
 
@@ -986,16 +1003,29 @@
       // stays as the user's *intent* ("Auto" or an explicit pick).
       setPickerDates(data.start, data.end);
 
-      candleSeries.setData(lastBars);
-      // Line series traces the closes — always visible, regardless of
-      // whether the candles render with usable bodies.
-      lineSeries.setData(lastBars.map(b => ({ time: b.time, value: b.close })));
-      volumeSeries.setData(lastBars.map(b => ({
-        time: b.time, value: b.volume || 0,
-        color: (b.close >= b.open ? "rgba(38, 166, 154, 0.45)"
-                                  : "rgba(239, 83, 80, 0.45)"),
-      })));
-      rsiSeries.setData(lastRsi);
+      // Suppress the price↔RSI sync subscriptions while we cascade
+      // setData across all four series. The first setData call
+      // (candleSeries) would otherwise fire the price-side sub and try
+      // to setVisibleRange on the RSI chart — which still has no data
+      // at that point, breaking the rest of this block. With `syncing`
+      // pinned to true, the subs no-op; we then let `fitContent()`
+      // below trigger a single, clean sync after all four series
+      // have their data in place.
+      syncing = true;
+      try {
+        candleSeries.setData(lastBars);
+        // Line series traces the closes — always visible, regardless of
+        // whether the candles render with usable bodies.
+        lineSeries.setData(lastBars.map(b => ({ time: b.time, value: b.close })));
+        volumeSeries.setData(lastBars.map(b => ({
+          time: b.time, value: b.volume || 0,
+          color: (b.close >= b.open ? "rgba(38, 166, 154, 0.45)"
+                                    : "rgba(239, 83, 80, 0.45)"),
+        })));
+        rsiSeries.setData(lastRsi);
+      } finally {
+        syncing = false;
+      }
       renderStats(lastStats);
       priceChart.timeScale().fitContent();
       rsiChart.timeScale().fitContent();
@@ -1499,14 +1529,23 @@
       // Per-day refs need the union too — pan-to-load-more added new
       // dates to the left/right edge.
       rebuildDayRefs();
-      candleSeries.setData(lastBars);
-      lineSeries.setData(lastBars.map(b => ({ time: b.time, value: b.close })));
-      volumeSeries.setData(lastBars.map(b => ({
-        time: b.time, value: b.volume || 0,
-        color: b.close >= b.open ? "rgba(38, 166, 154, 0.45)"
-                                  : "rgba(239, 83, 80, 0.45)",
-      })));
-      rsiSeries.setData(lastRsi);
+      // Same sync suppression as the main fetchAndRender block — see
+      // the comment there. Pan-to-load-more replaces all four series
+      // with the merged dataset, so we keep the sync subs quiet during
+      // the cascade and let fitContent re-establish a clean sync.
+      syncing = true;
+      try {
+        candleSeries.setData(lastBars);
+        lineSeries.setData(lastBars.map(b => ({ time: b.time, value: b.close })));
+        volumeSeries.setData(lastBars.map(b => ({
+          time: b.time, value: b.volume || 0,
+          color: b.close >= b.open ? "rgba(38, 166, 154, 0.45)"
+                                    : "rgba(239, 83, 80, 0.45)",
+        })));
+        rsiSeries.setData(lastRsi);
+      } finally {
+        syncing = false;
+      }
       // Update the form to reflect the now-broader loaded window so the
       // URL/share-state stays accurate.
       setPickerDates(

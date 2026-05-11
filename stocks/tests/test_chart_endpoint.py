@@ -400,6 +400,34 @@ def test_html_chart_rebuild_day_refs_tracks_high_low_close(chart_fixtures):
     assert "Math.min(curLo, b.low)" in body
 
 
+def test_html_chart_price_rsi_sync_uses_time_not_logical_range(chart_fixtures):
+    """Regression guard: the price↔RSI visible-range sync must use
+    *time* ranges, not *logical* (bar-index) ranges.
+
+    The RSI series skips warm-up bars where the indicator is NaN, so
+    RSI has fewer bars than price. Syncing logical ranges between two
+    charts with different bar counts clips the larger chart to the
+    smaller's count — manifesting as "the last hour of the intraday
+    chart disappears after switching presets back to Daily" because
+    fitContent() on the shorter RSI series propagates a {0, N-1}
+    logical range back to the longer price series.
+
+    Time-range sync is absolute (unix seconds) and immune to this.
+    Pin the API the template uses so a future refactor can't quietly
+    re-introduce the bar-index clipping."""
+    req = _MockRequest("NDX", query={"date": "2026-04-29"})
+    body = _run(handle_chart_html(req)).body.decode()
+    # The bug-prone APIs must NOT appear in the sync block.
+    # (They may legitimately appear elsewhere; we look for the
+    # specific call shapes used in the price↔RSI mirror.)
+    assert "rsiChart.timeScale().setVisibleLogicalRange" not in body
+    assert "priceChart.timeScale().setVisibleLogicalRange" not in body
+    # The fix uses time-range APIs.
+    assert "subscribeVisibleTimeRangeChange" in body
+    assert "rsiChart.timeScale().setVisibleRange(r)" in body
+    assert "priceChart.timeScale().setVisibleRange(r)" in body
+
+
 def test_api_chart_accepts_explicit_start_end(chart_fixtures):
     """Canonical range form: explicit `start` + `end` win over presets."""
     req = _MockRequest("NDX", query={
