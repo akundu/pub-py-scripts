@@ -283,7 +283,8 @@ dd {
     </nav>
     <div class="container">
     <h1 id="utp-voice-mobile-trading-interface">UTP Voice — Mobile Trading Interface</h1>
-<p>A mobile-friendly web app for trading credit spreads on SPX, NDX, and RUT from your phone. Sits in front of the UTP daemon, providing natural language commands, interactive options chain, spread analysis, and auto-trading.</p>
+<p>A mobile-friendly web app for trading credit spreads on SPX, NDX, and RUT from your phone. Sits in front of the UTP daemon, providing natural language commands via Claude API, an interactive options chain, spread analysis (Picks), portfolio management, and an automated trading engine.</p>
+<p><strong>File</strong>: <code>utp_voice.py</code> (5,329 lines) + <code>templates/utp_voice.html</code> (SPA frontend)</p>
 <h2 id="quick-start">Quick Start</h2>
 <div class="codehilite"><pre><span></span><code><span class="nb">cd</span><span class="w"> </span>live_trading/universal-trade-platform
 
@@ -291,15 +292,16 @@ dd {
 python<span class="w"> </span>utp_voice.py<span class="w"> </span>add-user<span class="w"> </span>myuser
 
 <span class="c1"># 2. Set environment variables</span>
-<span class="nb">export</span><span class="w"> </span><span class="nv">ANTHROPIC_API_KEY</span><span class="o">=</span><span class="s2">&quot;sk-ant-...&quot;</span><span class="w">     </span><span class="c1"># For chat/NL commands</span>
-<span class="nb">export</span><span class="w"> </span><span class="nv">UTP_VOICE_JWT_SECRET</span><span class="o">=</span><span class="s2">&quot;my-secret&quot;</span><span class="w">   </span><span class="c1"># Required for auth</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">ANTHROPIC_API_KEY</span><span class="o">=</span><span class="s2">&quot;sk-ant-...&quot;</span><span class="w">     </span><span class="c1"># For NL chat commands</span>
+<span class="nb">export</span><span class="w"> </span><span class="nv">UTP_VOICE_JWT_SECRET</span><span class="o">=</span><span class="s2">&quot;my-secret&quot;</span><span class="w">   </span><span class="c1"># Required (any random string)</span>
 
-<span class="c1"># 3. Start (make sure UTP daemon is already running)</span>
+<span class="c1"># 3. Start (make sure UTP daemon is already running on port 8000)</span>
 python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve
-python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span class="w"> </span>--public<span class="w">       </span><span class="c1"># Allow anonymous access to options/picks</span>
-python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span class="w"> </span>--workers<span class="w"> </span><span class="m">4</span><span class="w">    </span><span class="c1"># Multi-process</span>
+python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span class="w"> </span>--public<span class="w">        </span><span class="c1"># Anonymous access to options/picks</span>
+python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span class="w"> </span>--workers<span class="w"> </span><span class="m">4</span><span class="w">     </span><span class="c1"># Multi-process (more CPU cores)</span>
+python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span class="w"> </span>--cache<span class="w">         </span><span class="c1"># Enable Redis option/quote cache</span>
 
-<span class="c1"># 4. Open http://localhost:8800</span>
+<span class="c1"># 4. Open http://localhost:8800 in a browser or on your phone</span>
 </code></pre></div>
 
 <h2 id="features">Features</h2>
@@ -316,12 +318,12 @@ python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span cla
 <tr>
 <td><strong>Options</strong></td>
 <td>No (with <code>--public</code>)</td>
-<td>Interactive options chain with calls/puts, bid/ask, greeks (δ/θ/IV), percentiles (empirical + predicted), click-to-trade order builder</td>
+<td>Interactive options chain with calls/puts, bid/ask, greeks (δ/θ/IV), empirical+predicted percentiles, click-to-trade order builder</td>
 </tr>
 <tr>
 <td><strong>Picks</strong></td>
 <td>No (with <code>--public</code>)</td>
-<td>Auto-analyzed best credit spreads ranked by ROI with filters for ROI%, OTM%, width, delta, percentile, total credit, max loss. Near-miss rows shown when filters are strict.</td>
+<td>Auto-analyzed best credit spreads ranked by ROI with filter controls. Near-miss rows shown when filters are strict.</td>
 </tr>
 <tr>
 <td><strong>Portfolio</strong></td>
@@ -331,7 +333,7 @@ python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span cla
 <tr>
 <td><strong>Chat</strong></td>
 <td>Yes</td>
-<td>Natural language trading via Claude API with tool-calling agent. Voice input via Web Speech API.</td>
+<td>Natural language trading via Claude API with tool-calling agent. Voice input via Web Speech API on mobile.</td>
 </tr>
 </tbody>
 </table>
@@ -347,19 +349,18 @@ python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span cla
 </ul>
 <h3 id="picks-spread-scanner">Picks (Spread Scanner)</h3>
 <ul>
-<li><strong>Client-side computation</strong>: Scans all strike pairs locally from cached chain data (no server round-trip)</li>
+<li><strong>Client-side computation</strong>: Scans all strike pairs locally from cached chain data — no extra server round-trip</li>
 <li><strong>Filters</strong>: Min ROI%, Min OTM%, Width (per symbol or custom), Option Type, Min Percentile (empirical), Min Predicted Percentile, Max Delta, Quantity, Min Total Credit, Max Total Loss</li>
 <li><strong>DTE selector</strong>: 0DTE, 1DTE, 2DTE, 5DTE — data pre-fetched in background</li>
-<li><strong>Near-miss rows</strong>: When fewer than 10 spreads pass filters, shows the closest-to-matching rows in grey with failure tags</li>
+<li><strong>Near-miss rows</strong>: When fewer than 10 spreads pass filters, shows closest-to-matching rows in grey with failure tags</li>
 <li><strong>Per-contract + total</strong>: Credit and max loss shown both per-contract and total (× qty)</li>
 <li><strong>Percentile data</strong>: Empirical (from range_percentiles) and predicted (from predictions model) shown per spread</li>
-<li><strong>Auto-trade</strong>: Start automated execution of top N spreads per interval</li>
 </ul>
 <h3 id="portfolio">Portfolio</h3>
 <ul>
 <li><strong>KPI strip</strong>: Net Liquidation, Buying Power, Unrealized P&amp;L, Realized P&amp;L</li>
 <li><strong>Position table</strong>: Symbol, Strikes, Qty, Cost, Value, P&amp;L, Cr/ROI/MaxLoss, Expiration, Breach Risk</li>
-<li><strong>Position detail card</strong> (tap to expand): Entry info (time, cost, credit), Current (mark, value, unrealized, daily P&amp;L, P&amp;L vs risk%, time in position), Risk (breach distance, DTE, max loss, ROI)</li>
+<li><strong>Position detail card</strong> (tap to expand): Entry info (time, cost, credit), Current (mark, value, unrealized, daily P&amp;L, time in position), Risk (breach distance, DTE, max loss, ROI)</li>
 <li><strong>Actions</strong>: Close (MARKET/LIMIT, partial quantity), Buy More (equities or spreads)</li>
 <li><strong>Flush + Hard Reset</strong>: Flush re-syncs from broker. Hard reset clears all local data (with confirmation modal).</li>
 <li><strong>Recent closed</strong>: Last 5 closed positions with P&amp;L</li>
@@ -367,27 +368,126 @@ python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span cla
 <h3 id="chat-natural-language">Chat (Natural Language)</h3>
 <ul>
 <li><strong>Voice input</strong>: Web Speech API (tap mic button on mobile Safari/Chrome)</li>
-<li><strong>Claude agent</strong>: Tool-calling with 10 tools (get_portfolio, get_quote, get_options, execute_trade, close_position, etc.)</li>
-<li><strong>Read-only by default</strong>: Queries execute immediately, trades show confirmation card with Execute/Edit/Cancel</li>
-<li><strong>Multi-step workflows</strong>: "find best ROI spread for RUT" → quote → options → analysis → suggest</li>
+<li><strong>Claude agent</strong>: <code>claude-sonnet-4-20250514</code> (configurable via <code>UTP_VOICE_MODEL</code>) with 10 tool definitions, max 10 iterations per agent loop</li>
+<li><strong>Read-only by default</strong>: Queries (portfolio, quotes, options, history) execute immediately</li>
+<li><strong>Write confirmation flow</strong>: Any WRITE tool (execute_trade, close_position, cancel_order, reconcile_flush) creates a <code>PendingAction</code> with a 5-minute expiry, shown to user as a confirmation card with Execute/Edit/Cancel</li>
+<li><strong>Multi-step workflows</strong>: "find best ROI spread for RUT" → quote → options → analysis → suggest trade</li>
+<li><strong>System context</strong>: Includes today's date, default widths (SPX=20, NDX=50, RUT=20), typical quantity (25-45 contracts)</li>
 </ul>
+<p><strong>10 agent tools (READ + WRITE)</strong>:</p>
+<table>
+<thead>
+<tr>
+<th>Tool</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>get_portfolio</code></td>
+<td>READ</td>
+<td>Current positions, P&amp;L, balances</td>
+</tr>
+<tr>
+<td><code>get_quote</code></td>
+<td>READ</td>
+<td>Real-time quote for any symbol</td>
+</tr>
+<tr>
+<td><code>get_options</code></td>
+<td>READ</td>
+<td>Option chain data with bid/ask/greeks</td>
+</tr>
+<tr>
+<td><code>get_trades</code></td>
+<td>READ</td>
+<td>Trade history (today or by days)</td>
+</tr>
+<tr>
+<td><code>get_orders</code></td>
+<td>READ</td>
+<td>Open/working orders</td>
+</tr>
+<tr>
+<td><code>get_performance</code></td>
+<td>READ</td>
+<td>Win rate, Sharpe, drawdown, profit factor</td>
+</tr>
+<tr>
+<td><code>execute_trade</code></td>
+<td>WRITE</td>
+<td>Execute credit-spread/debit-spread/equity/iron-condor/single-option</td>
+</tr>
+<tr>
+<td><code>close_position</code></td>
+<td>WRITE</td>
+<td>Close position by ID (full or partial, MARKET/LIMIT)</td>
+</tr>
+<tr>
+<td><code>cancel_order</code></td>
+<td>WRITE</td>
+<td>Cancel open order</td>
+</tr>
+<tr>
+<td><code>reconcile_flush</code></td>
+<td>WRITE</td>
+<td>Flush local state and re-sync from broker</td>
+</tr>
+</tbody>
+</table>
 <h3 id="auto-trading">Auto-Trading</h3>
-<ul>
-<li><strong>Configure</strong>: Top N (default 3), interval (default 3 min), end time (default 12:00 ET), cooldown (default 10 min), fallback re-buy (default 15 min)</li>
-<li><strong>Execution</strong>: Server-side <code>compute_spreads_server()</code> evaluates all tickers, picks top N by ROI, executes at MARKET</li>
-<li><strong>Safety</strong>: Market hours only (9:30-3:50 ET), dedup by strike+type+exp with configurable cooldown, state persisted to JSON (survives restarts)</li>
-<li><strong>Monitoring</strong>: Status banner shows executed count, next eval time, stop button always visible</li>
-</ul>
+<p>Two auto-trade systems coexist:</p>
+<p><strong>1. Simple Auto-Trade</strong> (<code>/api/auto-trade/*</code>) — legacy polling loop
+- Configure: Top N (default 3), interval (default 3 min), end time (default 12:00 ET), cooldown (default 10 min), fallback re-buy (default 15 min)
+- Execution: <code>compute_spreads_server()</code> evaluates all tickers, picks top N by ROI, executes at MARKET
+- Safety: Market hours only (9:30-3:50 ET), dedup by strike+type+exp with configurable cooldown
+- State persisted to <code>data/utp_voice/auto_trade_state.json</code> (survives restarts)
+- History: <code>data/utp_voice/auto_trade_history.jsonl</code></p>
+<p><strong>2. Auto-Trader Engine</strong> (<code>/api/auto-trader/*</code>) — DTE-aware, multi-expiration, research-optimized
+- Three modes: historical sim (from CSV via sim daemon), shadow live (real prices, fake fills), live trading
+- Default config (optimized from 162-combo sweep, Mar-Apr 2026):
+  - tickers: SPX, RUT; option_types: put; dte: [0, 1, 2]
+  - min_otm_pct: 1.5%, spread_width: 15, num_contracts: 10, min_credit: 0.25
+  - entry window: 09:30-10:30 ET, max_trades: 5, max_loss_per_day: $75K
+  - profit_target: 50%, stop_loss: 2× credit; diversity_enabled: True
+- Diversity scoring: penalizes same ticker/type (-25/-15), same DTE (-10), overlapping strikes (-15); rewards new tickers (+10), new DTEs (+5)
+- <code>val_score = (total_pnl / peak_risk) × win_rate × min(profit_factor, 5) / 5</code>
+- Carries positions across days for multi-DTE (DTE 1/2 positions don't expire same day)</p>
 <h3 id="trade-logging">Trade Logging</h3>
 <p>Every trade (manual or auto) is logged to <code>data/utp_voice/trades.csv</code> with 28 fields:
 timestamp, symbol, trade_type, option_type, strikes, width, qty, expiration, DTE, credit, max_loss, ROI, OTM%, current_price, hist_percentile, pred_percentile, delta, theta, IV, order_id, fill_price, slippage, source.</p>
-<p>Download: <code>GET /api/trades/export</code></p>
+<p>Real fills only (no stub/test provider, no dry-run). Download: <code>GET /api/trades/export</code></p>
+<h2 id="architecture">Architecture</h2>
+<div class="codehilite"><pre><span></span><code><span class="n">Browser</span><span class="o">/</span><span class="n">Phone</span>
+<span class="w">    </span><span class="err">│</span>
+<span class="w">    </span><span class="err">├──</span><span class="w"> </span><span class="n">HTTP</span><span class="w"> </span><span class="n">REST</span><span class="w"> </span><span class="err">→</span><span class="w"> </span><span class="n">FastAPI</span><span class="w"> </span><span class="p">(</span><span class="n">utp_voice</span><span class="o">.</span><span class="n">py</span><span class="w"> </span><span class="n">on</span><span class="w"> </span><span class="n">port</span><span class="w"> </span><span class="mi">8800</span><span class="p">)</span>
+<span class="w">    </span><span class="err">│</span><span class="w">       </span><span class="err">│</span>
+<span class="w">    </span><span class="err">│</span><span class="w">       </span><span class="err">├──</span><span class="w"> </span><span class="n">Claude</span><span class="w"> </span><span class="n">Agent</span><span class="w"> </span><span class="p">(</span><span class="n">NL</span><span class="w"> </span><span class="n">chat</span><span class="p">)</span><span class="w"> </span><span class="err">→</span><span class="w"> </span><span class="n">UTPDaemonClient</span><span class="w"> </span><span class="err">→</span><span class="w"> </span><span class="n">UTP</span><span class="w"> </span><span class="n">daemon</span><span class="w"> </span><span class="p">(</span><span class="n">port</span><span class="w"> </span><span class="mi">8000</span><span class="p">)</span>
+<span class="w">    </span><span class="err">│</span><span class="w">       </span><span class="err">│</span><span class="w">                                                    </span><span class="err">└──</span><span class="w"> </span><span class="n">IBKR</span>
+<span class="w">    </span><span class="err">│</span><span class="w">       </span><span class="err">├──</span><span class="w"> </span><span class="n">Options</span><span class="w"> </span><span class="n">Grid</span><span class="w"> </span><span class="o">/</span><span class="w"> </span><span class="n">Picks</span><span class="w"> </span><span class="err">→</span><span class="w"> </span><span class="n">UTPDaemonClient</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">CSV</span><span class="w"> </span><span class="n">exports</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">Redis</span><span class="w"> </span><span class="n">cache</span>
+<span class="w">    </span><span class="err">│</span><span class="w">       </span><span class="err">├──</span><span class="w"> </span><span class="n">Portfolio</span><span class="w"> </span><span class="err">→</span><span class="w"> </span><span class="n">UTPDaemonClient</span>
+<span class="w">    </span><span class="err">│</span><span class="w">       </span><span class="err">├──</span><span class="w"> </span><span class="n">Auto</span><span class="o">-</span><span class="n">Trader</span><span class="w"> </span><span class="n">Engine</span><span class="w"> </span><span class="err">→</span><span class="w"> </span><span class="n">UTPDaemonClient</span><span class="w"> </span><span class="p">(</span><span class="n">sim</span><span class="o">/</span><span class="n">live</span><span class="o">/</span><span class="n">shadow</span><span class="p">)</span>
+<span class="w">    </span><span class="err">│</span><span class="w">       </span><span class="err">└──</span><span class="w"> </span><span class="n">Roll</span><span class="o">/</span><span class="n">Profit</span><span class="w"> </span><span class="n">targets</span><span class="w"> </span><span class="err">→</span><span class="w"> </span><span class="n">UTPDaemonClient</span><span class="w"> </span><span class="n">proxy</span>
+<span class="w">    </span><span class="err">│</span>
+<span class="w">    </span><span class="err">└──</span><span class="w"> </span><span class="n">WebSocket</span><span class="w"> </span><span class="o">/</span><span class="n">ws</span><span class="o">/</span><span class="n">prices</span><span class="w"> </span><span class="err">→</span><span class="w"> </span><span class="n">realtime</span><span class="w"> </span><span class="n">price</span><span class="w"> </span><span class="n">relay</span><span class="w"> </span><span class="n">from</span><span class="w"> </span><span class="n">db_server</span><span class="w"> </span><span class="p">(</span><span class="n">port</span><span class="w"> </span><span class="mi">9102</span><span class="o">/</span><span class="n">ws</span><span class="p">)</span>
+</code></pre></div>
+
+<p><strong>Key components:</strong>
+- <code>UTPDaemonClient</code> — async httpx client to UTP daemon; singleton via <code>get_daemon_client()</code>
+- <code>PendingAction</code> — 5-min expiry confirmation, persisted to Redis (<code>utp:voice:confirm:</code> prefix)
+- <code>compute_spreads_server()</code> — server-side spread ROI computation from raw option chain
+- <code>_ws_relay_loop()</code> — WebSocket relay: connects to db_server per-ticker, relays ticks to browser clients
+- <code>_auto_trade_loop()</code> — simple auto-trade background task
+- <code>_run_sim_day()</code> / <code>_run_sim_range()</code> — auto-trader engine (batch)
+- <code>_run_sim_day_streaming()</code> — auto-trader engine with SSE tick stream
+- <code>_run_shadow_loop()</code> / <code>_engine_live_loop()</code> — live/shadow background tasks</p>
 <h2 id="authentication">Authentication</h2>
 <ul>
 <li><strong>Default mode</strong>: All endpoints require login</li>
-<li><strong>Public mode</strong> (<code>--public</code>): Options, Picks, quotes, percentiles accessible without login. Portfolio, Chat, trading require login.</li>
-<li><strong>Credentials</strong>: bcrypt-hashed passwords in <code>data/utp_voice/credentials.json</code></li>
-<li><strong>Sessions</strong>: JWT httponly cookies, 8-hour expiry</li>
+<li><strong>Public mode</strong> (<code>--public</code>): Options, Picks, quotes, percentiles, prev-closes accessible without login. Portfolio, Chat, trading require login.</li>
+<li><strong>Credentials</strong>: bcrypt-hashed passwords in <code>data/utp_voice/credentials.json</code> (add with <code>add-user</code>)</li>
+<li><strong>Sessions</strong>: JWT httponly cookies (<code>utp_voice_session</code>), HS256, 7-day expiry (10080 min default)</li>
 <li><strong>URL routing</strong>: Hash-based (<code>/#/options?sym=RUT&amp;exp=2026-04-07</code>), bookmarkable</li>
 </ul>
 <h2 id="data-sources">Data Sources</h2>
@@ -406,30 +506,80 @@ timestamp, symbol, trade_type, option_type, strikes, width, qty, expiration, DTE
 <td>Real-time during market hours</td>
 </tr>
 <tr>
-<td>QuestDB (<code>db_server</code>)</td>
-<td>Equity prices batch</td>
+<td>QuestDB (<code>db_server</code> port 9102)</td>
+<td>Equity prices, daily closes, prev-closes</td>
 <td>~5 second updates</td>
 </tr>
 <tr>
-<td>CSV exports</td>
+<td>CSV exports (<code>csv_exports/options/</code>)</td>
 <td>Option snapshots (Polygon.io)</td>
-<td>Hours/days old, used when market closed</td>
+<td>Hours/days old, used as fallback or when market closed</td>
 </tr>
 <tr>
 <td>Percentile server (<code>:9100</code>)</td>
 <td>Empirical range percentiles</td>
-<td>120s cache</td>
+<td>300s market / 3600s closed cache</td>
 </tr>
 <tr>
 <td>Prediction server (<code>:9100</code>)</td>
 <td>Model-based price bands</td>
-<td>120s cache</td>
+<td>120s market / 3600s closed cache</td>
 </tr>
 </tbody>
 </table>
-<p>See <a href="data_fetching.html">data_fetching.md</a> and <a href="utp_voice_timing.html">utp_voice_timing.md</a> for complete timing and caching details.</p>
+<p><strong>Percentile server resolution</strong>: Tries <code>lin1.kundu.dev:9100</code> first, falls back to <code>localhost:9100</code>. Custom URLs via <code>PERCENTILE_SERVER_URL</code> bypass the fallback.</p>
+<p>See <a href="data_fetching.html">data_fetching.md</a> and <a href="utp_voice_timing.html">utp_voice_timing.md</a> for complete timing details.</p>
+<h2 id="redis-cache">Redis Cache</h2>
+<p>Enabled via <code>--cache</code> flag (default: off, pure proxy mode). When enabled:</p>
+<table>
+<thead>
+<tr>
+<th>Cache</th>
+<th>Key pattern</th>
+<th>TTL market / closed</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Quotes</td>
+<td><code>utp:voice:quote:{SYM}</code></td>
+<td>10s / 60s</td>
+</tr>
+<tr>
+<td>Option chains</td>
+<td><code>utp:voice:options:{SYM}:{EXP}:{TYPE}</code></td>
+<td>90s / 3600s</td>
+</tr>
+<tr>
+<td>Expirations</td>
+<td><code>utp:voice:exps:{SYM}</code></td>
+<td>90s / 3600s</td>
+</tr>
+<tr>
+<td>Pending confirmations</td>
+<td><code>utp:voice:confirm:{id}</code></td>
+<td>300s (fixed)</td>
+</tr>
+<tr>
+<td>Prev closes</td>
+<td><code>utp:voice:prev_closes</code></td>
+<td>300s / 3600s</td>
+</tr>
+<tr>
+<td>Percentiles</td>
+<td><code>utp:voice:percentiles</code></td>
+<td>300s / 3600s</td>
+</tr>
+<tr>
+<td>Predictions</td>
+<td><code>utp:voice:predictions</code></td>
+<td>120s / 3600s</td>
+</tr>
+</tbody>
+</table>
+<p>Two-phase option prefetch: CSV loaded instantly (disk), IBKR data fetched as a background task to upgrade CSV entries.</p>
 <h2 id="api-endpoints">API Endpoints</h2>
-<h3 id="public-with-public-flag">Public (with <code>--public</code> flag)</h3>
+<h3 id="public-accessible-without-login-when-public-is-set">Public (accessible without login when <code>--public</code> is set)</h3>
 <table>
 <thead>
 <tr>
@@ -440,27 +590,35 @@ timestamp, symbol, trade_type, option_type, strikes, width, qty, expiration, DTE
 <tbody>
 <tr>
 <td><code>GET /api/options-grid</code></td>
-<td>Option chain with strike range, expirations, quotes</td>
+<td>Option chain with strikes, bid/ask, greeks, merge-meta</td>
 </tr>
 <tr>
 <td><code>GET /api/quotes</code></td>
-<td>Multi-symbol equity quotes</td>
+<td>Multi-symbol equity quotes (concurrent fetch)</td>
 </tr>
 <tr>
 <td><code>GET /api/percentiles</code></td>
-<td>Empirical range percentiles</td>
+<td>Empirical range percentiles (proxied to <code>:9100</code>)</td>
 </tr>
 <tr>
 <td><code>GET /api/predictions</code></td>
-<td>Model-based predicted bands</td>
+<td>Model-based predicted bands (proxied to <code>:9100</code>)</td>
+</tr>
+<tr>
+<td><code>GET /api/prev-closes</code></td>
+<td>Last 2 closes per symbol from QuestDB</td>
 </tr>
 <tr>
 <td><code>GET /api/prefetch</code></td>
-<td>Trigger background data prefetch</td>
+<td>Trigger background option data prefetch</td>
 </tr>
 <tr>
 <td><code>GET /api/health</code></td>
 <td>Daemon connectivity status</td>
+</tr>
+<tr>
+<td><code>GET /</code></td>
+<td>SPA HTML (login page → tabs)</td>
 </tr>
 </tbody>
 </table>
@@ -474,40 +632,179 @@ timestamp, symbol, trade_type, option_type, strikes, width, qty, expiration, DTE
 </thead>
 <tbody>
 <tr>
+<td><code>POST /api/login</code></td>
+<td>Authenticate with username/password → JWT cookie</td>
+</tr>
+<tr>
+<td><code>POST /api/logout</code></td>
+<td>Clear session cookie</td>
+</tr>
+<tr>
+<td><code>GET /api/auth-check</code></td>
+<td>Verify session validity</td>
+</tr>
+<tr>
 <td><code>GET /api/portfolio</code></td>
-<td>Portfolio with breach status + quotes</td>
+<td>Portfolio with spread metrics, breach status, balances</td>
 </tr>
 <tr>
 <td><code>POST /api/chat</code></td>
-<td>Natural language via Claude agent</td>
+<td>Natural language command via Claude agent</td>
 </tr>
 <tr>
 <td><code>POST /api/confirm/{id}</code></td>
-<td>Execute a pending trade</td>
+<td>Execute a pending write action</td>
 </tr>
 <tr>
 <td><code>POST /api/quick-trade</code></td>
-<td>Create trade confirmation from grid/picks</td>
+<td>Create pending confirmation from options grid</td>
 </tr>
 <tr>
 <td><code>POST /api/execute-raw</code></td>
-<td>Forward raw request to daemon</td>
+<td>Forward raw trade payload to daemon</td>
 </tr>
 <tr>
 <td><code>GET /api/trades/export</code></td>
 <td>Download trades CSV</td>
 </tr>
 <tr>
+<td><code>GET /api/trades/list</code></td>
+<td>Paginated trade list (CSV + daemon positions merged)</td>
+</tr>
+<tr>
+<td><code>GET /api/performance-summary</code></td>
+<td>Performance metrics (proxied to daemon)</td>
+</tr>
+<tr>
+<td><code>GET /api/position-limits</code></td>
+<td>Check MAX_OPEN_POSITIONS / MAX_DAILY_TRADES</td>
+</tr>
+<tr>
+<td><code>GET /api/profit-targets</code></td>
+<td>List active profit targets (proxied to daemon)</td>
+</tr>
+<tr>
+<td><code>PUT /api/profit-targets/{id}</code></td>
+<td>Update profit target %</td>
+</tr>
+<tr>
+<td><code>POST /api/daemon-close</code></td>
+<td>Close daemon position by ID (for CLI-placed positions)</td>
+</tr>
+<tr>
+<td><code>GET /api/roll/suggestions</code></td>
+<td>Proxy to daemon GET /roll/suggestions</td>
+</tr>
+<tr>
+<td><code>POST /api/roll/execute/{id}</code></td>
+<td>Proxy to daemon POST /roll/execute/{id}</td>
+</tr>
+<tr>
+<td><code>POST /api/roll/dismiss/{id}</code></td>
+<td>Proxy to daemon POST /roll/dismiss/{id}</td>
+</tr>
+<tr>
 <td><code>POST /api/auto-trade/start</code></td>
-<td>Start auto-trading</td>
+<td>Start simple auto-trading</td>
 </tr>
 <tr>
 <td><code>POST /api/auto-trade/stop</code></td>
-<td>Stop auto-trading</td>
+<td>Stop simple auto-trading</td>
 </tr>
 <tr>
 <td><code>GET /api/auto-trade/status</code></td>
-<td>Auto-trade state</td>
+<td>Simple auto-trade state</td>
+</tr>
+<tr>
+<td><code>GET /api/auto-trade/history</code></td>
+<td>Session history (paged)</td>
+</tr>
+</tbody>
+</table>
+<h3 id="auto-trader-engine-endpoints">Auto-Trader Engine Endpoints</h3>
+<table>
+<thead>
+<tr>
+<th>Endpoint</th>
+<th>Auth</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>GET /api/auto-trader/config</code></td>
+<td>Public</td>
+<td>Get current engine config</td>
+</tr>
+<tr>
+<td><code>POST /api/auto-trader/config</code></td>
+<td>Public</td>
+<td>Merge-update engine config</td>
+</tr>
+<tr>
+<td><code>POST /api/auto-trader/run-day</code></td>
+<td>Public</td>
+<td>Run one sim day (blocking)</td>
+</tr>
+<tr>
+<td><code>POST /api/auto-trader/run-range</code></td>
+<td>Public</td>
+<td>Run date range (blocking)</td>
+</tr>
+<tr>
+<td><code>GET/POST /api/auto-trader/run-day-stream</code></td>
+<td>Public</td>
+<td>Run sim day with SSE stream</td>
+</tr>
+<tr>
+<td><code>POST /api/auto-trader/start-live</code></td>
+<td>Public</td>
+<td>Start live trading loop</td>
+</tr>
+<tr>
+<td><code>POST /api/auto-trader/stop-live</code></td>
+<td>Public</td>
+<td>Stop live trading loop</td>
+</tr>
+<tr>
+<td><code>GET /api/auto-trader/live-stream</code></td>
+<td>Public</td>
+<td>SSE stream of live events</td>
+</tr>
+<tr>
+<td><code>POST /api/auto-trader/start-shadow</code></td>
+<td>Public</td>
+<td>Start shadow mode (no real fills)</td>
+</tr>
+<tr>
+<td><code>POST /api/auto-trader/stop-shadow</code></td>
+<td>Public</td>
+<td>Stop shadow mode</td>
+</tr>
+<tr>
+<td><code>GET /api/auto-trader/shadow-stream</code></td>
+<td>Public</td>
+<td>SSE stream of shadow events</td>
+</tr>
+<tr>
+<td><code>GET /api/auto-trader/shadow-positions</code></td>
+<td>Public</td>
+<td>Shadow portfolio</td>
+</tr>
+</tbody>
+</table>
+<h3 id="websocket">WebSocket</h3>
+<table>
+<thead>
+<tr>
+<th>Endpoint</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>/ws/prices</code></td>
+<td>Realtime price ticks relayed from db_server WebSocket</td>
 </tr>
 </tbody>
 </table>
@@ -515,12 +812,18 @@ timestamp, symbol, trade_type, option_type, strikes, width, qty, expiration, DTE
 <div class="codehilite"><pre><span></span><code>python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span class="w">                    </span><span class="c1"># Start server (default port 8800)</span>
 python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span class="w"> </span>--public<span class="w">           </span><span class="c1"># Anonymous access to options/picks</span>
 python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span class="w"> </span>--port<span class="w"> </span><span class="m">9000</span><span class="w">        </span><span class="c1"># Custom port</span>
-python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span class="w"> </span>--workers<span class="w"> </span><span class="m">4</span><span class="w">        </span><span class="c1"># Multi-process</span>
-python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span class="w"> </span>--daemon-url<span class="w"> </span>http://host:8000<span class="w">  </span><span class="c1"># Custom daemon</span>
+python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span class="w"> </span>--workers<span class="w"> </span><span class="m">4</span><span class="w">        </span><span class="c1"># Multi-process (2-4 recommended)</span>
+python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span class="w"> </span>--daemon-url<span class="w"> </span>http://host:8000<span class="w">   </span><span class="c1"># Custom daemon</span>
+python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span class="w"> </span>--cache<span class="w">            </span><span class="c1"># Enable Redis caching</span>
+python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span class="w"> </span>--max-open-positions<span class="w"> </span><span class="m">20</span><span class="w">         </span><span class="c1"># Position limit (default 10)</span>
+python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span class="w"> </span>--max-daily-trades<span class="w"> </span><span class="m">50</span><span class="w">           </span><span class="c1"># Daily trade limit (default 20)</span>
+python<span class="w"> </span>utp_voice.py<span class="w"> </span>serve<span class="w"> </span>--log-level<span class="w"> </span>debug<span class="w">  </span><span class="c1"># Verbose logging</span>
 python<span class="w"> </span>utp_voice.py<span class="w"> </span>add-user<span class="w"> </span>&lt;username&gt;<span class="w">      </span><span class="c1"># Add/update user credentials</span>
 python<span class="w"> </span>utp_voice.py<span class="w"> </span>list-users<span class="w">               </span><span class="c1"># List configured users</span>
 </code></pre></div>
 
+<h3 id="auto-restart-behavior">Auto-Restart Behavior</h3>
+<p>The server auto-restarts on crashes (max 50 restarts, backoff 2s base → 30s max). Ctrl-C exits cleanly; a second Ctrl-C within 3s force-kills. Non-zero exit codes trigger restart; clean exit (code 0) does not.</p>
 <h2 id="environment-variables">Environment Variables</h2>
 <table>
 <thead>
@@ -549,32 +852,79 @@ python<span class="w"> </span>utp_voice.py<span class="w"> </span>list-users<spa
 <tr>
 <td><code>UTP_VOICE_JWT_SECRET</code></td>
 <td>(required)</td>
-<td>JWT signing secret</td>
+<td>JWT signing secret — any random string</td>
 </tr>
 <tr>
 <td><code>UTP_VOICE_JWT_EXPIRE_MINUTES</code></td>
-<td><code>480</code></td>
-<td>Session duration (8 hours)</td>
+<td><code>10080</code></td>
+<td>Session duration (default 7 days)</td>
 </tr>
 <tr>
 <td><code>UTP_VOICE_CREDENTIALS_FILE</code></td>
 <td><code>data/utp_voice/credentials.json</code></td>
-<td>Credentials file path</td>
+<td>bcrypt credentials file</td>
+</tr>
+<tr>
+<td><code>UTP_VOICE_MODEL</code></td>
+<td><code>claude-sonnet-4-20250514</code></td>
+<td>Claude model for NL agent</td>
+</tr>
+<tr>
+<td><code>DB_SERVER_URL</code></td>
+<td><code>http://localhost:9102</code></td>
+<td>QuestDB/db_server HTTP URL (prev-closes)</td>
+</tr>
+<tr>
+<td><code>DB_SERVER_WS_URL</code></td>
+<td>derived from DB_SERVER_URL + <code>/ws</code></td>
+<td>db_server WebSocket for price relay</td>
+</tr>
+<tr>
+<td><code>PERCENTILE_SERVER_URL</code></td>
+<td><code>http://lin1.kundu.dev:9100</code></td>
+<td>Percentile/prediction server</td>
 </tr>
 <tr>
 <td><code>CSV_EXPORTS_DIR</code></td>
 <td><code>../../csv_exports/options</code></td>
-<td>CSV option data directory</td>
+<td>CSV option data directory (fallback)</td>
 </tr>
 <tr>
-<td><code>PERCENTILE_SERVER_URL</code></td>
-<td><code>http://localhost:9100</code></td>
-<td>Percentile/prediction server</td>
+<td><code>MAX_OPEN_POSITIONS</code></td>
+<td><code>100</code> (env) / <code>10</code> (CLI)</td>
+<td>Max concurrent open positions</td>
 </tr>
 <tr>
-<td><code>DB_SERVER_URL</code></td>
-<td><code>http://localhost:8080</code></td>
-<td>QuestDB server for equity prices</td>
+<td><code>MAX_DAILY_TRADES</code></td>
+<td><code>20</code></td>
+<td>Max new trades per calendar day</td>
+</tr>
+</tbody>
+</table>
+<h2 id="persistence-files">Persistence Files</h2>
+<table>
+<thead>
+<tr>
+<th>File</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>data/utp_voice/credentials.json</code></td>
+<td>bcrypt-hashed user credentials</td>
+</tr>
+<tr>
+<td><code>data/utp_voice/trades.csv</code></td>
+<td>All executed trades (28 columns, append-only)</td>
+</tr>
+<tr>
+<td><code>data/utp_voice/auto_trade_state.json</code></td>
+<td>Simple auto-trade current session state</td>
+</tr>
+<tr>
+<td><code>data/utp_voice/auto_trade_history.jsonl</code></td>
+<td>Completed simple auto-trade sessions</td>
 </tr>
 </tbody>
 </table>
@@ -590,18 +940,13 @@ python<span class="w"> </span>utp_voice.py<span class="w"> </span>list-users<spa
 <tbody>
 <tr>
 <td><code>utp_voice.py</code></td>
-<td>~2,800</td>
-<td>Backend: FastAPI server, Claude agent, auto-trade, CSV logger</td>
+<td>5,329</td>
+<td>Backend: FastAPI server, Claude agent, auto-trader engine, WebSocket relay, CSV logger</td>
 </tr>
 <tr>
 <td><code>templates/utp_voice.html</code></td>
 <td>~2,700</td>
 <td>Frontend: SPA with 4 tabs, all JS/CSS inline</td>
-</tr>
-<tr>
-<td><code>tests/test_utp_voice.py</code></td>
-<td>~1,300</td>
-<td>105 tests</td>
 </tr>
 <tr>
 <td><code>docs/utp_voice.md</code></td>
@@ -620,6 +965,13 @@ python<span class="w"> </span>utp_voice.py<span class="w"> </span>list-users<spa
 </tr>
 </tbody>
 </table>
+<h2 id="see-also">See Also</h2>
+<ul>
+<li><code>sim_trader.py</code> — CLI client for the auto-trader engine (sim/shadow/live modes)</li>
+<li><code>run_auto_research.py</code> — parameter sweep for engine optimization</li>
+<li><a href="../CLAUDE.html">CLAUDE.md</a> "Auto-Trader Engine" section — CLI usage for <code>sim_trader.py</code></li>
+<li><a href="utp_voice_timing.html">utp_voice_timing.md</a> — complete cache timing reference</li>
+</ul>
     <div class="footer">
         Universal Trade Platform Documentation — Generated from Markdown sources in <code>docs/</code>
     </div>

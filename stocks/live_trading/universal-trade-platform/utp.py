@@ -8194,8 +8194,9 @@ async def _cmd_watchdog_http(args, server: str) -> int:
     action = getattr(args, "watchdog_action", None)
 
     async with httpx.AsyncClient(base_url=server, timeout=30.0) as client:
-        if action in ("suggestions", "suggest", "sg", None):
-            pos_id = getattr(args, "position_id", None)
+        if action in ("suggestions", "suggest", "sg", None, "review", "rv"):
+            pos_id  = getattr(args, "position_id", None)
+            verbose = getattr(args, "verbose", False)
             url = "/watchdog/suggestions"
             if pos_id:
                 url = f"{url}?position_id={pos_id}"
@@ -8204,7 +8205,14 @@ async def _cmd_watchdog_http(args, server: str) -> int:
                 print(f"  Error: {resp.status_code} {resp.text}")
                 return 1
             suggestions = resp.json()
-            _print_watchdog_suggestions(suggestions)
+            # Default (no subcommand) and "review" → rich dashboard view
+            # Named "suggestions" → compact table (original behaviour)
+            if action in (None, "review", "rv"):
+                status_resp = await client.get("/watchdog/status")
+                wstatus = status_resp.json() if status_resp.status_code == 200 else {}
+                _print_watchdog_review(suggestions, wstatus, verbose=verbose)
+            else:
+                _print_watchdog_suggestions(suggestions)
             return 0
 
         elif action in ("dismiss", "dm"):
@@ -8363,6 +8371,159 @@ def _print_watchdog_suggestions(suggestions: list) -> None:
             print(f"      created: {created}{_color(exec_hint, '2')}")
         else:
             print(f"      {_color(exec_hint.strip(), '2')}")
+    print()
+
+
+def _print_watchdog_review(suggestions: list, status: dict, verbose: bool = False) -> None:
+    """Rich watchdog review: summary banner + per-suggestion detail + engagement guide."""
+    SEV_COLOR  = {"urgent": "91", "critical": "91", "warning": "93", "info": "36"}
+    SEV_ICON   = {"urgent": "✖", "critical": "⚠", "warning": "▲", "info": "ℹ"}
+    SEV_RANK   = {"urgent": 4, "critical": 3, "warning": 2, "info": 1}
+    MOD_LABEL  = {
+        "close_advisor":  "CLOSE",
+        "roll_advisor":   "ROLL ",
+        "breach_monitor": "ALERT",
+    }
+    TYPE_DESC  = {
+        "close_profit":         "Profit target reached — close to lock in gains",
+        "close_profit_scalper": "Early scalper exit — 30%% captured, redeploy capital?",
+        "close_stop_loss":      "Stop-loss — short strike dangerously close",
+        "close_eod":            "EOD — position expires today, close before 4 PM ET",
+        "close_low_roi":        "Low ROI — almost no credit left, close to free margin",
+        "forward_roll":         "Forward roll — breach risk, move strikes further OTM",
+        "mirror_roll":          "Mirror roll — hedge with opposite-side spread",
+        "breach_alert":         "Breach alert — underlying approaching short strike (monitor only)",
+    }
+
+    # ── banner ──────────────────────────────────────────────────────────────────
+    pending = [s for s in suggestions if s.get("status") == "pending"]
+    n = len(pending)
+    last_cycle = status.get("last_cycle")
+    last_str   = last_cycle[:19] if last_cycle else "never"
+    counts     = status.get("suggestion_counts", {})
+
+    width = 70
+    print()
+    print("  " + "━" * width)
+    banner_title = f"  Watchdog Review  —  {n} pending suggestion{'s' if n != 1 else ''}"
+    print(f"{_color(banner_title, '1')}")
+    print(f"  Last cycle: {last_str}   "
+          f"pending={counts.get('pending',0)}  "
+          f"executed={counts.get('executed',0)}  "
+          f"dismissed={counts.get('dismissed',0)}")
+    print("  " + "━" * width)
+
+    if not pending:
+        print()
+        print("  No pending suggestions — all positions look healthy.")
+        print()
+        _print_watchdog_engagement_guide(verbose=verbose)
+        return
+
+    # Sort: most severe first, then by symbol
+    pending_sorted = sorted(
+        pending,
+        key=lambda s: (-SEV_RANK.get(s.get("severity", "info"), 0), s.get("symbol", "")),
+    )
+
+    # ── per-suggestion blocks ────────────────────────────────────────────────────
+    for idx, s in enumerate(pending_sorted, 1):
+        sev   = s.get("severity", "info")
+        color = SEV_COLOR.get(sev, "0")
+        icon  = SEV_ICON.get(sev, "•")
+        sid   = s.get("suggestion_id", "?")[:8]
+        sym   = s.get("symbol", "?")
+        mod   = MOD_LABEL.get(s.get("module", ""), s.get("module", "?")[:5].upper())
+        stype = s.get("suggestion_type", "?")
+        title = s.get("title", "?")
+        desc  = s.get("description", "")
+        created = s.get("created_at", "")[:19] if s.get("created_at") else "?"
+        action  = s.get("action") or {}
+        atype   = action.get("type", "?")
+        executable = atype in ("close", "roll")
+
+        print()
+        # Header line
+        sev_badge = f"[{sev.upper():^8}]"
+        print(f"  {_color(f'{icon} {sev_badge}', color)}  "
+              f"{_color(sym, '1'):<14}  "
+              f"{_color(mod, '36')}  "
+              f"{_color(title, '1')}")
+
+        # Suggestion ID + age
+        print(f"    ID: {_color(sid, '33')}   created: {created}   type: {stype}")
+
+        # Description / trigger reason
+        type_blurb = TYPE_DESC.get(stype, "")
+        if type_blurb:
+            print(f"    {_color('Trigger:', '2')} {type_blurb}")
+        if desc and desc != title:
+            print(f"    {_color('Detail: ', '2')} {desc}")
+
+        # Verbose: raw action dict
+        if verbose and action:
+            for k, v in action.items():
+                if k != "type":
+                    print(f"    {_color(f'  {k}:', '2')} {v}")
+
+        # Engagement options
+        print(f"    {_color('─' * 60, '2')}")
+        if executable:
+            print(f"    {_color('Execute (full qty):', '32')}  python utp.py wd execute {sid} --confirm")
+            print(f"    {_color('Execute (partial): ', '32')}  python utp.py wd execute {sid} --qty N --confirm")
+            print(f"    {_color('Preview first:    ', '36')}  python utp.py wd execute {sid}")
+            print(f"    {_color('Dismiss:          ', '2')}  python utp.py wd dismiss {sid}")
+        else:
+            print(f"    {_color('Monitor only — no execution.', '2')}  Dismiss when resolved:")
+            print(f"    {_color('Dismiss:          ', '2')}  python utp.py wd dismiss {sid}")
+
+        if verbose:
+            # Full REST equivalents
+            print(f"    {_color('REST execute:     ', '2')}  "
+                  f"curl -X POST http://localhost:8000/watchdog/execute/{sid} "
+                  f"-H 'Content-Type: application/json' -d '{{\"qty\": N}}'")
+            print(f"    {_color('REST dismiss:     ', '2')}  "
+                  f"curl -X POST http://localhost:8000/watchdog/dismiss/{sid}")
+
+    # ── engagement guide ─────────────────────────────────────────────────────────
+    print()
+    print("  " + "━" * width)
+    _print_watchdog_engagement_guide(n_suggestions=n, verbose=verbose)
+
+
+def _print_watchdog_engagement_guide(n_suggestions: int = 0, verbose: bool = False) -> None:
+    """Print concise (or verbose) guide for acting on watchdog suggestions."""
+    print()
+    print(f"  {_color('Quick reference:', '1')}")
+    print(f"    {_color('wd', '33')}                              Show this review")
+    print(f"    {_color('wd suggestions', '33')}                  List all pending suggestions")
+    print(f"    {_color('wd execute <ID>             ', '33')}   Preview suggestion details")
+    print(f"    {_color('wd execute <ID> --confirm   ', '33')}   Execute (full position qty)")
+    print(f"    {_color('wd execute <ID> --qty N --confirm', '33')}  Partial: close/roll N contracts")
+    print(f"    {_color('wd dismiss <ID>             ', '33')}   Dismiss (remove from list)")
+    print(f"    {_color('wd close-eligible           ', '33')}   Batch close by profit threshold")
+    print(f"    {_color('wd close-eligible --min-pct 0.80 --confirm', '33')}  Close all >=80%% positions")
+    print(f"    {_color('wd status                   ', '33')}   Module run times + counts")
+    if verbose:
+        print()
+        print(f"  {_color('Module behavior:', '1')}")
+        print(f"    {_color('close_advisor ', '36')}  Triggers: profit target, stop-loss, EOD, low-ROI")
+        print(f"                    Executing closes the spread at MARKET price")
+        print(f"    {_color('roll_advisor  ', '36')}  Triggers: breach risk (short strike proximity)")
+        print(f"                    Executing calls RollService → closes + opens new spread")
+        print(f"    {_color('breach_monitor', '36')}  Triggers: same breach thresholds as roll_advisor")
+        print(f"                    Monitor-only — no execution available")
+        print()
+        print(f"  {_color('Severity levels:', '1')}")
+        print(f"    {_color('✖ urgent  ', '91')}  ITM / EOD — act now")
+        print(f"    {_color('⚠ critical', '91')}  <0.5%% OTM / stop triggered — high priority")
+        print(f"    {_color('▲ warning ', '93')}  Profit target / 1%% OTM — review and decide")
+        print(f"    {_color('ℹ info    ', '36')}  Scalper exit / low-ROI — informational")
+        print()
+        print(f"  {_color('Action mode (auto-execute):', '1')}")
+        print(f"    Off by default. Enable per-module in daemon_default.yaml:")
+        print(f"      watchdog.module_overrides.close_advisor.action_mode: true")
+        print(f"    Or globally:  python utp.py wd config --action-mode")
     print()
 
 
@@ -11873,9 +12034,12 @@ via REST or CLI. Each suggestion has an 8-character ID (shown in portfolio).
 ━━━ EXAMPLES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
   # View suggestions
-  %(prog)s                                Show all pending suggestions
-  %(prog)s suggestions                    Same as above
-  %(prog)s suggestions --position 2d9a   Filter to one position
+  %(prog)s                                Rich review dashboard (default)
+  %(prog)s --verbose                      Rich review with full execution details
+  %(prog)s review                         Same as above
+  %(prog)s review --verbose               Full details: REST cmds, module/severity guide
+  %(prog)s review --position 2d9a        Filter dashboard to one position
+  %(prog)s suggestions                    Compact table (no engagement guide)
 
   # Execute a suggestion (ID prefix from portfolio Watchdog column)
   %(prog)s execute abc123                 Preview what will happen
@@ -11918,6 +12082,7 @@ via REST or CLI. Each suggestion has an 8-character ID (shown in portfolio).
 
 ━━━ ALIASES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   watchdog → wd
+  review → rv          (default when no subcommand given)
   suggestions → suggest, sg
   execute → ex
   dismiss → dm
@@ -11925,13 +12090,25 @@ via REST or CLI. Each suggestion has an 8-character ID (shown in portfolio).
                                         ''',
                                         formatter_class=argparse.RawDescriptionHelpFormatter)
     watchdog_sub = p_watchdog.add_subparsers(dest="watchdog_action")
+    p_watchdog.add_argument("--verbose", "-v", action="store_true", default=False,
+                             help="Show full execution details (review mode)")
     _add_connection_args(p_watchdog)
 
-    # watchdog suggestions
+    # watchdog review (default when no subcommand given — rich dashboard)
+    wd_review_p = watchdog_sub.add_parser("review", aliases=["rv"],
+                                          help="Rich suggestion dashboard with engagement guide (default view)")
+    wd_review_p.add_argument("--verbose", "-v", action="store_true", default=False,
+                              help="Show full execution details, REST commands, module/severity reference")
+    wd_review_p.add_argument("--position", default=None, dest="position_id",
+                              help="Filter to a specific position ID")
+
+    # watchdog suggestions (compact table)
     wd_suggest_p = watchdog_sub.add_parser("suggestions", aliases=["suggest", "sg"],
-                                           help="Show pending watchdog suggestions")
+                                           help="Compact suggestion table (use 'review' for rich view)")
     wd_suggest_p.add_argument("--position", default=None, dest="position_id",
                                help="Filter to a specific position ID")
+    wd_suggest_p.add_argument("--verbose", "-v", action="store_true", default=False,
+                               help="Same as 'review --verbose'")
 
     # watchdog execute <suggestion-id>
     wd_exec_p = watchdog_sub.add_parser("execute", aliases=["ex"],

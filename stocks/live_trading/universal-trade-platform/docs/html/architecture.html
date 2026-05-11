@@ -582,13 +582,32 @@ OptionQuoteStreamingService (background)
 - <code>POST /market/streaming/unsubscribe</code> -- remove symbols and cancel IBKR data lines</p>
 <p><strong>WebSocket clients</strong> connect to <code>/ws/quotes</code> and send subscribe/unsubscribe messages to filter which symbols they receive.</p>
 <p><strong>Safety:</strong> All IBKR limits are enforced with a 50% buffer -- max 50 subscriptions (IBKR allows ~100) and 22 msg/sec (IBKR allows 50).</p>
+<h3 id="watchdog-loop">Watchdog Loop</h3>
+<p>Runs every <code>WatchdogConfig.default_interval_seconds</code> (default 30s), <strong>market hours only</strong> (13:30–20:00 UTC, Mon–Fri), <strong>parent/IBKR process only</strong> (skipped in uvicorn worker processes identified by <code>_UTP_DAEMON_WORKER=1</code>):</p>
+<ol>
+<li>Calls <code>get_open_positions()</code> from position store</li>
+<li>Batch-fetches current prices via <code>get_quote()</code> for distinct symbols</li>
+<li>Runs each registered <code>WatchdogModule</code> if <code>module.is_due()</code>:</li>
+<li><strong><code>RollAdvisorModule</code></strong> — delegates to <code>RollService.scan_positions()</code>, wraps each <code>RollSuggestion</code> as a <code>WatchdogSuggestion</code> with type <code>forward_roll</code> / <code>mirror_roll</code></li>
+<li><strong><code>CloseAdvisorModule</code></strong> — checks open <code>multi_leg</code> positions for profit target (≥50% premium captured), stop loss (≥2× credit), EOD pre-expiry (within 15 min of 4 PM ET on expiration day), or low ROI (mark &lt;10% of entry with same-day expiry)</li>
+<li><strong><code>BreachMonitorModule</code></strong> — reads breach severity from <code>_calc_breach_status()</code> in <code>roll_service.py</code>, emits <code>breach_alert</code> suggestions; never auto-executes regardless of <code>action_mode</code></li>
+<li>Deduplicates new suggestions against existing pending ones (same <code>position_id</code> + <code>suggestion_type</code>)</li>
+<li>If <code>action_mode=True</code>, auto-executes qualifying suggestions and marks <code>auto_executed=True</code></li>
+<li>Expires stale suggestions older than <code>suggestion_ttl_seconds</code> (default 300s)</li>
+</ol>
+<p>Suggestions are stored in-memory in <code>WatchdogService._suggestions</code> (keyed by <code>suggestion_id</code>). <code>get_latest_by_position()</code> returns the most-severe pending suggestion per position — these are attached to each position dict by <code>LiveDataService.get_portfolio()</code> as <code>watchdog_hint</code> and rendered in the portfolio <code>Watchdog</code> column (fixed 30-char width, ANSI-colored by severity).</p>
+<p><strong>Severity levels</strong>: <code>info</code> (dim cyan) → <code>warning</code> (yellow) → <code>critical</code> (yellow) → <code>urgent</code> (red)</p>
+<p><strong>REST API</strong>: <code>GET /watchdog/suggestions</code>, <code>POST /watchdog/dismiss/{id}</code>, <code>GET/POST /watchdog/config</code>, <code>GET /watchdog/status</code></p>
+<p><strong>CLI</strong>: <code>python utp.py watchdog [suggestions|dismiss|config|status]</code> (alias <code>wd</code>)</p>
 <h3 id="task-lifecycle">Task Lifecycle</h3>
-<p>Both tasks are created as <code>asyncio.Task</code> objects during the lifespan startup and cancelled during shutdown:</p>
+<p>All background tasks are created as <code>asyncio.Task</code> objects during the lifespan startup and cancelled during shutdown:</p>
 <div class="codehilite"><pre><span></span><code><span class="k">async</span> <span class="k">def</span><span class="w"> </span><span class="nf">lifespan</span><span class="p">(</span><span class="n">app</span><span class="p">):</span>
     <span class="c1"># ... init services, register providers ...</span>
     <span class="n">tasks</span> <span class="o">=</span> <span class="p">[</span>
         <span class="n">asyncio</span><span class="o">.</span><span class="n">create_task</span><span class="p">(</span><span class="n">_expiration_loop</span><span class="p">(</span><span class="n">interval</span><span class="p">)),</span>
         <span class="n">asyncio</span><span class="o">.</span><span class="n">create_task</span><span class="p">(</span><span class="n">_position_sync_loop</span><span class="p">(</span><span class="n">interval</span><span class="p">)),</span>
+        <span class="n">asyncio</span><span class="o">.</span><span class="n">create_task</span><span class="p">(</span><span class="n">_watchdog_loop</span><span class="p">(</span><span class="n">watchdog_svc</span><span class="o">.</span><span class="n">config</span><span class="o">.</span><span class="n">default_interval_seconds</span><span class="p">)),</span>
+        <span class="n">asyncio</span><span class="o">.</span><span class="n">create_task</span><span class="p">(</span><span class="n">_position_greeks_loop</span><span class="p">(</span><span class="n">interval</span><span class="o">=</span><span class="mf">90.0</span><span class="p">)),</span>
     <span class="p">]</span>
     <span class="k">yield</span>
     <span class="k">for</span> <span class="n">t</span> <span class="ow">in</span> <span class="n">tasks</span><span class="p">:</span>

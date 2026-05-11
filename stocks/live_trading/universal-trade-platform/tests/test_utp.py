@@ -30222,6 +30222,84 @@ class TestWatchdogService:
         assert resp.status_code == 200
         assert captured_qty == [None]
 
+    # ── watchdog review display ───────────────────────────────────────────────
+
+    def test_print_watchdog_review_no_suggestions(self, capsys):
+        """_print_watchdog_review with empty list prints healthy banner + guide."""
+        from utp import _print_watchdog_review
+        _print_watchdog_review([], {"last_cycle": None, "suggestion_counts": {}})
+        out = capsys.readouterr().out
+        assert "Watchdog Review" in out
+        assert "healthy" in out.lower() or "no pending" in out.lower()
+        assert "wd execute" in out  # engagement guide always shown
+
+    def test_print_watchdog_review_with_suggestion(self, capsys):
+        """_print_watchdog_review shows suggestion ID, symbol, commands."""
+        from utp import _print_watchdog_review
+        from datetime import datetime, UTC
+        s = {
+            "suggestion_id": "abcd1234",
+            "position_id": "p1",
+            "symbol": "SPX",
+            "module": "close_advisor",
+            "suggestion_type": "close_profit",
+            "severity": "warning",
+            "title": "80% profit target",
+            "description": "DTE0: 81% captured",
+            "action": {"type": "close", "position_id": "p1", "close_reason": "profit_target"},
+            "created_at": datetime.now(UTC).isoformat(),
+            "status": "pending",
+        }
+        _print_watchdog_review([s], {"last_cycle": "2026-05-11T14:00:00", "suggestion_counts": {"pending": 1}})
+        out = capsys.readouterr().out
+        assert "abcd1234" in out
+        assert "SPX" in out
+        assert "--confirm" in out           # execute command shown
+        assert "wd dismiss abcd1234" in out # dismiss command shown
+
+    def test_print_watchdog_review_verbose_shows_rest(self, capsys):
+        """_print_watchdog_review verbose=True includes REST curl commands."""
+        from utp import _print_watchdog_review
+        from datetime import datetime, UTC
+        s = {
+            "suggestion_id": "abcd5678",
+            "position_id": "p1",
+            "symbol": "RUT",
+            "module": "roll_advisor",
+            "suggestion_type": "forward_roll",
+            "severity": "critical",
+            "title": "Forward Roll (critical)",
+            "description": "Short strike within 0.3%%",
+            "action": {"type": "roll", "suggestion_id": "rs1", "roll_type": "forward"},
+            "created_at": datetime.now(UTC).isoformat(),
+            "status": "pending",
+        }
+        _print_watchdog_review([s], {"suggestion_counts": {"pending": 1}}, verbose=True)
+        out = capsys.readouterr().out
+        assert "curl" in out                 # REST command shown in verbose
+        assert "localhost:8000" in out
+        assert "close_advisor" in out        # module reference shown
+        assert "urgent" in out.lower()       # severity guide shown
+
+    def test_print_watchdog_review_sorts_by_severity(self, capsys):
+        """_print_watchdog_review shows urgent before info."""
+        from utp import _print_watchdog_review
+        from datetime import datetime, UTC
+        def _s(sid, sym, sev, stype):
+            return {
+                "suggestion_id": sid, "position_id": sid, "symbol": sym,
+                "module": "close_advisor", "suggestion_type": stype,
+                "severity": sev, "title": sev, "description": "",
+                "action": {"type": "close", "position_id": sid},
+                "created_at": datetime.now(UTC).isoformat(), "status": "pending",
+            }
+        suggestions = [_s("aa", "SPX", "info", "close_low_roi"),
+                       _s("bb", "RUT", "urgent", "close_eod")]
+        _print_watchdog_review(suggestions, {"suggestion_counts": {"pending": 2}})
+        out = capsys.readouterr().out
+        # "bb" (urgent) should appear before "aa" (info)
+        assert out.index("bb") < out.index("aa")
+
     async def test_watchdog_close_eligible_post_passes_qty(self, client, api_key_headers):
         """POST /watchdog/close-eligible with qty passes it to _auto_execute."""
         from app.services.watchdog_service import init_watchdog_service
