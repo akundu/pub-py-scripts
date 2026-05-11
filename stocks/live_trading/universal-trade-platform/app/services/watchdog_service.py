@@ -103,13 +103,7 @@ class CloseAdvisorConfig:
     # None (or absent from overrides) = fall back to global action_mode.
     action_mode: Optional[bool] = None
 
-    # ── scalper early exit (info, before 11 AM ET) ─────────────────────────
-    # Only for DTE0 and DTE3 where freeing capital has high reinvestment value.
-    scalper_threshold: float = 0.30            # pct_captured to trigger
-    scalper_cutoff_et: int = 1100              # before this HHMM ET; override in tests with 2359
-    scalper_enabled_dtes: list = field(default_factory=lambda: [0, 3])
-
-    # ── standard lock-in profit target (warning) ───────────────────────────
+    # ── lock-in profit target (warning) ───────────────────────────────────
     # Thresholds from empirical 8,501-trade dataset:
     #   DTE0: hold to close default; 80% after noon ET
     #   DTE1: 80% at D0 EOD 15:30 ET — bimodal distribution, lower PTs gain little
@@ -180,8 +174,7 @@ class WatchdogSuggestion:
     symbol: str
     module: str            # "roll_advisor" | "close_advisor" | "breach_monitor"
     suggestion_type: str   # "forward_roll" | "mirror_roll" | "close_profit" |
-                           #  "close_profit_scalper" | "close_stop_loss" | "close_low_roi" |
-                           #  "close_eod" | "breach_alert"
+                           #  "close_stop_loss" | "close_low_roi" | "close_eod" | "breach_alert"
     severity: str          # "info" | "warning" | "critical" | "urgent"
     title: str             # short display text shown in portfolio Watchdog column
     description: str       # human-readable reason
@@ -710,7 +703,6 @@ class CloseAdvisorModule(WatchdogModule):
 
     # Notification priority rank (higher = escalates notification)
     _NOTIFY_RANK = {
-        "close_profit_scalper": 0,
         "close_low_roi": 0,
         "close_profit": 1,
         "close_stop_loss": 2,
@@ -816,31 +808,7 @@ class CloseAdvisorModule(WatchdogModule):
 
         # ── Profit target ─────────────────────────────────────────────────────
         if pct_captured is not None:
-            # Scalper early exit: DTE0/DTE3 before 11 AM ET at ≥30% captured.
-            # Freeing capital early lets you redeploy same day (DTE0) or get 3 DTE0s (DTE3).
-            if (
-                current_dte in cfg.scalper_enabled_dtes
-                and et_hhmm < cfg.scalper_cutoff_et
-                and pct_captured >= cfg.scalper_threshold
-            ):
-                results.append(WatchdogSuggestion(
-                    suggestion_id=str(uuid.uuid4())[:8],
-                    position_id=position_id,
-                    symbol=symbol,
-                    module=self.name,
-                    suggestion_type="close_profit_scalper",
-                    severity="info",
-                    title=f"30% profit — redeploy?",
-                    description=(
-                        f"Captured {pct_captured * 100:.0f}% by "
-                        f"{et_hhmm // 100:02d}:{et_hhmm % 100:02d} ET "
-                        f"(DTE{current_dte}); close to redeploy"
-                    ),
-                    action={"type": "close", "position_id": position_id, "close_reason": "profit_scalper"},
-                    created_at=datetime.now(UTC),
-                ))
-
-            # Standard lock-in: fire once check_time passes and threshold met.
+            # Lock-in: fire once check_time passes and threshold met.
             pt_threshold, check_after = self._get_pt_rules(current_dte, cfg)
             if check_after is not None and et_hhmm >= check_after and pct_captured >= pt_threshold:
                 results.append(WatchdogSuggestion(

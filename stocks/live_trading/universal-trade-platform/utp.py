@@ -8197,6 +8197,7 @@ async def _cmd_watchdog_http(args, server: str) -> int:
         if action in ("suggestions", "suggest", "sg", None, "review", "rv"):
             pos_id  = getattr(args, "position_id", None)
             verbose = getattr(args, "verbose", False)
+            compact = getattr(args, "compact", False)
             url = "/watchdog/suggestions"
             if pos_id:
                 url = f"{url}?position_id={pos_id}"
@@ -8205,14 +8206,14 @@ async def _cmd_watchdog_http(args, server: str) -> int:
                 print(f"  Error: {resp.status_code} {resp.text}")
                 return 1
             suggestions = resp.json()
-            # Default (no subcommand) and "review" → rich dashboard view
-            # Named "suggestions" → compact table (original behaviour)
-            if action in (None, "review", "rv"):
+            # All paths default to the rich review dashboard.
+            # --compact opts into the terse table for scripting/piping.
+            if compact:
+                _print_watchdog_suggestions(suggestions)
+            else:
                 status_resp = await client.get("/watchdog/status")
                 wstatus = status_resp.json() if status_resp.status_code == 200 else {}
                 _print_watchdog_review(suggestions, wstatus, verbose=verbose)
-            else:
-                _print_watchdog_suggestions(suggestions)
             return 0
 
         elif action in ("dismiss", "dm"):
@@ -8386,7 +8387,6 @@ def _print_watchdog_review(suggestions: list, status: dict, verbose: bool = Fals
     }
     TYPE_DESC  = {
         "close_profit":         "Profit target reached — close to lock in gains",
-        "close_profit_scalper": "Early scalper exit — 30%% captured, redeploy capital?",
         "close_stop_loss":      "Stop-loss — short strike dangerously close",
         "close_eod":            "EOD — position expires today, close before 4 PM ET",
         "close_low_roi":        "Low ROI — almost no credit left, close to free margin",
@@ -8496,7 +8496,7 @@ def _print_watchdog_engagement_guide(n_suggestions: int = 0, verbose: bool = Fal
     print()
     print(f"  {_color('Quick reference:', '1')}")
     print(f"    {_color('wd', '33')}                              Show this review")
-    print(f"    {_color('wd suggestions', '33')}                  List all pending suggestions")
+    print(f"    {_color('wd suggestions', '33')}                  Same (also: suggest, sg, review, rv)")
     print(f"    {_color('wd execute <ID>             ', '33')}   Preview suggestion details")
     print(f"    {_color('wd execute <ID> --confirm   ', '33')}   Execute (full position qty)")
     print(f"    {_color('wd execute <ID> --qty N --confirm', '33')}  Partial: close/roll N contracts")
@@ -8518,7 +8518,7 @@ def _print_watchdog_engagement_guide(n_suggestions: int = 0, verbose: bool = Fal
         print(f"    {_color('✖ urgent  ', '91')}  ITM / EOD — act now")
         print(f"    {_color('⚠ critical', '91')}  <0.5%% OTM / stop triggered — high priority")
         print(f"    {_color('▲ warning ', '93')}  Profit target / 1%% OTM — review and decide")
-        print(f"    {_color('ℹ info    ', '36')}  Scalper exit / low-ROI — informational")
+        print(f"    {_color('ℹ info    ', '36')}  Low-ROI / watch-level — informational")
         print()
         print(f"  {_color('Action mode (auto-execute):', '1')}")
         print(f"    Off by default. Enable per-module in daemon_default.yaml:")
@@ -11974,8 +11974,7 @@ via REST or CLI. Each suggestion has an 8-character ID (shown in portfolio).
 
   close_advisor    Profit target, stop-loss, low-ROI, and EOD close.
                    Triggers (DTE-aware, empirically derived):
-                     close_profit_scalper  30%% captured before 11 AM ET (DTE0/DTE3)
-                     close_profit          80%% (DTE0 after noon), 80%% (DTE1/2 after 15:30)
+                     close_profit          80%% (DTE0 after noon), 80%% (DTE1 after 15:30)
                                            70%% (DTE2 after 15:30), 75%% (DTE3 after 15:30)
                      close_stop_loss       Short strike proximity < 0.5%% (DTE0), < 1.0%% (DTE1)
                      close_eod             15 min before 4 PM ET on expiration day
@@ -11992,9 +11991,11 @@ via REST or CLI. Each suggestion has an 8-character ID (shown in portfolio).
                      breach_monitor: ALWAYS suggestion-only (no auto-action)
 
 ━━━ SUBCOMMANDS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  suggestions [--position POS_ID]
-      List all pending suggestions. Optionally filter to one position.
-      Aliases: suggest, sg
+  suggestions [--position POS_ID] [--verbose] [--compact]
+      Rich suggestion dashboard with engagement guide. --verbose adds
+      REST equivalents and module/severity reference. --compact gives
+      the terse table (useful for scripting or piping).
+      Aliases: suggest, sg, review, rv
 
   execute SUGGESTION_ID [--qty N] [--confirm]
       Execute a specific suggestion by its 8-char ID (or prefix).
@@ -12033,13 +12034,13 @@ via REST or CLI. Each suggestion has an 8-character ID (shown in portfolio).
                                         epilog='''
 ━━━ EXAMPLES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  # View suggestions
+  # View suggestions (all forms show the rich dashboard by default)
   %(prog)s                                Rich review dashboard (default)
-  %(prog)s --verbose                      Rich review with full execution details
-  %(prog)s review                         Same as above
-  %(prog)s review --verbose               Full details: REST cmds, module/severity guide
-  %(prog)s review --position 2d9a        Filter dashboard to one position
-  %(prog)s suggestions                    Compact table (no engagement guide)
+  %(prog)s --verbose                      Full details: REST cmds, module/severity guide
+  %(prog)s suggestions                    Same (aliases: suggest, sg, review, rv)
+  %(prog)s suggestions --verbose          Full details mode
+  %(prog)s suggestions --position 2d9a   Filter to one position
+  %(prog)s suggestions --compact          Terse table only (for scripting)
 
   # Execute a suggestion (ID prefix from portfolio Watchdog column)
   %(prog)s execute abc123                 Preview what will happen
@@ -12082,8 +12083,7 @@ via REST or CLI. Each suggestion has an 8-character ID (shown in portfolio).
 
 ━━━ ALIASES ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   watchdog → wd
-  review → rv          (default when no subcommand given)
-  suggestions → suggest, sg
+  suggestions → suggest, sg, review, rv   (all show rich dashboard)
   execute → ex
   dismiss → dm
   close-eligible → eligible, ce
@@ -12091,24 +12091,20 @@ via REST or CLI. Each suggestion has an 8-character ID (shown in portfolio).
                                         formatter_class=argparse.RawDescriptionHelpFormatter)
     watchdog_sub = p_watchdog.add_subparsers(dest="watchdog_action")
     p_watchdog.add_argument("--verbose", "-v", action="store_true", default=False,
-                             help="Show full execution details (review mode)")
+                             help="Show full execution details and REST equivalents")
+    p_watchdog.add_argument("--compact", action="store_true", default=False,
+                             help="Compact table output (opt-in, useful for scripting)")
     _add_connection_args(p_watchdog)
 
-    # watchdog review (default when no subcommand given — rich dashboard)
-    wd_review_p = watchdog_sub.add_parser("review", aliases=["rv"],
-                                          help="Rich suggestion dashboard with engagement guide (default view)")
-    wd_review_p.add_argument("--verbose", "-v", action="store_true", default=False,
-                              help="Show full execution details, REST commands, module/severity reference")
-    wd_review_p.add_argument("--position", default=None, dest="position_id",
-                              help="Filter to a specific position ID")
-
-    # watchdog suggestions (compact table)
-    wd_suggest_p = watchdog_sub.add_parser("suggestions", aliases=["suggest", "sg"],
-                                           help="Compact suggestion table (use 'review' for rich view)")
+    # watchdog suggestions / review — same rich dashboard by default
+    wd_suggest_p = watchdog_sub.add_parser("suggestions", aliases=["suggest", "sg", "review", "rv"],
+                                           help="Rich suggestion dashboard (default view)")
     wd_suggest_p.add_argument("--position", default=None, dest="position_id",
                                help="Filter to a specific position ID")
     wd_suggest_p.add_argument("--verbose", "-v", action="store_true", default=False,
-                               help="Same as 'review --verbose'")
+                               help="Show full execution details, REST commands, module/severity reference")
+    wd_suggest_p.add_argument("--compact", action="store_true", default=False,
+                               help="Compact table only (no engagement guide)")
 
     # watchdog execute <suggestion-id>
     wd_exec_p = watchdog_sub.add_parser("execute", aliases=["ex"],

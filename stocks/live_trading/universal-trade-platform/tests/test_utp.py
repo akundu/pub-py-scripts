@@ -29224,24 +29224,6 @@ class TestWatchdogService:
         pt = next(r for r in results if r.suggestion_type == "close_profit")
         assert pt.severity == "warning"
 
-    async def test_close_advisor_scalper_exit(self):
-        """Scalper exit fires for DTE0 when 30%+ captured before cutoff time."""
-        from app.services.watchdog_service import CloseAdvisorModule
-        from datetime import date
-        mod = CloseAdvisorModule()
-        today = date.today().isoformat()  # local date matches date.today() in watchdog code
-        pos = self._make_multi_leg_pos(
-            entry_price=2.00,
-            current_mark=1.35,  # captured = (2.00-1.35)/2.00 = 32.5% ≥ 30%
-            expiration=today,
-        )
-        # scalper_cutoff_et=2359 makes the 'before cutoff' check always pass
-        overrides = {"scalper_cutoff_et": 2359}
-        results = await mod.run([pos], {}, overrides)
-        assert any(r.suggestion_type == "close_profit_scalper" for r in results)
-        scalper = next(r for r in results if r.suggestion_type == "close_profit_scalper")
-        assert scalper.severity == "info"
-
     async def test_close_advisor_low_roi_on_expiry_day(self):
         """Low ROI fires when < 10% credit remains and position expires today."""
         from app.services.watchdog_service import CloseAdvisorModule
