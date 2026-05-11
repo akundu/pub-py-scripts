@@ -604,11 +604,18 @@
   let lastStats = {};
   // Per-day reference points built from `lastBars` after every fetch.
   //   dayOpenByDate:  ET-date string → that day's first bar's open
+  //   dayHighByDate / dayLowByDate / dayCloseByDate: that day's running
+  //                  extremes / latest close — surfaced in the tooltip
+  //                  when candles are hidden so the user still gets
+  //                  day-level context next to the hovered point.
   //   prevCloseByDate: ET-date string → previous trading day's last close
   // The crosshair tooltip uses these so "vs open" means *this bar's day's
   // open*, not the window-wide first bar (which was the bug — on a 1M
   // chart, every bar was being compared to April 2's open).
   let dayOpenByDate = new Map();
+  let dayHighByDate = new Map();
+  let dayLowByDate = new Map();
+  let dayCloseByDate = new Map();
   let prevCloseByDate = new Map();
   let currentInterval = {{INTERVAL_JSON}};
   let lastSpan = 1;
@@ -680,11 +687,18 @@
   // Bars come in chronological order from the server.
   function rebuildDayRefs() {
     dayOpenByDate = new Map();
-    const lastCloseByDate = new Map();
+    dayHighByDate = new Map();
+    dayLowByDate = new Map();
+    dayCloseByDate = new Map();
     for (const b of lastBars) {
       const d = etDateOf(b.time);
       if (!dayOpenByDate.has(d)) dayOpenByDate.set(d, b.open);
-      lastCloseByDate.set(d, b.close);
+      // Running extremes — survive across all bars in the same ET date.
+      const curHi = dayHighByDate.get(d);
+      const curLo = dayLowByDate.get(d);
+      dayHighByDate.set(d, curHi == null ? b.high : Math.max(curHi, b.high));
+      dayLowByDate.set(d, curLo == null ? b.low : Math.min(curLo, b.low));
+      dayCloseByDate.set(d, b.close);  // overwritten = chronologically last wins
     }
     // prev_close for day N = last close of day N-1 within the window.
     // For the *first* day in the window we fall back to the window-level
@@ -698,7 +712,7 @@
           prevCloseByDate.set(dates[0], lastStats.prev_close);
         }
       } else {
-        prevCloseByDate.set(dates[i], lastCloseByDate.get(dates[i - 1]));
+        prevCloseByDate.set(dates[i], dayCloseByDate.get(dates[i - 1]));
       }
     }
   }
@@ -741,16 +755,39 @@
           month: "short", day: "numeric", hour: "2-digit",
           minute: "2-digit", hour12: false }) +
           (tzAbbrev(d) ? " " + tzAbbrev(d) : "");
-    tooltip.innerHTML =
-      `<div class="tt-time">${tsFmt}</div>` +
-      `<div class="tt-row"><span class="tt-label">Open</span><span>${fmtNum(c.open)}</span></div>` +
-      `<div class="tt-row"><span class="tt-label">High</span><span>${fmtNum(c.high)}</span></div>` +
-      `<div class="tt-row"><span class="tt-label">Low</span><span>${fmtNum(c.low)}</span></div>` +
-      `<div class="tt-row"><span class="tt-label">Close</span><span>${fmtNum(c.close)}</span></div>` +
-      (v != null ? `<div class="tt-row"><span class="tt-label">Vol</span><span>${fmtNum(v.value, 0)}</span></div>` : "") +
-      (rsi != null ? `<div class="tt-row"><span class="tt-label">RSI</span><span>${fmtNum(rsi, 1)}</span></div>` : "") +
-      `<div class="tt-row"><span class="tt-label">vs open</span><span class="${dirClass(vsOpen)}">${fmtPct(vsOpen)}</span></div>` +
-      `<div class="tt-row"><span class="tt-label">vs prev close</span><span class="${dirClass(vsPrev)}">${fmtPct(vsPrev)}</span></div>`;
+    if (candlesVisible) {
+      // Full per-bar OHLCV — useful when the candle bodies are visible
+      // and the user is comparing intra-bar moves.
+      tooltip.innerHTML =
+        `<div class="tt-time">${tsFmt}</div>` +
+        `<div class="tt-row"><span class="tt-label">Open</span><span>${fmtNum(c.open)}</span></div>` +
+        `<div class="tt-row"><span class="tt-label">High</span><span>${fmtNum(c.high)}</span></div>` +
+        `<div class="tt-row"><span class="tt-label">Low</span><span>${fmtNum(c.low)}</span></div>` +
+        `<div class="tt-row"><span class="tt-label">Close</span><span>${fmtNum(c.close)}</span></div>` +
+        (v != null ? `<div class="tt-row"><span class="tt-label">Vol</span><span>${fmtNum(v.value, 0)}</span></div>` : "") +
+        (rsi != null ? `<div class="tt-row"><span class="tt-label">RSI</span><span>${fmtNum(rsi, 1)}</span></div>` : "") +
+        `<div class="tt-row"><span class="tt-label">vs open</span><span class="${dirClass(vsOpen)}">${fmtPct(vsOpen)}</span></div>` +
+        `<div class="tt-row"><span class="tt-label">vs prev close</span><span class="${dirClass(vsPrev)}">${fmtPct(vsPrev)}</span></div>`;
+    } else {
+      // Line-only mode: per-bar OHLC isn't shown on screen, so the
+      // tooltip mirrors that. Surface the *price at the hovered point*
+      // (= bar close) plus day-level OHLC for context — that's the
+      // information the line chart actually conveys.
+      const dayHi = dayHighByDate.get(barDate);
+      const dayLo = dayLowByDate.get(barDate);
+      const dayCl = dayCloseByDate.get(barDate);
+      const dayRange = (dayHi != null && dayLo != null)
+        ? `${fmtNum(dayLo)} – ${fmtNum(dayHi)}` : "—";
+      tooltip.innerHTML =
+        `<div class="tt-time">${tsFmt}</div>` +
+        `<div class="tt-row"><span class="tt-label">Price</span><span>${fmtNum(c.close)}</span></div>` +
+        `<div class="tt-row"><span class="tt-label">Day Open</span><span>${fmtNum(dayOpen)}</span></div>` +
+        `<div class="tt-row"><span class="tt-label">Day Range</span><span>${dayRange}</span></div>` +
+        `<div class="tt-row"><span class="tt-label">Day Close</span><span>${fmtNum(dayCl)}</span></div>` +
+        (rsi != null ? `<div class="tt-row"><span class="tt-label">RSI</span><span>${fmtNum(rsi, 1)}</span></div>` : "") +
+        `<div class="tt-row"><span class="tt-label">vs open</span><span class="${dirClass(vsOpen)}">${fmtPct(vsOpen)}</span></div>` +
+        `<div class="tt-row"><span class="tt-label">vs prev close</span><span class="${dirClass(vsPrev)}">${fmtPct(vsPrev)}</span></div>`;
+    }
     const wrapRect = wrap.getBoundingClientRect();
     let x = param.point.x + 18, y = param.point.y + 18;
     if (x + 200 > wrapRect.width) x = param.point.x - 200;

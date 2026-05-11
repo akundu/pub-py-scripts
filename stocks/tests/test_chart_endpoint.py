@@ -363,6 +363,43 @@ def test_html_chart_candles_toggle_hides_candles_and_volume(chart_fixtures):
     assert "lineSeries.applyOptions({ visible:" not in body
 
 
+def test_html_chart_tooltip_branches_on_candles_visibility(chart_fixtures):
+    """Crosshair tooltip switches layout based on candlesVisible.
+    With candles ON: full per-bar OHLCV. With candles OFF: simplified
+    line-chart info — the price at the hovered point plus day-level
+    OHLC for context, no per-bar OHLC.
+
+    This is what the user asked for: when only the line is showing,
+    the tooltip should reflect what the line conveys (price), not
+    pretend candle data is still on screen."""
+    req = _MockRequest("NDX", query={"date": "2026-04-29"})
+    body = _run(handle_chart_html(req)).body.decode()
+    # The branch on candle visibility.
+    assert "if (candlesVisible) {" in body
+    # The simplified mode shows day-level context (Day Open / Range / Close)
+    # built from the per-day refs maps in rebuildDayRefs.
+    assert 'tt-label">Day Open' in body
+    assert 'tt-label">Day Range' in body
+    assert 'tt-label">Day Close' in body
+    # And it surfaces "Price" (the hovered close) instead of per-bar OHLC.
+    assert 'tt-label">Price' in body
+
+
+def test_html_chart_rebuild_day_refs_tracks_high_low_close(chart_fixtures):
+    """The simplified tooltip needs day-level high/low/close, so
+    rebuildDayRefs must populate `dayHighByDate` / `dayLowByDate` /
+    `dayCloseByDate` alongside `dayOpenByDate`. Pin the wiring so a
+    future refactor doesn't quietly drop one."""
+    req = _MockRequest("NDX", query={"date": "2026-04-29"})
+    body = _run(handle_chart_html(req)).body.decode()
+    assert "dayHighByDate.set" in body
+    assert "dayLowByDate.set" in body
+    assert "dayCloseByDate.set" in body
+    # Math.max / Math.min for running extremes (not just last-bar's high/low).
+    assert "Math.max(curHi, b.high)" in body
+    assert "Math.min(curLo, b.low)" in body
+
+
 def test_api_chart_accepts_explicit_start_end(chart_fixtures):
     """Canonical range form: explicit `start` + `end` win over presets."""
     req = _MockRequest("NDX", query={
