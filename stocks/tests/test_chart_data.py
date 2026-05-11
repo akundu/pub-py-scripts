@@ -895,14 +895,14 @@ def test_complete_end_date_csv_does_not_trigger_backfill(tmp_path: Path):
 
 
 def test_partial_end_date_falls_through_when_realtime_empty(tmp_path: Path):
-    """If realtime_data has nothing for the partial date (rolling
-    window already aged it out), the loader gracefully returns the
-    truncated CSV — no errors, no empty payload. The user sees a
-    short chart instead of a blank one."""
+    """If realtime_data has nothing for the partial date AND the DB
+    has no hourly_prices or daily_prices for that day either, the
+    loader gracefully returns the truncated CSV — no errors, no empty
+    payload. The user sees a short chart instead of a blank one."""
     rows = _five_min_rows_truncated(19, 0)  # truncated
     _write_5min_csv(tmp_path, "I:SPX", "2025-05-08", rows, ticker="I:SPX")
 
-    fake = _FakeDBWithTicks(ticks=pd.DataFrame())  # empty RT response
+    fake = _FakeDBWithTicks(ticks=pd.DataFrame())  # empty RT, empty hourly
 
     out, src = _run(load_bars_with_db_fallback(
         "SPX", "2025-05-08", "2025-05-08", interval="5m",
@@ -913,3 +913,178 @@ def test_partial_end_date_falls_through_when_realtime_empty(tmp_path: Path):
     assert src == "csv"
     # Bars only go up to 19:00 UTC (truncated CSV).
     assert out.index[-1] == pd.Timestamp("2025-05-08 19:00:00", tz="UTC")
+
+
+class _FakeDBFull:
+    """Stand-in DB that can serve realtime ticks, hourly bars, and
+    daily bars independently. Lets us pin which fallback tier the
+    loader actually used."""
+    def __init__(self, ticks=None, hourly=None, daily=None):
+        self._ticks = ticks if ticks is not None else pd.DataFrame()
+        self._hourly = hourly if hourly is not None else pd.DataFrame()
+        self._daily = daily if daily is not None else pd.DataFrame()
+        self.calls = {"realtime": 0, "hourly": 0, "daily": 0}
+
+    async def get_stock_data(self, ticker, start_date, end_date, interval):
+        if interval == "hourly":
+            self.calls["hourly"] += 1
+            return self._hourly
+        if interval == "daily":
+            self.calls["daily"] += 1
+            return self._daily
+        return pd.DataFrame()
+
+    async def get_realtime_data(self, ticker, start_datetime=None,
+                                  end_datetime=None, data_type="quote"):
+        self.calls["realtime"] += 1
+        return self._ticks
+
+
+def test_partial_end_date_uses_hourly_when_realtime_empty(tmp_path: Path):
+    """When realtime has no data for a partial end_date, the loader
+    falls back to hourly_prices and keeps only the hourly bars whose
+    timestamp is *after* the CSV's last bar. CSV stays authoritative
+    for the early-session window; hourly fills the tail gap."""
+    # CSV ends at 18:00 UTC = 14:00 ET (2h before close).
+    rows = _five_min_rows_truncated(18, 0)
+    _write_5min_csv(tmp_path, "I:SPX", "2025-05-08", rows, ticker="I:SPX")
+
+    # Hourly bars for the full session, including the tail (18:00
+    # through 19:00 UTC) that CSV is missing. Use clearly distinct
+    # values so we can verify which source painted which bar.
+    hourly_idx = pd.DatetimeIndex([
+        pd.Timestamp("2025-05-08 13:00:00", tz="UTC"),
+        pd.Timestamp("2025-05-08 14:00:00", tz="UTC"),
+        pd.Timestamp("2025-05-08 15:00:00", tz="UTC"),
+        pd.Timestamp("2025-05-08 16:00:00", tz="UTC"),
+        pd.Timestamp("2025-05-08 17:00:00", tz="UTC"),
+        pd.Timestamp("2025-05-08 18:00:00", tz="UTC"),
+        pd.Timestamp("2025-05-08 19:00:00", tz="UTC"),
+    ])
+    hourly = pd.DataFrame({
+        "open": [9000.0] * 7, "high": [9100.0] * 7,
+        "low": [8900.0] * 7, "close": [9050.0] * 7,
+        "volume": [10000] * 7,
+    }, index=hourly_idx)
+
+    fake = _FakeDBFull(ticks=pd.DataFrame(), hourly=hourly)
+    out, src = _run(load_bars_with_db_fallback(
+        "SPX", "2025-05-08", "2025-05-08", interval="5m",
+        db_instance=fake, equities_dir=tmp_path,
+    ))
+
+    assert not out.empty
+    assert "db" in src, f"Expected hourly-DB supplement in source label, got {src!r}"
+    # CSV's last bar is 18:00. Hourly's 18:00 bar should be DROPPED
+    # (>= csv_last filter), but its 19:00 bar should be KEPT — that's
+    # the post-tail bar from the gap. The hourly DataFrame is sorted
+    # so the keep filter is straightforward.
+    tail_18 = out.loc[out.index == pd.Timestamp("2025-05-08 18:00:00", tz="UTC")]
+    assert (tail_18["high"] < 8000).all(), (
+        "CSV 18:00 must win over hourly 18:00 (CSV is the authoritative "
+        "source on overlapping timestamps)"
+    )
+    has_19 = (out.index == pd.Timestamp("2025-05-08 19:00:00", tz="UTC")).any()
+    assert has_19, "Hourly 19:00 bar should fill the post-CSV-last tail gap"
+
+
+def test_partial_end_date_synthesizes_from_daily_when_all_else_empty(tmp_path: Path):
+    """Last-resort fallback: realtime AND hourly both have nothing for
+    the partial day, but daily_prices has the day's close. The loader
+    appends a single synthetic bar at 19:55 UTC carrying the daily
+    close as O=H=L=C, so the chart at least shows where the day
+    ended instead of cutting short."""
+    rows = _five_min_rows_truncated(19, 0)
+    _write_5min_csv(tmp_path, "I:SPX", "2025-05-08", rows, ticker="I:SPX")
+
+    daily_idx = pd.DatetimeIndex([pd.Timestamp("2025-05-08", tz="UTC")])
+    daily = pd.DataFrame({
+        "open": [7000.0], "high": [7100.0], "low": [6990.0],
+        "close": [7077.77], "volume": [1_000_000],
+    }, index=daily_idx)
+
+    fake = _FakeDBFull(ticks=pd.DataFrame(), hourly=pd.DataFrame(), daily=daily)
+    out, src = _run(load_bars_with_db_fallback(
+        "SPX", "2025-05-08", "2025-05-08", interval="5m",
+        db_instance=fake, equities_dir=tmp_path,
+    ))
+
+    assert "daily" in src, (
+        f"Expected daily-close synthesis in source label, got {src!r}"
+    )
+    # The synthesized bar lands at 19:55 UTC with the daily close
+    # value mirrored to OHLC.
+    synth_ts = pd.Timestamp("2025-05-08 19:55:00", tz="UTC")
+    assert synth_ts in out.index, (
+        f"Expected synthesized close bar at 19:55 UTC; index = {list(out.index)[-3:]}"
+    )
+    synth = out.loc[synth_ts]
+    assert synth["close"] == 7077.77
+    assert synth["open"] == synth["close"] == synth["high"] == synth["low"], (
+        "Synthesized bar should mirror close to all OHLC fields "
+        "(no fake intra-bar move)"
+    )
+
+
+def test_partial_end_date_skips_daily_when_hourly_already_filled(tmp_path: Path):
+    """If hourly_prices already produced bars in the post-CSV-last
+    tail, the daily-synthesis fallback should NOT fire — no need to
+    pile on a synthesized bar when we have real (hourly) data for
+    the gap. CSV ends at 17:00 UTC so hourly's 18:00 and 19:00 bars
+    both clearly land after CSV's last (the keep filter is
+    `ts > csv_last_for_end`, strictly greater)."""
+    rows = _five_min_rows_truncated(17, 0)  # CSV ends 3h before close
+    _write_5min_csv(tmp_path, "I:SPX", "2025-05-08", rows, ticker="I:SPX")
+
+    hourly_idx = pd.DatetimeIndex([
+        pd.Timestamp("2025-05-08 17:00:00", tz="UTC"),  # overlaps; loses to CSV
+        pd.Timestamp("2025-05-08 18:00:00", tz="UTC"),  # post-tail; kept
+        pd.Timestamp("2025-05-08 19:00:00", tz="UTC"),  # post-tail; kept
+    ])
+    hourly = pd.DataFrame({
+        "open":  [9000.0, 9000.0, 9050.0],
+        "high":  [9050.0, 9050.0, 9100.0],
+        "low":   [8950.0, 8950.0, 9000.0],
+        "close": [9025.0, 9050.0, 9075.0],
+        "volume":[5000, 5500, 6000],
+    }, index=hourly_idx)
+    daily_idx = pd.DatetimeIndex([pd.Timestamp("2025-05-08", tz="UTC")])
+    daily = pd.DataFrame({
+        "open": [7000.0], "high": [7100.0], "low": [6990.0],
+        "close": [7077.77], "volume": [1_000_000],
+    }, index=daily_idx)
+
+    fake = _FakeDBFull(ticks=pd.DataFrame(), hourly=hourly, daily=daily)
+    out, src = _run(load_bars_with_db_fallback(
+        "SPX", "2025-05-08", "2025-05-08", interval="5m",
+        db_instance=fake, equities_dir=tmp_path,
+    ))
+    # Hourly tail-fill IS present (18:00 and 19:00 bars).
+    assert pd.Timestamp("2025-05-08 18:00:00", tz="UTC") in out.index
+    assert pd.Timestamp("2025-05-08 19:00:00", tz="UTC") in out.index
+    # Daily synth is NOT present — `daily` should not appear in source.
+    assert "daily" not in src, (
+        f"Daily-synthesis fired despite hourly already providing tail "
+        f"data (source = {src!r})"
+    )
+    assert fake.calls["daily"] == 0, (
+        "daily_prices should not even be queried when hourly already "
+        "covers the tail gap"
+    )
+
+
+def test_complete_end_date_csv_does_not_query_daily(tmp_path: Path):
+    """Happy path — full session CSV → no realtime, hourly, or daily
+    queries. Avoids extra DB load when nothing's wrong."""
+    rows = _five_min_rows_truncated(19, 55)
+    _write_5min_csv(tmp_path, "I:SPX", "2025-05-08", rows, ticker="I:SPX")
+
+    fake = _FakeDBFull()
+    out, src = _run(load_bars_with_db_fallback(
+        "SPX", "2025-05-08", "2025-05-08", interval="5m",
+        db_instance=fake, equities_dir=tmp_path,
+    ))
+    assert src == "csv"
+    assert fake.calls["realtime"] == 0
+    assert fake.calls["hourly"] == 0
+    assert fake.calls["daily"] == 0

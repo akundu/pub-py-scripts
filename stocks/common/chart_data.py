@@ -539,8 +539,33 @@ async def load_bars_with_db_fallback(
     # Intraday route — start with CSVs, list weekday gaps for DB top-up.
     csv_df, missing = _load_csv_range(symbol, start_date, end_date, equities_dir)
 
+    # Detect a partial CSV on end_date — when the cron / source
+    # delivered only part of a session's bars (Polygon being slow on
+    # the last hour, network drops mid-fetch). The existing fallback
+    # only fires for entirely-absent dates; without this check we'd
+    # silently render a chart that ends ~14:55 ET when the user
+    # expected to see the close. Threshold "before 19:50 UTC" =
+    # before the start of the closing 5-min bar (19:55 UTC = 15:55 ET);
+    # 5 min of slack so a session that legitimately ends at 19:55
+    # doesn't false-positive. Half-day sessions (close 13:00 ET =
+    # 17:00 UTC) trip this — that's fine; the supplementary sources
+    # return empty and we fall through cleanly.
+    end_date_partial = False
+    csv_last_for_end: pd.Timestamp | None = None
+    if not csv_df.empty:
+        try:
+            end_mask = csv_df.index.strftime("%Y-%m-%d") == end_date
+            end_bars = csv_df[end_mask]
+            if not end_bars.empty:
+                csv_last_for_end = end_bars.index[-1]
+                threshold = pd.Timestamp(f"{end_date} 19:50:00", tz="UTC")
+                if csv_last_for_end < threshold:
+                    end_date_partial = True
+        except Exception:
+            pass
+
     db_df = pd.DataFrame()
-    if missing and db_instance is not None:
+    if (missing or end_date_partial) and db_instance is not None:
         try:
             # Pull hourly bars across the entire range; we'll later trim
             # down to just the missing weekday windows in case the CSV had
@@ -555,11 +580,28 @@ async def load_bars_with_db_fallback(
             )
             if raw is not None and not raw.empty:
                 db_df = _normalize_db_ohlc_df(raw)
-                # Restrict DB rows to dates we don't already have on disk.
+                # Keep DB rows whose ET-date is entirely missing from
+                # CSV (existing fallback) AND, when end_date's CSV is
+                # partial, keep DB rows for end_date with a timestamp
+                # *after* the CSV's last bar — those are the tail-fill
+                # bars that close the gap to market close.
                 if not csv_df.empty:
                     csv_dates = {ts.strftime("%Y-%m-%d") for ts in csv_df.index}
-                    keep = [ts for ts in db_df.index
-                            if ts.strftime("%Y-%m-%d") not in csv_dates]
+
+                    def _keep(ts):
+                        ds = ts.strftime("%Y-%m-%d")
+                        if ds not in csv_dates:
+                            return True
+                        if (
+                            end_date_partial
+                            and ds == end_date
+                            and csv_last_for_end is not None
+                            and ts > csv_last_for_end
+                        ):
+                            return True
+                        return False
+
+                    keep = [ts for ts in db_df.index if _keep(ts)]
                     db_df = db_df.loc[keep] if keep else pd.DataFrame()
         except Exception:
             # Surface the CSV slice anyway on DB error.
@@ -600,28 +642,11 @@ async def load_bars_with_db_fallback(
     if today_in_range:
         rt_target_date = today_str
         rt_owns_date = True
-    else:
-        # Case 2 — was end_date's CSV truncated? Last regular-session
-        # 5-min bar starts at 19:55 UTC (15:55 ET, ending at 16:00 close).
-        # If the last CSV bar for end_date is *before* 19:50 UTC, treat
-        # the day as partial and ask realtime to backfill. The 19:50
-        # threshold (vs strictly 19:55) gives 5 minutes of slack so a
-        # session that genuinely ends at 19:55 doesn't false-positive.
-        # Half-day sessions (close 13:00 ET = 17:00 UTC) will trigger
-        # this — that's fine; realtime will return empty for those days
-        # and we'll fall through.
-        if not csv_df.empty:
-            try:
-                end_mask = csv_df.index.strftime("%Y-%m-%d") == end_date
-                end_bars = csv_df[end_mask]
-                if not end_bars.empty:
-                    last_utc = end_bars.index[-1]
-                    threshold = pd.Timestamp(f"{end_date} 19:50:00", tz="UTC")
-                    if last_utc < threshold:
-                        rt_target_date = end_date
-                        rt_owns_date = False
-            except Exception:
-                pass
+    elif end_date_partial:
+        # Case 2 — partial-CSV-on-end_date detected up-front. Ask
+        # realtime to backfill that date.
+        rt_target_date = end_date
+        rt_owns_date = False
 
     if db_instance is not None and rt_target_date is not None:
         # `data_type='trade'` carries the actual moving prices for both
@@ -666,6 +691,66 @@ async def load_bars_with_db_fallback(
         csv_df = _drop_dates(csv_df)
         db_df = _drop_dates(db_df)
 
+    # Last-resort daily-close synthesis. If end_date's CSV is partial
+    # AND nothing else (realtime, hourly) covered the post-CSV-last
+    # window for that date, query daily_prices for end_date and append
+    # a single synthesized bar at 19:55 UTC carrying that day's close
+    # as O=H=L=C. Far better than leaving the chart cut ~1h before
+    # close — at least the user can see where the day actually ended.
+    # daily_prices is permanent (no rolling window) so this works
+    # even months later when realtime ticks have long since aged out.
+    daily_synth_df = pd.DataFrame()
+    if (
+        end_date_partial
+        and csv_last_for_end is not None
+        and db_instance is not None
+    ):
+        # Did realtime / hourly already produce something past the
+        # CSV's last bar for end_date?
+        def _has_tail(df: pd.DataFrame) -> bool:
+            if df.empty:
+                return False
+            try:
+                tail_mask = (
+                    (df.index.strftime("%Y-%m-%d") == end_date)
+                    & (df.index > csv_last_for_end)
+                )
+                return bool(tail_mask.any())
+            except Exception:
+                return False
+
+        if not _has_tail(realtime_df) and not _has_tail(db_df):
+            try:
+                daily_raw = await db_instance.get_stock_data(
+                    symbol,
+                    start_date=end_date,
+                    end_date=end_date,
+                    interval="daily",
+                )
+                if daily_raw is not None and not daily_raw.empty:
+                    norm = _normalize_db_ohlc_df(daily_raw)
+                    if not norm.empty and "close" in norm.columns:
+                        close_val = float(norm.iloc[-1]["close"])
+                        synth_ts = pd.Timestamp(
+                            f"{end_date} 19:55:00", tz="UTC"
+                        )
+                        # Only synthesize if the synth timestamp is
+                        # actually past CSV's last bar — else it would
+                        # overlap and lose to CSV in the dedup anyway.
+                        if synth_ts > csv_last_for_end:
+                            daily_synth_df = pd.DataFrame(
+                                {
+                                    "open": [close_val],
+                                    "high": [close_val],
+                                    "low": [close_val],
+                                    "close": [close_val],
+                                    "volume": [0],
+                                },
+                                index=pd.DatetimeIndex([synth_ts]),
+                            )
+            except Exception:
+                daily_synth_df = pd.DataFrame()
+
     parts: List[Tuple[pd.DataFrame, str]] = []
     if not csv_df.empty:
         parts.append((csv_df, "csv"))
@@ -673,6 +758,8 @@ async def load_bars_with_db_fallback(
         parts.append((db_df, "db"))
     if not realtime_df.empty:
         parts.append((realtime_df, "rt"))
+    if not daily_synth_df.empty:
+        parts.append((daily_synth_df, "daily"))
 
     if not parts:
         return pd.DataFrame(), "empty"
